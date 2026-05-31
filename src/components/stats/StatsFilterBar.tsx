@@ -1,5 +1,5 @@
 import React from "react";
-import { Calendar, ChevronDown, RefreshCw } from "lucide-react";
+import { Calendar, ChevronDown, Layers, RefreshCw } from "lucide-react";
 import { BrandIcon } from "@/components/BrandIcon";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CLI_APP_SOURCE_BADGE } from "@/constants";
@@ -69,26 +69,30 @@ export function StatsFilterBar({
       : PRESETS.find((p) => p.id === range.preset)?.label ?? "Range";
 
   return (
-    <div className="flex items-center gap-2 flex-wrap">
-      {/* Source filter — shadcn Tabs (Radix-backed). `h-9` keeps it
-          visually flush with the date dropdown and refresh button on
-          the right. */}
-      <Tabs
-        value={source}
-        onValueChange={(v) => onSourceChange(v as SourceFilter)}
-        aria-label="Source filter"
-      >
-        <TabsList className="h-9">
-          {SOURCES.map((s) => (
-            <TabsTrigger key={s} value={s} className="text-xs gap-1.5">
-              {s !== "All" && <BrandIcon source={sourceLabel(s)} />}
-              <span>{sourceLabel(s)}</span>
-            </TabsTrigger>
-          ))}
-        </TabsList>
-      </Tabs>
-
-      <div className="flex-1" />
+    <div className="flex items-center gap-1 rounded-md bg-muted p-3 flex-wrap">
+      {/* Source filter — shadcn Tabs (Radix-backed), styled to match
+          the Providers page tab bar (flat, transparent inside a muted
+          container) so the two filter shells look identical. */}
+      <div className="flex-1 min-w-0 overflow-x-auto">
+        <Tabs
+          value={source}
+          onValueChange={(v) => onSourceChange(v as SourceFilter)}
+          aria-label="Source filter"
+        >
+          <TabsList className="w-full justify-start gap-1 bg-transparent p-0 [&>button]:flex-none [&>button]:rounded-md [&>button]:px-3">
+            {SOURCES.map((s) => (
+              <TabsTrigger key={s} value={s}>
+                {s === "All" ? (
+                  <Layers className="size-4 shrink-0" aria-hidden />
+                ) : (
+                  <BrandIcon source={sourceLabel(s)} />
+                )}
+                <span>{sourceLabel(s)}</span>
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
+      </div>
 
       {/* Date range dropdown — anchored to the right side of its
           trigger so the menu doesn't overflow the panel when sitting

@@ -12,6 +12,7 @@ import {
   File,
   FileJson,
   Folder,
+  Layers,
   Loader2,
   MessageSquare,
   Sparkles
@@ -568,7 +569,11 @@ export function App() {
                           />
                         </button>
                         <span className="flex items-center justify-center size-4 shrink-0">
-                          <BrandIcon source={group.source} />
+                          {group.source === "All" ? (
+                            <Layers className="size-4" aria-hidden />
+                          ) : (
+                            <BrandIcon source={group.source} />
+                          )}
                         </span>
                         <span className="flex-1 min-w-0 truncate font-medium text-base">
                           {sourceDisplayName(group.source)}
