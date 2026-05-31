@@ -38,13 +38,15 @@ Current alignment target: data acquisition and message preview formatting should
 
 - Frontend: `src/main.tsx`
 - Styles: `src/styles.css`
-- Frontend local-store wrapper: `src/config.ts` (routes `getConfig`/`setConfig` to the two backing files via IPC)
+- Frontend local-store wrapper: `src/config.ts` (routes `getConfig`/`setConfig` to the three backing files via IPC — `providers` → providers.json, `favorites` → favorites.json, everything else → config.json)
 - Tauri IPC commands: `src-tauri/src/lib.rs`
 - Session/Memory/Skill scanning, parsing, and formatting: `src-tauri/src/sessions.rs`
 - Provider switching (activate / deactivate / reverse-derive / test / fetch-models): `src-tauri/src/providers.rs`
-- Local KV store (config.json + providers.json under `~/.termory/`, chmod 0600): `src-tauri/src/config.rs`
+- Local KV store (config.json + providers.json + favorites.json under `~/.termory/`, chmod 0600): `src-tauri/src/config.rs`
 - Stats aggregations (pure, window-accurate): `src/lib/stats-utils.ts` (+ `stats-utils.test.ts`)
 - Stats UI: `src/components/stats/{StatsPage,StatsFilterBar,OverviewHero,DailyTokenUsageChart,DailyActivityHeatmap,shared}.tsx`
+- Favorites helpers (pure, snapshot-based): `src/lib/favorites.ts` (+ `favorites.test.ts`)
+- Favorites UI: `src/components/favorites/FavoritesPage.tsx` (+ `FavoritesPage.test.tsx`); star button + scroll-to-message hook live on `src/components/MessageList.tsx`
 - Tauri config: `src-tauri/tauri.conf.json`
 - Rust parser/formatter tests: inline tests at the bottom of `src-tauri/src/sessions.rs`
 - Rust provider/store tests: inline tests at the bottom of `src-tauri/src/providers.rs` and `src-tauri/src/config.rs`
@@ -60,6 +62,7 @@ Current Tauri IPC commands, called from the frontend with `invoke(...)`:
 - `fetch_provider_models(provider)` — hits `/v1/models` (or `/v1beta/models?key=` for Gemini) and returns the available model ids for the editor's autocomplete
 - `read_app_config` / `write_app_config` — `~/.termory/config.json` (UI prefs)
 - `read_app_providers` / `write_app_providers` — `~/.termory/providers.json` (provider library, contains API keys, chmod 0600)
+- `read_app_favorites` / `write_app_favorites` — `~/.termory/favorites.json` (saved message snapshots, may contain PII / pasted secrets, chmod 0600)
 
 ## Project Commands
 
@@ -623,9 +626,69 @@ Naming alignment (UI label ↔ data field ↔ file ↔ component) is intentional
 - "DAILY ACTIVITY" card → `DailyActivityHeatmap.tsx` ← `DailyActivity` ← `dailyActivity()`
 - KPI labels (`Sessions` / `Messages` / `Tokens` / `Projects`) map 1:1 to `WindowTotals` fields
 
+## Favorites
+
+Per-message starring + dedicated Favorites route. Stars live next to every message in the Records detail pane; the Favorites route lists them in a Records-style 2-column shell (list / detail) and survives source-file deletion via local snapshots.
+
+### Snapshot rule (LOCKED — do not weaken)
+
+A `Favorite` is a **self-contained snapshot** of the parsed message. The full `SessionMessage` (role + complete markdown text + timestamp + kind) gets stored verbatim alongside source-session metadata (title, project, path, message index). When the source session is later deleted / renamed / re-parsed differently, the Favorite **stays readable and renders identically** — the detail pane uses the same `<MessageBody>` (react-markdown + remark-gfm) pipeline as the Records detail, so what you see in Favorites matches what you saw when you starred it.
+
+Do not:
+- Replace the snapshot with a `(source_session_id, message_index)` reference that re-fetches the message at render time. The "Open original" button still uses that tuple, but as a navigation hint, not the source of truth. If the index has drifted by the time the user clicks it, that's accepted — the snapshot in the favorite is authoritative.
+- Strip the snapshot to "just the markdown text" — `role` / `kind` / `timestamp` are read by the role-bar color, the lowercase chip, and possible future tooltips.
+- Lazy-fetch session metadata. `source_session_title` / `source_session_project` are stored at favorite time so the list card still has something to show when the original session is gone.
+
+### Wire shape
+
+`Favorite` (per favorite, in `~/.termory/favorites.json` as a JSON array):
+
+```ts
+{
+  id: string;                     // UUID v4 (frontend-generated)
+  favorited_at: string;           // ISO 8601 UTC
+  message: SessionMessage;        // full snapshot
+  source: SessionSource;          // narrowed: "Claude" | "Codex" | "Gemini" | "OpenCode"
+  source_session_id: string;
+  source_session_path: string;
+  source_session_title: string;
+  source_session_project: string;
+  source_message_index: number;
+}
+```
+
+Same `SessionMessage` struct used by `scan_all_sessions` / Records — no schema duplication.
+
+### Identity key
+
+The `(source, source_session_id, source_message_index)` tuple is the "is this message currently favorited?" key (`favoriteKey()` in `src/lib/favorites.ts`). Used by:
+- The star button to render its fill state in O(1)
+- `toggleFavoriteEntry()` to flip between add / remove
+- The `[&_*]:text-primary-foreground` highlight cascade in the list cards
+
+Index drift across re-parses is the documented trade-off — if a session's `merge_tool_outputs` produces a different message at the same index later, the Records star may light up on the wrong message. The Favorites page itself is unaffected because it renders the snapshot. We deliberately did NOT pick a content hash because (a) it complicates "click star to remove" UX (hash mismatch ≠ "wasn't favorited") and (b) index drift is rare; sessions are append-only in all four scanners.
+
+### Frontend layout (LOCKED for visual parity with Records)
+
+FavoritesPage is the same shell as Records' middle + right columns:
+- List column: `bg-sidebar` aside, 240–300px, `text-sidebar-foreground` default text, `bg-primary text-primary-foreground [&_*]:text-primary-foreground` active state — identical class set to Records' session list buttons. Newest first by `favorited_at`. Auto-selects the first card on mount and after the previously-selected card is removed.
+- Detail column: same `<header>` shape as Records detail (`text-lg font-semibold` title, `text-xs leading-none` meta row with `·` chips, size=12 lucide icons). Action icons (`ExternalLink` / `Trash2`) cluster top-right of the meta row, NOT the title row — keeps the title clean.
+
+`MessageList` (used in Records, optionally pluggable into anywhere else) accepts an optional `favorites: FavoriteContext` bundle (session + keys + onToggle). Caller that doesn't want the affordance simply omits the bundle — the three-field grouping prevents "forgot to pass one" bugs.
+
+### Scroll-to-message navigation
+
+"Open original" on a Favorite navigates to Records AND scrolls the detail pane to that message. Path:
+1. `openItem(item, messageIndex?)` in App.tsx — sets `selected` AND a `pendingScroll = {sessionKey, index, nonce}` state. Nonce is `Date.now()`; same favorite clicked twice still re-triggers.
+2. Records renders; once `detail.messages` loads, `MessageList` receives `scrollRequest` (only when `pendingScroll.sessionKey === selected`'s key).
+3. `MessageList`'s effect fires a `requestAnimationFrame` → `virtualizer.scrollToIndex(idx, {align: "start"})` → `onScrolled()` callback.
+4. `clearPendingScroll = useCallback(() => setPendingScroll(null), [])` in App.tsx nulls the state — required so the scroll doesn't fire again when the user selects another session and comes back.
+
+The callback identity is stable (`useCallback` with empty deps) so the MessageList effect's dep array doesn't oscillate.
+
 ## Pending feature work
 
-The current UI shell is settled: activity rail (Providers / Records / Search / Stats / Settings, in that order — Providers is the default landing route via `readRouteFromHash` → `"providers"` fallback), routed via URL hash, with a passive bottom freshness footer fed by the Rust filesystem watcher. Providers / Records / Search / Stats are fully implemented; only Settings still renders a placeholder card.
+The current UI shell is settled: activity rail (Providers / Records / Search / Favorites / Stats / Settings, in that order — Providers is the default landing route via `readRouteFromHash` → `"providers"` fallback), routed via URL hash, with a passive bottom freshness footer fed by the Rust filesystem watcher. Providers / Records / Search / Favorites / Stats are fully implemented; only Settings still renders a placeholder card.
 
 Roadmap below is grouped by priority. Pick top-down within a tier.
 
@@ -639,7 +702,7 @@ All P0 items have shipped:
 
 ### P1 — new pages & persistence
 
-- ~~`tauri-plugin-store`~~ — replaced with custom `config.rs` module (`~/.termory/{config,providers}.json` with `chmod 0600`). The plugin couldn't control file location or Unix permissions; rolling our own KV gives both.
+- ~~`tauri-plugin-store`~~ — replaced with custom `config.rs` module (`~/.termory/{config,providers,favorites}.json` with `chmod 0600`). The plugin couldn't control file location or Unix permissions; rolling our own KV gives both.
 - ~~Providers page~~ — done. See the "Providers" section above. Cross-verified against `.audit-sources/cc-switch/` for the per-CLI write shapes; 4 CLIs supported with per-CLI tests. OpenCode adapter was re-done in a second pass: instead of self-declaring `provider.termory.{npm,name,models}` (which fights OpenCode's catalog at runtime), Termory now writes the API key under one of OpenCode's built-in catalog ids (`anthropic`/`openai`/`openai-compatible`/…) into `~/.local/share/opencode/auth.json` — same shape `/connect` produces — and optionally overlays a `baseURL` in `opencode.json`. The AI SDK dropdown in the editor is the catalog id picker.
 - ~~Stats page~~ — done. See the "Stats" section below. KPI strip (Sessions/Messages/Tokens/Projects) + DAILY TOKEN USAGE line chart + DAILY ACTIVITY heatmap. All values window-accurate from each session's `daily_tokens[]` — no fallback smearing, no lifetime-of-touched-session totals.
 - **App Settings page** — theme, scan-path overrides, keyboard shortcuts, watcher toggle.
@@ -649,10 +712,11 @@ All P0 items have shipped:
 - **Right-click context menus** — on list items ("Re-read this file", "Reveal in Finder", "Copy ID") and on sidebar source rows ("Re-scan this source").
 - **Keyboard navigation** — arrow keys in lists, Enter to open, Esc to close, Cmd-1..5 to switch rail, Cmd-F to summon search.
 - ~~Watcher completion~~ — intentionally not pursued. Per-project files (`<cwd>/CLAUDE.md`, `AGENTS.md`, `.claude/skills/`, etc.) are only read at launch; if a user edits them mid-session the change isn't reflected until next launch / manual refresh, and that's acceptable. Recursive cwd watching would pull in `node_modules` / build noise and isn't worth the complexity.
-- **Frontend test baseline** — zero tests today. Start with Vitest + React Testing Library on `CopyMenu`, `FreshnessFooter`, the route reducer.
+- ~~Frontend test baseline~~ — done. 117 Vitest tests covering `session-utils`, `format`, `usePersistentState`, `CopyMenu`, `FreshnessFooter`, `stats-utils`, `favorites` helpers, `FavoritesPage`, and `MessageList` (star wiring). `@tanstack/react-virtual` is `vi.mock`'d in MessageList tests to bypass jsdom layout limits.
 
 ### P3 — nice to have
 
 - ~~New-item badges~~ — explicitly excluded; the freshness footer ("Synced 2m ago") is enough passive feedback, an unread/red-dot system isn't desired here.
+- ~~Starred messages~~ — done. See the "Favorites" section above. Per-message star (not per-session) with full-snapshot storage in `~/.termory/favorites.json` and a dedicated rail destination.
 - **Export session** — single session → markdown / PDF, surfaced via the detail header's existing action row.
-- **Starred sessions / tags** — virtual "Starred" source in sidebar; custom labels per record. Needs P1 store.
+- **Starred sessions / tags** — virtual "Starred" source in sidebar; custom labels per record (orthogonal to per-message favorites — favorites snapshot a message body, tags label the session as a whole).
