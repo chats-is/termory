@@ -1,10 +1,12 @@
-// Local store split across two files under ~/.termory/:
+// Local store split across three files under ~/.termory/:
 //   * config.json    — UI prefs (default_pane, recent_searches, …).
 //   * providers.json — Provider library (contains API keys, chmod 0600).
+//   * favorites.json — Saved message snapshots (chmod 0600).
 //
 // Frontend callers use the unchanged getConfig/setConfig interface;
-// this module routes key `providers` to the providers file and every
-// other key to config.json. Splitting keeps API keys out of the file
+// this module routes `providers` / `favorites` keys to their own
+// files and every other key to config.json. Splitting keeps
+// per-feature data (and any embedded secrets/PII) out of files that
 // users might back up or share.
 
 import { invoke } from "@tauri-apps/api/core";
@@ -24,9 +26,11 @@ const warn = (...args: unknown[]) => {
 };
 
 const PROVIDERS_KEY = "providers";
+const FAVORITES_KEY = "favorites";
 
 let configPromise: Promise<ConfigObject> | null = null;
 let providersPromise: Promise<unknown[]> | null = null;
+let favoritesPromise: Promise<unknown[]> | null = null;
 
 function loadConfig(): Promise<ConfigObject> {
   if (!configPromise) {
@@ -90,9 +94,34 @@ async function flushProviders(next: unknown[]): Promise<void> {
   }
 }
 
+function loadFavorites(): Promise<unknown[]> {
+  if (!favoritesPromise) {
+    favoritesPromise = invoke<unknown>("read_app_favorites")
+      .then((value) => (Array.isArray(value) ? value : []))
+      .catch((err) => {
+        warn("config: read_app_favorites failed", err);
+        return [];
+      });
+  }
+  return favoritesPromise;
+}
+
+async function flushFavorites(next: unknown[]): Promise<void> {
+  favoritesPromise = Promise.resolve(next);
+  try {
+    await invoke("write_app_favorites", { value: next });
+  } catch (err) {
+    warn("config: write_app_favorites failed", err);
+  }
+}
+
 export async function getConfig<T>(key: string): Promise<T | null> {
   if (key === PROVIDERS_KEY) {
     const arr = await loadProviders();
+    return arr as unknown as T;
+  }
+  if (key === FAVORITES_KEY) {
+    const arr = await loadFavorites();
     return arr as unknown as T;
   }
   const config = await loadConfig();
@@ -108,6 +137,14 @@ export async function setConfig<T>(key: string, value: T): Promise<void> {
       return;
     }
     await flushProviders(value as unknown[]);
+    return;
+  }
+  if (key === FAVORITES_KEY) {
+    if (!Array.isArray(value)) {
+      warn("config: favorites value must be an array, ignoring set");
+      return;
+    }
+    await flushFavorites(value as unknown[]);
     return;
   }
   const current = await loadConfig();

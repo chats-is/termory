@@ -1,12 +1,14 @@
-//! App config + provider-library KV stored under `~/.termory/`.
+//! App config + provider-library + favorites KV stored under `~/.termory/`.
 //!
-//! Two files, separated by sensitivity:
-//!   * `config.json`     — UI preferences (default_pane, recent_searches,
-//!                        providers_app, …). No secrets.
+//! Three files, separated by sensitivity / purpose:
+//!   * `config.json`    — UI preferences (default_pane, recent_searches,
+//!                       providers_app, …). No secrets.
 //!   * `providers.json` — Provider library (contains API keys).
+//!   * `favorites.json` — Saved message snapshots (may contain whatever
+//!                       the user pasted into a CLI; treat as private).
 //!
-//! Both files write atomically (tmp + rename) and on Unix get mode
-//! 0600 (parent dir 0700). Pattern matches Codex auth.json
+//! All three files write atomically (tmp + rename) and on Unix get
+//! mode 0600 (parent dir 0700). Pattern matches Codex auth.json
 //! (`login/src/auth/storage.rs:147`), OpenCode auth.json
 //! (`packages/opencode/src/auth/index.ts:78,87`), and cc-switch's
 //! settings store (`settings.rs:469-475`).
@@ -20,6 +22,7 @@ use std::path::{Path, PathBuf};
 const APP_DIR_NAME: &str = ".termory";
 const CONFIG_FILE_NAME: &str = "config.json";
 const PROVIDERS_FILE_NAME: &str = "providers.json";
+const FAVORITES_FILE_NAME: &str = "favorites.json";
 
 fn app_dir() -> Result<PathBuf, Box<dyn Error>> {
     let home = dirs::home_dir().ok_or("home directory not available")?;
@@ -32,6 +35,10 @@ fn config_path() -> Result<PathBuf, Box<dyn Error>> {
 
 fn providers_path() -> Result<PathBuf, Box<dyn Error>> {
     Ok(app_dir()?.join(PROVIDERS_FILE_NAME))
+}
+
+fn favorites_path() -> Result<PathBuf, Box<dyn Error>> {
+    Ok(app_dir()?.join(FAVORITES_FILE_NAME))
 }
 
 // ===================================================================
@@ -122,6 +129,23 @@ pub fn read_providers() -> Result<JsonValue, Box<dyn Error>> {
 /// Atomically write `~/.termory/providers.json` (chmod 0600 on Unix).
 pub fn write_providers(value: &JsonValue) -> Result<(), Box<dyn Error>> {
     write_json_atomic_0600(&providers_path()?, value)
+}
+
+// ===================================================================
+// favorites.json — saved message snapshots
+// ===================================================================
+
+/// Read `~/.termory/favorites.json`. Returns `[]` if missing.
+pub fn read_favorites() -> Result<JsonValue, Box<dyn Error>> {
+    read_json(&favorites_path()?, JsonValue::Array(Vec::new()))
+}
+
+/// Atomically write `~/.termory/favorites.json` (chmod 0600 on Unix).
+/// Favorites can contain sensitive snippets the user pasted into a
+/// CLI (API keys, prompts with PII, …) — hence the same 0600 mode as
+/// `providers.json`.
+pub fn write_favorites(value: &JsonValue) -> Result<(), Box<dyn Error>> {
+    write_json_atomic_0600(&favorites_path()?, value)
 }
 
 #[cfg(test)]
@@ -236,6 +260,45 @@ mod tests {
         write_providers(&payload).unwrap();
         let back = read_providers().unwrap();
         assert_eq!(back, payload);
+    }
+
+    #[test]
+    fn read_missing_favorites_returns_empty_array() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let tmp = tempdir("favorites-empty");
+        let _h = HomeOverride::new(&tmp);
+        let value = read_favorites().unwrap();
+        assert!(value.as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn favorites_roundtrip_preserves_array_order() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let tmp = tempdir("rt-favorites");
+        let _h = HomeOverride::new(&tmp);
+        let payload = serde_json::json!([
+            {"id": "f-1", "message": {"role": "user", "text": "hi", "kind": "text"}},
+            {"id": "f-2", "message": {"role": "assistant", "text": "hey", "kind": "text"}},
+        ]);
+        write_favorites(&payload).unwrap();
+        let back = read_favorites().unwrap();
+        assert_eq!(back, payload);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn favorites_file_gets_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = HOME_LOCK.lock().unwrap();
+        let tmp = tempdir("favorites-perms");
+        let _h = HomeOverride::new(&tmp);
+        write_favorites(&serde_json::json!([])).unwrap();
+        let mode = fs::metadata(tmp.join(".termory/favorites.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "favorites.json must be 0600");
     }
 
     #[test]

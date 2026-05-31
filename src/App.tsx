@@ -6,8 +6,8 @@ import { getVersion } from "@tauri-apps/api/app";
 import type { Update } from "@tauri-apps/plugin-updater";
 import {
   BookOpen,
+  Calendar,
   ChevronRight,
-  Clock,
   FolderOpen,
   File,
   FileJson,
@@ -23,11 +23,13 @@ import { cn } from "@/lib/utils";
 import type {
   AppSession,
   CliApp,
+  Favorite,
   MemoryTool,
   Provider,
   Route,
   SearchHit,
-  SessionDetail
+  SessionDetail,
+  SessionMessage
 } from "@/types";
 import { formatDate, formatRelativeDate } from "@/lib/format";
 import {
@@ -43,6 +45,11 @@ import {
   sourceDisplayName
 } from "@/lib/session-utils";
 import { isProviderList } from "@/lib/provider-utils";
+import {
+  favoriteKeySet,
+  isFavoriteList,
+  toggleFavoriteEntry
+} from "@/lib/favorites";
 import { addSetValue, toggleSetValue } from "@/lib/set-utils";
 import { RAIL_ROUTE_ORDER } from "@/constants";
 import { usePersistentState } from "@/hooks/usePersistentState";
@@ -56,7 +63,6 @@ import { SessionCardSkeletonList } from "@/components/SessionCardSkeleton";
 import { MemoryCard } from "@/components/MemoryCard";
 import { MessageBody } from "@/components/MessageBody";
 import { MessageList } from "@/components/MessageList";
-import { RoutePlaceholder } from "@/components/RoutePlaceholder";
 import { SnippetLine } from "@/components/SnippetLine";
 
 // Route + modal code-splitting (M6). Each lazy chunk only ships when
@@ -80,6 +86,11 @@ const StatsPage = React.lazy(() =>
     default: m.StatsPage
   }))
 );
+const FavoritesPage = React.lazy(() =>
+  import("@/components/favorites/FavoritesPage").then((m) => ({
+    default: m.FavoritesPage
+  }))
+);
 const SettingsPage = React.lazy(() =>
   import("@/components/settings/SettingsPage").then((m) => ({
     default: m.SettingsPage
@@ -92,6 +103,18 @@ const UpdateDialog = React.lazy(() =>
 );
 
 export function App() {
+  // Force a re-render every minute so `formatRelativeDate` ("2 min
+  // ago" / "Synced 3 min ago" / favorited-at chips) stays accurate
+  // without each consumer needing its own timer. Cheap: a noop reducer
+  // bumps state once a minute, React reconciles the (mostly static)
+  // tree, every formatRelativeDate call re-evaluates against the new
+  // wall clock.
+  const [, tickRelativeTime] = React.useReducer((n: number) => n + 1, 0);
+  React.useEffect(() => {
+    const id = setInterval(() => tickRelativeTime(), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
   const [sessions, setSessions] = React.useState<AppSession[]>([]);
   const [selected, setSelected] = React.useState<AppSession | null>(null);
   const [detail, setDetail] = React.useState<SessionDetail | null>(null);
@@ -137,6 +160,17 @@ export function App() {
     true,
     (raw): raw is boolean => typeof raw === "boolean"
   );
+  const [favorites, setFavorites] = usePersistentState<Favorite[]>(
+    "favorites",
+    [],
+    isFavoriteList
+  );
+  // Derived: fast "is this (source, session, index) in favorites?"
+  // lookup. Set is rebuilt only when the array reference changes.
+  const favoriteKeys = React.useMemo(
+    () => favoriteKeySet(favorites),
+    [favorites]
+  );
 
   const addRecentSearch = React.useCallback(
     (raw: string) => {
@@ -153,6 +187,21 @@ export function App() {
   const clearRecentSearches = React.useCallback(() => {
     setRecentSearches([]);
   }, [setRecentSearches]);
+
+  const toggleFavorite = React.useCallback(
+    (session: AppSession, message: SessionMessage, index: number) => {
+      setFavorites((current) =>
+        toggleFavoriteEntry(current, session, message, index)
+      );
+    },
+    [setFavorites]
+  );
+  const removeFavorite = React.useCallback(
+    (id: string) => {
+      setFavorites((current) => current.filter((f) => f.id !== id));
+    },
+    [setFavorites]
+  );
   const [route, setRouteImmediate] = React.useState<Route>(() => readRouteFromHash());
   const [, startTransition] = React.useTransition();
   const setRoute = React.useCallback(
@@ -224,18 +273,44 @@ export function App() {
     };
   }, []);
 
-  // Shared "jump to this record" action — used by both the Search page
-  // and the Cmd-K palette. Resets the Records sidebar filters so the
-  // target item is visible in its pane and switches the pane tab to
-  // match the item type before flipping the route.
+  // Pending scroll request — used when "Open original" on a Favorite
+  // wants to land on a specific message. Lives at App level because
+  // the navigation flow crosses route change + async detail load +
+  // MessageList mount. The nonce lets repeat clicks on the same
+  // (session, index) still re-trigger a scroll.
+  const [pendingScroll, setPendingScroll] = React.useState<{
+    sessionKey: string;
+    index: number;
+    nonce: number;
+  } | null>(null);
+  // Stable handle — passed to MessageList so the effect dep array
+  // doesn't refire on every parent re-render.
+  const clearPendingScroll = React.useCallback(
+    () => setPendingScroll(null),
+    []
+  );
+
+  // Shared "jump to this record" action — used by Search, Cmd-K, and
+  // the Favorites "Open original" button. Resets the Records sidebar
+  // filters so the target item is visible in its pane and switches
+  // the pane tab to match the item type before flipping the route.
+  // When `messageIndex` is supplied, the records detail pane will
+  // scroll that message into view as soon as it finishes loading.
   const openItem = React.useCallback(
-    (item: AppSession) => {
+    (item: AppSession, messageIndex?: number) => {
       setSource("All");
       setProject(null);
       if (isMemoryItem(item)) setPane("memory");
       else if (isSkillItem(item)) setPane("skills");
       else setPane("sessions");
       setSelected(item);
+      if (messageIndex != null && messageIndex >= 0) {
+        setPendingScroll({
+          sessionKey: `${item.source}::${item.id}`,
+          index: messageIndex,
+          nonce: Date.now()
+        });
+      }
       setRoute("records");
     },
     [setPane]
@@ -512,10 +587,17 @@ export function App() {
                 refreshing={loading}
               />
             )}
+            {route === "favorites" && (
+              <FavoritesPage
+                favorites={favorites}
+                sessions={sessions}
+                onOpenSource={(session, messageIndex) =>
+                  openItem(session, messageIndex)
+                }
+                onRemove={removeFavorite}
+              />
+            )}
           </React.Suspense>
-          {route !== "records" && route !== "search" && route !== "providers" && route !== "settings" && route !== "stats" && (
-            <RoutePlaceholder route={route} />
-          )}
           {route === "records" && (
             <main className="flex-1 min-h-0 grid grid-cols-[220px_minmax(240px,300px)_1fr]">
               <aside className="flex flex-col min-h-0 bg-sidebar mt-3 ml-3 rounded-md">
@@ -841,12 +923,12 @@ export function App() {
                         {selected.title || "(untitled)"}
                       </h2>
 
-                      <div className="flex items-center gap-2 text-xs text-muted-foreground flex-wrap">
+                      <div className="flex items-center gap-2 text-xs leading-none text-muted-foreground flex-wrap">
                         <span
                           className="inline-flex items-center gap-1"
                           title={selected.updated_at ?? selected.started_at ?? ""}
                         >
-                          <Clock size={13} />
+                          <Calendar size={12} className="shrink-0" />
                           {formatDate(selected.updated_at ?? selected.started_at)}
                         </span>
                         {isSessionItem(selected) && (
@@ -856,7 +938,7 @@ export function App() {
                               className="inline-flex items-center gap-1"
                               title={`${selected.message_count} messages`}
                             >
-                              <MessageSquare size={13} />
+                              <MessageSquare size={12} className="shrink-0" />
                               {selected.message_count}
                             </span>
                           </>
@@ -866,7 +948,7 @@ export function App() {
                           className="inline-flex items-center gap-1 min-w-0"
                           title={selected.project}
                         >
-                          <Folder size={13} />
+                          <Folder size={12} className="shrink-0" />
                           <span className="truncate">
                             {projectDisplayName(selected.project)}
                           </span>
@@ -875,10 +957,10 @@ export function App() {
 
                       <div className="flex items-center justify-between gap-2">
                         <div
-                          className="inline-flex items-center gap-1.5 min-w-0 text-xs font-mono text-muted-foreground"
+                          className="inline-flex items-center gap-1 min-w-0 text-xs leading-none font-mono text-muted-foreground"
                           title={selected.path}
                         >
-                          <File size={13} className="shrink-0" />
+                          <File size={12} className="shrink-0" />
                           <span className="truncate">{selected.path}</span>
                         </div>
                         <div className="inline-flex items-center gap-2 shrink-0">
@@ -889,7 +971,7 @@ export function App() {
                             aria-label="Open in Finder"
                             className="inline-flex shrink-0 text-muted-foreground hover:text-foreground transition-colors"
                           >
-                            <FolderOpen size={13} />
+                            <FolderOpen size={12} />
                           </button>
                           <CopyMenu
                             items={[
@@ -918,7 +1000,26 @@ export function App() {
                         <Loader2 className="animate-spin" />
                       </div>
                     ) : isSessionItem(selected) && detail?.messages.length ? (
-                      <MessageList messages={detail.messages} />
+                      <MessageList
+                        messages={detail.messages}
+                        favorites={{
+                          session: selected,
+                          keys: favoriteKeys,
+                          onToggle: (message, index) =>
+                            toggleFavorite(selected, message, index)
+                        }}
+                        scrollRequest={
+                          pendingScroll &&
+                          pendingScroll.sessionKey ===
+                            `${selected.source}::${selected.id}`
+                            ? {
+                                index: pendingScroll.index,
+                                nonce: pendingScroll.nonce
+                              }
+                            : null
+                        }
+                        onScrolled={clearPendingScroll}
+                      />
                     ) : detail?.messages.length ? (
                       <div className="flex-1 overflow-auto px-4 py-2">
                         <div className="rounded-lg bg-card text-card-foreground px-5 py-4">

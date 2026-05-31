@@ -43,7 +43,7 @@ export function CopyMenu({ items }: { items: { label: string; value: string }[] 
         aria-label="Copy"
         className="inline-flex shrink-0 text-muted-foreground hover:text-foreground transition-colors"
       >
-        <Copy size={13} />
+        <Copy size={12} />
       </button>
       {open && (
         <div

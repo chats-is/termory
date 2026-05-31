@@ -261,6 +261,26 @@ async fn write_app_providers(value: serde_json::Value) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Read ~/.termory/favorites.json. Returns an empty `[]` if missing.
+/// Stored separately because favorites can contain user-typed prompts
+/// with PII or accidentally-pasted secrets — file is chmod 0600.
+#[tauri::command]
+async fn read_app_favorites() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| config::read_favorites().map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Atomically write ~/.termory/favorites.json with file mode 0600 (Unix).
+#[tauri::command]
+async fn write_app_favorites(value: serde_json::Value) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        config::write_favorites(&value).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 pub fn run() {
     // Log target directory: `~/.termory/logs/`. Falls back to the
     // OS-default log location if HOME isn't readable so app launch
@@ -314,6 +334,8 @@ pub fn run() {
             write_app_config,
             read_app_providers,
             write_app_providers,
+            read_app_favorites,
+            write_app_favorites,
         ])
         .setup(|app| {
             // Background filesystem watcher: pushes a fresh

@@ -138,9 +138,23 @@ export const CLI_INSTALL: Record<
   }
 };
 
-export const ROUTES: Route[] = ["records", "search", "stats", "providers", "settings"];
+export const ROUTES: Route[] = [
+  "records",
+  "search",
+  "stats",
+  "favorites",
+  "providers",
+  "settings"
+];
 
-// Order matches the rail's visual order (Providers / Records / Search / Stats / Settings)
-// and ⌘1..5 bindings.
-export const RAIL_ROUTE_ORDER: Route[] = ["providers", "records", "search", "stats", "settings"];
+// Order matches the rail's visual order (Providers / Records / Search /
+// Favorites / Stats / Settings) and ⌘1..6 bindings.
+export const RAIL_ROUTE_ORDER: Route[] = [
+  "providers",
+  "records",
+  "search",
+  "favorites",
+  "stats",
+  "settings"
+];
 

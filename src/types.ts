@@ -63,6 +63,34 @@ export type SessionDetail = {
   messages: SessionMessage[];
 };
 
+/** A user-saved message snapshot. Stored in `~/.termory/favorites.json`
+ * and persists across CLI re-scans even if the original session file
+ * is renamed / deleted (we keep the full content + enough source ref
+ * to attempt re-opening the original transcript). */
+export type Favorite = {
+  /** Unique id for the favorite itself (not the source message). */
+  id: string;
+  /** ISO timestamp when the user starred this message. */
+  favorited_at: string;
+  /** Full message snapshot — survives source-file changes. */
+  message: SessionMessage;
+  /** Source platform tag. Narrowed to the 4 session sources because
+   * Memory / Skill items don't have a starrable message list. */
+  source: SessionSource;
+  /** Best-effort reference back to the original session. The source
+   * file might have been deleted by the time the favorite is opened;
+   * the snapshot above is the authoritative copy. */
+  source_session_id: string;
+  source_session_path: string;
+  source_session_title: string;
+  source_session_project: string;
+  /** Index of this message within the session's parsed message list
+   * AT TIME OF FAVORITE. Indices can drift if the parser changes
+   * shape, so don't rely on this for content — use it only as a
+   * fast equality key for "is this message currently favorited?". */
+  source_message_index: number;
+};
+
 export type SearchHit = {
   session: AppSession;
   snippet: string;
@@ -74,7 +102,12 @@ export type SearchHit = {
   truncated?: boolean;
 };
 
-export type MemoryTool = "Claude" | "Codex" | "Gemini" | "OpenCode" | "Other";
+/** Sources of parsed session transcripts. Capitalized form lives on
+ * `AppSession.source` (Rust enum → string). Currently the same 4
+ * values are also the legal `Favorite.source`. */
+export type SessionSource = "Claude" | "Codex" | "Gemini" | "OpenCode";
+
+export type MemoryTool = SessionSource | "Other";
 
 export type CliApp = "claude" | "codex" | "gemini" | "opencode";
 
@@ -145,6 +178,12 @@ export type TestResult = {
   message: string;
 };
 
-export type Route = "records" | "search" | "stats" | "providers" | "settings";
+export type Route =
+  | "records"
+  | "search"
+  | "stats"
+  | "favorites"
+  | "providers"
+  | "settings";
 
 export type Pane = "sessions" | "memory" | "skills";
