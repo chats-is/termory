@@ -20,7 +20,7 @@ const THEME_OPTIONS: { value: ThemeChoice; label: string; icon: React.ReactNode 
 const SHORTCUTS: { keys: string[]; label: string }[] = [
   { keys: ["⌘", "K"], label: "Open search palette" },
   { keys: ["⌘", "F"], label: "Open search palette (alias)" },
-  { keys: ["⌘", "1..5"], label: "Switch rail route" },
+  { keys: ["⌘", "1..6"], label: "Switch rail route" },
   { keys: ["Esc"], label: "Close palette / dropdown" }
 ];
 

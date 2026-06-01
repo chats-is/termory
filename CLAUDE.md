@@ -15,11 +15,17 @@ Supported sources in the current code:
 - Gemini CLI
 - OpenCode
 
-Top-level UI panes:
+Top-level UI shell — six activity-rail routes (⌘1..6 in order):
 
-- **Sessions** — chat/transcript history per tool
-- **Memories** — on-disk memory files (CLAUDE.md, AGENTS.md, GEMINI.md, `~/.codex/memories/`, `~/.claude/projects/<slug>/memory/`, etc.)
-- **Skills** — `SKILL.md` files under each tool's skills directory plus the cross-tool `.agents/skills/` location
+1. **Providers** — third-party API platform switcher (per CLI). Default landing route.
+2. **Records** — chat / transcript history. Three internal panes:
+   - *Sessions* — per-tool transcripts
+   - *Memories* — on-disk memory files (CLAUDE.md, AGENTS.md, GEMINI.md, `~/.codex/memories/`, `~/.claude/projects/<slug>/memory/`, etc.)
+   - *Skills* — `SKILL.md` files under each tool's skills directory plus the cross-tool `.agents/skills/` location
+3. **Favorites** — saved per-message snapshots
+4. **Search** — substring search + Cmd-K palette
+5. **Stats** — KPI strip + Daily tokens chart + Daily activities heatmap
+6. **Settings** — Appearance / Storage / Search history / Keyboard shortcuts / About
 
 Current alignment target: data acquisition and message preview formatting should follow the official tools. UI layout, source filters, project grouping, search, stats, cross-source sorting, and the Memory/Skills views are app behavior and do not need official UI parity.
 
@@ -51,18 +57,30 @@ Current alignment target: data acquisition and message preview formatting should
 - Rust parser/formatter tests: inline tests at the bottom of `src-tauri/src/sessions.rs`
 - Rust provider/store tests: inline tests at the bottom of `src-tauri/src/providers.rs` and `src-tauri/src/config.rs`
 
-Current Tauri IPC commands, called from the frontend with `invoke(...)`:
+Current Tauri IPC commands (17), called from the frontend with `invoke(...)`:
 
+**Scan & detail**
 - `scan_all_sessions` — returns Sessions + Memory + Skill entries as `AppSession[]`
 - `load_session` — loads one entry by `{ source, path, id }`
-- `search_all_sessions` — substring search across all loaded session/memory/skill bodies
+- `search_all_sessions(query)` — substring search across all loaded session/memory/skill bodies; each `SearchHit` carries `first_match_index` for scroll-to-message
+
+**CLI detection**
+- `detect_clis()` — runs `which`-style probes for `claude` / `codex` / `gemini` / `opencode` binaries; returns `{ [app]: boolean }` for the Providers page InstallGuide gate
+- `detect_cli_versions_cmd()` — invokes each detected CLI with `--version` so the Providers page can show actual installed versions
+
+**Providers — switch CLI to a third-party platform**
 - `provider_active_state(app, providers)` / `provider_active_states(providers)` — reverse-derive which Provider is currently active by reading the CLI's live config files; nothing about "active" is stored backend-side
 - `activate_provider(provider, providersForApp)` / `deactivate_provider(app, providersForApp)` — materialize a Provider into the CLI's live config (or clear Termory-injected fields)
+- `delete_provider(provider)` — remove a stored Provider AND deactivate it if it was the active one
+- `set_opencode_default_provider(provider)` — OpenCode-specific: pick which of multiple configured `auth.json` entries opencode uses by default
 - `test_provider_api(provider)` — connectivity probe to the provider's base URL (returns `{ ok, status, latencyMs, message }`)
 - `fetch_provider_models(provider)` — hits `/v1/models` (or `/v1beta/models?key=` for Gemini) and returns the available model ids for the editor's autocomplete
+- `fetch_provider_favicon(url)` — proxies a one-shot `<host>/favicon.*` fetch through the backend (avoids leaking the hostname to a third-party favicon service); returns a `data:image/...;base64,...` URL cached on the Provider record
+
+**App-local KV stores** (all `chmod 0600` on Unix)
 - `read_app_config` / `write_app_config` — `~/.termory/config.json` (UI prefs)
-- `read_app_providers` / `write_app_providers` — `~/.termory/providers.json` (provider library, contains API keys, chmod 0600)
-- `read_app_favorites` / `write_app_favorites` — `~/.termory/favorites.json` (saved message snapshots, may contain PII / pasted secrets, chmod 0600)
+- `read_app_providers` / `write_app_providers` — `~/.termory/providers.json` (provider library, contains API keys)
+- `read_app_favorites` / `write_app_favorites` — `~/.termory/favorites.json` (saved message snapshots, may contain PII / pasted secrets)
 
 ## Project Commands
 
@@ -758,7 +776,7 @@ function render(ui: React.ReactElement, options?: RenderOptions) {
 
 ## Pending feature work
 
-The current UI shell is settled: activity rail (Providers / Records / Search / Favorites / Stats / Settings, in that order — Providers is the default landing route via `readRouteFromHash` → `"providers"` fallback), routed via URL hash, with a passive bottom freshness footer fed by the Rust filesystem watcher. Providers / Records / Search / Favorites / Stats are fully implemented; only Settings still renders a placeholder card.
+The current UI shell is settled: activity rail (Providers / Records / Favorites / Search / Stats / Settings, in that order — Providers is the default landing route via `readRouteFromHash` → `"providers"` fallback), routed via URL hash, with a passive bottom freshness footer fed by the Rust filesystem watcher. **All six rail destinations are real implementations** — no route renders a placeholder anymore (`RoutePlaceholder` was removed when Favorites shipped).
 
 Roadmap below is grouped by priority. Pick top-down within a tier.
 
@@ -775,12 +793,12 @@ All P0 items have shipped:
 - ~~`tauri-plugin-store`~~ — replaced with custom `config.rs` module (`~/.termory/{config,providers,favorites}.json` with `chmod 0600`). The plugin couldn't control file location or Unix permissions; rolling our own KV gives both.
 - ~~Providers page~~ — done. See the "Providers" section above. Cross-verified against `.audit-sources/cc-switch/` for the per-CLI write shapes; 4 CLIs supported with per-CLI tests. OpenCode adapter was re-done in a second pass: instead of self-declaring `provider.termory.{npm,name,models}` (which fights OpenCode's catalog at runtime), Termory now writes the API key under one of OpenCode's built-in catalog ids (`anthropic`/`openai`/`openai-compatible`/…) into `~/.local/share/opencode/auth.json` — same shape `/connect` produces — and optionally overlays a `baseURL` in `opencode.json`. The AI SDK dropdown in the editor is the catalog id picker.
 - ~~Stats page~~ — done. See the "Stats" section below. KPI strip (Sessions/Messages/Tokens/Projects) + DAILY TOKENS line chart + DAILY ACTIVITIES heatmap. All values window-accurate from each session's `daily_tokens[]` — no fallback smearing, no lifetime-of-touched-session totals.
-- **App Settings page** — theme, scan-path overrides, keyboard shortcuts, watcher toggle.
+- ~~App Settings page~~ — done. 5 sections: Appearance (next-themes System/Light/Dark), Storage (`~/.termory/` path + "Open in Finder"), Search history (count + Clear), Keyboard shortcuts (display-only reference), About (version + manual / auto update check). The only spec item NOT in the page is **scan-path overrides** — users with non-default CLI install locations still rely on the per-CLI env vars (`CLAUDE_CONFIG_DIR` etc.). Add a "Sources" section if that ever becomes a real ask. The originally-listed "watcher toggle" was dropped along with the watcher-completion work in P2.
 
 ### P2 — quality of life
 
 - **Right-click context menus** — on list items ("Re-read this file", "Reveal in Finder", "Copy ID") and on sidebar source rows ("Re-scan this source").
-- **Keyboard navigation** — arrow keys in lists, Enter to open, Esc to close, Cmd-1..5 to switch rail, Cmd-F to summon search.
+- **Keyboard navigation** — partial. ✅ `⌘1..6` switch rail routes (App.tsx:235), `⌘K` / `⌘F` summon Cmd-K search palette (CommandPalette.tsx), `Esc` closes palette / dropdowns. ❌ Still TODO: arrow-key navigation inside lists (Records sidebar, session list, Favorites list) and `Enter` to open the focused item.
 - ~~Watcher completion~~ — intentionally not pursued. Per-project files (`<cwd>/CLAUDE.md`, `AGENTS.md`, `.claude/skills/`, etc.) are only read at launch; if a user edits them mid-session the change isn't reflected until next launch / manual refresh, and that's acceptable. Recursive cwd watching would pull in `node_modules` / build noise and isn't worth the complexity.
 - ~~Frontend test baseline~~ — done. 117 Vitest tests covering `session-utils`, `format`, `usePersistentState`, `CopyMenu`, `FreshnessFooter`, `stats-utils`, `favorites` helpers, `FavoritesPage`, and `MessageList` (star wiring). `@tanstack/react-virtual` is `vi.mock`'d in MessageList tests to bypass jsdom layout limits.
 

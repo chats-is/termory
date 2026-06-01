@@ -230,8 +230,8 @@ export function App() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
-  // ⌘1..5 (or Ctrl 1..5) switch rail routes by visual order:
-  // 1=Providers, 2=Records, 3=Search, 4=Stats, 5=Settings.
+  // ⌘1..6 (or Ctrl 1..6) switch rail routes by visual order:
+  // 1=Providers, 2=Records, 3=Favorites, 4=Search, 5=Stats, 6=Settings.
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey)) return;
