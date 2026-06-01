@@ -901,12 +901,10 @@ fn extract_codex_tokens_from_rollout(path: &Path) -> TokenExtraction {
                             bucket[2] += delta[2];
                             bucket[3] += delta[3];
                             bucket[4] += 1; // one AI interaction
-                            let hourbox =
-                                daily_hours.entry(date.clone()).or_insert([0u64; 24]);
+                            let hourbox = daily_hours.entry(date.clone()).or_insert([0u64; 24]);
                             hourbox[hour as usize] += 1;
                             let delta_total = delta[0] + delta[1] + delta[2] + delta[3];
-                            let tokbox =
-                                daily_hour_tokens.entry(date).or_insert([0u64; 24]);
+                            let tokbox = daily_hour_tokens.entry(date).or_insert([0u64; 24]);
                             tokbox[hour as usize] += delta_total;
                         }
                         prev_cumulative = Some(current);
@@ -1106,12 +1104,9 @@ fn extract_claude_tokens_from_jsonl(path: &Path) -> TokenExtraction {
                 if let Some((_, hour)) = date_hour.as_ref() {
                     let hourbox = daily_hours.entry(date.clone()).or_insert([0u64; 24]);
                     hourbox[*hour as usize] += 1;
-                    let line_total = line_input
-                        + line_output
-                        + line_cache_read
-                        + line_cache_creation;
-                    let tokbox =
-                        daily_hour_tokens.entry(date).or_insert([0u64; 24]);
+                    let line_total =
+                        line_input + line_output + line_cache_read + line_cache_creation;
+                    let tokbox = daily_hour_tokens.entry(date).or_insert([0u64; 24]);
                     tokbox[*hour as usize] += line_total;
                 }
             }
@@ -3010,18 +3005,14 @@ impl GeminiTokenAccumulator {
                     bucket[4] += line_total;
                     bucket[5] += 1; // one tokens record = 1 interaction
                     if let Some((_, hour)) = date_hour.as_ref() {
-                        let hourbox =
-                            self.daily_hours.entry(date.clone()).or_insert([0u64; 24]);
+                        let hourbox = self.daily_hours.entry(date.clone()).or_insert([0u64; 24]);
                         hourbox[*hour as usize] += 1;
                         let recorded_total = if line_total > 0 {
                             line_total
                         } else {
                             line_input + line_output + line_cached + line_reasoning
                         };
-                        let tokbox = self
-                            .daily_hour_tokens
-                            .entry(date)
-                            .or_insert([0u64; 24]);
+                        let tokbox = self.daily_hour_tokens.entry(date).or_insert([0u64; 24]);
                         tokbox[*hour as usize] += recorded_total;
                     }
                 }
@@ -13434,8 +13425,8 @@ mod tests {
         let daily = daily.expect("daily breakdown should be populated");
         assert_eq!(daily.len(), 1);
         assert_eq!(daily[0].date.len(), 10); // YYYY-MM-DD shape
-        // Final delta should equal the final cumulative numbers since
-        // the first event was null (no prior baseline).
+                                             // Final delta should equal the final cumulative numbers since
+                                             // the first event was null (no prior baseline).
         assert_eq!(daily[0].tokens.input, 20000);
         assert_eq!(daily[0].tokens.output, 500);
         assert_eq!(daily[0].tokens.cached, 8000);
