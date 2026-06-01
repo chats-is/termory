@@ -1,6 +1,7 @@
 mod config;
 mod providers;
 mod sessions;
+mod tray;
 mod watcher;
 
 /// Shared test infrastructure. The `HOME_LOCK` mutex serializes tests
@@ -153,6 +154,7 @@ async fn provider_active_states(providers: Vec<Provider>) -> Result<Vec<ActiveSt
 /// (`set_opencode_default_provider`).
 #[tauri::command]
 async fn activate_provider(
+    app: tauri::AppHandle,
     provider: Provider,
     providers_for_app: Vec<Provider>,
 ) -> Result<(), String> {
@@ -160,19 +162,26 @@ async fn activate_provider(
         activate(&provider, &providers_for_app).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|err| err.to_string())?
+    .map_err(|err| err.to_string())??;
+    let _ = tray::rebuild_menu(&app);
+    Ok(())
 }
 
 /// Promote a Termory OpenCode provider to OpenCode's startup default
 /// by writing `model = "<termory-id>/<primary>"` at the top of
 /// opencode.json. The provider must already be activated.
 #[tauri::command]
-async fn set_opencode_default_provider(provider: Provider) -> Result<(), String> {
+async fn set_opencode_default_provider(
+    app: tauri::AppHandle,
+    provider: Provider,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         set_opencode_default(&provider).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|err| err.to_string())?
+    .map_err(|err| err.to_string())??;
+    let _ = tray::rebuild_menu(&app);
+    Ok(())
 }
 
 /// Surgical per-provider cleanup before delete. For Claude/Codex/Gemini
@@ -182,24 +191,32 @@ async fn set_opencode_default_provider(provider: Provider) -> Result<(), String>
 /// top-level `model` if it pointed here); sibling Termory slots and
 /// any /connect entries in `auth.json` stay untouched.
 #[tauri::command]
-async fn delete_provider(provider: Provider) -> Result<(), String> {
+async fn delete_provider(app: tauri::AppHandle, provider: Provider) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         delete_provider_traces(&provider).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|err| err.to_string())?
+    .map_err(|err| err.to_string())??;
+    let _ = tray::rebuild_menu(&app);
+    Ok(())
 }
 
 /// Restore a CLI to its native auth flow by clearing all
 /// Termory-injected fields.
 #[tauri::command]
-async fn deactivate_provider(app: String, providers_for_app: Vec<Provider>) -> Result<(), String> {
+async fn deactivate_provider(
+    handle: tauri::AppHandle,
+    app: String,
+    providers_for_app: Vec<Provider>,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let cli = CliApp::parse(&app).ok_or_else(|| format!("unknown app: {app}"))?;
         deactivate(cli, &providers_for_app).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|err| err.to_string())?
+    .map_err(|err| err.to_string())??;
+    let _ = tray::rebuild_menu(&handle);
+    Ok(())
 }
 
 /// Send a connectivity probe to the provider's base URL.
@@ -253,12 +270,17 @@ async fn read_app_providers() -> Result<serde_json::Value, String> {
 
 /// Atomically write ~/.termory/providers.json with file mode 0600 (Unix).
 #[tauri::command]
-async fn write_app_providers(value: serde_json::Value) -> Result<(), String> {
+async fn write_app_providers(
+    app: tauri::AppHandle,
+    value: serde_json::Value,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         config::write_providers(&value).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    let _ = tray::rebuild_menu(&app);
+    Ok(())
 }
 
 /// Read ~/.termory/favorites.json. Returns an empty `[]` if missing.
@@ -337,6 +359,23 @@ pub fn run() {
             read_app_favorites,
             write_app_favorites,
         ])
+        .on_window_event(|window, event| {
+            // Closing the window hides it instead of quitting, so the
+            // app keeps running in the menu-bar tray (switch providers,
+            // reopen via the tray's "Open"). Real quit goes through the
+            // tray's "Exit" → app.exit(0).
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                // No window on screen → hide the Dock icon too, so
+                // Termory lives only in the menu bar. The tray's "Open"
+                // brings the Dock icon back. set_dock_visibility is the
+                // purpose-built API (handles the macOS activation
+                // quirks that a raw activation-policy toggle does not).
+                #[cfg(target_os = "macos")]
+                let _ = window.app_handle().set_dock_visibility(false);
+                api.prevent_close();
+            }
+        })
         .setup(|app| {
             // Background filesystem watcher: pushes a fresh
             // `Vec<AppSession>` to the frontend via
@@ -351,6 +390,12 @@ pub fn run() {
                 Err(err) => {
                     log::error!("watcher init failed: {err}");
                 }
+            }
+            // System tray (macOS menu bar) — one click → menu listing
+            // all providers per CLI for one-tap switching. Tray failure
+            // is non-fatal; the app window still works.
+            if let Err(err) = tray::install(app.handle()) {
+                log::error!("tray install failed: {err}");
             }
             Ok(())
         })

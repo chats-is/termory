@@ -297,10 +297,17 @@ export function ProvidersPage({
     const unlistenPromise = listen("termory:sources-changed", () => {
       void refreshActive();
     });
+    // The menu-bar tray switches providers via its own handler and
+    // emits this after writing the CLI's live config — re-derive so an
+    // open Providers page reflects a tray switch even when unfocused.
+    const unlistenTrayPromise = listen("termory:providers-changed", () => {
+      void refreshActive();
+    });
     const peerHandler = () => void refreshActive();
     window.addEventListener(ACTIVE_STATE_REFRESH_EVENT, peerHandler);
     return () => {
       void unlistenPromise.then((fn) => fn()).catch(() => {});
+      void unlistenTrayPromise.then((fn) => fn()).catch(() => {});
       window.removeEventListener(ACTIVE_STATE_REFRESH_EVENT, peerHandler);
     };
   }, [refreshActive]);

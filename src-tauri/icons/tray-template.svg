@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Menu-bar template glyph: a solid rounded-square "chip" (the app
+       icon's container, = the BACKGROUND) with the three-card terminal
+       stack (= the CONTENT) knocked out as transparent windows and a
+       black `>_` prompt on the front card. Pure black on transparent
+       so macOS themes it for light / dark menu bars. tray-icon.png is
+       the rasterized form (36×36 px = 18pt @2x); this SVG is the source.
+
+       Two independent layers — keep them separate when adjusting:
+         • BACKGROUND = the chip rect below (x8.28 y10.78 111.44×111.44,
+           rx29.5). A small margin keeps the whole icon a touch under
+           the full menu-bar size. Shrinking this rect shrinks the whole
+           icon; rx controls how rounded vs square the corners look.
+           Scale note: the PNG is 36px, so 1px there ≈ 128/36 ≈ 3.56
+           units here — adjust the chip in these steps for px-level tweaks.
+         • CONTENT = the three cards + prompt, scaled ~0.91 about the
+           chip centre so they sit slightly inset and centered inside
+           the chip.
+
+       Vertical nudge: the whole glyph is shifted DOWN by 2.5 units
+       (≈0.7px @36) from dead-centre so it reads optically centered in
+       the menu bar (geometric centre looks a touch high there).
+
+       - `windows` mask punches the union of the three card bodies out
+         of the solid chip.
+       - `hideFront` / `hideFrontMid` masks occlude the parts of the
+         mid / back card outlines that fall behind a card in front. -->
+  <defs>
+    <mask id="windows">
+      <rect width="128" height="128" fill="#fff"/>
+      <rect x="23" y="54.5" width="62" height="44" rx="9" fill="#000"/>
+      <rect x="33" y="44.5" width="62" height="44" rx="9" fill="#000"/>
+      <rect x="43" y="34.5" width="62" height="44" rx="9" fill="#000"/>
+    </mask>
+    <mask id="hideFront">
+      <rect width="128" height="128" fill="#fff"/>
+      <rect x="23" y="54.5" width="62" height="44" rx="9" fill="#000"/>
+    </mask>
+    <mask id="hideFrontMid">
+      <rect width="128" height="128" fill="#fff"/>
+      <rect x="23" y="54.5" width="62" height="44" rx="9" fill="#000"/>
+      <rect x="33" y="44.5" width="62" height="44" rx="9" fill="#000"/>
+    </mask>
+  </defs>
+
+  <!-- BACKGROUND: solid chip (small margin) with windows punched out -->
+  <rect x="8.28" y="10.78" width="111.44" height="111.44" rx="29.5" fill="#000000" mask="url(#windows)"/>
+
+  <!-- CONTENT: card separator outlines (occluded) + prompt -->
+  <g fill="none" stroke="#000000" stroke-width="5"
+     stroke-linecap="round" stroke-linejoin="round">
+    <rect x="43" y="34.5" width="62" height="44" rx="9" mask="url(#hideFrontMid)"/>
+    <rect x="33" y="44.5" width="62" height="44" rx="9" mask="url(#hideFront)"/>
+    <rect x="23" y="54.5" width="62" height="44" rx="9"/>
+  </g>
+  <g fill="none" stroke="#000000" stroke-width="6"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 37 64.5 L 51 74.5 L 37 84.5"/>
+  </g>
+  <rect x="56" y="80.5" width="16" height="6" rx="3" fill="#000000"/>
+</svg>
