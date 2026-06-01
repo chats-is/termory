@@ -27,12 +27,15 @@ Top-level UI shell — six activity-rail routes (⌘1..6 in order):
 5. **Stats** — KPI strip + Daily tokens chart + Daily activities heatmap
 6. **Settings** — Appearance / Storage / Search history / Keyboard shortcuts / About
 
+Plus a **system-level macOS menu-bar tray** (outside the in-app rail) for quick provider switching — see "Menu-bar tray" below.
+
 Current alignment target: data acquisition and message preview formatting should follow the official tools. UI layout, source filters, project grouping, search, stats, cross-source sorting, and the Memory/Skills views are app behavior and do not need official UI parity.
 
 ## Tech Stack
 
 - Desktop framework: Tauri v2
 - Frontend: React 18, TypeScript, Vite
+- UI / styling: Tailwind CSS v4 + shadcn/ui (Radix primitives); charts via `recharts`; virtualized lists via `@tanstack/react-virtual`; theming via `next-themes`; toasts via `sonner`
 - Backend: Rust 2021
 - Database access: `rusqlite` with bundled SQLite
 - JSON parsing: `serde`, `serde_json`
@@ -48,6 +51,7 @@ Current alignment target: data acquisition and message preview formatting should
 - Tauri IPC commands: `src-tauri/src/lib.rs`
 - Session/Memory/Skill scanning, parsing, and formatting: `src-tauri/src/sessions.rs`
 - Provider switching (activate / deactivate / reverse-derive / test / fetch-models): `src-tauri/src/providers.rs`
+- macOS menu-bar tray (build menu / rebuild / click handler): `src-tauri/src/tray.rs`; icon assets `src-tauri/icons/tray-icon.png` (36×36 template) + `tray-template.svg` (vector source)
 - Local KV store (config.json + providers.json + favorites.json under `~/.termory/`, chmod 0600): `src-tauri/src/config.rs`
 - Stats aggregations (pure, window-accurate): `src/lib/stats-utils.ts` (+ `stats-utils.test.ts`)
 - Stats UI: `src/components/stats/{StatsPage,StatsFilterBar,OverviewHero,DailyTokensChart,DailyActivitiesHeatmap,shared}.tsx`
@@ -582,6 +586,39 @@ All four were cross-verified against the upstream CLI source (`.audit-sources/{c
 **Claude sub-model routing (Advanced section):** Claude Code's `/model` menu in 3P mode reads `process.env.ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL` via `getDefaultXxxModel()` (`model.ts:105-138`). Users who route different sizes to different upstream models (e.g. Sonnet → `gpt-5`, Opus → `claude-opus-4-7`) fill the Advanced fields; empty fields strip the corresponding env var.
 
 **Test coverage:** Each CLI has an activate/reverse roundtrip test, an unrelated-fields-preserved test, and an OAuth-credentials-isolated three-stage test (Stage 1 simulates a prior CLI login, Stage 2 activates a Custom provider via Termory, Stage 3 deactivates — credentials file must be byte-identical at the end). See `providers::tests::*` in `src-tauri/src/providers.rs`.
+
+## Menu-bar tray (macOS system tray)
+
+A native system-tray icon (the macOS menu bar) for quick provider switching, separate from the in-app Providers rail route. Implemented in `src-tauri/src/tray.rs` and installed from `lib.rs` `setup()`. Requires the `tauri` features `tray-icon` + `image-png` (Cargo.toml).
+
+**Menu shape** — one submenu per CLI; the active choice is shown inline on the first-level row and the submenu lists Official + the user's providers with the active one checkmarked:
+
+```
+Claude Code · Official  ▸  ☑ Official
+                           ─────────
+                           ☐ Anthropic
+                           ☐ OpenRouter
+Codex · OpenRouter      ▸  …
+Gemini · …              ▸  …
+OpenCode · Official     ▸  …
+─────────────────────
+Open
+Exit
+```
+
+- **Active state is reverse-derived** via `providers::read_active_state` (same as the Providers page) — Termory still stores no "active provider" pointer. Checkmark + inline `· name` use the matched provider name, else "Official".
+- **CLI display names** match the Providers page tabs (`CLI_APP_LABEL` in `src/constants.ts`) — keep `cli_label` in `tray.rs` in sync (it's "Gemini", not "Gemini CLI").
+- **Click handler** reuses the same write helpers as the IPC commands (`activate` / `deactivate`), so the on-disk path is single-sourced. For **OpenCode** a click does `activate` **+** `set_opencode_default` (the slot must exist before it can be the default — `set_opencode_default` errors otherwise), so one click both enables the slot and sets it as default, matching the Providers page end state. Single-slot CLIs (Claude / Codex / Gemini) need only `activate`.
+- **Menu is rebuilt** (`tray::rebuild_menu`) after every tray click and after the five provider-mutating IPC commands (`activate_provider` / `deactivate_provider` / `delete_provider` / `set_opencode_default_provider` / `write_app_providers`) so the checkmarks / inline titles stay in sync.
+- After a tray switch the handler emits **`termory:providers-changed`**; `ProvidersPage` listens for it and re-derives active state, so an open Providers page reflects a tray switch even when unfocused.
+- **Open / Exit** are plain `MenuItem`s (not `PredefinedMenuItem::quit`) so macOS attaches no native item icon. Exit calls `app.exit(0)`.
+- **Icon**: embedded `icons/tray-icon.png` (36×36 = 18pt @2x, the macOS standard), a pure-black template image of the three-card terminal "chip" from the app icon, optically centered. `icon_as_template(true)` lets macOS theme it for light / dark bars. `icons/tray-template.svg` is the vector source; the menu-bar size is governed by the whole image (tray-icon crate scales it to a fixed 18pt height), so the artwork's transparent margin controls how large it reads.
+
+**Known minor gaps (by design for a quick-switcher):** the tray doesn't run the Providers page's `ensureCliInstalled` gate; it doesn't expose OpenCode's multi-slot enable/disable or delete; failures are `log::error!`-only (no toast). Menu only refreshes on Termory-initiated changes, so an external switch (cc-switch / manual edit) can leave it stale until the next Termory action.
+
+### Window / Dock behavior (menu-bar app)
+
+Closing the window does **not** quit — `lib.rs` `on_window_event` intercepts `CloseRequested`, calls `window.hide()` + `set_dock_visibility(false)` (macOS) + `api.prevent_close()`, so the app keeps running in the menu bar with no Dock icon. The tray's **Open** restores the Dock icon (`set_dock_visibility(true)`) then shows / unminimizes / focuses the window. Launch starts with the window + Dock icon visible (default). `set_dock_visibility` is the purpose-built API — a raw `set_activation_policy(Accessory)`/`Regular` toggle did NOT reliably restore the Dock icon when re-showing the window.
 
 ## Stats
 
