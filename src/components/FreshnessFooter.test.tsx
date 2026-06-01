@@ -30,7 +30,7 @@ describe("FreshnessFooter", () => {
     expect(screen.getByText("Syncing…")).toBeInTheDocument();
   });
 
-  it("renders 'Sync failed' with tooltip when error is set", () => {
+  it("renders 'Sync failed' when error is set", () => {
     render(
       <FreshnessFooter
         syncing={false}
@@ -38,8 +38,7 @@ describe("FreshnessFooter", () => {
         error="boom: ENOENT"
       />
     );
-    const footer = screen.getByText("Sync failed").closest("footer");
-    expect(footer).toHaveAttribute("title", "boom: ENOENT");
+    expect(screen.getByText("Sync failed")).toBeInTheDocument();
   });
 
   it("flashes 'Synced just now' when lastSyncedAt advances, then falls back", () => {

@@ -100,6 +100,10 @@ export type SearchHit = {
   // backend's 500-match cap — render `×500+` instead of `×500` so
   // the user knows there were probably way more.
   truncated?: boolean;
+  // 0-based index of the first matched message in `detail.messages`.
+  // The frontend feeds this to `openItem(session, messageIndex)` so
+  // the Records detail pane scrolls to the match on jump.
+  first_match_index?: number;
 };
 
 /** Sources of parsed session transcripts. Capitalized form lives on

@@ -16,7 +16,7 @@ export function SearchPage({
   onClearRecent
 }: {
   sessions: AppSession[];
-  onOpenItem: (item: AppSession) => void;
+  onOpenItem: (item: AppSession, messageIndex?: number) => void;
   recentSearches: string[];
   onCommitSearch: (query: string) => void;
   onClearRecent: () => void;
@@ -30,9 +30,9 @@ export function SearchPage({
   }, []);
 
   const handleOpen = React.useCallback(
-    (item: AppSession) => {
+    (item: AppSession, messageIndex?: number) => {
       onCommitSearch(committedQuery || query);
-      onOpenItem(item);
+      onOpenItem(item, messageIndex);
     },
     [committedQuery, onCommitSearch, onOpenItem, query]
   );
@@ -118,7 +118,7 @@ export function SearchPage({
                 key={sessionKey(hit.session)}
                 hit={hit}
                 query={committedQuery}
-                onOpen={() => handleOpen(hit.session)}
+                onOpen={() => handleOpen(hit.session, hit.first_match_index)}
               />
             ))}
           </div>

@@ -3,6 +3,11 @@ import { Calendar, ExternalLink, Folder, Star, Trash2 } from "lucide-react";
 import { BrandIcon } from "@/components/BrandIcon";
 import { EmptyState } from "@/components/EmptyState";
 import { MessageBody } from "@/components/MessageBody";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from "@/components/ui/tooltip";
 import { formatDate, formatRelativeDate } from "@/lib/format";
 import { sortFavoritesDesc } from "@/lib/favorites";
 import { roleClass, sourceDisplayName, basename } from "@/lib/session-utils";
@@ -130,29 +135,20 @@ export function FavoritesPage({
             row below in text-xs with `·`-separated chips. Actions
             cluster on the right of the title row. */}
         <header className="flex flex-col gap-2 p-3">
-          <h2
-            className="text-lg font-semibold leading-snug truncate"
-            title={selected.source_session_title}
-          >
+          <h2 className="text-lg font-semibold leading-snug truncate">
             {selected.source_session_title || "(untitled)"}
           </h2>
 
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-xs leading-none text-muted-foreground flex-wrap min-w-0">
-              <span
-                className="inline-flex items-center gap-1 tabular-nums"
-                title={selected.favorited_at}
-              >
+              <span className="inline-flex items-center gap-1 tabular-nums">
                 <Calendar size={12} className="shrink-0" />
                 {formatDate(selected.favorited_at)}
               </span>
               {selected.source_session_project && (
                 <>
                   <span className="text-border">·</span>
-                  <span
-                    className="inline-flex items-center gap-1 min-w-0"
-                    title={selected.source_session_project}
-                  >
+                  <span className="inline-flex items-center gap-1 min-w-0">
                     <Folder size={12} className="shrink-0" />
                     <span className="truncate">
                       {basename(selected.source_session_project)}
@@ -163,34 +159,42 @@ export function FavoritesPage({
             </div>
             <div className="inline-flex items-center gap-2 shrink-0">
               {selectedSession ? (
-                <button
-                  type="button"
-                  onClick={() =>
-                    onOpenSource(selectedSession, selected.source_message_index)
-                  }
-                  title="Open original session"
-                  aria-label="Open original session"
-                  className="inline-flex shrink-0 text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  <ExternalLink size={12} />
-                </button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onOpenSource(
+                          selectedSession,
+                          selected.source_message_index
+                        )
+                      }
+                      aria-label="Open original session"
+                      className="inline-flex shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <ExternalLink size={12} />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>Open original session</TooltipContent>
+                </Tooltip>
               ) : (
-                <span
-                  className="text-[10px] uppercase tracking-wide text-muted-foreground"
-                  title="Original session no longer in scan results"
-                >
+                <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
                   archived
                 </span>
               )}
-              <button
-                type="button"
-                onClick={() => onRemove(selected.id)}
-                title="Remove from favorites"
-                aria-label="Remove favorite"
-                className="inline-flex shrink-0 text-muted-foreground hover:text-destructive transition-colors"
-              >
-                <Trash2 size={12} />
-              </button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={() => onRemove(selected.id)}
+                    aria-label="Remove favorite"
+                    className="inline-flex shrink-0 text-muted-foreground hover:text-destructive transition-colors"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>Remove from favorites</TooltipContent>
+              </Tooltip>
             </div>
           </div>
         </header>

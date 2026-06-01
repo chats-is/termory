@@ -1,14 +1,14 @@
 import React from "react";
 import { StatsFilterBar } from "./StatsFilterBar";
 import { OverviewHero } from "./OverviewHero";
-import { DailyTokenUsageChart } from "./DailyTokenUsageChart";
-import { DailyActivityHeatmap } from "./DailyActivityHeatmap";
+import { DailyTokensChart } from "./DailyTokensChart";
+import { DailyActivitiesHeatmap } from "./DailyActivitiesHeatmap";
 import type { AppSession } from "@/types";
 import {
   type DateRange,
   type SourceFilter,
-  dailyActivity,
-  dailyTokenUsage,
+  dailyActivities,
+  dailyTokens,
   filterSessions,
   resolveRange,
   windowTotals
@@ -18,8 +18,8 @@ import {
  * Stats dashboard:
  *   1. StatsFilterBar    — date range + source
  *   2. OverviewHero      — KPI strip (Sessions / Messages / Tokens / Projects)
- *   3. DailyTokenUsageChart — per-day token breakdown (line chart)
- *   4. DailyActivityHeatmap — 24-hour × N-date heatmap
+ *   3. DailyTokensChart — per-day token breakdown (line chart)
+ *   4. DailyActivitiesHeatmap — 24-hour × N-date heatmap
  */
 export function StatsPage({
   sessions,
@@ -45,12 +45,12 @@ export function StatsPage({
     [filtered, resolved]
   );
 
-  const tokenUsage = React.useMemo(
-    () => dailyTokenUsage(filtered, resolved),
+  const tokenData = React.useMemo(
+    () => dailyTokens(filtered, resolved),
     [filtered, resolved]
   );
-  const activity = React.useMemo(
-    () => dailyActivity(filtered, resolved),
+  const activities = React.useMemo(
+    () => dailyActivities(filtered, resolved),
     [filtered, resolved]
   );
 
@@ -71,8 +71,8 @@ export function StatsPage({
           tokens={totals.tokens}
           projects={totals.projects}
         />
-        <DailyTokenUsageChart usage={tokenUsage} />
-        <DailyActivityHeatmap activity={activity} totals={totals} />
+        <DailyTokensChart data={tokenData} />
+        <DailyActivitiesHeatmap activities={activities} totals={totals} />
       </div>
     </div>
   );

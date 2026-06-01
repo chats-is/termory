@@ -25,7 +25,7 @@ export function CommandPalette({
   onCommitSearch
 }: {
   sessions: AppSession[];
-  onOpenItem: (item: AppSession) => void;
+  onOpenItem: (item: AppSession, messageIndex?: number) => void;
   recentSearches: string[];
   onCommitSearch: (query: string) => void;
   onClearRecent: () => void;
@@ -53,9 +53,9 @@ export function CommandPalette({
     if (!open) setQuery("");
   }, [open]);
 
-  const handleOpen = (item: AppSession) => {
+  const handleOpen = (item: AppSession, messageIndex?: number) => {
     onCommitSearch(committedQuery || query);
-    onOpenItem(item);
+    onOpenItem(item, messageIndex);
     setOpen(false);
   };
 
@@ -125,7 +125,7 @@ export function CommandPalette({
                 <CommandItem
                   key={sessionKey(session)}
                   value={sessionKey(session)}
-                  onSelect={() => handleOpen(session)}
+                  onSelect={() => handleOpen(session, row.first_match_index)}
                   className="items-start gap-2.5"
                 >
                   <Badge
@@ -141,7 +141,7 @@ export function CommandPalette({
                     <span className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0">
                       <span>{sourceDisplayName(session.source)}</span>
                       <span className="text-border">·</span>
-                      <span className="truncate" title={session.project}>
+                      <span className="truncate">
                         {projectDisplayName(session.project)}
                       </span>
                     </span>

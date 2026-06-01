@@ -134,7 +134,7 @@ export function localDateKey(d: Date): string {
  *   sessions[hour][date] — sessions whose `started_at` fell on
  *                          (date, hour). Sparse — most cells are 0.
  */
-export type DailyActivity = {
+export type DailyActivities = {
   dates: string[];
   messages: number[][];
   tokens: number[][];
@@ -143,10 +143,10 @@ export type DailyActivity = {
 
 /** Build the 24-hour × N-date matrices for messages / tokens /
  * sessions-started. */
-export function dailyActivity(
+export function dailyActivities(
   sessions: AppSession[],
   range: { from: Date; to: Date }
-): DailyActivity {
+): DailyActivities {
   const dates: string[] = [];
   const cursor = new Date(range.from);
   cursor.setHours(0, 0, 0, 0);
@@ -278,14 +278,14 @@ export function windowTotals(
   };
 }
 
-export type DailyTokenUsage = {
+export type DailyTokens = {
   date: string; // YYYY-MM-DD (local)
   /** Number of AI interactions on this date (sum of
    * `daily_tokens[date].messages`). Drives the in-range messages KPI
    * via `windowTotals`. */
   messages: number;
   /** Total tokens that day. Matches the "Total" row in the
-   * DailyTokenUsageChart tooltip. Named `total` (not `tokens`) so it
+   * DailyTokensChart tooltip. Named `total` (not `tokens`) so it
    * aligns with `TokenStats.total` and avoids collision with the
    * TokenStats *object* called `tokens` on AppSession. */
   total: number;
@@ -305,13 +305,13 @@ export type DailyTokenUsage = {
  * fabricate per-day numbers that look identical to real data.
  *
  * Days outside the chart's range are silently dropped. Session counts
- * live on `DailyActivity` (heatmap matrix), not here.
+ * live on `DailyActivities` (heatmap matrix), not here.
  */
-export function dailyTokenUsage(
+export function dailyTokens(
   sessions: AppSession[],
   range: { from: Date; to: Date }
-): DailyTokenUsage[] {
-  const buckets = new Map<string, DailyTokenUsage>();
+): DailyTokens[] {
+  const buckets = new Map<string, DailyTokens>();
   const cursor = new Date(range.from);
   cursor.setHours(0, 0, 0, 0);
   const end = new Date(range.to);

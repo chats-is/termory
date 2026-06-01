@@ -25,8 +25,8 @@ export function ActivityRail({
   const items: { id: Route; icon: React.ReactNode; label: string }[] = [
     { id: "providers", icon: <Plug size={20} />, label: "Providers" },
     { id: "records", icon: <History size={20} />, label: "Records" },
-    { id: "search", icon: <Search size={20} />, label: "Search" },
     { id: "favorites", icon: <Star size={20} />, label: "Favorites" },
+    { id: "search", icon: <Search size={20} />, label: "Search" },
     { id: "stats", icon: <BarChart3 size={20} />, label: "Stats" },
     { id: "settings", icon: <SettingsIcon size={20} />, label: "Settings" }
   ];

@@ -77,7 +77,6 @@ export function FreshnessFooter({
   return (
     <footer
       aria-label={label || "Freshness status"}
-      title={tooltip}
       className={cn(
         "absolute bottom-0 right-0 flex items-center gap-1.5 rounded-tl-md bg-sidebar px-3 py-1 text-[11px]",
         stateClass

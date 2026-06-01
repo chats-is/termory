@@ -83,7 +83,6 @@ export function InstallGuide({
               type="button"
               onClick={() => void copy()}
               aria-label="Copy install command"
-              title="Copy"
               className="inline-flex items-center justify-center size-7 rounded hover:bg-accent hover:text-accent-foreground transition-colors"
             >
               {copied ? (

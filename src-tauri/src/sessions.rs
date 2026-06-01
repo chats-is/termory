@@ -442,6 +442,15 @@ pub struct SearchHit {
     /// frontend uses this to render `×500+` instead of `×500`.
     #[serde(default)]
     pub truncated: bool,
+    /// 0-based index of the first message containing the query in the
+    /// parsed `detail.messages` list. The frontend feeds this to
+    /// `openItem(session, messageIndex)` so the Records detail pane
+    /// scrolls straight to the matching message. `None` only if the
+    /// hit came from a code path that didn't observe an index
+    /// (currently impossible — every populated `SearchHit` carries
+    /// one — but optional on the wire for forward compat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_match_index: Option<usize>,
 }
 
 /// Per-session match-count ceiling. After this many hits we stop
@@ -461,10 +470,10 @@ pub fn search_sessions(query: &str) -> Result<Vec<SearchHit>, Box<dyn Error>> {
         let Some(detail) = get_session_for_search(&session) else {
             continue;
         };
-        let mut first: Option<(String, String)> = None;
+        let mut first: Option<(String, String, usize)> = None;
         let mut match_count = 0usize;
         let mut truncated = false;
-        for message in &detail.messages {
+        for (msg_index, message) in detail.messages.iter().enumerate() {
             let lower = message.text.to_lowercase();
             let mut cursor = 0usize;
             while let Some(found) = lower[cursor..].find(&needle) {
@@ -477,6 +486,7 @@ pub fn search_sessions(query: &str) -> Result<Vec<SearchHit>, Box<dyn Error>> {
                     first = Some((
                         message.role.clone(),
                         make_search_snippet(&message.text, pos, end),
+                        msg_index,
                     ));
                 }
                 match_count += 1;
@@ -490,13 +500,14 @@ pub fn search_sessions(query: &str) -> Result<Vec<SearchHit>, Box<dyn Error>> {
                 break;
             }
         }
-        if let Some((role, snippet)) = first {
+        if let Some((role, snippet, first_match_index)) = first {
             hits.push(SearchHit {
                 session: detail.session.clone(),
                 snippet,
                 role,
                 match_count,
                 truncated,
+                first_match_index: Some(first_match_index),
             });
         }
     }

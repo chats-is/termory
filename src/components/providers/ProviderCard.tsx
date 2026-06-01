@@ -141,13 +141,6 @@ export function ProviderCard({
                 size="sm"
                 onClick={onSetDefault}
                 disabled={settingDefault || !activatable || (isOpencode && !isConfigured)}
-                title={
-                  !activatable
-                    ? "Install it first."
-                    : isOpencode && !isConfigured
-                      ? "Enable this provider first."
-                      : undefined
-                }
               >
                 {settingDefault ? "Setting…" : "Set as default"}
               </Button>

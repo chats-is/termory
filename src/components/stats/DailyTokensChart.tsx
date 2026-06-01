@@ -4,13 +4,18 @@ import {
   Line,
   LineChart,
   ResponsiveContainer,
-  Tooltip,
+  Tooltip as RechartsTooltip,
   XAxis,
   YAxis
 } from "recharts";
 import { Card, CardContent } from "@/components/ui/card";
 import { formatCompact, formatFullNumber } from "@/lib/format";
-import type { DailyTokenUsage } from "@/lib/stats-utils";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from "@/components/ui/tooltip";
+import type { DailyTokens } from "@/lib/stats-utils";
 import {
   BreakdownRow,
   TOKEN_COLORS,
@@ -19,7 +24,7 @@ import {
 } from "./shared";
 
 /**
- * Daily token usage — 4 trend lines on one linear-scale chart.
+ * Daily tokens — 4 trend lines on one linear-scale chart.
  *
  *   Input    — blue
  *   Output   — emerald
@@ -40,7 +45,7 @@ function CustomTooltip({
   label
 }: {
   active?: boolean;
-  payload?: ReadonlyArray<{ payload?: DailyTokenUsage }>;
+  payload?: ReadonlyArray<{ payload?: DailyTokens }>;
   label?: string;
 }) {
   if (!active || !payload || payload.length === 0) return null;
@@ -77,37 +82,39 @@ function CustomTooltip({
   );
 }
 
-export function DailyTokenUsageChart({ usage }: { usage: DailyTokenUsage[] }) {
+export function DailyTokensChart({ data }: { data: DailyTokens[] }) {
   const total = React.useMemo(
-    () => usage.reduce((acc, b) => acc + b.total, 0),
-    [usage]
+    () => data.reduce((acc, b) => acc + b.total, 0),
+    [data]
   );
   // Anchor on the LAST bucket and walk backwards by 2 days. First
   // bucket only ends up labeled when n is odd (29 → 0 lands cleanly);
   // for even n the first tick lands on index 1, and the unlabeled
   // index 0 is acceptable per spec. Every visible gap is exactly 2.
   const xTicks = React.useMemo(() => {
-    const n = usage.length;
+    const n = data.length;
     if (n === 0) return [];
     const indices: number[] = [];
     for (let i = n - 1; i >= 0; i -= 2) indices.push(i);
     indices.reverse();
-    return indices.map((i) => usage[i].date);
-  }, [usage]);
+    return indices.map((i) => data[i].date);
+  }, [data]);
   return (
     <Card className="p-3 gap-2 outline outline-1 outline-transparent bg-card shadow-sm">
       <CardContent className="px-0 flex flex-col gap-3">
         <div className="flex items-baseline justify-between gap-2 flex-wrap">
           <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wide">
-            Daily token usage
+            Daily tokens
           </h3>
           {total > 0 && (
-            <span
-              className="text-[11px] text-muted-foreground tabular-nums"
-              title={formatFullNumber(total)}
-            >
-              {formatCompact(total)} tokens
-            </span>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="text-[11px] text-muted-foreground tabular-nums cursor-default">
+                  {formatCompact(total)} tokens
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>{formatFullNumber(total)} tokens</TooltipContent>
+            </Tooltip>
           )}
         </div>
         {total === 0 ? (
@@ -118,7 +125,7 @@ export function DailyTokenUsageChart({ usage }: { usage: DailyTokenUsage[] }) {
           <div className="h-[220px] w-full">
             <ResponsiveContainer>
               <LineChart
-                data={usage}
+                data={data}
                 margin={{ top: 6, right: 0, bottom: 0, left: 0 }}
               >
                 <CartesianGrid
@@ -145,7 +152,7 @@ export function DailyTokenUsageChart({ usage }: { usage: DailyTokenUsage[] }) {
                   tickFormatter={formatCompact}
                   domain={[0, "auto"]}
                 />
-                <Tooltip content={<CustomTooltip />} />
+                <RechartsTooltip content={<CustomTooltip />} />
                 <Line
                   type="monotone"
                   dataKey="cached"

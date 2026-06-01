@@ -148,7 +148,6 @@ export function StatsFilterBar({
         onClick={onRefresh}
         disabled={refreshing}
         aria-label="Refresh stats"
-        title="Refresh"
         className={cn(
           "h-9 w-9 rounded-md border bg-card shadow-sm",
           "inline-flex items-center justify-center transition-colors",

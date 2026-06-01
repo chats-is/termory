@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppSession } from "../types";
 import {
-  dailyTokenUsage,
+  dailyTokens,
   filterSessions,
-  dailyActivity,
+  dailyActivities,
   resolveRange,
   sessionTimestamp,
   windowTotals
@@ -272,7 +272,7 @@ describe("windowTotals", () => {
   });
 });
 
-describe("dailyTokenUsage", () => {
+describe("dailyTokens", () => {
   const range = {
     from: new Date("2026-05-28T00:00:00"),
     to: new Date("2026-05-29T23:59:59")
@@ -310,7 +310,7 @@ describe("dailyTokenUsage", () => {
         ]
       })
     ];
-    const out = dailyTokenUsage(sessions, wide);
+    const out = dailyTokens(sessions, wide);
     expect(out.find((d) => d.date === "2026-05-26")!.total).toBe(800);
     expect(out.find((d) => d.date === "2026-05-27")!.total).toBe(0);
     expect(out.find((d) => d.date === "2026-05-28")!.total).toBe(200);
@@ -333,12 +333,12 @@ describe("dailyTokenUsage", () => {
         { input: 600_000, output: 200_000, cached: 200_000 }
       )
     ];
-    const out = dailyTokenUsage(sessions, wide);
+    const out = dailyTokens(sessions, wide);
     for (const d of out) expect(d.total).toBe(0);
   });
 
   it("emits a dense series across the range, with zero rows for empty days", () => {
-    const out = dailyTokenUsage([], range);
+    const out = dailyTokens([], range);
     expect(out.map((d) => d.date)).toEqual(["2026-05-28", "2026-05-29"]);
     for (const d of out) {
       expect(d.total).toBe(0);
@@ -346,7 +346,7 @@ describe("dailyTokenUsage", () => {
   });
 });
 
-describe("dailyActivity", () => {
+describe("dailyActivities", () => {
   const range = {
     from: new Date("2026-05-28T00:00:00"),
     to: new Date("2026-05-29T23:59:59")
@@ -367,7 +367,7 @@ describe("dailyActivity", () => {
         ]
       })
     ];
-    const out = dailyActivity(sessions, range);
+    const out = dailyActivities(sessions, range);
     expect(out.dates).toEqual(["2026-05-28", "2026-05-29"]);
     expect(out.messages[10][0]).toBe(3);
     expect(out.messages[14][0]).toBe(2);
@@ -383,7 +383,7 @@ describe("dailyActivity", () => {
         updated_at: "2026-05-28T15:00:00"
       })
     ];
-    const out = dailyActivity(sessions, range);
+    const out = dailyActivities(sessions, range);
     expect(out.sessions[14][0]).toBe(1);
     // No spill into any other cell.
     let totalSessions = 0;
@@ -404,7 +404,7 @@ describe("dailyActivity", () => {
       // shouldn't look "created today").
       mk({ updated_at: "2026-05-29T10:00:00" })
     ];
-    const out = dailyActivity(sessions, range);
+    const out = dailyActivities(sessions, range);
     expect(out.sessions[10][0]).toBe(1);
     let total = 0;
     for (let h = 0; h < 24; h++) {
@@ -414,7 +414,7 @@ describe("dailyActivity", () => {
   });
 
   it("ignores Memory / Skill items", () => {
-    const out = dailyActivity(
+    const out = dailyActivities(
       [
         mk({ source: "Memory", started_at: "2026-05-28T10:00:00" }),
         mk({ source: "Skill", started_at: "2026-05-29T10:00:00" })

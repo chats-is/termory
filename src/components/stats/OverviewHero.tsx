@@ -13,7 +13,7 @@ import { TOKEN_COLORS, BreakdownRow } from "./shared";
  *   Sessions · Messages · Tokens · Projects
  *
  * The Tokens cell reveals an input/output/cached/reasoning breakdown
- * on hover (shadcn HoverCard), matching the DailyTokenUsageChart tooltip.
+ * on hover (shadcn HoverCard), matching the DailyTokensChart tooltip.
  */
 
 export function OverviewHero({

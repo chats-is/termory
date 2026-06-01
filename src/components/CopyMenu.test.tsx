@@ -1,7 +1,21 @@
+import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen } from "@testing-library/react";
+import {
+  act,
+  render as rtlRender,
+  screen,
+  type RenderOptions
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { CopyMenu } from "./CopyMenu";
+
+/** CopyMenu's trigger is wrapped in a shadcn Tooltip; Radix throws if
+ * no TooltipProvider is in the tree. main.tsx provides one at the app
+ * root — these tests provide the same. */
+function render(ui: React.ReactElement, options?: RenderOptions) {
+  return rtlRender(<TooltipProvider>{ui}</TooltipProvider>, options);
+}
 
 // `copyToClipboard` goes through Tauri's clipboard plugin in production;
 // in jsdom there's no plugin. Mock to a spy so we can assert it was

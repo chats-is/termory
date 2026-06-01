@@ -44,7 +44,7 @@ Current alignment target: data acquisition and message preview formatting should
 - Provider switching (activate / deactivate / reverse-derive / test / fetch-models): `src-tauri/src/providers.rs`
 - Local KV store (config.json + providers.json + favorites.json under `~/.termory/`, chmod 0600): `src-tauri/src/config.rs`
 - Stats aggregations (pure, window-accurate): `src/lib/stats-utils.ts` (+ `stats-utils.test.ts`)
-- Stats UI: `src/components/stats/{StatsPage,StatsFilterBar,OverviewHero,DailyTokenUsageChart,DailyActivityHeatmap,shared}.tsx`
+- Stats UI: `src/components/stats/{StatsPage,StatsFilterBar,OverviewHero,DailyTokensChart,DailyActivitiesHeatmap,shared}.tsx`
 - Favorites helpers (pure, snapshot-based): `src/lib/favorites.ts` (+ `favorites.test.ts`)
 - Favorites UI: `src/components/favorites/FavoritesPage.tsx` (+ `FavoritesPage.test.tsx`); star button + scroll-to-message hook live on `src/components/MessageList.tsx`
 - Tauri config: `src-tauri/tauri.conf.json`
@@ -570,8 +570,8 @@ All four were cross-verified against the upstream CLI source (`.audit-sources/{c
 Three cards stacked under a source filter + date range bar:
 
 1. **OverviewHero** — KPI strip: Sessions / Messages / Tokens / Projects. The Tokens cell hovers a 4-row breakdown (Input / Output / Reasoning / Cached + Total).
-2. **DailyTokenUsageChart** — 4 trend lines (Input / Output / Cached / Reasoning) on a single linear-scale chart. Tooltip per-day shows fixed 5-row breakdown.
-3. **DailyActivityHeatmap** — 24-hour × N-date heatmap. Cell intensity scales off message count; hover reveals `Sessions / Messages / Tokens` for that exact `(date, hour)` bucket. Hour labels: hand-picked 14 rows, work band 09:00–18:00 highlighted with `text-foreground`.
+2. **DailyTokensChart** — 4 trend lines (Input / Output / Cached / Reasoning) on a single linear-scale chart. Tooltip per-day shows fixed 5-row breakdown.
+3. **DailyActivitiesHeatmap** — 24-hour × N-date heatmap. Cell intensity blends per-cell messages + tokens via a weighted geometric mean (see "Heatmap intensity rule" below); hover reveals `Sessions / Messages / Tokens` for that exact `(date, hour)` bucket. Hour labels: hand-picked 14 rows, work band 09:00–18:00 highlighted with `text-foreground`.
 
 ### Accuracy rules (LOCKED — do not weaken)
 
@@ -593,7 +593,47 @@ The rules `windowTotals` (and the two visualization functions) follow:
 **Cross-source consistency** (backend-guaranteed):
 - `entry.messages === Σ entry.hours[h]` per `daily_tokens` entry
 - `entry.tokens.total === Σ entry.hour_tokens[h]` per entry (Gemini edge case: when some records have explicit `total` and others don't, slight drift)
-- Therefore `Σ windowTotals.messages === Σ DailyActivity.messages[h][d]` and `Σ windowTotals.tokens.total === Σ DailyTokenUsage[].total === Σ DailyActivity.tokens[h][d]`
+- Therefore `Σ windowTotals.messages === Σ DailyActivities.messages[h][d]` and `Σ windowTotals.tokens.total === Σ DailyTokens[].total === Σ DailyActivities.tokens[h][d]`
+
+### Heatmap intensity rule (LOCKED — do not weaken)
+
+`DailyActivitiesHeatmap` colors each `(h, d)` cell by a combined intensity ratio. The formula is a **weighted geometric mean** with messages tilted at 60%, tokens at 40%:
+
+```
+ratio = m^0.6 * t^0.4    where m = msgCount / maxMsg, t = tokCount / maxTok
+```
+
+Computed per cell in a `useMemo` that pre-scans `maxMsg` / `maxTok` and fills a 24×N ratio matrix once — the render loop only reads `ratios[h][d]`. Do NOT inline the `Math.pow` calls into the JSX map (720+ calls per frame).
+
+**Single-dimension degradation** (don't remove this):
+- `maxMsg === 0 && maxTok === 0` → `ratio = 0` (truly inert)
+- `maxTok === 0` → fall back to `msgCount / maxMsg` (old session users with no `daily_tokens`)
+- `maxMsg === 0` → fall back to `tokCount / maxTok` (degenerate)
+- Otherwise → geometric mean as above
+
+**Tier mapping** (6 buckets, thresholds skewed toward the low end so mid-activity cells don't get stuck in the lightest tier):
+
+| ratio | tier | Tailwind class |
+|---|---|---|
+| `≤ 0` | inert | `bg-foreground/[0.04]` |
+| `< 0.08` | 1 (lightest) | `bg-primary/15` |
+| `< 0.18` | 2 | `bg-primary/30` |
+| `< 0.35` | 3 | `bg-primary/45` |
+| `< 0.55` | 4 | `bg-primary/60` |
+| `< 0.75` | 5 | `bg-primary/75` |
+| `≥ 0.75` | 6 (darkest) | `bg-primary/90` |
+
+**Special cells**:
+- `msg === 0 && sess === 0` → inert color, NO HoverCard (no work to show)
+- `msg === 0 && sess > 0` (a session was created in this hour but its first message landed later) → floor color `bg-primary/10` — deliberately ONE notch below tier 1 so it's distinguishable from a real-but-low activity cell. Hoverable; HoverCard shows `Sessions: N`.
+
+Why weighted geometric mean (not arithmetic, not single-dimension):
+- Pure messages → "one big request" hour reads cold (user was actively waiting on a 100K-token answer)
+- Pure tokens → "many short messages" hour reads cold (user was clearly engaged)
+- Arithmetic mean → "many msg + low tok" cells stay too bright (high m dominates)
+- Geometric mean with `m^0.6 * t^0.4` → messages are the primary signal but tokens still pull ~40%; equal-magnitude cells (`m === t`) collapse cleanly to that shared value
+
+Whoever later tunes the weight: change `MSG_WEIGHT` in `DailyActivitiesHeatmap.tsx` (default `0.6`). Don't change the geometric-mean shape itself unless you have a UX reason as strong as the one above.
 
 ### Backend wire shape
 
@@ -619,11 +659,11 @@ All four are gated on a successful local-time parse — records without a timest
 
 ### Frontend aggregation
 
-`src/lib/stats-utils.ts` exports the pure helpers (`windowTotals` / `dailyTokenUsage` / `dailyActivity` / `filterSessions`). Each one iterates `filtered` sessions once; the Stats page memoizes them per `(filtered, resolved)`. 86 unit tests cover the window-overlap regression, no-fallback enforcement, per-source attribution, and cross-consistency between aggregator outputs.
+`src/lib/stats-utils.ts` exports the pure helpers (`windowTotals` / `dailyTokens` / `dailyActivities` / `filterSessions`). Each one iterates `filtered` sessions once; the Stats page memoizes them per `(filtered, resolved)`. 117 unit tests cover the window-overlap regression, no-fallback enforcement, per-source attribution, and cross-consistency between aggregator outputs.
 
 Naming alignment (UI label ↔ data field ↔ file ↔ component) is intentional:
-- "DAILY TOKEN USAGE" card → `DailyTokenUsageChart.tsx` (component) ← `DailyTokenUsage[]` (type) ← `dailyTokenUsage()` (function)
-- "DAILY ACTIVITY" card → `DailyActivityHeatmap.tsx` ← `DailyActivity` ← `dailyActivity()`
+- "DAILY TOKENS" card → `DailyTokensChart.tsx` (component) ← `DailyTokens[]` (type) ← `dailyTokens()` (function)
+- "DAILY ACTIVITIES" card → `DailyActivitiesHeatmap.tsx` ← `DailyActivities` ← `dailyActivities()`
 - KPI labels (`Sessions` / `Messages` / `Tokens` / `Projects`) map 1:1 to `WindowTotals` fields
 
 ## Favorites
@@ -676,15 +716,45 @@ FavoritesPage is the same shell as Records' middle + right columns:
 
 `MessageList` (used in Records, optionally pluggable into anywhere else) accepts an optional `favorites: FavoriteContext` bundle (session + keys + onToggle). Caller that doesn't want the affordance simply omits the bundle — the three-field grouping prevents "forgot to pass one" bugs.
 
-### Scroll-to-message navigation
+### Scroll-to-message navigation (shared by Favorites + Search + Cmd-K)
 
-"Open original" on a Favorite navigates to Records AND scrolls the detail pane to that message. Path:
-1. `openItem(item, messageIndex?)` in App.tsx — sets `selected` AND a `pendingScroll = {sessionKey, index, nonce}` state. Nonce is `Date.now()`; same favorite clicked twice still re-triggers.
-2. Records renders; once `detail.messages` loads, `MessageList` receives `scrollRequest` (only when `pendingScroll.sessionKey === selected`'s key).
-3. `MessageList`'s effect fires a `requestAnimationFrame` → `virtualizer.scrollToIndex(idx, {align: "start"})` → `onScrolled()` callback.
-4. `clearPendingScroll = useCallback(() => setPendingScroll(null), [])` in App.tsx nulls the state — required so the scroll doesn't fire again when the user selects another session and comes back.
+Three sites navigate "into a specific message" — Favorites "Open original", Search results, Cmd-K palette results. All converge on the same `openItem(item, messageIndex?)` → `pendingScroll` → `MessageList scrollRequest` → `onScrolled` path:
 
-The callback identity is stable (`useCallback` with empty deps) so the MessageList effect's dep array doesn't oscillate.
+1. **Backend** — `SearchHit` carries `first_match_index: Option<usize>` (the 0-based index of the message containing the first query hit). `serde(default, skip_serializing_if = "Option::is_none")` so old hits without it still deserialize.
+2. **`openItem(item, messageIndex?)`** in App.tsx — sets `selected` AND a `pendingScroll = {sessionKey, index, nonce}` state. Nonce is `Date.now()`; same target clicked twice still re-triggers.
+3. **Records renders**; once `detail.messages` loads, `MessageList` receives `scrollRequest` (only when `pendingScroll.sessionKey === selected`'s key).
+4. **`MessageList`'s effect** fires a `requestAnimationFrame` → `virtualizer.scrollToIndex(idx, {align: "start"})` → `onScrolled()` callback.
+5. **`clearPendingScroll = useCallback(() => setPendingScroll(null), [])`** in App.tsx nulls the state — required so the scroll doesn't fire again when the user selects another session and comes back.
+
+The callback identity is stable (`useCallback` with empty deps) so the MessageList effect's dep array doesn't oscillate. SearchPage / CommandPalette pass `hit.first_match_index` through to `onOpenItem`; Favorites passes `source_message_index`.
+
+## UI conventions
+
+### Tooltips (LOCKED)
+
+Termory uses **shadcn `Tooltip`** (Radix-backed, mounted via `TooltipProvider` at root in `main.tsx`) — not raw HTML `title=` attributes. Native `title` was removed project-wide and replaced where the affordance is needed:
+
+| Place | Trigger |
+|---|---|
+| Records detail "Open in Finder" | shadcn `Tooltip` |
+| `CopyMenu` trigger | shadcn `Tooltip` (suppressed while menu open via `open={menuOpen ? false : undefined}`) |
+| `MessageList` star button | shadcn `Tooltip` (dynamic label: Add / Remove from favorites) |
+| Favorites detail "Open original session" + "Remove favorite" | shadcn `Tooltip` |
+| Stats header compact-number chips (e.g. "1.2B tokens") | shadcn `Tooltip` showing `formatFullNumber(...)` |
+
+Do NOT add `title="..."` to JSX. The reasons: (1) inconsistent styling vs the rest of the app, (2) no touch / long-press support, (3) browser-native tooltip can fight with focus-visible / aria-label, (4) shadcn version respects the project's color tokens.
+
+Icon-only buttons still need an `aria-label` regardless of whether they have a Tooltip — screen-reader users don't trigger hover.
+
+When a button opens a popover or dropdown that anchors on the SAME element (CopyMenu's case), suppress the Tooltip while the popover is open: pass `open={isOpen ? false : undefined}` to `<Tooltip>` so the two surfaces don't stack on the same anchor.
+
+Tests that mount a component using `<Tooltip>` standalone (without the app's root `TooltipProvider`) must wrap their `render(...)` in a `TooltipProvider`. Pattern:
+
+```tsx
+function render(ui: React.ReactElement, options?: RenderOptions) {
+  return rtlRender(<TooltipProvider>{ui}</TooltipProvider>, options);
+}
+```
 
 ## Pending feature work
 
@@ -704,7 +774,7 @@ All P0 items have shipped:
 
 - ~~`tauri-plugin-store`~~ — replaced with custom `config.rs` module (`~/.termory/{config,providers,favorites}.json` with `chmod 0600`). The plugin couldn't control file location or Unix permissions; rolling our own KV gives both.
 - ~~Providers page~~ — done. See the "Providers" section above. Cross-verified against `.audit-sources/cc-switch/` for the per-CLI write shapes; 4 CLIs supported with per-CLI tests. OpenCode adapter was re-done in a second pass: instead of self-declaring `provider.termory.{npm,name,models}` (which fights OpenCode's catalog at runtime), Termory now writes the API key under one of OpenCode's built-in catalog ids (`anthropic`/`openai`/`openai-compatible`/…) into `~/.local/share/opencode/auth.json` — same shape `/connect` produces — and optionally overlays a `baseURL` in `opencode.json`. The AI SDK dropdown in the editor is the catalog id picker.
-- ~~Stats page~~ — done. See the "Stats" section below. KPI strip (Sessions/Messages/Tokens/Projects) + DAILY TOKEN USAGE line chart + DAILY ACTIVITY heatmap. All values window-accurate from each session's `daily_tokens[]` — no fallback smearing, no lifetime-of-touched-session totals.
+- ~~Stats page~~ — done. See the "Stats" section below. KPI strip (Sessions/Messages/Tokens/Projects) + DAILY TOKENS line chart + DAILY ACTIVITIES heatmap. All values window-accurate from each session's `daily_tokens[]` — no fallback smearing, no lifetime-of-touched-session totals.
 - **App Settings page** — theme, scan-path overrides, keyboard shortcuts, watcher toggle.
 
 ### P2 — quality of life

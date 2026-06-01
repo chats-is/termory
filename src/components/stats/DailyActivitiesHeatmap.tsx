@@ -7,7 +7,12 @@ import {
 } from "@/components/ui/hover-card";
 import { cn } from "@/lib/utils";
 import { formatCompact, formatFullNumber } from "@/lib/format";
-import type { DailyActivity, WindowTotals } from "@/lib/stats-utils";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from "@/components/ui/tooltip";
+import type { DailyActivities, WindowTotals } from "@/lib/stats-utils";
 import { formatDateLong, formatDateShort } from "./shared";
 
 /**
@@ -39,33 +44,90 @@ function formatHourRange24(h: number): string {
   return `${String(h).padStart(2, "0")}:00 – ${String(next).padStart(2, "0")}:00`;
 }
 
-function cellClass(value: number, max: number): string {
-  if (value === 0 || max === 0) return "bg-foreground/[0.04]";
-  const ratio = value / max;
-  if (ratio < 0.25) return "bg-primary/25";
-  if (ratio < 0.5) return "bg-primary/45";
-  if (ratio < 0.75) return "bg-primary/65";
+/** Map a normalized intensity ratio (0..1) to a Tailwind opacity tier.
+ * 6 buckets with thresholds skewed toward the low end — narrow at
+ * the bottom (so cells don't get stuck in the lightest tier just
+ * because a single hour was much busier), wide at the top (so any
+ * cell ≥ 0.75 of peak already renders at the darkest opacity).
+ * Opacity is linearly stepped 15% → 90% (+15% per tier). */
+function tierClass(ratio: number): string {
+  if (ratio <= 0) return "bg-foreground/[0.04]";
+  if (ratio < 0.08) return "bg-primary/15";
+  if (ratio < 0.18) return "bg-primary/30";
+  if (ratio < 0.35) return "bg-primary/45";
+  if (ratio < 0.55) return "bg-primary/60";
+  if (ratio < 0.75) return "bg-primary/75";
   return "bg-primary/90";
 }
 
-export function DailyActivityHeatmap({
-  activity,
+/**
+ * Combined messages + tokens intensity via weighted geometric mean,
+ * tilted 60% toward messages.
+ *
+ *   ratio = m^0.6 * t^0.4
+ *      where m = msg / maxMsg, t = tok / maxTok
+ *
+ * Messages are the primary signal — they reflect "I'm actually
+ * typing" presence — but tokens still pull ~40% so a one-shot big
+ * request hour and a many-short-messages hour render different
+ * intensities. Equal-magnitude cells (m === t) collapse to that
+ * shared value.
+ *
+ * Single-dimension degradation: when only one dimension has any
+ * data in the window (e.g. old sessions without `daily_tokens` →
+ * `maxTok === 0`), fall back to that dimension alone so the
+ * heatmap stays meaningful instead of going all-inert.
+ */
+const MSG_WEIGHT = 0.6;
+const TOK_WEIGHT = 1 - MSG_WEIGHT;
+function cellRatio(
+  msgCount: number,
+  tokCount: number,
+  maxMsg: number,
+  maxTok: number
+): number {
+  if (maxMsg === 0 && maxTok === 0) return 0;
+  if (maxTok === 0) return msgCount / maxMsg;
+  if (maxMsg === 0) return tokCount / maxTok;
+  const m = msgCount / maxMsg;
+  const t = tokCount / maxTok;
+  return Math.pow(m, MSG_WEIGHT) * Math.pow(t, TOK_WEIGHT);
+}
+
+export function DailyActivitiesHeatmap({
+  activities,
   totals
 }: {
-  activity: DailyActivity;
+  activities: DailyActivities;
   totals: WindowTotals;
 }) {
-  const { dates, messages, tokens, sessions } = activity;
+  const { dates, messages, tokens, sessions } = activities;
 
-  const max = React.useMemo(() => {
-    let m = 0;
+  // Pre-compute every (h, d) cell's combined intensity ratio in one
+  // pass. Tracks per-dimension maxes (so the geometric mean
+  // normalizes each independently — tokens at 1e5-scale otherwise
+  // drown out messages at 10-scale) and reuses them while filling
+  // the ratio matrix. Render loop just reads `ratios[h][d]` — no
+  // 720+ `Math.pow` calls per re-render.
+  const ratios = React.useMemo(() => {
+    let maxMsg = 0;
+    let maxTok = 0;
     for (let h = 0; h < 24; h++) {
       for (let d = 0; d < dates.length; d++) {
-        if (messages[h][d] > m) m = messages[h][d];
+        if (messages[h][d] > maxMsg) maxMsg = messages[h][d];
+        if (tokens[h][d] > maxTok) maxTok = tokens[h][d];
       }
     }
-    return m;
-  }, [messages, dates.length]);
+    const matrix: number[][] = Array.from({ length: 24 }, () =>
+      dates.map(() => 0)
+    );
+    for (let h = 0; h < 24; h++) {
+      for (let d = 0; d < dates.length; d++) {
+        matrix[h][d] = cellRatio(messages[h][d], tokens[h][d], maxMsg, maxTok);
+      }
+    }
+    return matrix;
+  }, [messages, tokens, dates.length]);
   const hasAnyActivity =
     totals.sessions > 0 || totals.messages > 0 || totals.tokens.total > 0;
 
@@ -81,16 +143,25 @@ export function DailyActivityHeatmap({
       <CardContent className="px-0 flex flex-col gap-3">
         <div className="flex items-baseline justify-between gap-2 flex-wrap">
           <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wide">
-            Daily activity
+            Daily activities
           </h3>
           {hasAnyActivity && (
             <span className="text-[11px] text-muted-foreground tabular-nums">
               {totals.sessions} sessions · {totals.messages.toLocaleString()} messages ·{" "}
-              <span title={formatFullNumber(totals.tokens.total)}>
-                {totals.tokens.total === 0
-                  ? "—"
-                  : formatCompact(totals.tokens.total)} tokens
-              </span>
+              {totals.tokens.total === 0 ? (
+                <span>— tokens</span>
+              ) : (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="cursor-default">
+                      {formatCompact(totals.tokens.total)} tokens
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {formatFullNumber(totals.tokens.total)} tokens
+                  </TooltipContent>
+                </Tooltip>
+              )}
             </span>
           )}
         </div>
@@ -131,15 +202,18 @@ export function DailyActivityHeatmap({
                     return (
                       <div
                         key={`${h}-${i}`}
-                        className={cn("h-[10px]", cellClass(0, max))}
+                        className={cn("h-[10px]", tierClass(0))}
                       />
                     );
                   }
-                  // Intensity scales off messages; a sessions-only cell
-                  // would otherwise render the inert color, so floor it
-                  // at the lightest active tier.
+                  // Read the pre-computed combined intensity. A
+                  // sessions-only cell (msg=0, tok=0) gets a dedicated
+                  // floor color (`bg-primary/10`) — lighter than
+                  // tier 1 — so it stays distinguishable from inert
+                  // AND from real-but-low activity cells.
+                  const ratio = ratios[h][i];
                   const colorClass =
-                    msgCount === 0 ? "bg-primary/25" : cellClass(msgCount, max);
+                    ratio === 0 ? "bg-primary/10" : tierClass(ratio);
                   return (
                     <HoverCard
                       key={`${h}-${i}`}
@@ -180,7 +254,7 @@ export function DailyActivityHeatmap({
                             <span className="text-muted-foreground w-20">
                               Tokens
                             </span>
-                            <span title={formatFullNumber(tokCount)}>
+                            <span>
                               {tokCount === 0 ? "—" : formatCompact(tokCount)}
                             </span>
                           </div>
@@ -209,9 +283,11 @@ export function DailyActivityHeatmap({
         <div className="flex justify-end items-center gap-1 text-[10px] text-muted-foreground">
           <span>Less</span>
           <span className="size-2.5 bg-foreground/[0.04]" />
-          <span className="size-2.5 bg-primary/25" />
+          <span className="size-2.5 bg-primary/15" />
+          <span className="size-2.5 bg-primary/30" />
           <span className="size-2.5 bg-primary/45" />
-          <span className="size-2.5 bg-primary/65" />
+          <span className="size-2.5 bg-primary/60" />
+          <span className="size-2.5 bg-primary/75" />
           <span className="size-2.5 bg-primary/90" />
           <span>More</span>
         </div>

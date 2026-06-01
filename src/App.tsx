@@ -19,6 +19,11 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type {
   AppSession,
@@ -916,38 +921,26 @@ export function App() {
                 {selected && (
                   <>
                     <header className="flex flex-col gap-2 p-3">
-                      <h2
-                        className="text-lg font-semibold leading-snug"
-                        title={selected.title}
-                      >
+                      <h2 className="text-lg font-semibold leading-snug">
                         {selected.title || "(untitled)"}
                       </h2>
 
                       <div className="flex items-center gap-2 text-xs leading-none text-muted-foreground flex-wrap">
-                        <span
-                          className="inline-flex items-center gap-1"
-                          title={selected.updated_at ?? selected.started_at ?? ""}
-                        >
+                        <span className="inline-flex items-center gap-1">
                           <Calendar size={12} className="shrink-0" />
                           {formatDate(selected.updated_at ?? selected.started_at)}
                         </span>
                         {isSessionItem(selected) && (
                           <>
                             <span className="text-border">·</span>
-                            <span
-                              className="inline-flex items-center gap-1"
-                              title={`${selected.message_count} messages`}
-                            >
+                            <span className="inline-flex items-center gap-1">
                               <MessageSquare size={12} className="shrink-0" />
                               {selected.message_count}
                             </span>
                           </>
                         )}
                         <span className="text-border">·</span>
-                        <span
-                          className="inline-flex items-center gap-1 min-w-0"
-                          title={selected.project}
-                        >
+                        <span className="inline-flex items-center gap-1 min-w-0">
                           <Folder size={12} className="shrink-0" />
                           <span className="truncate">
                             {projectDisplayName(selected.project)}
@@ -956,23 +949,24 @@ export function App() {
                       </div>
 
                       <div className="flex items-center justify-between gap-2">
-                        <div
-                          className="inline-flex items-center gap-1 min-w-0 text-xs leading-none font-mono text-muted-foreground"
-                          title={selected.path}
-                        >
+                        <div className="inline-flex items-center gap-1 min-w-0 text-xs leading-none font-mono text-muted-foreground">
                           <File size={12} className="shrink-0" />
                           <span className="truncate">{selected.path}</span>
                         </div>
                         <div className="inline-flex items-center gap-2 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => revealItemInDir(selected.path)}
-                            title="Open in Finder"
-                            aria-label="Open in Finder"
-                            className="inline-flex shrink-0 text-muted-foreground hover:text-foreground transition-colors"
-                          >
-                            <FolderOpen size={12} />
-                          </button>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                type="button"
+                                onClick={() => revealItemInDir(selected.path)}
+                                aria-label="Open in Finder"
+                                className="inline-flex shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+                              >
+                                <FolderOpen size={12} />
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent>Open in Finder</TooltipContent>
+                          </Tooltip>
                           <CopyMenu
                             items={[
                               ...(isSessionItem(selected) &&

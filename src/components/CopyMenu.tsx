@@ -1,6 +1,11 @@
 import React from "react";
 import { Check, Copy } from "lucide-react";
 import { copyToClipboard } from "@/lib/clipboard";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 export function CopyMenu({ items }: { items: { label: string; value: string }[] }) {
@@ -35,16 +40,23 @@ export function CopyMenu({ items }: { items: { label: string; value: string }[] 
 
   return (
     <div ref={wrapperRef} className="relative inline-flex">
-      <button
-        type="button"
-        onClick={() => setOpen((prev) => !prev)}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label="Copy"
-        className="inline-flex shrink-0 text-muted-foreground hover:text-foreground transition-colors"
-      >
-        <Copy size={12} />
-      </button>
+      {/* Tooltip is suppressed while the menu is open so the two
+          popovers don't stack on the same anchor. */}
+      <Tooltip open={open ? false : undefined}>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            onClick={() => setOpen((prev) => !prev)}
+            aria-haspopup="menu"
+            aria-expanded={open}
+            aria-label="Copy"
+            className="inline-flex shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <Copy size={12} />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>Copy</TooltipContent>
+      </Tooltip>
       {open && (
         <div
           role="menu"

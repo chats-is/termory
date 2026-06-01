@@ -222,7 +222,6 @@ export function ProviderEditor({
                   size="icon"
                   onClick={() => setRevealKey((c) => !c)}
                   aria-label={revealKey ? "Hide API key" : "Show API key"}
-                  title={revealKey ? "Hide API key" : "Show API key"}
                 >
                   {revealKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                 </Button>
@@ -289,7 +288,6 @@ export function ProviderEditor({
                   onClick={() => void fetchModels()}
                   disabled={!canFetchModels}
                   aria-label="Fetch available models from API"
-                  title="Fetch models from API"
                 >
                   {fetchingModels ? (
                     <Loader2 className="size-4 animate-spin" />

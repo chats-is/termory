@@ -492,7 +492,6 @@ export function ProvidersPage({
             onClick={startNew}
             disabled={!installed[app]}
             aria-label="Add provider"
-            title={installed[app] ? "Add provider" : `Install ${CLI_APP_LABEL[app]} first.`}
             className="rounded-md size-8 shrink-0 shadow-sm"
           >
             <Plus className="size-4" />

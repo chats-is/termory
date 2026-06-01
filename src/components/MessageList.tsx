@@ -2,6 +2,11 @@ import React from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Star } from "lucide-react";
 import { MessageBody } from "@/components/MessageBody";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { favoriteKey } from "@/lib/favorites";
 import type { AppSession, SessionMessage } from "@/types";
@@ -113,33 +118,41 @@ export function MessageList({
                 </span>
                 <span className="flex-1" />
                 {favorites && (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      favorites.onToggle(message, idx);
-                    }}
-                    aria-label={
-                      isFavorited ? "Remove from favorites" : "Add to favorites"
-                    }
-                    title={
-                      isFavorited ? "Remove from favorites" : "Add to favorites"
-                    }
-                    className={cn(
-                      "p-1 -mr-1 rounded transition-colors hover:bg-accent",
-                      isFavorited
-                        ? "text-amber-500 hover:text-amber-600"
-                        : "text-muted-foreground/40 hover:text-foreground"
-                    )}
-                  >
-                    <Star
-                      className={cn(
-                        "size-3.5",
-                        isFavorited && "fill-current"
-                      )}
-                      aria-hidden
-                    />
-                  </button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          favorites.onToggle(message, idx);
+                        }}
+                        aria-label={
+                          isFavorited
+                            ? "Remove from favorites"
+                            : "Add to favorites"
+                        }
+                        className={cn(
+                          "p-1 -mr-1 rounded transition-colors",
+                          isFavorited
+                            ? "text-amber-500 hover:text-amber-600"
+                            : "text-muted-foreground/40 hover:text-foreground"
+                        )}
+                      >
+                        <Star
+                          className={cn(
+                            "size-3.5",
+                            isFavorited && "fill-current"
+                          )}
+                          aria-hidden
+                        />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {isFavorited
+                        ? "Remove from favorites"
+                        : "Add to favorites"}
+                    </TooltipContent>
+                  </Tooltip>
                 )}
               </header>
               <MessageBody text={message.text} className="pl-[11px]" />

@@ -2,7 +2,7 @@
 
 import { formatCompact } from "@/lib/format";
 
-/** Series colors — used in both the DailyTokenUsageChart lines/tooltip
+/** Series colors — used in both the DailyTokensChart lines/tooltip
  * and the OverviewHero Tokens hover-card breakdown. Single source of
  * truth so the two surfaces never drift. */
 export const TOKEN_COLORS = {
