@@ -564,7 +564,7 @@ Termory does **not** store an "active provider" pointer anywhere. `provider_acti
 ```
 { id, app: "claude"|"codex"|"gemini"|"opencode", kind: "custom"|"official",
   name, baseUrl?, apiKey?, model?,
-  claude?: { haikuModel?, sonnetModel?, opusModel? },
+  claude?: { haikuModel?, sonnetModel?, opusModel?, sonnet1m?, opus1m? },
   opencode?: { providerId? } }
 ```
 
@@ -583,7 +583,9 @@ All four were cross-verified against the upstream CLI source (`.audit-sources/{c
 
 **Codex "stable provider id" rationale:** Codex stores session history keyed by `model_provider`. If we used a different id per provider, switching would visually "drop" history. We pin all Termory-written Codex provider blocks to id `"termory"` (`TERMORY_PROVIDER_ID` constant) and refuse to overwrite Codex's built-in reserved ids (`openai`/`amazon-bedrock`/`ollama`/`lmstudio` — `CODEX_RESERVED_IDS`).
 
-**Claude sub-model routing (Advanced section):** Claude Code's `/model` menu in 3P mode reads `process.env.ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL` via `getDefaultXxxModel()` (`model.ts:105-138`). Users who route different sizes to different upstream models (e.g. Sonnet → `gpt-5`, Opus → `claude-opus-4-7`) fill the Advanced fields; empty fields strip the corresponding env var.
+**Claude sub-model routing ("Model Mapping" section):** Claude Code's `/model` menu in 3P mode reads `process.env.ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL` via `getDefaultXxxModel()` (`model.ts:105-138`). Users who route different sizes to different upstream models (e.g. Sonnet → `gpt-5`, Opus → `claude-opus-4-7`) fill the Model Mapping fields; empty fields strip the corresponding env var. In the editor this is a shadcn `Collapsible` (not a card), defaulting open when any mapping/1M is already set.
+
+**Claude 1M context (per-route `[1m]` suffix):** `ClaudeOptions.sonnet_1m` / `opus_1m` declare the 1M context window per route. When set, `activate_claude` appends the `[1m]` model-id suffix to the corresponding `ANTHROPIC_DEFAULT_{SONNET,OPUS}_MODEL` value (cc-switch's `ONE_M_CONTEXT_MARKER` in `claude_desktop_config.rs`; e.g. `gpt-5[1m]`). `with_claude_1m` is idempotent (won't double-append). **Haiku has no 1M variant** (no flag, never suffixed) and the main `ANTHROPIC_MODEL` is left bare. Reverse-derivation (`read_active_claude`) matches on base_url + api_key only, so the `[1m]` suffix never affects active-state / checkmark matching. The editor surfaces this as a per-route "1M" checkbox on Sonnet / Opus only.
 
 **Test coverage:** Each CLI has an activate/reverse roundtrip test, an unrelated-fields-preserved test, and an OAuth-credentials-isolated three-stage test (Stage 1 simulates a prior CLI login, Stage 2 activates a Custom provider via Termory, Stage 3 deactivates — credentials file must be byte-identical at the end). See `providers::tests::*` in `src-tauri/src/providers.rs`.
 
@@ -784,6 +786,15 @@ Three sites navigate "into a specific message" — Favorites "Open original", Se
 The callback identity is stable (`useCallback` with empty deps) so the MessageList effect's dep array doesn't oscillate. SearchPage / CommandPalette pass `hit.first_match_index` through to `onOpenItem`; Favorites passes `source_message_index`.
 
 ## UI conventions
+
+### Never hand-edit `src/components/ui/*` (LOCKED)
+
+The files under `src/components/ui/` are stock shadcn/ui components — keep them unmodified. Do **not** hand-edit them to add styling or behavior.
+
+- Need a new primitive (e.g. Collapsible, Accordion)? Add it with the shadcn CLI: `npx shadcn@latest add <name>`. It writes the stock component + pulls any radix dep. Don't hand-write the file.
+- All customization (layout, spacing, animation, state) goes at the **usage site** via `className` / props on the consuming component, never inside `ui/*`. Example: the Model Mapping collapsible in `ProviderEditor.tsx` applies its `grid`, `animate-collapsible-*`, focus-ring `-mx`/`px`, and trigger classes at the call site — `ui/collapsible.tsx` stays the untouched CLI output.
+- Animation keyframes come from the already-imported `tw-animate-css` (`globals.css`), referenced via utility classes (`animate-collapsible-down/up`, `animate-in`, …) at the usage site — don't add `@keyframes` to component files.
+- Verify before committing: `git diff --stat src/components/ui/` should be empty (new shadcn additions show as untracked files, which is fine).
 
 ### Tooltips (LOCKED)
 

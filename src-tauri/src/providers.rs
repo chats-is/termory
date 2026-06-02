@@ -581,6 +581,14 @@ pub struct ClaudeOptions {
     pub sonnet_model: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub opus_model: String,
+    /// Declare the 1M context window per route via the `[1m]` model-id
+    /// suffix on ANTHROPIC_DEFAULT_{SONNET,OPUS}_MODEL (cc-switch's
+    /// per-route `supports1m`). Haiku has no 1M variant, so there's no
+    /// Haiku flag.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sonnet_1m: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub opus_1m: bool,
 }
 
 /// OpenCode catalog binding. `provider_id` selects which AI SDK npm
@@ -780,6 +788,16 @@ fn claude_settings_path() -> Result<PathBuf, Box<dyn Error>> {
     Ok(home()?.join(".claude").join("settings.json"))
 }
 
+/// Append Claude Code's `[1m]` 1M-context suffix to a model id when
+/// `on` is set — skips empty ids and ones already suffixed.
+fn with_claude_1m(model: &str, on: bool) -> String {
+    if on && !model.is_empty() && !model.ends_with("[1m]") {
+        format!("{model}[1m]")
+    } else {
+        model.to_string()
+    }
+}
+
 fn activate_claude(p: &Provider) -> Result<(), Box<dyn Error>> {
     let path = claude_settings_path()?;
     let mut root = load_json_object(&path)?;
@@ -821,15 +839,40 @@ fn activate_claude(p: &Provider) -> Result<(), Box<dyn Error>> {
     // branch). Empty string in the provider means "don't override
     // this size"; we strip the corresponding env var so Claude falls
     // back to its default Anthropic-side resolution.
-    for (env_key, val) in [
-        ("ANTHROPIC_DEFAULT_HAIKU_MODEL", p.claude_haiku_model()),
-        ("ANTHROPIC_DEFAULT_SONNET_MODEL", p.claude_sonnet_model()),
-        ("ANTHROPIC_DEFAULT_OPUS_MODEL", p.claude_opus_model()),
+    //
+    // 1M context is declared per-route via the `[1m]` model-id suffix
+    // (cc-switch `claude_desktop_config.rs` ONE_M_CONTEXT_MARKER) on
+    // the ANTHROPIC_DEFAULT_{SONNET,OPUS}_MODEL values. Haiku has no
+    // 1M variant, so it never gets the suffix.
+    let (sonnet_1m, opus_1m) = p
+        .claude
+        .as_ref()
+        .map(|c| (c.sonnet_1m, c.opus_1m))
+        .unwrap_or((false, false));
+    for (env_key, val, one_m) in [
+        (
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            p.claude_haiku_model(),
+            false,
+        ),
+        (
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            p.claude_sonnet_model(),
+            sonnet_1m,
+        ),
+        (
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            p.claude_opus_model(),
+            opus_1m,
+        ),
     ] {
         if val.is_empty() {
             env.remove(env_key);
         } else {
-            env.insert(env_key.into(), JsonValue::String(val.to_string()));
+            env.insert(
+                env_key.into(),
+                JsonValue::String(with_claude_1m(val, one_m)),
+            );
         }
     }
     write_json_object(&path, &root)
@@ -2635,6 +2678,7 @@ mod tests {
             sonnet_model: "gpt-5".into(),
             opus_model: "claude-opus-4-7".into(),
             haiku_model: "deepseek-chat".into(),
+            ..Default::default()
         });
         activate(&p, &[p.clone()]).unwrap();
 
@@ -2682,6 +2726,55 @@ mod tests {
                 "{var} must be cleared after deactivate"
             );
         }
+    }
+
+    #[test]
+    fn claude_activate_appends_1m_suffix_per_route_only() {
+        // Declaring 1M on Sonnet (but not Opus) must append `[1m]` to
+        // ANTHROPIC_DEFAULT_SONNET_MODEL only. Opus stays bare, Haiku
+        // never gets it (no 1M variant), and the main ANTHROPIC_MODEL
+        // is untouched.
+        let _g = HOME_LOCK.lock().unwrap();
+        let tmp = tempdir("claude-1m");
+        let _home = HomeOverride::new(&tmp);
+
+        let mut p = make_provider(CliApp::Claude, "ctx-1m", "https://api.x.io", "sk-1m");
+        p.model = "claude-sonnet-4-5".into();
+        p.claude = Some(ClaudeOptions {
+            sonnet_model: "claude-sonnet-4-5".into(),
+            opus_model: "claude-opus-4-7".into(),
+            haiku_model: "claude-haiku-4-5".into(),
+            sonnet_1m: true,
+            opus_1m: false,
+        });
+        activate(&p, &[p.clone()]).unwrap();
+
+        let after: JsonValue =
+            serde_json::from_str(&fs::read_to_string(tmp.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        let env_str = |k: &str| {
+            after
+                .pointer(&format!("/env/{k}"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+        assert_eq!(
+            env_str("ANTHROPIC_DEFAULT_SONNET_MODEL").as_deref(),
+            Some("claude-sonnet-4-5[1m]")
+        );
+        assert_eq!(
+            env_str("ANTHROPIC_DEFAULT_OPUS_MODEL").as_deref(),
+            Some("claude-opus-4-7")
+        );
+        assert_eq!(
+            env_str("ANTHROPIC_DEFAULT_HAIKU_MODEL").as_deref(),
+            Some("claude-haiku-4-5")
+        );
+        // Main model never gets the suffix.
+        assert_eq!(
+            env_str("ANTHROPIC_MODEL").as_deref(),
+            Some("claude-sonnet-4-5")
+        );
     }
 
     #[test]

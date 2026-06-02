@@ -1,7 +1,12 @@
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Eye, EyeOff, Loader2, RefreshCw } from "lucide-react";
+import { ChevronRight, Eye, EyeOff, Loader2, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger
+} from "@/components/ui/collapsible";
 import {
   Dialog,
   DialogContent,
@@ -41,6 +46,18 @@ export function ProviderEditor({
   const [fetchingModels, setFetchingModels] = React.useState(false);
   const [modelError, setModelError] = React.useState<string | null>(null);
   const [saving, setSaving] = React.useState(false);
+  // Model Mapping collapsible — opens by default when the provider
+  // already has any mapping / 1M flag set, otherwise stays folded.
+  const [mappingOpen, setMappingOpen] = React.useState(
+    () =>
+      !!(
+        provider.claude?.sonnetModel ||
+        provider.claude?.opusModel ||
+        provider.claude?.haikuModel ||
+        provider.claude?.sonnet1m ||
+        provider.claude?.opus1m
+      )
+  );
   const modelDatalistId = React.useId();
   // Snapshot the originally-loaded URL so we can decide whether to
   // refetch the favicon on save. Captured once at mount — re-rendering
@@ -109,9 +126,17 @@ export function ProviderEditor({
     const claude = {
       sonnetModel: draft.claude?.sonnetModel?.trim() || undefined,
       opusModel: draft.claude?.opusModel?.trim() || undefined,
-      haikuModel: draft.claude?.haikuModel?.trim() || undefined
+      haikuModel: draft.claude?.haikuModel?.trim() || undefined,
+      sonnet1m: draft.claude?.sonnet1m || undefined,
+      opus1m: draft.claude?.opus1m || undefined
     };
-    const claudeHasAny = !!(claude.sonnetModel || claude.opusModel || claude.haikuModel);
+    const claudeHasAny = !!(
+      claude.sonnetModel ||
+      claude.opusModel ||
+      claude.haikuModel ||
+      claude.sonnet1m ||
+      claude.opus1m
+    );
     const extraModels = (draft.opencode?.models ?? [])
       .map((m) => m.trim())
       .filter((m) => m.length > 0);
@@ -164,14 +189,14 @@ export function ProviderEditor({
         if (!open) onClose();
       }}
     >
-      <DialogContent className="sm:max-w-lg max-h-[88vh] overflow-y-auto">
+      <DialogContent className="sm:max-w-2xl">
         <form onSubmit={handleSubmit} className="contents">
           <DialogHeader className="flex-row items-baseline gap-2">
             <DialogTitle>{isNew ? "Add provider" : "Edit provider"}</DialogTitle>
             <DialogDescription>{CLI_APP_LABEL[draft.app]}</DialogDescription>
           </DialogHeader>
 
-          <div className="flex flex-col gap-4 py-2">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-4 items-start -mx-6 max-h-[65vh] overflow-y-auto px-6 py-1">
             <div className="grid gap-2">
               <Label htmlFor="provider-name">Name *</Label>
               <Input
@@ -203,7 +228,7 @@ export function ProviderEditor({
               <p className="text-xs text-muted-foreground">{baseUrlHelp(draft.app)}</p>
             </div>
 
-            <div className="grid gap-2">
+            <div className={`grid gap-2 ${isOpencode ? "" : "sm:col-span-2"}`}>
               <Label htmlFor="provider-apikey">API key</Label>
               <div className="flex gap-1.5">
                 <Input
@@ -263,7 +288,7 @@ export function ProviderEditor({
               </div>
             )}
 
-            <div className="grid gap-2">
+            <div className="grid gap-2 sm:col-span-2">
               <Label htmlFor="provider-model">{`Model${modelRequired ? " *" : ""}`}</Label>
               <div className="flex gap-1.5">
                 <Input
@@ -314,7 +339,7 @@ export function ProviderEditor({
             </div>
 
             {isOpencode && (
-              <div className="grid gap-2">
+              <div className="grid gap-2 sm:col-span-2">
                 <Label htmlFor="provider-extra-models">Additional models</Label>
                 <Input
                   id="provider-extra-models"
@@ -341,26 +366,52 @@ export function ProviderEditor({
             )}
 
             {draft.app === "claude" && (
-              <details className="group rounded-md bg-muted/40 px-3 py-2">
-                <summary className="cursor-pointer text-xs font-medium select-none">
-                  Advanced — per-size routing (Sonnet / Opus / Haiku)
-                </summary>
-                <p className="text-xs text-muted-foreground mt-2">
+              <Collapsible
+                open={mappingOpen}
+                onOpenChange={setMappingOpen}
+                className="grid gap-2 sm:col-span-2"
+              >
+                <CollapsibleTrigger className="flex w-full items-center justify-between gap-1.5 text-sm font-medium select-none [&[data-state=open]>svg]:rotate-90">
+                  Model Mapping
+                  <ChevronRight className="size-3.5 text-muted-foreground transition-transform" />
+                </CollapsibleTrigger>
+                <CollapsibleContent className="-mx-1.5 overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
+                <div className="grid gap-3 px-1.5 py-1.5">
+                <p className="text-xs text-muted-foreground">
                   When Claude Code's <code className="font-mono text-[11px]">/model</code> menu picks a size,
                   it sends the model id below to your provider. Leave blank to fall back to the main model.
+                  Tick <span className="font-medium">1M</span> to append <code className="font-mono text-[11px]">[1m]</code> so that route requests the 1M context window (Haiku has no 1M variant).
                 </p>
-                <div className="flex flex-col gap-3 mt-3">
+                <div className="flex flex-col gap-3">
                   {(
                     [
-                      ["sonnetModel", "Sonnet route", "e.g. gpt-5"],
-                      ["opusModel", "Opus route", "e.g. claude-opus-4-7"],
-                      ["haikuModel", "Haiku route", "e.g. deepseek-chat"]
+                      ["sonnetModel", "Sonnet", "e.g. gpt-5", "sonnet1m"],
+                      ["opusModel", "Opus", "e.g. claude-opus-4-7", "opus1m"],
+                      ["haikuModel", "Haiku", "e.g. deepseek-chat", null]
                     ] as const
-                  ).map(([key, label, ph]) => (
+                  ).map(([key, label, ph, oneMKey]) => (
                     <div key={key} className="grid gap-1.5">
-                      <Label htmlFor={`claude-${key}`} className="text-xs">
-                        {label}
-                      </Label>
+                      <div className="flex items-center justify-between gap-2">
+                        <Label htmlFor={`claude-${key}`} className="text-xs">
+                          {label}
+                        </Label>
+                        {oneMKey && (
+                          <label className="flex items-center gap-1 text-xs text-muted-foreground cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              className="size-3 accent-primary"
+                              checked={draft.claude?.[oneMKey] ?? false}
+                              onChange={(e) =>
+                                update("claude", {
+                                  ...(draft.claude ?? {}),
+                                  [oneMKey]: e.target.checked
+                                })
+                              }
+                            />
+                            1M
+                          </label>
+                        )}
+                      </div>
                       <Input
                         id={`claude-${key}`}
                         type="text"
@@ -377,7 +428,9 @@ export function ProviderEditor({
                     </div>
                   ))}
                 </div>
-              </details>
+                </div>
+                </CollapsibleContent>
+              </Collapsible>
             )}
           </div>
 

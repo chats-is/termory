@@ -138,6 +138,11 @@ export type Provider = {
     haikuModel?: string;
     sonnetModel?: string;
     opusModel?: string;
+    // Per-route 1M context declaration — Termory appends `[1m]` to the
+    // corresponding ANTHROPIC_DEFAULT_{SONNET,OPUS}_MODEL value. Haiku
+    // has no 1M variant.
+    sonnet1m?: boolean;
+    opus1m?: boolean;
   };
   // OpenCode-only nested options. `providerId` is the catalog id
   // whose npm package OpenCode should load (anthropic /
