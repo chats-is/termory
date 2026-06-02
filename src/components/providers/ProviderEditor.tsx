@@ -1,6 +1,14 @@
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronRight, Eye, EyeOff, Loader2, RefreshCw } from "lucide-react";
+import {
+  ChevronRight,
+  Eye,
+  EyeOff,
+  Loader2,
+  Plus,
+  RefreshCw,
+  Trash2
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Collapsible,
@@ -58,6 +66,33 @@ export function ProviderEditor({
         provider.claude?.opus1m
       )
   );
+  // Custom config overrides — open by default when the provider
+  // already has some.
+  const [overridesOpen, setOverridesOpen] = React.useState(
+    () => (provider.overrides?.length ?? 0) > 0
+  );
+  const overrides = draft.overrides ?? [];
+  const setOverrides = (next: { key: string; value: string }[]) =>
+    update("overrides", next);
+  // Always show at least one row so there's an input ready without
+  // clicking "Add" first. The blank row is virtual until typed into
+  // (empty-key rows are dropped on submit).
+  const overrideRows =
+    overrides.length > 0 ? overrides : [{ key: "", value: "" }];
+  // Per-CLI help with REAL config keys (verified against each tool's
+  // source): Claude settings.json / Codex config.toml / OpenCode
+  // opencode.json take dot-path + typed values; Gemini's .env takes
+  // env var names with verbatim string values.
+  const overrideHelp = {
+    claude:
+      "e.g. cleanupPeriodDays, outputStyle, env.CLAUDE_CODE_USE_BEDROCK — dot-path keys; values typed automatically (env.* kept as strings).",
+    codex:
+      "e.g. model_reasoning_effort, approval_policy — dot-path keys; values typed automatically.",
+    gemini:
+      "e.g. GOOGLE_CLOUD_PROJECT, GOOGLE_GENAI_USE_VERTEXAI — each key is a .env variable name; values written verbatim.",
+    opencode:
+      "e.g. theme, autoupdate — dot-path keys; values typed automatically."
+  }[draft.app];
   const modelDatalistId = React.useId();
   // Snapshot the originally-loaded URL so we can decide whether to
   // refetch the favicon on save. Captured once at mount — re-rendering
@@ -145,6 +180,10 @@ export function ProviderEditor({
       models: extraModels.length > 0 ? extraModels : undefined
     };
     const opencodeHasAny = !!(opencode.providerId || opencode.models);
+    // Drop override rows with a blank key; keep values verbatim.
+    const cleanedOverrides = (draft.overrides ?? [])
+      .map((o) => ({ key: o.key.trim(), value: o.value }))
+      .filter((o) => o.key.length > 0);
     const trimmedBaseUrl = draft.baseUrl?.trim() || undefined;
 
     // Refetch the favicon when the URL is new OR has just changed.
@@ -178,6 +217,7 @@ export function ProviderEditor({
       model: draft.model?.trim() || undefined,
       claude: claudeHasAny ? claude : undefined,
       opencode: opencodeHasAny ? opencode : undefined,
+      overrides: cleanedOverrides.length > 0 ? cleanedOverrides : undefined,
       favicon
     });
   };
@@ -432,6 +472,85 @@ export function ProviderEditor({
                 </CollapsibleContent>
               </Collapsible>
             )}
+
+            <Collapsible
+              open={overridesOpen}
+              onOpenChange={setOverridesOpen}
+              className="grid gap-2 sm:col-span-2"
+            >
+              <CollapsibleTrigger className="flex w-full items-center justify-between gap-1.5 text-sm font-medium select-none [&[data-state=open]>svg]:rotate-90">
+                Custom config overrides
+                <ChevronRight className="size-3.5 text-muted-foreground transition-transform" />
+              </CollapsibleTrigger>
+              <CollapsibleContent className="-mx-1.5 overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
+                <div className="grid gap-3 px-1.5 py-1.5">
+                  <p className="text-xs text-muted-foreground">
+                    Extra settings merged into {CLI_APP_LABEL[draft.app]}'s config
+                    while this provider is active, and removed when you switch away.{" "}
+                    {overrideHelp}
+                  </p>
+                  <div className="flex flex-col gap-2">
+                    {overrideRows.map((o, i) => (
+                      <div key={i} className="flex items-center gap-1.5">
+                        <Input
+                          aria-label="Override key"
+                          className="font-mono flex-1"
+                          placeholder="key"
+                          value={o.key}
+                          onChange={(e) =>
+                            setOverrides(
+                              overrideRows.map((r, j) =>
+                                j === i ? { ...r, key: e.target.value } : r
+                              )
+                            )
+                          }
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                        <Input
+                          aria-label="Override value"
+                          className="font-mono flex-1"
+                          placeholder="value"
+                          value={o.value}
+                          onChange={(e) =>
+                            setOverrides(
+                              overrideRows.map((r, j) =>
+                                j === i ? { ...r, value: e.target.value } : r
+                              )
+                            )
+                          }
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label="Remove override"
+                          onClick={() =>
+                            setOverrides(overrideRows.filter((_, j) => j !== i))
+                          }
+                        >
+                          <Trash2 className="size-4" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="justify-self-start"
+                    onClick={() =>
+                      setOverrides([...overrides, { key: "", value: "" }])
+                    }
+                  >
+                    <Plus className="size-4" />
+                    Add override
+                  </Button>
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
           </div>
 
           <DialogFooter>

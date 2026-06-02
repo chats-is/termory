@@ -558,6 +558,14 @@ pub struct Provider {
     /// OpenCode-only options nested under `opencode`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opencode: Option<OpencodeOptions>,
+    /// User-defined config overrides merged into the CLI's live config
+    /// on activation and stripped on switch/deactivate. `key` is a
+    /// dot-path (`env.FOO`, `tools.web.enabled`); `value` is type-
+    /// inferred (`true`/`false` → bool, numeric → number, else string)
+    /// for JSON/TOML targets and kept verbatim for Gemini's `.env`.
+    /// See `apply_overrides` / `override_keys`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<ProviderOverride>,
     /// Cached favicon as a `data:image/...;base64,...` URL. Populated
     /// at create / edit time via `fetch_favicon` so the ProviderCard
     /// can render the brand mark locally without making a network
@@ -609,6 +617,16 @@ pub struct OpencodeOptions {
     /// written as `models: { <id>: { name: "<id>" } }` entries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
+}
+
+/// One user-defined config override. `key` is a dot-path into the
+/// CLI's config (`env.FOO`, `tools.web.enabled`); `value` is the raw
+/// string the user typed (type-inferred per target format at write
+/// time).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProviderOverride {
+    pub key: String,
+    pub value: String,
 }
 
 impl Provider {
@@ -718,9 +736,9 @@ pub fn activate(provider: &Provider, providers_for_app: &[Provider]) -> Result<(
         return Err("activate() does not accept Official kind — call deactivate() instead.".into());
     }
     match provider.app {
-        CliApp::Claude => activate_claude(provider),
-        CliApp::Codex => activate_codex(provider),
-        CliApp::Gemini => activate_gemini(provider),
+        CliApp::Claude => activate_claude(provider, providers_for_app),
+        CliApp::Codex => activate_codex(provider, providers_for_app),
+        CliApp::Gemini => activate_gemini(provider, providers_for_app),
         CliApp::Opencode => activate_opencode(provider, providers_for_app),
     }
 }
@@ -729,9 +747,9 @@ pub fn activate(provider: &Provider, providers_for_app: &[Provider]) -> Result<(
 /// falls back to its native auth flow.
 pub fn deactivate(app: CliApp, providers_for_app: &[Provider]) -> Result<(), Box<dyn Error>> {
     match app {
-        CliApp::Claude => deactivate_claude(),
-        CliApp::Codex => deactivate_codex(),
-        CliApp::Gemini => deactivate_gemini(),
+        CliApp::Claude => deactivate_claude(providers_for_app),
+        CliApp::Codex => deactivate_codex(providers_for_app),
+        CliApp::Gemini => deactivate_gemini(providers_for_app),
         CliApp::Opencode => deactivate_opencode(providers_for_app),
     }
 }
@@ -798,7 +816,7 @@ fn with_claude_1m(model: &str, on: bool) -> String {
     }
 }
 
-fn activate_claude(p: &Provider) -> Result<(), Box<dyn Error>> {
+fn activate_claude(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>> {
     let path = claude_settings_path()?;
     let mut root = load_json_object(&path)?;
     let env = ensure_json_object(&mut root, "env")?;
@@ -875,10 +893,14 @@ fn activate_claude(p: &Provider) -> Result<(), Box<dyn Error>> {
             );
         }
     }
+    // Clear every provider's override keys, then apply this one's
+    // (env.* kept as strings — Claude's `env` is Record<string,string>).
+    strip_json_overrides(&mut root, &override_keys(all, CliApp::Claude));
+    apply_claude_overrides(&mut root, p);
     write_json_object(&path, &root)
 }
 
-fn deactivate_claude() -> Result<(), Box<dyn Error>> {
+fn deactivate_claude(all: &[Provider]) -> Result<(), Box<dyn Error>> {
     let path = claude_settings_path()?;
     if !path.exists() {
         return Ok(());
@@ -896,6 +918,7 @@ fn deactivate_claude() -> Result<(), Box<dyn Error>> {
             root.remove("env");
         }
     }
+    strip_json_overrides(&mut root, &override_keys(all, CliApp::Claude));
     write_json_object(&path, &root)
 }
 
@@ -1014,7 +1037,7 @@ fn codex_provider_id_or_default(_p: &Provider) -> String {
     TERMORY_PROVIDER_ID.to_string()
 }
 
-fn activate_codex(p: &Provider) -> Result<(), Box<dyn Error>> {
+fn activate_codex(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>> {
     let provider_id = codex_provider_id_or_default(p);
 
     // Step 1: write auth.json.
@@ -1096,6 +1119,9 @@ fn activate_codex(p: &Provider) -> Result<(), Box<dyn Error>> {
         // Defensive: scrub any pre-existing env_key on this block to
         // avoid Codex preferring an empty env var over auth.json.
         block.remove("env_key");
+        // Clear every provider's override keys, then apply this one's.
+        strip_toml_overrides(&mut doc, &override_keys(all, CliApp::Codex));
+        apply_toml_overrides(&mut doc, p);
         write_text_file(&config_path, &doc.to_string())
     })();
 
@@ -1111,7 +1137,7 @@ fn activate_codex(p: &Provider) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn deactivate_codex() -> Result<(), Box<dyn Error>> {
+fn deactivate_codex(all: &[Provider]) -> Result<(), Box<dyn Error>> {
     // Clear ApiKey-mode fields from auth.json, but preserve any
     // ChatGPT OAuth credentials. We only touch the API key path —
     // if the user previously ran `codex login` and has tokens in
@@ -1193,6 +1219,7 @@ fn deactivate_codex() -> Result<(), Box<dyn Error>> {
             doc.as_table_mut().remove("model_providers");
         }
     }
+    strip_toml_overrides(&mut doc, &override_keys(all, CliApp::Codex));
     write_text_file(&config_path, &doc.to_string())
 }
 
@@ -1311,7 +1338,7 @@ fn gemini_env_path() -> Result<PathBuf, Box<dyn Error>> {
     Ok(home()?.join(".gemini").join(".env"))
 }
 
-fn activate_gemini(p: &Provider) -> Result<(), Box<dyn Error>> {
+fn activate_gemini(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>> {
     let path = gemini_env_path()?;
     let mut map = parse_dotenv(&path)?;
     // Each field: write when non-empty, strip when empty. Empty-string
@@ -1332,10 +1359,22 @@ fn activate_gemini(p: &Provider) -> Result<(), Box<dyn Error>> {
             map.insert(key.into(), value.clone());
         }
     }
+    // Overrides: `.env` is flat, so each override key is the literal
+    // env var name and the value is verbatim. Clear every provider's
+    // override keys first, then apply this one's.
+    for k in override_keys(all, CliApp::Gemini) {
+        map.remove(&k);
+    }
+    for o in &p.overrides {
+        let key = o.key.trim();
+        if !key.is_empty() && !override_key_is_managed(CliApp::Gemini, key) {
+            map.insert(key.to_string(), o.value.clone());
+        }
+    }
     write_dotenv(&path, &map)
 }
 
-fn deactivate_gemini() -> Result<(), Box<dyn Error>> {
+fn deactivate_gemini(all: &[Provider]) -> Result<(), Box<dyn Error>> {
     let path = gemini_env_path()?;
     if !path.exists() {
         return Ok(());
@@ -1344,6 +1383,9 @@ fn deactivate_gemini() -> Result<(), Box<dyn Error>> {
     map.remove("GOOGLE_GEMINI_BASE_URL");
     map.remove("GEMINI_API_KEY");
     map.remove("GEMINI_MODEL");
+    for k in override_keys(all, CliApp::Gemini) {
+        map.remove(&k);
+    }
     write_dotenv(&path, &map)
 }
 
@@ -1469,7 +1511,7 @@ fn opencode_npm_for_catalog(catalog_id: &str) -> &'static str {
     }
 }
 
-fn activate_opencode(p: &Provider, _all: &[Provider]) -> Result<(), Box<dyn Error>> {
+fn activate_opencode(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>> {
     // Primary model is required — without an entry in `models` map
     // OpenCode's picker can't surface this provider. API key is
     // optional (OpenCode supports env-var references and some
@@ -1534,6 +1576,10 @@ fn activate_opencode(p: &Provider, _all: &[Provider]) -> Result<(), Box<dyn Erro
     // Setting it as OpenCode's startup default is a separate explicit
     // action via `set_opencode_default`. Multi-provider coexistence
     // is intentional — OpenCode picks at runtime via `/model`.
+    //
+    // Clear every provider's override keys, then apply this one's.
+    strip_json_overrides(&mut root, &override_keys(all, CliApp::Opencode));
+    apply_json_overrides(&mut root, p, CliApp::Opencode);
     write_json_object(&path, &root)
 }
 
@@ -1626,6 +1672,11 @@ fn deactivate_opencode(providers: &[Provider]) -> Result<(), Box<dyn Error>> {
     }
     let mut root = load_json_object(&config_path)?;
 
+    // Strip every provider's override keys.
+    let keys = override_keys(providers, CliApp::Opencode);
+    let had_overrides = !keys.is_empty();
+    strip_json_overrides(&mut root, &keys);
+
     let user_termory_ids: std::collections::HashSet<String> = providers
         .iter()
         .filter(|p| p.app == CliApp::Opencode && p.kind == ProviderKind::Custom)
@@ -1636,14 +1687,20 @@ fn deactivate_opencode(providers: &[Provider]) -> Result<(), Box<dyn Error>> {
         .and_then(|v| v.as_str())
         .and_then(|s| s.split_once('/').map(|(pid, _)| pid.to_string()));
 
+    let mut model_removed = false;
     if let Some(id) = active_termory_id {
         if user_termory_ids.contains(&id) {
             root.remove("model");
-            if root.is_empty() {
-                let _ = fs::remove_file(&config_path);
-            } else {
-                write_json_object(&config_path, &root)?;
-            }
+            model_removed = true;
+        }
+    }
+
+    // Only touch the file when something Termory-owned changed.
+    if had_overrides || model_removed {
+        if root.is_empty() {
+            let _ = fs::remove_file(&config_path);
+        } else {
+            write_json_object(&config_path, &root)?;
         }
     }
     Ok(())
@@ -2156,6 +2213,244 @@ fn ensure_object_at<'a>(
     }
 }
 
+// ===================================================================
+// User-defined config overrides (Provider.overrides)
+//
+// A provider can carry extra `{ key, value }` pairs that Termory merges
+// into the CLI's live config on activation and strips on switch /
+// deactivate. `key` is a dot-path; `value` is type-inferred for
+// JSON/TOML targets, kept verbatim for Gemini's `.env`. Clean removal
+// uses `override_keys` (the UNION of every provider-of-this-CLI's keys)
+// so switching A → B never leaves A's keys behind.
+// ===================================================================
+
+/// Split a dot-path key into non-empty segments.
+fn dot_path(key: &str) -> Vec<&str> {
+    key.split('.')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Keys that Termory's dedicated fields (`baseUrl` / `apiKey` / `model`
+/// / per-app routing) own. Overrides must NEVER touch these — they're
+/// an escape hatch for *additional* config, not a way to clobber the
+/// core credential/endpoint/model the user set in their own fields.
+/// Checked at both apply and strip time so a managed key in `overrides`
+/// is silently ignored, and the dedicated field always wins.
+fn override_key_is_managed(app: CliApp, key: &str) -> bool {
+    let k = key.trim();
+    match app {
+        CliApp::Claude => matches!(
+            k,
+            "env.ANTHROPIC_BASE_URL"
+                | "env.ANTHROPIC_AUTH_TOKEN"
+                | "env.ANTHROPIC_API_KEY"
+                | "env.ANTHROPIC_MODEL"
+                | "env.ANTHROPIC_DEFAULT_HAIKU_MODEL"
+                | "env.ANTHROPIC_DEFAULT_SONNET_MODEL"
+                | "env.ANTHROPIC_DEFAULT_OPUS_MODEL"
+        ),
+        // Codex: top-level model_provider/model + the whole
+        // model_providers.* table (Termory's [model_providers.termory]).
+        CliApp::Codex => k == "model_provider" || k == "model" || k.starts_with("model_providers."),
+        CliApp::Gemini => {
+            matches!(
+                k,
+                "GOOGLE_GEMINI_BASE_URL" | "GEMINI_API_KEY" | "GEMINI_MODEL"
+            )
+        }
+        // OpenCode: top-level model + the whole provider.* tree
+        // (Termory's provider.<termory-id> slot).
+        CliApp::Opencode => k == "model" || k.starts_with("provider."),
+    }
+}
+
+/// Union of every override key declared by any provider in the list,
+/// excluding managed keys — the set Termory must clear before
+/// (re)writing the active provider's overrides.
+fn override_keys(providers: &[Provider], app: CliApp) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for p in providers {
+        for o in &p.overrides {
+            let k = o.key.trim();
+            if k.is_empty() || override_key_is_managed(app, k) {
+                continue;
+            }
+            if !keys.iter().any(|e| e == k) {
+                keys.push(k.to_string());
+            }
+        }
+    }
+    keys
+}
+
+/// Infer a JSON scalar from a user-typed string: bool / integer /
+/// finite float / else string. No arrays/objects in v1.
+fn infer_json_value(raw: &str) -> JsonValue {
+    let t = raw.trim();
+    match t {
+        "true" => return JsonValue::Bool(true),
+        "false" => return JsonValue::Bool(false),
+        _ => {}
+    }
+    if let Ok(i) = t.parse::<i64>() {
+        return JsonValue::from(i);
+    }
+    if let Ok(f) = t.parse::<f64>() {
+        if f.is_finite() {
+            return JsonValue::from(f);
+        }
+    }
+    JsonValue::String(raw.to_string())
+}
+
+/// Set a dot-path in a JSON object, creating intermediate objects.
+fn json_set_path(root: &mut Map<String, JsonValue>, key: &str, value: JsonValue) {
+    let segs = dot_path(key);
+    let Some((last, parents)) = segs.split_last() else {
+        return;
+    };
+    let mut cur = root;
+    for seg in parents {
+        let entry = cur
+            .entry(seg.to_string())
+            .or_insert_with(|| JsonValue::Object(Map::new()));
+        if !entry.is_object() {
+            *entry = JsonValue::Object(Map::new());
+        }
+        cur = entry.as_object_mut().expect("ensured object");
+    }
+    cur.insert(last.to_string(), value);
+}
+
+/// Remove a dot-path from a JSON object, pruning now-empty parents.
+fn json_remove_path(root: &mut Map<String, JsonValue>, key: &str) {
+    let segs = dot_path(key);
+    json_remove_path_inner(root, &segs);
+}
+fn json_remove_path_inner(map: &mut Map<String, JsonValue>, segs: &[&str]) {
+    match segs {
+        [] => {}
+        [last] => {
+            map.remove(*last);
+        }
+        [head, rest @ ..] => {
+            if let Some(child) = map.get_mut(*head).and_then(|v| v.as_object_mut()) {
+                json_remove_path_inner(child, rest);
+                if child.is_empty() {
+                    map.remove(*head);
+                }
+            }
+        }
+    }
+}
+
+/// Apply a provider's overrides into a JSON config root (Claude
+/// settings.json, opencode.json).
+fn apply_json_overrides(root: &mut Map<String, JsonValue>, p: &Provider, app: CliApp) {
+    for o in &p.overrides {
+        let key = o.key.trim();
+        if key.is_empty() || override_key_is_managed(app, key) {
+            continue;
+        }
+        json_set_path(root, key, infer_json_value(&o.value));
+    }
+}
+
+/// Claude variant: `settings.json`'s `env` object is
+/// `Record<string, string>`, so override values under `env.*` are kept
+/// as strings (never type-inferred to bool/number); everything else is
+/// inferred like normal JSON. Managed keys (base url / token / model /
+/// routing) are skipped — the dedicated fields own them.
+fn apply_claude_overrides(root: &mut Map<String, JsonValue>, p: &Provider) {
+    for o in &p.overrides {
+        let key = o.key.trim();
+        if key.is_empty() || override_key_is_managed(CliApp::Claude, key) {
+            continue;
+        }
+        let value = if dot_path(key).first() == Some(&"env") {
+            JsonValue::String(o.value.clone())
+        } else {
+            infer_json_value(&o.value)
+        };
+        json_set_path(root, key, value);
+    }
+}
+
+/// Strip the given override keys from a JSON config root.
+fn strip_json_overrides(root: &mut Map<String, JsonValue>, keys: &[String]) {
+    for k in keys {
+        json_remove_path(root, k);
+    }
+}
+
+/// Infer a toml_edit Item (scalar) from a user-typed string.
+fn infer_toml_item(raw: &str) -> Item {
+    let t = raw.trim();
+    if t == "true" {
+        return toml_value(true);
+    }
+    if t == "false" {
+        return toml_value(false);
+    }
+    if let Ok(i) = t.parse::<i64>() {
+        return toml_value(i);
+    }
+    if let Ok(f) = t.parse::<f64>() {
+        if f.is_finite() {
+            return toml_value(f);
+        }
+    }
+    toml_value(raw)
+}
+
+/// Apply a provider's overrides into a TOML document (Codex config.toml).
+fn apply_toml_overrides(doc: &mut DocumentMut, p: &Provider) {
+    for o in &p.overrides {
+        if override_key_is_managed(CliApp::Codex, o.key.trim()) {
+            continue;
+        }
+        let segs = dot_path(&o.key);
+        let Some((last, parents)) = segs.split_last() else {
+            continue;
+        };
+        let mut tbl = doc.as_table_mut();
+        for seg in parents {
+            let entry = tbl.entry(seg).or_insert(toml_edit::table());
+            if !entry.is_table() {
+                *entry = toml_edit::table();
+            }
+            tbl = entry.as_table_mut().expect("ensured table");
+        }
+        tbl.insert(last, infer_toml_item(&o.value));
+    }
+}
+
+/// Strip override keys from a TOML document, pruning now-empty tables.
+fn strip_toml_overrides(doc: &mut DocumentMut, keys: &[String]) {
+    for k in keys {
+        let segs = dot_path(k);
+        toml_remove_path_inner(doc.as_table_mut(), &segs);
+    }
+}
+fn toml_remove_path_inner(tbl: &mut toml_edit::Table, segs: &[&str]) {
+    match segs {
+        [] => {}
+        [last] => {
+            tbl.remove(*last);
+        }
+        [head, rest @ ..] => {
+            if let Some(child) = tbl.get_mut(*head).and_then(|i| i.as_table_mut()) {
+                toml_remove_path_inner(child, rest);
+                if child.is_empty() {
+                    tbl.remove(*head);
+                }
+            }
+        }
+    }
+}
+
 fn load_toml_document(path: &Path) -> Result<DocumentMut, Box<dyn Error>> {
     if !path.exists() {
         return Ok(DocumentMut::new());
@@ -2474,7 +2769,151 @@ mod tests {
             claude: None,
             opencode: None,
             favicon: None,
+            overrides: Vec::new(),
         }
+    }
+
+    #[test]
+    fn provider_overrides_apply_strip_and_infer_types_json() {
+        // Claude (JSON) overrides: dot-path nesting, type inference,
+        // clean removal of the previous provider's keys on switch
+        // (incl. empty-parent pruning), and full strip on deactivate.
+        let _g = HOME_LOCK.lock().unwrap();
+        let tmp = tempdir("ovr-json");
+        let _home = HomeOverride::new(&tmp);
+        fs::create_dir_all(tmp.join(".claude")).unwrap();
+
+        let mut a = make_provider(CliApp::Claude, "A", "https://a.x.io", "sk-a");
+        a.overrides = vec![
+            ProviderOverride {
+                key: "env.FOO".into(),
+                value: "bar".into(),
+            },
+            ProviderOverride {
+                key: "permissions.defaultMode".into(),
+                value: "acceptEdits".into(),
+            },
+            // Managed key — MUST be ignored, never clobbers the real
+            // baseUrl from the dedicated field.
+            ProviderOverride {
+                key: "env.ANTHROPIC_BASE_URL".into(),
+                value: "https://evil.example".into(),
+            },
+        ];
+        let mut b = make_provider(CliApp::Claude, "B", "https://b.x.io", "sk-b");
+        b.overrides = vec![
+            // Looks like a bool, but env values must stay strings.
+            ProviderOverride {
+                key: "env.FLAG".into(),
+                value: "true".into(),
+            },
+            // Non-env key → type-inferred to a number.
+            ProviderOverride {
+                key: "cleanupPeriodDays".into(),
+                value: "30".into(),
+            },
+        ];
+        let all = vec![a.clone(), b.clone()];
+        let read = || -> JsonValue {
+            serde_json::from_str(&fs::read_to_string(tmp.join(".claude/settings.json")).unwrap())
+                .unwrap()
+        };
+
+        activate(&a, &all).unwrap();
+        let cfg = read();
+        assert_eq!(
+            cfg.pointer("/env/FOO").and_then(|v| v.as_str()),
+            Some("bar")
+        );
+        assert_eq!(
+            cfg.pointer("/permissions/defaultMode")
+                .and_then(|v| v.as_str()),
+            Some("acceptEdits")
+        );
+        // Managed key override is ignored: the dedicated baseUrl wins.
+        assert_eq!(
+            cfg.pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(|v| v.as_str()),
+            Some("https://a.x.io"),
+            "overrides must never clobber the managed baseUrl"
+        );
+
+        // Switch to B → A's keys gone (empty `permissions` pruned), B's
+        // applied with numeric type inference.
+        activate(&b, &all).unwrap();
+        let cfg = read();
+        assert!(
+            cfg.pointer("/env/FOO").is_none(),
+            "previous provider's override must be stripped on switch"
+        );
+        assert!(
+            cfg.pointer("/permissions").is_none(),
+            "emptied parent object must be pruned"
+        );
+        // env.* stays a string even when it looks like a bool.
+        assert_eq!(
+            cfg.pointer("/env/FLAG").and_then(|v| v.as_str()),
+            Some("true")
+        );
+        assert!(cfg.pointer("/env/FLAG").unwrap().as_bool().is_none());
+        // non-env key is type-inferred to a real number.
+        assert_eq!(
+            cfg.pointer("/cleanupPeriodDays").and_then(|v| v.as_i64()),
+            Some(30)
+        );
+
+        // Deactivate → B's overrides gone too.
+        deactivate(CliApp::Claude, &all).unwrap();
+        let cfg = read();
+        assert!(cfg.pointer("/env/FLAG").is_none());
+        assert!(cfg.pointer("/cleanupPeriodDays").is_none());
+    }
+
+    #[test]
+    fn provider_overrides_apply_strip_nested_toml() {
+        // Codex (TOML) overrides: nested table path + bool inference,
+        // pruned cleanly on deactivate.
+        let _g = HOME_LOCK.lock().unwrap();
+        let tmp = tempdir("ovr-toml");
+        let _home = HomeOverride::new(&tmp);
+        fs::create_dir_all(tmp.join(".codex")).unwrap();
+
+        let mut p = make_provider(CliApp::Codex, "C", "https://c.x.io/v1", "sk-c");
+        p.overrides = vec![
+            ProviderOverride {
+                key: "model_reasoning_effort".into(),
+                value: "high".into(),
+            },
+            ProviderOverride {
+                key: "tools.web_search".into(),
+                value: "true".into(),
+            },
+        ];
+        let all = vec![p.clone()];
+
+        activate(&p, &all).unwrap();
+        let txt = fs::read_to_string(tmp.join(".codex/config.toml")).unwrap();
+        let doc: toml::Value = toml::from_str(&txt).unwrap();
+        assert_eq!(
+            doc.get("model_reasoning_effort").and_then(|v| v.as_str()),
+            Some("high")
+        );
+        assert_eq!(
+            doc.get("tools")
+                .and_then(|t| t.get("web_search"))
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "nested tools.web_search must be a real bool, not the string \"true\""
+        );
+
+        deactivate(CliApp::Codex, &all).unwrap();
+        let txt = fs::read_to_string(tmp.join(".codex/config.toml")).unwrap();
+        let doc: toml::Value = toml::from_str(&txt).unwrap();
+        assert!(doc.get("model_reasoning_effort").is_none());
+        assert!(
+            doc.get("tools").is_none(),
+            "emptied [tools] table must be pruned"
+        );
     }
 
     #[test]
@@ -2923,6 +3362,53 @@ command = "npx"
 
         let state2 = read_active_state(CliApp::Codex, &[p.clone()]).unwrap();
         assert_eq!(state2.kind, ActiveKind::Official);
+    }
+
+    #[test]
+    fn codex_switching_between_custom_providers_keeps_stable_model_provider_id() {
+        // Codex's `codex resume` picker filters sessions by the active
+        // `model_provider` (resume_picker.rs MatchDefault). If every
+        // Termory custom provider used a distinct id, switching would
+        // scope resume to the new id and hide the old provider's
+        // history — the cc-switch complaint. Termory pins ALL custom
+        // providers to the single stable id `TERMORY_PROVIDER_ID`, so
+        // switching among them keeps `model_provider` constant and the
+        // whole resume history stays visible. Lock that in here.
+        let _g = HOME_LOCK.lock().unwrap();
+        let tmp = tempdir("codex-stable-id");
+        let _home = HomeOverride::new(&tmp);
+        fs::create_dir_all(tmp.join(".codex")).unwrap();
+
+        let read_model_provider = || {
+            let txt = fs::read_to_string(tmp.join(".codex/config.toml")).unwrap();
+            let toml: toml::Value = toml::from_str(&txt).unwrap();
+            toml.get("model_provider")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+
+        // Two distinct custom providers (different endpoints/keys).
+        let a = make_provider(CliApp::Codex, "Provider A", "https://a.x.io/v1", "sk-a");
+        let b = make_provider(CliApp::Codex, "Provider B", "https://b.x.io/v1", "sk-b");
+
+        activate(&a, &[a.clone(), b.clone()]).unwrap();
+        assert_eq!(read_model_provider().as_deref(), Some(TERMORY_PROVIDER_ID));
+        assert!(fs::read_to_string(tmp.join(".codex/config.toml"))
+            .unwrap()
+            .contains("https://a.x.io/v1"));
+
+        // Switch to B — model_provider must NOT change; only the
+        // termory block's base_url is swapped.
+        activate(&b, &[a.clone(), b.clone()]).unwrap();
+        assert_eq!(
+            read_model_provider().as_deref(),
+            Some(TERMORY_PROVIDER_ID),
+            "switching custom providers must keep model_provider stable so codex resume keeps history"
+        );
+        let txt = fs::read_to_string(tmp.join(".codex/config.toml")).unwrap();
+        assert!(txt.contains("https://b.x.io/v1"));
+        // Exactly one termory provider block — not one per provider.
+        assert_eq!(txt.matches("[model_providers.termory]").count(), 1);
     }
 
     #[test]

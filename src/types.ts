@@ -152,6 +152,12 @@ export type Provider = {
     providerId?: string;
     models?: string[];
   };
+  // User-defined config overrides merged into the CLI's live config on
+  // activation and stripped on switch/deactivate. `key` is a dot-path
+  // (`env.FOO`, `tools.web_search`); `value` is type-inferred
+  // (bool/number/else string) for JSON/TOML targets, verbatim for
+  // Gemini's `.env`.
+  overrides?: { key: string; value: string }[];
   // Cached favicon as a `data:image/...;base64,...` URL. Populated at
   // create / edit time by `invoke('fetch_provider_favicon')` so the
   // ProviderCard renders the brand mark locally without making a
