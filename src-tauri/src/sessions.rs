@@ -9130,7 +9130,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn search_cache_evicts_oldest_when_full() {
         let mut cache = SearchCache::new(3);
         let mtime = SystemTime::now();
@@ -9238,6 +9237,7 @@ mod tests {
         assert!(cache.get(&(PathBuf::from("/b"), mtime)).is_none());
     }
 
+    #[test]
     fn get_session_rejects_id_outside_scan_set() {
         // Force a known empty-index state so we don't depend on any
         // previous scan_sessions() call leaving residue.
