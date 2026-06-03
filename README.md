@@ -1,101 +1,34 @@
 # Termory
 
-> Management for your AI Terminal and Memory.
+> One place to browse your AI coding-CLI history — and switch API providers in a click.
 
-Local-first desktop app for browsing coding-agent CLI session history and inspecting the memory each tool writes to disk — Codex, Claude Code, Gemini CLI, and OpenCode in one place.
+Termory is a desktop app for **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode**. See every session, memory file, and skill across all your tools in one window, keep the messages worth saving, search across everything, and switch any CLI between API providers without touching a config file. It runs natively on **macOS, Linux, and Windows**, and everything stays on your machine.
 
-## Sources
+## Features
 
-Sessions:
+- **Providers** — keep named API profiles for each CLI and switch the active one with a click (or straight from the macOS menu bar). Your native login is never touched, so it always survives the switch.
+- **Records** — all your sessions, memory files, and skills from every tool, rendered the way each tool shows them.
+- **Favorites** — star any message; it's saved as a snapshot that stays readable even after the original session is gone.
+- **Search** — instant search across all your history, with a ⌘K command palette.
+- **Stats** — tokens, messages, projects, and an activity heatmap over any date range.
+- **Local-first** — no servers, no telemetry. Termory reads your history in place and never modifies it.
 
-- Codex CLI: `~/.codex/state_5.sqlite`, `~/.codex/sessions/**/*.jsonl`
-- Claude Code: `~/.claude/projects/**/*.jsonl`
-- Gemini CLI: `~/.gemini/tmp/**/chats/*.json`
-- OpenCode: `~/.local/share/opencode/opencode.db` (with JSON storage fallback)
+## Supported tools
 
-Memory (paths verified against each tool's open-source code, not just docs):
+Codex · Claude Code · Gemini CLI · OpenCode
 
-- Claude Code: `~/.claude/projects/<sanitized-canonical-git-root>/memory/**/*.md`, `~/.claude/rules/**/*.md` (global), `<cwd>/.claude/rules/**/*.md` (project)
-- Codex: `~/.codex/memories/**/*.md` (excluding `skills/`)
-- Gemini CLI:
-  - Global: `~/.gemini/GEMINI.md` (legacy) and `~/.gemini/MEMORY.md` (modern alias)
-  - Per-project: `~/.gemini/tmp/<id>/memory/{MEMORY.md preferred, GEMINI.md legacy}` (also recursive — source: `packages/core/src/config/storage.ts getProjectMemoryDir`)
-- Per-project instruction files: scanned at cwd AND every ancestor **only when a `.git` directory exists at or above cwd**. Without `.git` only cwd is scanned (matches Codex/Gemini/OpenCode source). Walk stops at the git root (inclusive) and never enters `$HOME`. Files at each level:
-  - `CLAUDE.md` → tag `claude,opencode`
-  - `CLAUDE.local.md` → tag `claude`
-  - `AGENTS.md` → tag `codex,opencode`
-  - `AGENTS.override.md` → tag `codex`
-  - `GEMINI.md` → tag `gemini`
-  - `MEMORY.md` → tag `gemini`
-  - `<cwd>/.claude/CLAUDE.md` → tag `claude` (project root only, not ancestors)
-- Global instruction files: `~/.claude/CLAUDE.md` (`claude,opencode`), `~/.codex/AGENTS.md` + `~/.codex/AGENTS.override.md` (`codex`), `~/.config/opencode/AGENTS.md` (`opencode`)
+## Download
 
-Paths intentionally NOT scanned (not in any tool's source):
+Grab the latest installer for your platform from the [Releases](https://github.com/copilot-is/termory/releases) page — macOS (Apple Silicon & Intel), Linux (AppImage / deb / rpm), and Windows.
 
-- `AGENTS.local.md` — not used by Codex/OpenCode (Codex uses `AGENTS.override.md`)
-- `~/.codex/instructions.md` — legacy, no current Codex source reference
-- `~/.claude/CLAUDE.local.md` (user-level) — only project-level is documented
-- `CONTEXT.md` — OpenCode deprecated
-- `project_doc_fallback_filenames` from `~/.codex/config.toml` — Termory does not read user config
+> Current builds are unsigned, so the OS may warn on first launch. On macOS, right-click the app and choose **Open**.
 
-Sources (source code, not docs):
+## Build from source
 
-- Codex: [`codex-rs/core/src/agents_md.rs`](https://github.com/openai/codex/blob/main/codex-rs/core/src/agents_md.rs), [`codex-rs/ext/memories/src/local.rs`](https://github.com/openai/codex/blob/main/codex-rs/ext/memories/src/local.rs), [`codex-rs/config/src/project_root_markers.rs`](https://github.com/openai/codex/blob/main/codex-rs/config/src/project_root_markers.rs)
-- Gemini CLI: [`packages/core/src/utils/memoryDiscovery.ts`](https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/utils/memoryDiscovery.ts), [`packages/core/src/config/storage.ts`](https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/config/storage.ts), [`packages/core/src/tools/memoryTool.ts`](https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/tools/memoryTool.ts)
-- OpenCode: [`packages/opencode/src/session/instruction.ts`](https://github.com/sst/opencode/blob/dev/packages/opencode/src/session/instruction.ts), [`packages/opencode/src/project/project.ts`](https://github.com/sst/opencode/blob/dev/packages/opencode/src/project/project.ts)
-- Claude Code: `src/memdir/paths.ts`, `src/utils/attachments.ts` (videcoding/cli reference)
-
-Skills (paths verified from each tool's open-source code):
-
-- Claude Code: `~/.claude/skills/**/*.md` (global), `<cwd>/.claude/skills/**/*.md` (project) — tagged `claude,opencode` (OpenCode also officially reads `.claude/skills/`)
-- Codex: `~/.codex/skills/**/*.md` (global, confirmed at `codex-rs/core/src/session/tests.rs:3817` — `codex_home.join("skills")`), `<cwd>/.codex/skills/**/*.md` (project)
-- Gemini CLI: `~/.gemini/skills/**/*.md` (global, confirmed at `Storage.getUserSkillsDir`), `~/.gemini/tmp/<id>/memory/skills/**/*.md` (per-project, confirmed at `Storage.getProjectSkillsMemoryDir`), `<cwd>/.gemini/skills/**/*.md` (project workspace)
-- OpenCode: `~/.config/opencode/skills/**/*.md` (global), `<cwd>/.opencode/skills/**/*.md` (project)
-- Tool-neutral (Codex + Gemini CLI + OpenCode all officially read these): `~/.agents/skills/**/*.md` (global), `<cwd>/.agents/skills/**/*.md` (project) — tagged `codex,gemini,opencode`
-
-The app reads source history in place and does not modify original session files.
-
-## Stack
-
-- Tauri v2
-- React + TypeScript + Vite
-- Rust backend
-- SQLite reader for OpenCode
-
-## Development
-
-Prerequisites:
-
-- Node.js 20+
-- Rust toolchain with Cargo
-- Platform-specific Tauri prerequisites
-
-Install dependencies:
+Requires Node.js 20+, the Rust toolchain, and the [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```bash
 npm install
-```
-
-Run the web UI:
-
-```bash
-npm run dev
-```
-
-Run the desktop app:
-
-```bash
-npm run tauri:dev
-```
-
-Build:
-
-```bash
-npm run tauri:build
-```
-
-Run backend tests:
-
-```bash
-cargo test --manifest-path src-tauri/Cargo.toml --lib
+npm run tauri:dev     # run the desktop app
+npm run tauri:build   # build installers
 ```

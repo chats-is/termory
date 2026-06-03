@@ -526,6 +526,11 @@ Audit reference is OpenCode `1.15.5` (commit `9324ef0`). Compared against `v1.15
 - Format command and tool output the way the official tool **actually renders it in its TUI** — not what its docs say, and not what feels right. Always grep `.audit-sources/<repo>/` for the real render function and put a `// path/to/file.tsx:LINE` citation next to the matching Termory branch. Earlier rounds of this codebase had ~600 lines of tool-formatting guesswork that diverged from every TUI; those have been replaced and the rule exists to prevent regressing.
 - Treat UI behavior separately from official data behavior. Source filters, project grouping, search, stats, cross-source sorting, and the Memory/Skills views are app UI behavior.
 - Keep changes scoped. Avoid unrelated refactors.
+- **Cross-platform is a hard requirement (macOS / Linux / Windows).** The release CI builds all four targets (macOS arm64 + x64, Linux, Windows) on every `v*` tag — keep it green, and don't let a single-platform API leak into a shared path. Concretely:
+  - Gate every OS-specific call behind `#[cfg(...)]`: `cfg(unix)` for `chmod`/permissions (with a `cfg(not(unix))` fallback), `cfg(target_os = "macos")` for Dock / `set_dock_visibility` / tray niceties, per-OS branches for CLI-binary PATH probing and the filesystem watcher.
+  - Resolve each CLI's data path to what THAT tool actually uses per-OS. Claude/Codex/Gemini use home-relative dotdirs (`~/.codex`, …) on all platforms. OpenCode uses xdg-basedir → `~/.config` / `~/.local/share` on **every** OS including Windows, so build those via `home().join(".config/…")` and **do NOT use `dirs::config_dir()` / `dirs::data_dir()`** for them (those return `~/Library/Application Support` on macOS and `%APPDATA%` on Windows — both wrong for these tools). Cite the upstream path source.
+  - Build paths with `PathBuf::join` from `home()` / `dirs::*` — never string-concatenate with `/`, and no shell/`.exe` assumptions outside a `cfg`.
+  - Backend tests use a `HOME` override and run on the dev OS only — they validate path *logic*, not real Windows/Linux runtime. A green build ≠ runtime-verified; call out anything that needs real-device testing.
 - Add or update tests when changing a parser or formatter. Skill/memory scanners have parallel tests at the bottom of `sessions.rs` — extend that block when adding scan paths. Tool-rendering tests should assert verbatim strings (e.g. `"**Search**(pattern: \"TODO\", path: \"src\")"`), not regex matches, so renames are caught.
 - When adding a new scan location for an existing tool, verify against the tool's official source first (then docs as a secondary reference); do not infer from naming conventions alone.
 
@@ -559,6 +564,8 @@ User flow: a Provider is a named snapshot of `{baseUrl, apiKey, model, ...}`. Ea
 
 Termory does **not** store an "active provider" pointer anywhere. `provider_active_state` reverse-derives the active state on every read by parsing the CLI's live config files and matching against the in-memory provider list — this keeps Termory consistent when other tools (`cc-switch`, manual `vim`, the CLI's own OAuth flow) change the same files.
 
+**Editing a live provider re-applies it.** Saving the editor (`saveProvider` in `ProvidersPage.tsx`) writes providers.json AND, when the edited provider is the one currently live for its CLI (matched for single-slot, or an enabled OpenCode slot), re-runs `activate_provider` so the change (model / base URL / key / options / …) reaches the live config — otherwise the edit would silently not take effect until a manual re-activate. It passes the *previous* provider copy into `providersForApp` too, so option keys the edit **removed** are still in the strip set and get cleaned (single-slot); for OpenCode the block is rebuilt wholesale so removal is automatic. If the OpenCode provider was also the startup default, it re-runs `set_opencode_default` to refresh the `model` pointer. New or inactive providers don't touch any live config.
+
 `Provider` schema (in `providers.json`, fields default to omitted when empty):
 
 ```
@@ -588,7 +595,7 @@ All four were cross-verified against the upstream CLI source (`.audit-sources/{c
 
 **Claude 1M context:** declared by appending the `[1m]` model-id suffix directly to an override value (e.g. `claude-sonnet-4-6[1m]`) — Claude Code recommends 1M, so it's just part of the value the user types. There is no separate 1M flag/checkbox and no `with_claude_1m` helper anymore. Reverse-derivation (`read_active_claude`) matches on base_url + api_key only, so any `[1m]` suffix never affects active-state / checkmark matching.
 
-**Test coverage:** Each CLI has an activate/reverse roundtrip test, an unrelated-fields-preserved test, and an OAuth-credentials-isolated three-stage test (Stage 1 simulates a prior CLI login, Stage 2 activates a Custom provider via Termory, Stage 3 deactivates — credentials file must be byte-identical at the end). See `providers::tests::*` in `src-tauri/src/providers.rs`.
+**Test coverage:** Each CLI has an activate/reverse roundtrip test and an unrelated-fields-preserved test. The single-slot CLIs (Claude/Codex/Gemini) also have an OAuth-credentials-isolated three-stage test (Stage 1 simulates a prior CLI login, Stage 2 activates a Custom provider via Termory, Stage 3 deactivates — the credentials file must be byte-identical at the end). OpenCode never writes `auth.json`, so its isolation tests instead assert `auth.json` stays byte-identical and sibling `provider.*` blocks/options survive (`opencode_activate_preserves_unrelated_provider_blocks`, `opencode_enabling_one_provider_keeps_siblings_options`). See `providers::tests::*` in `src-tauri/src/providers.rs`.
 
 ## Menu-bar tray (macOS system tray)
 
@@ -622,6 +629,8 @@ Exit
 ### Window / Dock behavior (menu-bar app)
 
 Closing the window does **not** quit — `lib.rs` `on_window_event` intercepts `CloseRequested`, calls `window.hide()` + `set_dock_visibility(false)` (macOS) + `api.prevent_close()`, so the app keeps running in the menu bar with no Dock icon. The tray's **Open** restores the Dock icon (`set_dock_visibility(true)`) then shows / unminimizes / focuses the window. Launch starts with the window + Dock icon visible (default). `set_dock_visibility` is the purpose-built API — a raw `set_activation_policy(Accessory)`/`Regular` toggle did NOT reliably restore the Dock icon when re-showing the window.
+
+The window's title-bar **text is hidden** (`"hiddenTitle": true` on the window in `tauri.conf.json`) — the traffic-light buttons and a normal draggable title bar stay; only the "Termory" label is suppressed. `title` is still `"Termory"` so Mission Control / the window menu identify it.
 
 ## Stats
 
