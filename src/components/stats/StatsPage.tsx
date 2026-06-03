@@ -55,8 +55,10 @@ export function StatsPage({
   );
 
   return (
-    <div className="flex-1 min-h-0 overflow-auto px-3 mt-3 pb-1">
-      <div className="flex flex-col gap-3 pr-1">
+    <div className="flex-1 min-h-0 flex flex-col">
+      {/* Fixed header (sibling, outside the scroll area) — the filter bar
+          stays put while the cards scroll, matching the Providers page. */}
+      <div className="px-3 mt-3 mb-3">
         <StatsFilterBar
           range={range}
           onRangeChange={setRange}
@@ -65,14 +67,18 @@ export function StatsPage({
           refreshing={refreshing}
           onRefresh={onRefresh}
         />
-        <OverviewHero
-          sessions={totals.sessions}
-          messages={totals.messages}
-          tokens={totals.tokens}
-          projects={totals.projects}
-        />
-        <DailyTokensChart data={tokenData} />
-        <DailyActivitiesHeatmap activities={activities} totals={totals} />
+      </div>
+      <div className="flex-1 min-h-0 overflow-auto px-3 pb-1">
+        <div className="flex flex-col gap-3">
+          <OverviewHero
+            sessions={totals.sessions}
+            messages={totals.messages}
+            tokens={totals.tokens}
+            projects={totals.projects}
+          />
+          <DailyTokensChart data={tokenData} />
+          <DailyActivitiesHeatmap activities={activities} totals={totals} />
+        </div>
       </div>
     </div>
   );

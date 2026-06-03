@@ -516,7 +516,7 @@ export function ProvidersPage({
 
   return (
     <div className="flex-1 min-h-0 flex flex-col bg-background">
-      <div className="px-3 pt-3">
+      <div className="px-3 pt-3 pb-3">
         <div className="flex items-center gap-1 rounded-md bg-muted p-3">
           <div className="flex-1 min-w-0">
             <Tabs value={app} onValueChange={(v) => setApp(v as CliApp)}>
@@ -552,8 +552,8 @@ export function ProvidersPage({
           />
         </React.Suspense>
       ) : (
-        <div className="flex-1 min-h-0 overflow-auto px-3 pt-3 pb-0">
-          <div className="flex flex-col gap-2.5">
+        <div className="flex-1 min-h-0 overflow-auto px-3 pb-0">
+          <div className="flex flex-col gap-3">
             {!installed[app] && (
               <div className="flex items-center gap-2 rounded-md outline outline-1 outline-amber-500/30 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 px-3 py-2 text-base leading-relaxed">
                 <AlertTriangle className="size-4 shrink-0" />

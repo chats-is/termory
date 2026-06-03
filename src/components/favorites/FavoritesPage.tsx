@@ -129,7 +129,7 @@ export function FavoritesPage({
       </aside>
 
       {/* ───────────────── Detail column ───────────────── */}
-      <section className="flex flex-col min-h-0 mt-3 mr-3 ml-3 bg-background">
+      <section className="flex flex-col min-h-0 mt-3 ml-3 bg-background">
         {/* Header — same layout / font scale as the Records detail
             pane: text-lg font-semibold title on a row of its own, meta
             row below in text-xs with `·`-separated chips. Actions
