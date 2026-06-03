@@ -335,15 +335,52 @@ export function ProvidersPage({
     setEditingIsNew(false);
   };
 
-  const saveProvider = (next: Provider) => {
-    setProviders((cur) => {
-      const idx = cur.findIndex((p) => p.id === next.id);
-      if (idx === -1) return [...cur, next];
-      const copy = cur.slice();
-      copy[idx] = next;
-      return copy;
-    });
+  const saveProvider = async (next: Provider) => {
+    const prev = providers.find((p) => p.id === next.id);
+    const updated = prev
+      ? providers.map((p) => (p.id === next.id ? next : p))
+      : [...providers, next];
+    setProviders(updated);
     closeEditor();
+
+    // Saving only updates providers.json. If the edited provider is the
+    // one currently live for its CLI, re-activate so the change (model /
+    // base URL / key / options / …) actually reaches the live config —
+    // otherwise the edit silently doesn't take effect until the user
+    // manually re-activates. New providers and edits to an inactive
+    // provider don't touch any live config.
+    const state = activeStates[next.app];
+    const isLive =
+      next.app === "opencode"
+        ? (state?.configuredProviderIds ?? []).includes(next.id)
+        : state?.matchedProviderId === next.id;
+    if (next.kind !== "custom" || !isLive) return;
+
+    // The backend strips the union of all providers' CURRENT option keys
+    // before re-applying — so a key the edit REMOVED is no longer in the
+    // union and would be orphaned in the live config. Fold the previous
+    // version of this provider into the strip set (backend only reads its
+    // option keys; a duplicate id is harmless) so removed keys get
+    // cleaned. The applied provider (`next`) carries only current keys,
+    // so removed ones are stripped and not written back.
+    const stripSet = updated.filter((p) => p.app === next.app);
+    if (prev) stripSet.push(prev);
+    try {
+      await invoke("activate_provider", {
+        provider: next,
+        providersForApp: stripSet
+      });
+      // OpenCode: if it was also the startup default, refresh the
+      // top-level model pointer in case the primary model changed.
+      if (next.app === "opencode" && state?.matchedProviderId === next.id) {
+        await invoke("set_opencode_default_provider", { provider: next });
+      }
+      await refreshActive();
+    } catch (err) {
+      toast.error(
+        `Saved, but couldn't update ${CLI_APP_LABEL[next.app]} live config: ${String(err)}`
+      );
+    }
   };
 
   const deleteProvider = async (id: string) => {
@@ -481,7 +518,7 @@ export function ProvidersPage({
     <div className="flex-1 min-h-0 flex flex-col bg-background">
       <div className="px-3 pt-3">
         <div className="flex items-center gap-1 rounded-md bg-muted p-3">
-          <div className="flex-1 min-w-0 overflow-x-auto">
+          <div className="flex-1 min-w-0">
             <Tabs value={app} onValueChange={(v) => setApp(v as CliApp)}>
               <TabsList className="w-full justify-start gap-1 bg-transparent p-0 [&>button]:flex-none [&>button]:rounded-md [&>button]:px-3">
                 {CLI_APPS.map((id) => (

@@ -11975,7 +11975,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             read,
-            "⏺ **Read**(`src/main.ts` [limit=20, offset=10])\\\n↳ Loaded src/main.ts"
+            // Source order (offset, limit) — matches OpenCode's JS TUI,
+            // which iterates the input object in insertion order. (Before
+            // serde_json's preserve_order this came out alphabetically.)
+            "⏺ **Read**(`src/main.ts` [offset=10, limit=20])\\\n↳ Loaded src/main.ts"
         );
 
         // TodoWrite — todos rendered as a list with status icons.

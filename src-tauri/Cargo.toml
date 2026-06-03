@@ -22,7 +22,10 @@ dirs = "6"
 notify = "8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order: write JSON keys in insertion order (not alphabetical),
+# so opencode.json's `models` keeps the primary `model` first and merges
+# into user configs preserve their existing key order.
+serde_json = { version = "1", features = ["preserve_order"] }
 tauri = { version = "2.9.0", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-log = "2"

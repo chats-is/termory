@@ -129,35 +129,23 @@ export type Provider = {
   baseUrl?: string;
   apiKey?: string;
   model?: string;
-  // Claude-only options nested so the JSON is grouped: when set,
-  // Claude Code's `/model` menu (Sonnet/Opus/Haiku) maps to these model
-  // ids instead of the Anthropic-native ones — matters when the
-  // provider doesn't speak Anthropic model id (e.g. routes Claude
-  // requests to gpt-5).
-  claude?: {
-    haikuModel?: string;
-    sonnetModel?: string;
-    opusModel?: string;
-    // Per-route 1M context declaration — Termory appends `[1m]` to the
-    // corresponding ANTHROPIC_DEFAULT_{SONNET,OPUS}_MODEL value. Haiku
-    // has no 1M variant.
-    sonnet1m?: boolean;
-    opus1m?: boolean;
-  };
-  // OpenCode-only nested options. `providerId` is the catalog id
-  // whose npm package OpenCode should load (anthropic /
-  // openai-compatible / …). `models` are extra model ids surfaced in
-  // OpenCode's picker alongside the primary `model` (top-level).
-  opencode?: {
-    providerId?: string;
-    models?: string[];
-  };
-  // User-defined config overrides merged into the CLI's live config on
-  // activation and stripped on switch/deactivate. `key` is a dot-path
-  // (`env.FOO`, `tools.web_search`); `value` is type-inferred
-  // (bool/number/else string) for JSON/TOML targets, verbatim for
-  // Gemini's `.env`.
-  overrides?: { key: string; value: string }[];
+  // OpenCode-only: the AI SDK npm package OpenCode loads for this
+  // provider — written verbatim to opencode.json `provider.<id>.npm`
+  // (the official config field, e.g. "@ai-sdk/openai-compatible").
+  // Only the OpenCode editor branch sets it and only the OpenCode
+  // backend reads it — inert for other apps.
+  npm?: string;
+  // OpenCode-only: extra models surfaced in OpenCode's picker alongside
+  // the primary top-level `model`. Each is `{ id, name }` → written as
+  // `models: { <id>: { name } }` (name defaults to id when blank). Like
+  // `npm`, OpenCode-only.
+  models?: { id: string; name: string }[];
+  // User-defined provider options ("Advanced settings" in the editor)
+  // merged into the CLI's live config on activation and stripped on
+  // switch/deactivate. `key` is a dot-path (`env.FOO`, `tools.web_search`);
+  // `value` is type-inferred (bool/number/else string) for JSON/TOML
+  // targets, verbatim for Gemini's `.env`.
+  options?: { key: string; value: string }[];
   // Cached favicon as a `data:image/...;base64,...` URL. Populated at
   // create / edit time by `invoke('fetch_provider_favicon')` so the
   // ProviderCard renders the brand mark locally without making a

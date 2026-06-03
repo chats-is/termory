@@ -536,7 +536,9 @@ pub enum ProviderKind {
     Custom,
 }
 
-/// Which env-var name Claude Code looks up the auth string under.
+/// A stored third-party API platform for one CLI — a named snapshot of
+/// `{base_url, api_key, model, …}` the user can activate. One library
+/// per CLI, persisted as an array in `~/.termory/providers.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Provider {
@@ -550,22 +552,31 @@ pub struct Provider {
     pub api_key: String,
     #[serde(default)]
     pub model: String,
-    /// Claude-only options nested under `claude` in the JSON so the
-    /// editor can group them visually and Termory doesn't pollute the
-    /// top-level shape for every app.
+    /// OpenCode-only: the AI SDK npm package OpenCode loads for this
+    /// provider — written verbatim to opencode.json `provider.<id>.npm`
+    /// (the official config field, e.g. "@ai-sdk/openai-compatible").
+    /// Empty/None → defaults to "@ai-sdk/openai-compatible".
+    /// Read ONLY by `activate_opencode`; `activate()` dispatches by
+    /// `app`, so for a non-OpenCode provider this is inert storage and
+    /// is never consulted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude: Option<ClaudeOptions>,
-    /// OpenCode-only options nested under `opencode`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub opencode: Option<OpencodeOptions>,
-    /// User-defined config overrides merged into the CLI's live config
-    /// on activation and stripped on switch/deactivate. `key` is a
-    /// dot-path (`env.FOO`, `tools.web.enabled`); `value` is type-
-    /// inferred (`true`/`false` → bool, numeric → number, else string)
-    /// for JSON/TOML targets and kept verbatim for Gemini's `.env`.
-    /// See `apply_overrides` / `override_keys`.
+    pub npm: Option<String>,
+    /// OpenCode-only: extra models surfaced in OpenCode's picker
+    /// alongside the primary top-level `model`. Each is written as a
+    /// `models: { <id>: { name: <name> } }` entry (name defaults to the
+    /// id when blank). Like `npm`, read ONLY by `activate_opencode` —
+    /// inert for every other app.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub overrides: Vec<ProviderOverride>,
+    pub models: Vec<ProviderModel>,
+    /// User-defined provider options ("Advanced settings" in the editor)
+    /// merged into the CLI's live config on activation and stripped on
+    /// switch/deactivate. `key` is a dot-path (`env.FOO`,
+    /// `tools.web.enabled`); `value` is type-inferred (`true`/`false` →
+    /// bool, numeric → number, else string) for JSON/TOML targets and
+    /// kept verbatim for Gemini's `.env`. Serialized as `options`.
+    /// See `apply_*_overrides` / `override_keys`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<ProviderOption>,
     /// Cached favicon as a `data:image/...;base64,...` URL. Populated
     /// at create / edit time via `fetch_favicon` so the ProviderCard
     /// can render the brand mark locally without making a network
@@ -576,92 +587,40 @@ pub struct Provider {
     pub favicon: Option<String>,
 }
 
-/// Claude Code's `/model` menu reads three env vars
-/// (ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL — `modelOptions.ts:167`)
-/// to route per-size picks at the upstream provider. Empty fields fall
-/// back to the provider's top-level `model`.
+/// One user-defined provider option ("Advanced settings" entry). `key`
+/// is a dot-path into the CLI's config (`env.FOO`, `tools.web.enabled`);
+/// `value` is the raw string the user typed (type-inferred per target
+/// format at write time).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaudeOptions {
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub haiku_model: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub sonnet_model: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub opus_model: String,
-    /// Declare the 1M context window per route via the `[1m]` model-id
-    /// suffix on ANTHROPIC_DEFAULT_{SONNET,OPUS}_MODEL (cc-switch's
-    /// per-route `supports1m`). Haiku has no 1M variant, so there's no
-    /// Haiku flag.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub sonnet_1m: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub opus_1m: bool,
-}
-
-/// OpenCode catalog binding. `provider_id` selects which AI SDK npm
-/// package OpenCode loads — the dropdown shows catalog ids
-/// (`anthropic` / `openai` / `openai-compatible` / …) which map to
-/// `@ai-sdk/<id>` npm packages in `opencode_npm_for_catalog`.
-/// Empty/missing → defaults to `openai-compatible`. `models` are
-/// extra model ids surfaced in OpenCode's picker alongside the
-/// provider's primary `model` (top-level Provider field).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct OpencodeOptions {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_id: Option<String>,
-    /// Extra model ids to expose in OpenCode's model picker alongside
-    /// the top-level `model` field (which acts as the primary/default).
-    /// OpenCode supports multiple models per provider — they all get
-    /// written as `models: { <id>: { name: "<id>" } }` entries.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
-}
-
-/// One user-defined config override. `key` is a dot-path into the
-/// CLI's config (`env.FOO`, `tools.web.enabled`); `value` is the raw
-/// string the user typed (type-inferred per target format at write
-/// time).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ProviderOverride {
+pub struct ProviderOption {
     pub key: String,
     pub value: String,
 }
 
+/// One extra OpenCode model: `id` is the model id (the key in OpenCode's
+/// `models` map), `name` its display label. Blank `name` falls back to
+/// `id` at write time.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProviderModel {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
 impl Provider {
-    fn claude_haiku_model(&self) -> &str {
-        self.claude
-            .as_ref()
-            .map(|c| c.haiku_model.as_str())
-            .unwrap_or("")
-    }
-    fn claude_sonnet_model(&self) -> &str {
-        self.claude
-            .as_ref()
-            .map(|c| c.sonnet_model.as_str())
-            .unwrap_or("")
-    }
-    fn claude_opus_model(&self) -> &str {
-        self.claude
-            .as_ref()
-            .map(|c| c.opus_model.as_str())
-            .unwrap_or("")
-    }
-    fn opencode_catalog_id_raw(&self) -> Option<&str> {
-        self.opencode
-            .as_ref()
-            .and_then(|o| o.provider_id.as_deref())
-    }
-    fn opencode_extra_models(&self) -> &[String] {
-        self.opencode
-            .as_ref()
-            .map(|o| o.models.as_slice())
-            .unwrap_or(&[])
+    /// The npm package OpenCode should load for this provider — the
+    /// official `provider.<id>.npm` field. Empty/None falls back to the
+    /// OpenAI-compatible adapter (covers most third-party gateways).
+    fn opencode_npm(&self) -> &str {
+        self.npm
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(OPENCODE_DEFAULT_NPM)
     }
 }
 
-const OPENCODE_DEFAULT_PROVIDER_ID: &str = "openai-compatible";
+const OPENCODE_DEFAULT_NPM: &str = "@ai-sdk/openai-compatible";
 
 /// Reverse-derived active state for a single CLI.
 #[derive(Debug, Clone, Serialize)]
@@ -806,16 +765,6 @@ fn claude_settings_path() -> Result<PathBuf, Box<dyn Error>> {
     Ok(home()?.join(".claude").join("settings.json"))
 }
 
-/// Append Claude Code's `[1m]` 1M-context suffix to a model id when
-/// `on` is set — skips empty ids and ones already suffixed.
-fn with_claude_1m(model: &str, on: bool) -> String {
-    if on && !model.is_empty() && !model.ends_with("[1m]") {
-        format!("{model}[1m]")
-    } else {
-        model.to_string()
-    }
-}
-
 fn activate_claude(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>> {
     let path = claude_settings_path()?;
     let mut root = load_json_object(&path)?;
@@ -850,49 +799,13 @@ fn activate_claude(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>>
     } else {
         env.remove("ANTHROPIC_MODEL");
     }
-    // Per-size routing: when the user picks Haiku / Sonnet / Opus
-    // from Claude Code's `/model` menu in 3P mode, Claude reads
-    // these env vars to decide the actual model id to send (see
-    // `modelOptions.ts:77-89, 109, 167` — `is3P && customXxxModel`
-    // branch). Empty string in the provider means "don't override
-    // this size"; we strip the corresponding env var so Claude falls
-    // back to its default Anthropic-side resolution.
+    // Per-size routing (Haiku / Sonnet / Opus picks in Claude Code's
+    // `/model` menu) is no longer a dedicated field — users express it
+    // through overrides as `env.ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL`
+    // (those keys are NOT in `override_key_is_managed`, so they pass
+    // through). 1M context is declared by appending `[1m]` directly to
+    // the override value (e.g. `claude-sonnet-4-6[1m]`).
     //
-    // 1M context is declared per-route via the `[1m]` model-id suffix
-    // (cc-switch `claude_desktop_config.rs` ONE_M_CONTEXT_MARKER) on
-    // the ANTHROPIC_DEFAULT_{SONNET,OPUS}_MODEL values. Haiku has no
-    // 1M variant, so it never gets the suffix.
-    let (sonnet_1m, opus_1m) = p
-        .claude
-        .as_ref()
-        .map(|c| (c.sonnet_1m, c.opus_1m))
-        .unwrap_or((false, false));
-    for (env_key, val, one_m) in [
-        (
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-            p.claude_haiku_model(),
-            false,
-        ),
-        (
-            "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            p.claude_sonnet_model(),
-            sonnet_1m,
-        ),
-        (
-            "ANTHROPIC_DEFAULT_OPUS_MODEL",
-            p.claude_opus_model(),
-            opus_1m,
-        ),
-    ] {
-        if val.is_empty() {
-            env.remove(env_key);
-        } else {
-            env.insert(
-                env_key.into(),
-                JsonValue::String(with_claude_1m(val, one_m)),
-            );
-        }
-    }
     // Clear every provider's override keys, then apply this one's
     // (env.* kept as strings — Claude's `env` is Record<string,string>).
     strip_json_overrides(&mut root, &override_keys(all, CliApp::Claude));
@@ -1365,7 +1278,7 @@ fn activate_gemini(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>>
     for k in override_keys(all, CliApp::Gemini) {
         map.remove(&k);
     }
-    for o in &p.overrides {
+    for o in &p.options {
         let key = o.key.trim();
         if !key.is_empty() && !override_key_is_managed(CliApp::Gemini, key) {
             map.insert(key.to_string(), o.value.clone());
@@ -1478,40 +1391,14 @@ fn opencode_config_path() -> Result<PathBuf, Box<dyn Error>> {
         .join("opencode.json"))
 }
 
-fn opencode_catalog_id(p: &Provider) -> String {
-    p.opencode_catalog_id_raw()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(OPENCODE_DEFAULT_PROVIDER_ID)
-        .to_string()
-}
-
-/// Stable, per-Termory-provider id used in OpenCode's auth.json and
-/// opencode.json. Termory writes its providers under this id so they
-/// don't share the catalog id namespace with the user's `/connect`
-/// entries.
+/// Stable, per-Termory-provider id used as the key in OpenCode's
+/// opencode.json `provider` map. Termory writes its providers under this
+/// id so they don't collide with the user's `/connect` entries.
 fn opencode_termory_id(p: &Provider) -> String {
     format!("termory-{}", p.id)
 }
 
-/// Map the user-facing catalog id (anthropic / openai-compatible /
-/// google / …) to the npm package name OpenCode loads for that
-/// provider. This is what goes into opencode.json `provider.<id>.npm`
-/// so OpenCode knows which AI SDK to instantiate.
-fn opencode_npm_for_catalog(catalog_id: &str) -> &'static str {
-    match catalog_id {
-        "anthropic" => "@ai-sdk/anthropic",
-        "openai" => "@ai-sdk/openai",
-        "openai-compatible" => "@ai-sdk/openai-compatible",
-        "google" => "@ai-sdk/google",
-        "azure" => "@ai-sdk/azure",
-        "amazon-bedrock" => "@ai-sdk/amazon-bedrock",
-        "google-vertex" => "@ai-sdk/google-vertex",
-        _ => "@ai-sdk/openai-compatible",
-    }
-}
-
-fn activate_opencode(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>> {
+fn activate_opencode(p: &Provider, _all: &[Provider]) -> Result<(), Box<dyn Error>> {
     // Primary model is required — without an entry in `models` map
     // OpenCode's picker can't surface this provider. API key is
     // optional (OpenCode supports env-var references and some
@@ -1522,8 +1409,7 @@ fn activate_opencode(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error
     }
 
     let termory_id = opencode_termory_id(p);
-    let catalog = opencode_catalog_id(p);
-    let npm = opencode_npm_for_catalog(&catalog);
+    let npm = p.opencode_npm();
 
     // Everything lives in opencode.json under provider.<termory-id>:
     //   npm, name, options.{baseURL, apiKey}, models.{<id>: {name}}
@@ -1547,39 +1433,52 @@ fn activate_opencode(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error
     if !p.api_key.trim().is_empty() {
         opts.insert("apiKey".into(), JsonValue::String(p.api_key.clone()));
     }
+    // User "Advanced settings" options live INSIDE this provider's
+    // `options` bag (OpenCode's open-ended AI-SDK options object). This
+    // scopes them to the provider automatically: `block.clear()` above
+    // rebuilds them on every enable (so removed keys vanish with no
+    // separate strip), deleting the slot drops them, and sibling
+    // providers' options are never touched. Keys are relative to
+    // `options`; baseURL / apiKey are managed by the dedicated fields.
+    for o in &p.options {
+        let key = o.key.trim();
+        if key.is_empty() || override_key_is_managed(CliApp::Opencode, key) {
+            continue;
+        }
+        json_set_path(&mut opts, key, infer_json_value(&o.value));
+    }
     if !opts.is_empty() {
         block.insert("options".into(), JsonValue::Object(opts));
     }
 
-    // models map: primary first, then any extras the user added in the
-    // editor. Dedup so the primary isn't repeated. cc-switch writes
-    // each model with `{name: "<id>"}` so OpenCode's picker has a label.
+    // models map: primary first (display name = its id), then the extra
+    // models the user added (id + name; blank name falls back to id).
+    // Keyed by id, so a duplicate id just overrides — including a list
+    // entry that re-declares the primary to give it a custom name.
+    // cc-switch writes each as `{name: "<label>"}` so the picker has a
+    // label.
     let mut models = serde_json::Map::new();
-    let mut seen = std::collections::HashSet::new();
-    for m in std::iter::once(p.model.trim()).chain(
-        p.opencode_extra_models()
-            .iter()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty()),
-    ) {
-        if !seen.insert(m.to_string()) {
-            continue;
+    let put = |models: &mut serde_json::Map<String, JsonValue>, id: &str, name: &str| {
+        if id.is_empty() {
+            return;
         }
+        let label = if name.is_empty() { id } else { name };
         let mut entry = serde_json::Map::new();
-        entry.insert("name".into(), JsonValue::String(m.to_string()));
-        models.insert(m.to_string(), JsonValue::Object(entry));
+        entry.insert("name".into(), JsonValue::String(label.to_string()));
+        models.insert(id.to_string(), JsonValue::Object(entry));
+    };
+    put(&mut models, p.model.trim(), "");
+    for m in &p.models {
+        put(&mut models, m.id.trim(), m.name.trim());
     }
     block.insert("models".into(), JsonValue::Object(models));
 
-    // NOTE: Termory does NOT write the top-level `model` field on
-    // activate. Activate only registers this provider's slot.
-    // Setting it as OpenCode's startup default is a separate explicit
-    // action via `set_opencode_default`. Multi-provider coexistence
-    // is intentional — OpenCode picks at runtime via `/model`.
-    //
-    // Clear every provider's override keys, then apply this one's.
-    strip_json_overrides(&mut root, &override_keys(all, CliApp::Opencode));
-    apply_json_overrides(&mut root, p, CliApp::Opencode);
+    // NOTE: Termory does NOT write the top-level `model` field here.
+    // Enabling only registers this provider's slot; promoting it to the
+    // OpenCode-startup default is a separate explicit action via
+    // `set_opencode_default`. Multiple enabled providers coexist —
+    // OpenCode picks at runtime via `/model`. Options need no top-level
+    // strip/apply anymore: they're rebuilt inside the block above.
     write_json_object(&path, &root)
 }
 
@@ -1672,11 +1571,9 @@ fn deactivate_opencode(providers: &[Provider]) -> Result<(), Box<dyn Error>> {
     }
     let mut root = load_json_object(&config_path)?;
 
-    // Strip every provider's override keys.
-    let keys = override_keys(providers, CliApp::Opencode);
-    let had_overrides = !keys.is_empty();
-    strip_json_overrides(&mut root, &keys);
-
+    // No option-stripping here: options live inside each provider's block
+    // (`provider.<id>.options`), and enabled slots stay on "Set Official"
+    // — so their options stay too. We only clear the startup-default.
     let user_termory_ids: std::collections::HashSet<String> = providers
         .iter()
         .filter(|p| p.app == CliApp::Opencode && p.kind == ProviderKind::Custom)
@@ -1695,8 +1592,8 @@ fn deactivate_opencode(providers: &[Provider]) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // Only touch the file when something Termory-owned changed.
-    if had_overrides || model_removed {
+    // Only touch the file when the default actually pointed at us.
+    if model_removed {
         if root.is_empty() {
             let _ = fs::remove_file(&config_path);
         } else {
@@ -2214,7 +2111,7 @@ fn ensure_object_at<'a>(
 }
 
 // ===================================================================
-// User-defined config overrides (Provider.overrides)
+// User-defined config overrides (Provider.options / "options")
 //
 // A provider can carry extra `{ key, value }` pairs that Termory merges
 // into the CLI's live config on activation and strips on switch /
@@ -2241,15 +2138,15 @@ fn dot_path(key: &str) -> Vec<&str> {
 fn override_key_is_managed(app: CliApp, key: &str) -> bool {
     let k = key.trim();
     match app {
+        // The DEFAULT_{HAIKU,SONNET,OPUS}_MODEL routing keys are
+        // intentionally NOT managed — users set per-size routing through
+        // overrides (with an optional `[1m]` suffix for 1M context).
         CliApp::Claude => matches!(
             k,
             "env.ANTHROPIC_BASE_URL"
                 | "env.ANTHROPIC_AUTH_TOKEN"
                 | "env.ANTHROPIC_API_KEY"
                 | "env.ANTHROPIC_MODEL"
-                | "env.ANTHROPIC_DEFAULT_HAIKU_MODEL"
-                | "env.ANTHROPIC_DEFAULT_SONNET_MODEL"
-                | "env.ANTHROPIC_DEFAULT_OPUS_MODEL"
         ),
         // Codex: top-level model_provider/model + the whole
         // model_providers.* table (Termory's [model_providers.termory]).
@@ -2260,9 +2157,11 @@ fn override_key_is_managed(app: CliApp, key: &str) -> bool {
                 "GOOGLE_GEMINI_BASE_URL" | "GEMINI_API_KEY" | "GEMINI_MODEL"
             )
         }
-        // OpenCode: top-level model + the whole provider.* tree
-        // (Termory's provider.<termory-id> slot).
-        CliApp::Opencode => k == "model" || k.starts_with("provider."),
+        // OpenCode options are written INSIDE the provider's own block
+        // under `provider.<id>.options`, so keys are relative to that
+        // `options` bag. The two keys Termory fills from dedicated fields
+        // (baseURL / apiKey) are managed and must not be clobbered.
+        CliApp::Opencode => k == "baseURL" || k == "apiKey",
     }
 }
 
@@ -2272,7 +2171,7 @@ fn override_key_is_managed(app: CliApp, key: &str) -> bool {
 fn override_keys(providers: &[Provider], app: CliApp) -> Vec<String> {
     let mut keys: Vec<String> = Vec::new();
     for p in providers {
-        for o in &p.overrides {
+        for o in &p.options {
             let k = o.key.trim();
             if k.is_empty() || override_key_is_managed(app, k) {
                 continue;
@@ -2346,25 +2245,13 @@ fn json_remove_path_inner(map: &mut Map<String, JsonValue>, segs: &[&str]) {
     }
 }
 
-/// Apply a provider's overrides into a JSON config root (Claude
-/// settings.json, opencode.json).
-fn apply_json_overrides(root: &mut Map<String, JsonValue>, p: &Provider, app: CliApp) {
-    for o in &p.overrides {
-        let key = o.key.trim();
-        if key.is_empty() || override_key_is_managed(app, key) {
-            continue;
-        }
-        json_set_path(root, key, infer_json_value(&o.value));
-    }
-}
-
 /// Claude variant: `settings.json`'s `env` object is
 /// `Record<string, string>`, so override values under `env.*` are kept
 /// as strings (never type-inferred to bool/number); everything else is
 /// inferred like normal JSON. Managed keys (base url / token / model /
 /// routing) are skipped — the dedicated fields own them.
 fn apply_claude_overrides(root: &mut Map<String, JsonValue>, p: &Provider) {
-    for o in &p.overrides {
+    for o in &p.options {
         let key = o.key.trim();
         if key.is_empty() || override_key_is_managed(CliApp::Claude, key) {
             continue;
@@ -2407,7 +2294,7 @@ fn infer_toml_item(raw: &str) -> Item {
 
 /// Apply a provider's overrides into a TOML document (Codex config.toml).
 fn apply_toml_overrides(doc: &mut DocumentMut, p: &Provider) {
-    for o in &p.overrides {
+    for o in &p.options {
         if override_key_is_managed(CliApp::Codex, o.key.trim()) {
             continue;
         }
@@ -2766,10 +2653,10 @@ mod tests {
             base_url: base.into(),
             api_key: key.into(),
             model: "test-model".into(),
-            claude: None,
-            opencode: None,
+            npm: None,
+            models: Vec::new(),
             favicon: None,
-            overrides: Vec::new(),
+            options: Vec::new(),
         }
     }
 
@@ -2784,31 +2671,31 @@ mod tests {
         fs::create_dir_all(tmp.join(".claude")).unwrap();
 
         let mut a = make_provider(CliApp::Claude, "A", "https://a.x.io", "sk-a");
-        a.overrides = vec![
-            ProviderOverride {
+        a.options = vec![
+            ProviderOption {
                 key: "env.FOO".into(),
                 value: "bar".into(),
             },
-            ProviderOverride {
+            ProviderOption {
                 key: "permissions.defaultMode".into(),
                 value: "acceptEdits".into(),
             },
             // Managed key — MUST be ignored, never clobbers the real
             // baseUrl from the dedicated field.
-            ProviderOverride {
+            ProviderOption {
                 key: "env.ANTHROPIC_BASE_URL".into(),
                 value: "https://evil.example".into(),
             },
         ];
         let mut b = make_provider(CliApp::Claude, "B", "https://b.x.io", "sk-b");
-        b.overrides = vec![
+        b.options = vec![
             // Looks like a bool, but env values must stay strings.
-            ProviderOverride {
+            ProviderOption {
                 key: "env.FLAG".into(),
                 value: "true".into(),
             },
             // Non-env key → type-inferred to a number.
-            ProviderOverride {
+            ProviderOption {
                 key: "cleanupPeriodDays".into(),
                 value: "30".into(),
             },
@@ -2879,12 +2766,12 @@ mod tests {
         fs::create_dir_all(tmp.join(".codex")).unwrap();
 
         let mut p = make_provider(CliApp::Codex, "C", "https://c.x.io/v1", "sk-c");
-        p.overrides = vec![
-            ProviderOverride {
+        p.options = vec![
+            ProviderOption {
                 key: "model_reasoning_effort".into(),
                 value: "high".into(),
             },
-            ProviderOverride {
+            ProviderOption {
                 key: "tools.web_search".into(),
                 value: "true".into(),
             },
@@ -3113,12 +3000,23 @@ mod tests {
             "sk-multi",
         );
         p.model = "gpt-5".into();
-        p.claude = Some(ClaudeOptions {
-            sonnet_model: "gpt-5".into(),
-            opus_model: "claude-opus-4-7".into(),
-            haiku_model: "deepseek-chat".into(),
-            ..Default::default()
-        });
+        // Per-size routing now flows through overrides — the
+        // DEFAULT_{HAIKU,SONNET,OPUS}_MODEL keys are unmanaged, so they
+        // pass straight through into env.
+        p.options = vec![
+            ProviderOption {
+                key: "env.ANTHROPIC_DEFAULT_SONNET_MODEL".into(),
+                value: "gpt-5".into(),
+            },
+            ProviderOption {
+                key: "env.ANTHROPIC_DEFAULT_OPUS_MODEL".into(),
+                value: "claude-opus-4-7".into(),
+            },
+            ProviderOption {
+                key: "env.ANTHROPIC_DEFAULT_HAIKU_MODEL".into(),
+                value: "deepseek-chat".into(),
+            },
+        ];
         activate(&p, &[p.clone()]).unwrap();
 
         let after: JsonValue =
@@ -3168,93 +3066,55 @@ mod tests {
     }
 
     #[test]
-    fn claude_activate_appends_1m_suffix_per_route_only() {
-        // Declaring 1M on Sonnet (but not Opus) must append `[1m]` to
-        // ANTHROPIC_DEFAULT_SONNET_MODEL only. Opus stays bare, Haiku
-        // never gets it (no 1M variant), and the main ANTHROPIC_MODEL
-        // is untouched.
+    fn claude_switch_strips_other_providers_sub_model_overrides() {
+        // Provider A routes Opus to a custom model via an override.
+        // Switching to Provider B (which declares no such override) must
+        // strip ANTHROPIC_DEFAULT_OPUS_MODEL — the override union cleans
+        // up keys any known provider manages, even when the activated
+        // provider doesn't set them.
         let _g = HOME_LOCK.lock().unwrap();
-        let tmp = tempdir("claude-1m");
-        let _home = HomeOverride::new(&tmp);
-
-        let mut p = make_provider(CliApp::Claude, "ctx-1m", "https://api.x.io", "sk-1m");
-        p.model = "claude-sonnet-4-5".into();
-        p.claude = Some(ClaudeOptions {
-            sonnet_model: "claude-sonnet-4-5".into(),
-            opus_model: "claude-opus-4-7".into(),
-            haiku_model: "claude-haiku-4-5".into(),
-            sonnet_1m: true,
-            opus_1m: false,
-        });
-        activate(&p, &[p.clone()]).unwrap();
-
-        let after: JsonValue =
-            serde_json::from_str(&fs::read_to_string(tmp.join(".claude/settings.json")).unwrap())
-                .unwrap();
-        let env_str = |k: &str| {
-            after
-                .pointer(&format!("/env/{k}"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        };
-        assert_eq!(
-            env_str("ANTHROPIC_DEFAULT_SONNET_MODEL").as_deref(),
-            Some("claude-sonnet-4-5[1m]")
-        );
-        assert_eq!(
-            env_str("ANTHROPIC_DEFAULT_OPUS_MODEL").as_deref(),
-            Some("claude-opus-4-7")
-        );
-        assert_eq!(
-            env_str("ANTHROPIC_DEFAULT_HAIKU_MODEL").as_deref(),
-            Some("claude-haiku-4-5")
-        );
-        // Main model never gets the suffix.
-        assert_eq!(
-            env_str("ANTHROPIC_MODEL").as_deref(),
-            Some("claude-sonnet-4-5")
-        );
-    }
-
-    #[test]
-    fn claude_activate_skips_empty_sub_models_and_strips_stale_ones() {
-        // User clears the Opus override on an existing provider and
-        // saves. We must remove ANTHROPIC_DEFAULT_OPUS_MODEL from
-        // settings.json — leaving a stale env var would silently
-        // override Claude's default Opus next session.
-        let _g = HOME_LOCK.lock().unwrap();
-        let tmp = tempdir("claude-clear-sub-model");
+        let tmp = tempdir("claude-switch-strip");
         let _home = HomeOverride::new(&tmp);
         fs::create_dir_all(tmp.join(".claude")).unwrap();
-        fs::write(
-            tmp.join(".claude/settings.json"),
-            r#"{
-              "env": {
-                "ANTHROPIC_BASE_URL": "https://api.x.io",
-                "ANTHROPIC_AUTH_TOKEN": "sk-stale",
-                "ANTHROPIC_DEFAULT_OPUS_MODEL": "stale-opus-route"
-              }
-            }"#,
-        )
-        .unwrap();
 
-        let mut p = make_provider(CliApp::Claude, "clear-opus", "https://api.x.io", "sk-stale");
-        p.model = "gpt-5".into();
-        // claude_opus_model stays empty; we expect the stale value to be removed.
-        activate(&p, &[p.clone()]).unwrap();
+        let mut a = make_provider(CliApp::Claude, "route-opus", "https://a.example", "sk-a");
+        a.model = "gpt-5".into();
+        a.options = vec![ProviderOption {
+            key: "env.ANTHROPIC_DEFAULT_OPUS_MODEL".into(),
+            value: "claude-opus-4-7".into(),
+        }];
+        let mut b = make_provider(CliApp::Claude, "plain", "https://b.example", "sk-b");
+        b.model = "gpt-5-mini".into();
+        let all = vec![a.clone(), b.clone()];
 
-        let after: JsonValue =
+        activate(&a, &all).unwrap();
+        let after_a: JsonValue =
+            serde_json::from_str(&fs::read_to_string(tmp.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            after_a
+                .pointer("/env/ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .and_then(|v| v.as_str()),
+            Some("claude-opus-4-7")
+        );
+
+        // Switch to B — its base_url/token replace A's, and A's opus
+        // override is stripped via the union.
+        activate(&b, &all).unwrap();
+        let after_b: JsonValue =
             serde_json::from_str(&fs::read_to_string(tmp.join(".claude/settings.json")).unwrap())
                 .unwrap();
         assert!(
-            after.pointer("/env/ANTHROPIC_DEFAULT_OPUS_MODEL").is_none(),
-            "empty claude_opus_model must strip the stale env var"
+            after_b
+                .pointer("/env/ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .is_none(),
+            "switching to a provider without the opus override must strip it"
         );
         assert_eq!(
-            after
-                .pointer("/env/ANTHROPIC_MODEL")
+            after_b
+                .pointer("/env/ANTHROPIC_BASE_URL")
                 .and_then(|v| v.as_str()),
-            Some("gpt-5")
+            Some("https://b.example")
         );
     }
 
@@ -3718,10 +3578,17 @@ base_url = "https://x.io/v1"
             "sk-packy",
         );
         p.model = "claude-opus-4-7".into();
-        p.opencode = Some(OpencodeOptions {
-            provider_id: Some("anthropic".into()),
-            models: vec!["claude-sonnet-4-5".into(), "claude-haiku-4-5".into()],
-        });
+        p.npm = Some("@ai-sdk/anthropic".into());
+        p.models = vec![
+            ProviderModel {
+                id: "claude-sonnet-4-5".into(),
+                ..Default::default()
+            },
+            ProviderModel {
+                id: "claude-haiku-4-5".into(),
+                ..Default::default()
+            },
+        ];
         activate(&p, &[p.clone()]).unwrap();
 
         // auth.json must NOT be created — that file is reserved for /connect.
@@ -3768,6 +3635,16 @@ base_url = "https://x.io/v1"
                 Some(m)
             );
         }
+        // The primary model is written FIRST in the models map (relies on
+        // serde_json's preserve_order feature keeping insertion order).
+        assert_eq!(
+            config
+                .pointer(&format!("{block_ptr}/models"))
+                .and_then(|v| v.as_object())
+                .and_then(|m| m.keys().next())
+                .map(String::as_str),
+            Some("claude-opus-4-7")
+        );
         // Activate alone does NOT set as default — top-level `model`
         // is untouched.
         assert!(config.get("model").is_none());
@@ -3794,18 +3671,24 @@ base_url = "https://x.io/v1"
     }
 
     #[test]
-    fn opencode_activate_dedupes_primary_in_extra_models() {
+    fn opencode_activate_dedupes_primary_in_models() {
         let _g = HOME_LOCK.lock().unwrap();
         let tmp = tempdir("opencode-dedup");
         let _home = HomeOverride::new(&tmp);
 
         let mut p = make_provider(CliApp::Opencode, "dedup", "", "sk-dedup");
         p.model = "gpt-5".into();
-        p.opencode = Some(OpencodeOptions {
-            provider_id: None,
-            // Primary repeated + an actual extra
-            models: vec!["gpt-5".into(), "gpt-5-mini".into()],
-        });
+        // Primary repeated + an actual extra (with a custom display name).
+        p.models = vec![
+            ProviderModel {
+                id: "gpt-5".into(),
+                ..Default::default()
+            },
+            ProviderModel {
+                id: "gpt-5-mini".into(),
+                name: "GPT-5 Mini".into(),
+            },
+        ];
         activate(&p, &[p.clone()]).unwrap();
 
         let termory_id = format!("termory-{}", p.id);
@@ -3820,6 +3703,130 @@ base_url = "https://x.io/v1"
         assert_eq!(models.len(), 2);
         assert!(models.contains_key("gpt-5"));
         assert!(models.contains_key("gpt-5-mini"));
+        // Primary's name defaults to its id; the extra uses its label.
+        assert_eq!(
+            config
+                .pointer(&format!("/provider/{termory_id}/models/gpt-5/name"))
+                .and_then(|v| v.as_str()),
+            Some("gpt-5")
+        );
+        assert_eq!(
+            config
+                .pointer(&format!("/provider/{termory_id}/models/gpt-5-mini/name"))
+                .and_then(|v| v.as_str()),
+            Some("GPT-5 Mini")
+        );
+    }
+
+    #[test]
+    fn opencode_options_nest_under_provider_block_and_skip_managed() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let tmp = tempdir("opencode-options");
+        let _home = HomeOverride::new(&tmp);
+
+        let mut p = make_provider(CliApp::Opencode, "p", "https://api.x.io", "sk-p");
+        p.model = "m1".into();
+        p.options = vec![
+            // → number, nested inside the provider's options bag
+            ProviderOption {
+                key: "timeout".into(),
+                value: "600000".into(),
+            },
+            // → nested string under options.headers
+            ProviderOption {
+                key: "headers.X-Token".into(),
+                value: "abc".into(),
+            },
+            // managed (set by the dedicated API key field) → ignored
+            ProviderOption {
+                key: "apiKey".into(),
+                value: "evil".into(),
+            },
+        ];
+        let read = || -> JsonValue {
+            serde_json::from_str(
+                &fs::read_to_string(tmp.join(".config/opencode/opencode.json")).unwrap(),
+            )
+            .unwrap()
+        };
+        activate(&p, &[p.clone()]).unwrap();
+        let id = format!("termory-{}", p.id);
+        let cfg = read();
+        assert_eq!(
+            cfg.pointer(&format!("/provider/{id}/options/timeout"))
+                .and_then(|v| v.as_i64()),
+            Some(600000)
+        );
+        assert_eq!(
+            cfg.pointer(&format!("/provider/{id}/options/headers/X-Token"))
+                .and_then(|v| v.as_str()),
+            Some("abc")
+        );
+        // apiKey stays the dedicated field's value, not the override.
+        assert_eq!(
+            cfg.pointer(&format!("/provider/{id}/options/apiKey"))
+                .and_then(|v| v.as_str()),
+            Some("sk-p")
+        );
+        // Nothing leaked to the top level.
+        assert!(cfg.get("timeout").is_none());
+
+        // Removing the options and re-enabling drops them (block rebuilt),
+        // while baseURL/apiKey from the dedicated fields survive.
+        p.options = vec![];
+        activate(&p, &[p.clone()]).unwrap();
+        let cfg2 = read();
+        assert!(cfg2
+            .pointer(&format!("/provider/{id}/options/timeout"))
+            .is_none());
+        assert_eq!(
+            cfg2.pointer(&format!("/provider/{id}/options/baseURL"))
+                .and_then(|v| v.as_str()),
+            Some("https://api.x.io")
+        );
+    }
+
+    #[test]
+    fn opencode_enabling_one_provider_keeps_siblings_options() {
+        // Core multi-slot guarantee: enabling B must not wipe A's options,
+        // because each provider's options live inside its own block.
+        let _g = HOME_LOCK.lock().unwrap();
+        let tmp = tempdir("opencode-sibling-options");
+        let _home = HomeOverride::new(&tmp);
+
+        let mut a = make_provider(CliApp::Opencode, "a", "https://a.io", "sk-a");
+        a.id = "aaa".into();
+        a.model = "ma".into();
+        a.options = vec![ProviderOption {
+            key: "timeout".into(),
+            value: "111".into(),
+        }];
+        let mut b = make_provider(CliApp::Opencode, "b", "https://b.io", "sk-b");
+        b.id = "bbb".into();
+        b.model = "mb".into();
+        b.options = vec![ProviderOption {
+            key: "timeout".into(),
+            value: "222".into(),
+        }];
+        let all = vec![a.clone(), b.clone()];
+        activate(&a, &all).unwrap();
+        activate(&b, &all).unwrap();
+
+        let cfg: JsonValue = serde_json::from_str(
+            &fs::read_to_string(tmp.join(".config/opencode/opencode.json")).unwrap(),
+        )
+        .unwrap();
+        // A's option survived B being enabled.
+        assert_eq!(
+            cfg.pointer("/provider/termory-aaa/options/timeout")
+                .and_then(|v| v.as_i64()),
+            Some(111)
+        );
+        assert_eq!(
+            cfg.pointer("/provider/termory-bbb/options/timeout")
+                .and_then(|v| v.as_i64()),
+            Some(222)
+        );
     }
 
     #[test]
@@ -3929,10 +3936,7 @@ base_url = "https://x.io/v1"
 
         let mut p = make_provider(CliApp::Opencode, "termory-one", "", "sk-termory");
         p.model = "claude-opus-4-7".into();
-        p.opencode = Some(OpencodeOptions {
-            provider_id: Some("anthropic".into()),
-            models: vec![],
-        });
+        p.npm = Some("@ai-sdk/anthropic".into());
         activate(&p, &[p.clone()]).unwrap();
 
         let config: JsonValue = serde_json::from_str(
@@ -3976,10 +3980,7 @@ base_url = "https://x.io/v1"
             "sk-termory",
         );
         p.model = "model-a".into();
-        p.opencode = Some(OpencodeOptions {
-            provider_id: Some("anthropic".into()),
-            models: vec![],
-        });
+        p.npm = Some("@ai-sdk/anthropic".into());
         activate(&p, &[p.clone()]).unwrap();
         set_opencode_default(&p).unwrap();
 
@@ -4035,10 +4036,6 @@ base_url = "https://x.io/v1"
 
         let mut p = make_provider(CliApp::Opencode, "t", "", "sk-t");
         p.model = "m".into();
-        p.opencode = Some(OpencodeOptions {
-            provider_id: None,
-            models: vec![],
-        });
         activate(&p, &[p.clone()]).unwrap();
 
         // User points top-level model at a non-Termory provider.
@@ -4109,10 +4106,7 @@ base_url = "https://x.io/v1"
         let _home = HomeOverride::new(&tmp);
         let mut p = make_provider(CliApp::Opencode, "no-key", "https://example.com", "");
         p.model = "gpt-5".into();
-        p.opencode = Some(OpencodeOptions {
-            provider_id: Some("openai-compatible".into()),
-            models: vec![],
-        });
+        p.npm = Some("@ai-sdk/openai-compatible".into());
         activate(&p, &[p.clone()]).unwrap();
 
         let termory_id = format!("termory-{}", p.id);

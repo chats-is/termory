@@ -32,9 +32,28 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select";
-import { CLI_APP_LABEL, OPENCODE_PROVIDER_ID_OPTIONS } from "@/constants";
-import { apiKeyHelp, baseUrlHelp, baseUrlPlaceholder } from "@/lib/provider-utils";
+import {
+  CLI_APP_LABEL,
+  OPENCODE_DEFAULT_NPM,
+  OPENCODE_NPM_OPTIONS
+} from "@/constants";
+import {
+  apiKeyHelp,
+  baseUrlHelp,
+  baseUrlPlaceholder,
+  isManagedOptionKey
+} from "@/lib/provider-utils";
 import type { Provider } from "@/types";
+
+// Default override rows seeded for a fresh Claude provider — the per-size
+// `/model` routing keys. Shown as editable templates; blank ones are
+// dropped on save. Append `[1m]` to a value to request the 1M context
+// window for that route (e.g. `claude-sonnet-4-6[1m]`).
+const CLAUDE_OVERRIDE_TEMPLATE: { key: string; value: string }[] = [
+  { key: "env.ANTHROPIC_DEFAULT_SONNET_MODEL", value: "" },
+  { key: "env.ANTHROPIC_DEFAULT_OPUS_MODEL", value: "" },
+  { key: "env.ANTHROPIC_DEFAULT_HAIKU_MODEL", value: "" }
+];
 
 export function ProviderEditor({
   provider,
@@ -54,44 +73,78 @@ export function ProviderEditor({
   const [fetchingModels, setFetchingModels] = React.useState(false);
   const [modelError, setModelError] = React.useState<string | null>(null);
   const [saving, setSaving] = React.useState(false);
-  // Model Mapping collapsible — opens by default when the provider
-  // already has any mapping / 1M flag set, otherwise stays folded.
-  const [mappingOpen, setMappingOpen] = React.useState(
-    () =>
-      !!(
-        provider.claude?.sonnetModel ||
-        provider.claude?.opusModel ||
-        provider.claude?.haikuModel ||
-        provider.claude?.sonnet1m ||
-        provider.claude?.opus1m
-      )
-  );
-  // Custom config overrides — open by default when the provider
-  // already has some.
+  // Custom config overrides — open by default when the provider already
+  // has some, or for Claude (where the seeded per-size routing template
+  // replaces the old Model Mapping section).
   const [overridesOpen, setOverridesOpen] = React.useState(
-    () => (provider.overrides?.length ?? 0) > 0
+    () => (provider.options?.length ?? 0) > 0 || provider.app === "claude"
   );
-  const overrides = draft.overrides ?? [];
+  const overrides = draft.options ?? [];
   const setOverrides = (next: { key: string; value: string }[]) =>
-    update("overrides", next);
-  // Always show at least one row so there's an input ready without
-  // clicking "Add" first. The blank row is virtual until typed into
-  // (empty-key rows are dropped on submit).
-  const overrideRows =
-    overrides.length > 0 ? overrides : [{ key: "", value: "" }];
+    update("options", next);
+  // For Claude, the three per-size routing keys are ALWAYS present as a
+  // protected template: their key is read-only and they can't be deleted
+  // — the user only fills the value (blank ones drop on submit). Any
+  // other override rows the user adds sit after them and stay freely
+  // editable / removable. Other apps just show one blank row to start.
+  const protectedKeys =
+    draft.app === "claude" ? CLAUDE_OVERRIDE_TEMPLATE.map((t) => t.key) : [];
+  const overrideRows: { key: string; value: string }[] = (() => {
+    if (draft.app === "claude") {
+      const byKey = new Map(overrides.map((o) => [o.key, o.value]));
+      const template = CLAUDE_OVERRIDE_TEMPLATE.map((t) => ({
+        key: t.key,
+        value: byKey.get(t.key) ?? ""
+      }));
+      const extras = overrides.filter((o) => !protectedKeys.includes(o.key));
+      return [...template, ...extras];
+    }
+    return overrides.length > 0 ? overrides : [{ key: "", value: "" }];
+  })();
+  // Duplicate non-blank keys would silently overwrite each other on
+  // activation (last wins), so block the save until they're resolved.
+  const duplicateKeys = (() => {
+    const seen = new Set<string>();
+    const dups = new Set<string>();
+    for (const o of overrideRows) {
+      const k = o.key.trim();
+      if (!k) continue;
+      if (seen.has(k)) dups.add(k);
+      else seen.add(k);
+    }
+    return [...dups];
+  })();
+  // Keys already managed by the provider's own fields (Base URL / API key
+  // / Model / AI SDK). The backend silently skips them, so block the save
+  // and tell the user to use the dedicated field instead. Protected
+  // Claude template keys are not managed, so they never trip this.
+  const managedKeys = [
+    ...new Set(
+      overrideRows
+        .map((o) => o.key.trim())
+        .filter((k) => k && isManagedOptionKey(draft.app, k))
+    )
+  ];
+  // OpenCode extra-models editor rows (Model ID + display name). Same
+  // add/delete UX as Advanced settings; always show one row to start.
+  const modelList = draft.models ?? [];
+  const setModelList = (next: { id: string; name: string }[]) =>
+    update("models", next);
+  const modelRows =
+    modelList.length > 0 ? modelList : [{ id: "", name: "" }];
   // Per-CLI help with REAL config keys (verified against each tool's
   // source): Claude settings.json / Codex config.toml / OpenCode
   // opencode.json take dot-path + typed values; Gemini's .env takes
   // env var names with verbatim string values.
   const overrideHelp = {
     claude:
-      "e.g. cleanupPeriodDays, outputStyle, env.CLAUDE_CODE_USE_BEDROCK — dot-path keys; values typed automatically (env.* kept as strings).",
+      "The env.ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL rows route Claude Code's /model size picks to upstream model ids — append [1m] for the 1M context window. Add any other settings.json key too (e.g. cleanupPeriodDays, outputStyle). env.* values are kept as strings.",
     codex:
       "e.g. model_reasoning_effort, approval_policy — dot-path keys; values typed automatically.",
     gemini:
       "e.g. GOOGLE_CLOUD_PROJECT, GOOGLE_GENAI_USE_VERTEXAI — each key is a .env variable name; values written verbatim.",
     opencode:
-      "e.g. theme, autoupdate — dot-path keys; values typed automatically."
+      "Written under this provider's options in opencode.json (e.g. timeout, setCacheKey, headers.X-Token) — dot-path keys; values typed automatically. baseURL / apiKey come from the fields above."
   }[draft.app];
   const modelDatalistId = React.useId();
   // Snapshot the originally-loaded URL so we can decide whether to
@@ -124,7 +177,9 @@ export function ProviderEditor({
   const canSave =
     draft.name.trim().length > 0 &&
     (draft.baseUrl ?? "").trim().length > 0 &&
-    (!modelRequired || (draft.model ?? "").trim().length > 0);
+    (!modelRequired || (draft.model ?? "").trim().length > 0) &&
+    duplicateKeys.length === 0 &&
+    managedKeys.length === 0;
 
   const canFetchModels = (draft.baseUrl ?? "").trim().length > 0 && !fetchingModels;
 
@@ -155,35 +210,22 @@ export function ProviderEditor({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canSave || saving) return;
-    // Trim every string field; collapse nested option objects to
-    // undefined when nothing inside survived the trim, so providers.json
-    // doesn't carry empty {claude: {}} / {opencode: {}} blocks.
-    const claude = {
-      sonnetModel: draft.claude?.sonnetModel?.trim() || undefined,
-      opusModel: draft.claude?.opusModel?.trim() || undefined,
-      haikuModel: draft.claude?.haikuModel?.trim() || undefined,
-      sonnet1m: draft.claude?.sonnet1m || undefined,
-      opus1m: draft.claude?.opus1m || undefined
-    };
-    const claudeHasAny = !!(
-      claude.sonnetModel ||
-      claude.opusModel ||
-      claude.haikuModel ||
-      claude.sonnet1m ||
-      claude.opus1m
-    );
-    const extraModels = (draft.opencode?.models ?? [])
-      .map((m) => m.trim())
-      .filter((m) => m.length > 0);
-    const opencode = {
-      providerId: draft.opencode?.providerId?.trim() || undefined,
-      models: extraModels.length > 0 ? extraModels : undefined
-    };
-    const opencodeHasAny = !!(opencode.providerId || opencode.models);
-    // Drop override rows with a blank key; keep values verbatim.
-    const cleanedOverrides = (draft.overrides ?? [])
-      .map((o) => ({ key: o.key.trim(), value: o.value }))
-      .filter((o) => o.key.length > 0);
+    // OpenCode-only top-level fields. `npm` is dropped when it equals
+    // the default (the backend already falls back to it). `models` drops
+    // rows with a blank id; a blank name is kept "" (backend defaults it
+    // to the id at write time).
+    const models = (draft.models ?? [])
+      .map((m) => ({ id: m.id.trim(), name: m.name.trim() }))
+      .filter((m) => m.id.length > 0);
+    const npm =
+      isOpencode && draft.npm && draft.npm.trim() !== OPENCODE_DEFAULT_NPM
+        ? draft.npm.trim()
+        : undefined;
+    // Drop override rows missing a key OR a value — a seeded template row
+    // the user never filled isn't a real override. Values kept verbatim.
+    const cleanedOverrides = (draft.options ?? [])
+      .map((o) => ({ key: o.key.trim(), value: o.value.trim() }))
+      .filter((o) => o.key.length > 0 && o.value.length > 0);
     const trimmedBaseUrl = draft.baseUrl?.trim() || undefined;
 
     // Refetch the favicon when the URL is new OR has just changed.
@@ -215,9 +257,9 @@ export function ProviderEditor({
       baseUrl: trimmedBaseUrl,
       apiKey: draft.apiKey?.trim() || undefined,
       model: draft.model?.trim() || undefined,
-      claude: claudeHasAny ? claude : undefined,
-      opencode: opencodeHasAny ? opencode : undefined,
-      overrides: cleanedOverrides.length > 0 ? cleanedOverrides : undefined,
+      npm,
+      models: models.length > 0 ? models : undefined,
+      options: cleanedOverrides.length > 0 ? cleanedOverrides : undefined,
       favicon
     });
   };
@@ -298,19 +340,14 @@ export function ProviderEditor({
               <div className="grid gap-2">
                 <Label>AI SDK *</Label>
                 <Select
-                  value={draft.opencode?.providerId ?? "openai-compatible"}
-                  onValueChange={(v) =>
-                    update("opencode", {
-                      ...(draft.opencode ?? {}),
-                      providerId: v
-                    })
-                  }
+                  value={draft.npm ?? OPENCODE_DEFAULT_NPM}
+                  onValueChange={(v) => update("npm", v)}
                 >
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {OPENCODE_PROVIDER_ID_OPTIONS.map((opt) => (
+                    {OPENCODE_NPM_OPTIONS.map((opt) => (
                       <SelectItem key={opt.value} value={opt.value}>
                         {opt.label}
                       </SelectItem>
@@ -319,9 +356,8 @@ export function ProviderEditor({
                 </Select>
                 <p className="text-xs text-muted-foreground">
                   {
-                    OPENCODE_PROVIDER_ID_OPTIONS.find(
-                      (o) =>
-                        o.value === (draft.opencode?.providerId ?? "openai-compatible")
+                    OPENCODE_NPM_OPTIONS.find(
+                      (o) => o.value === (draft.npm ?? OPENCODE_DEFAULT_NPM)
                     )?.hint
                   }
                 </p>
@@ -380,97 +416,72 @@ export function ProviderEditor({
 
             {isOpencode && (
               <div className="grid gap-2 sm:col-span-2">
-                <Label htmlFor="provider-extra-models">Additional models</Label>
-                <Input
-                  id="provider-extra-models"
-                  type="text"
-                  className="font-mono"
-                  placeholder="e.g. claude-sonnet-4-5, gpt-5-mini"
-                  value={(draft.opencode?.models ?? []).join(", ")}
-                  onChange={(e) =>
-                    update("opencode", {
-                      ...(draft.opencode ?? {}),
-                      models: e.target.value
-                        .split(",")
-                        .map((s) => s.trim())
-                        .filter((s) => s.length > 0)
-                    })
-                  }
-                  autoComplete="off"
-                  spellCheck={false}
-                />
+                <Label>Additional models</Label>
                 <p className="text-xs text-muted-foreground">
-                  Comma-separated extra model ids surfaced in OpenCode's picker. The primary "Model" above is always included.
+                  Extra models surfaced in OpenCode's picker (the primary
+                  "Model" above is always included). ID is the model id; name
+                  is the display label (defaults to the id if left blank).
                 </p>
-              </div>
-            )}
-
-            {draft.app === "claude" && (
-              <Collapsible
-                open={mappingOpen}
-                onOpenChange={setMappingOpen}
-                className="grid gap-2 sm:col-span-2"
-              >
-                <CollapsibleTrigger className="flex w-full items-center justify-between gap-1.5 text-sm font-medium select-none [&[data-state=open]>svg]:rotate-90">
-                  Model Mapping
-                  <ChevronRight className="size-3.5 text-muted-foreground transition-transform" />
-                </CollapsibleTrigger>
-                <CollapsibleContent className="-mx-1.5 overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
-                <div className="grid gap-3 px-1.5 py-1.5">
-                <p className="text-xs text-muted-foreground">
-                  When Claude Code's <code className="font-mono text-[11px]">/model</code> menu picks a size,
-                  it sends the model id below to your provider. Leave blank to fall back to the main model.
-                  Tick <span className="font-medium">1M</span> to append <code className="font-mono text-[11px]">[1m]</code> so that route requests the 1M context window (Haiku has no 1M variant).
-                </p>
-                <div className="flex flex-col gap-3">
-                  {(
-                    [
-                      ["sonnetModel", "Sonnet", "e.g. gpt-5", "sonnet1m"],
-                      ["opusModel", "Opus", "e.g. claude-opus-4-7", "opus1m"],
-                      ["haikuModel", "Haiku", "e.g. deepseek-chat", null]
-                    ] as const
-                  ).map(([key, label, ph, oneMKey]) => (
-                    <div key={key} className="grid gap-1.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <Label htmlFor={`claude-${key}`} className="text-xs">
-                          {label}
-                        </Label>
-                        {oneMKey && (
-                          <label className="flex items-center gap-1 text-xs text-muted-foreground cursor-pointer select-none">
-                            <input
-                              type="checkbox"
-                              className="size-3 accent-primary"
-                              checked={draft.claude?.[oneMKey] ?? false}
-                              onChange={(e) =>
-                                update("claude", {
-                                  ...(draft.claude ?? {}),
-                                  [oneMKey]: e.target.checked
-                                })
-                              }
-                            />
-                            1M
-                          </label>
-                        )}
-                      </div>
+                <div className="flex flex-col gap-2">
+                  {modelRows.map((m, i) => (
+                    <div key={i} className="flex items-center gap-1.5">
                       <Input
-                        id={`claude-${key}`}
-                        type="text"
-                        className="font-mono"
-                        placeholder={ph}
-                        value={draft.claude?.[key] ?? ""}
+                        aria-label="Model ID"
+                        className="font-mono flex-1"
+                        placeholder="model id"
+                        value={m.id}
                         onChange={(e) =>
-                          update("claude", {
-                            ...(draft.claude ?? {}),
-                            [key]: e.target.value
-                          })
+                          setModelList(
+                            modelRows.map((r, j) =>
+                              j === i ? { ...r, id: e.target.value } : r
+                            )
+                          )
                         }
+                        autoComplete="off"
+                        spellCheck={false}
                       />
+                      <Input
+                        aria-label="Model display name"
+                        className="flex-1"
+                        placeholder="Display name (optional)"
+                        value={m.name}
+                        onChange={(e) =>
+                          setModelList(
+                            modelRows.map((r, j) =>
+                              j === i ? { ...r, name: e.target.value } : r
+                            )
+                          )
+                        }
+                        autoComplete="off"
+                        spellCheck={false}
+                      />
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        aria-label="Remove model"
+                        onClick={() =>
+                          setModelList(modelRows.filter((_, j) => j !== i))
+                        }
+                      >
+                        <Trash2 className="size-4" />
+                      </Button>
                     </div>
                   ))}
                 </div>
-                </div>
-                </CollapsibleContent>
-              </Collapsible>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="justify-self-start"
+                  onClick={() =>
+                    setModelList([...modelList, { id: "", name: "" }])
+                  }
+                >
+                  <Plus className="size-4" />
+                  Add model
+                </Button>
+              </div>
             )}
 
             <Collapsible
@@ -479,7 +490,7 @@ export function ProviderEditor({
               className="grid gap-2 sm:col-span-2"
             >
               <CollapsibleTrigger className="flex w-full items-center justify-between gap-1.5 text-sm font-medium select-none [&[data-state=open]>svg]:rotate-90">
-                Custom config overrides
+                Advanced settings
                 <ChevronRight className="size-3.5 text-muted-foreground transition-transform" />
               </CollapsibleTrigger>
               <CollapsibleContent className="-mx-1.5 overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
@@ -490,52 +501,93 @@ export function ProviderEditor({
                     {overrideHelp}
                   </p>
                   <div className="flex flex-col gap-2">
-                    {overrideRows.map((o, i) => (
-                      <div key={i} className="flex items-center gap-1.5">
-                        <Input
-                          aria-label="Override key"
-                          className="font-mono flex-1"
-                          placeholder="key"
-                          value={o.key}
-                          onChange={(e) =>
-                            setOverrides(
-                              overrideRows.map((r, j) =>
-                                j === i ? { ...r, key: e.target.value } : r
+                    {overrideRows.map((o, i) => {
+                      // Seeded Claude routing keys are protected: read-only
+                      // key, no delete. Only the value is editable.
+                      const isProtected = protectedKeys.includes(o.key);
+                      const isDup =
+                        !isProtected && duplicateKeys.includes(o.key.trim());
+                      const isManaged =
+                        !isProtected && managedKeys.includes(o.key.trim());
+                      return (
+                        <div key={i} className="flex items-center gap-1.5">
+                          <Input
+                            aria-label="Override key"
+                            aria-invalid={isDup || isManaged || undefined}
+                            className={`font-mono flex-1${
+                              isProtected ? " text-muted-foreground" : ""
+                            }`}
+                            placeholder="key"
+                            value={o.key}
+                            readOnly={isProtected}
+                            tabIndex={isProtected ? -1 : undefined}
+                            onChange={(e) =>
+                              setOverrides(
+                                overrideRows.map((r, j) =>
+                                  j === i ? { ...r, key: e.target.value } : r
+                                )
                               )
-                            )
-                          }
-                          autoComplete="off"
-                          spellCheck={false}
-                        />
-                        <Input
-                          aria-label="Override value"
-                          className="font-mono flex-1"
-                          placeholder="value"
-                          value={o.value}
-                          onChange={(e) =>
-                            setOverrides(
-                              overrideRows.map((r, j) =>
-                                j === i ? { ...r, value: e.target.value } : r
+                            }
+                            autoComplete="off"
+                            spellCheck={false}
+                          />
+                          <Input
+                            aria-label="Override value"
+                            className="font-mono flex-1"
+                            placeholder={
+                              isProtected ? "model id (append [1m] for 1M)" : "value"
+                            }
+                            value={o.value}
+                            onChange={(e) =>
+                              setOverrides(
+                                overrideRows.map((r, j) =>
+                                  j === i ? { ...r, value: e.target.value } : r
+                                )
                               )
-                            )
-                          }
-                          autoComplete="off"
-                          spellCheck={false}
-                        />
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          aria-label="Remove override"
-                          onClick={() =>
-                            setOverrides(overrideRows.filter((_, j) => j !== i))
-                          }
-                        >
-                          <Trash2 className="size-4" />
-                        </Button>
-                      </div>
-                    ))}
+                            }
+                            autoComplete="off"
+                            spellCheck={false}
+                          />
+                          {isProtected ? (
+                            // Protected default route — no delete icon, but
+                            // keep its footprint so inputs stay aligned.
+                            <span className="size-9 shrink-0" aria-hidden />
+                          ) : (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              aria-label="Remove override"
+                              onClick={() =>
+                                setOverrides(
+                                  overrideRows.filter((_, j) => j !== i)
+                                )
+                              }
+                            >
+                              <Trash2 className="size-4" />
+                            </Button>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
+                  {duplicateKeys.length > 0 && (
+                    <p className="text-xs text-destructive">
+                      Duplicate key{duplicateKeys.length > 1 ? "s" : ""}:{" "}
+                      {duplicateKeys.map((k) => `"${k}"`).join(", ")} — each key
+                      must be unique.
+                    </p>
+                  )}
+                  {managedKeys.length > 0 && (
+                    <p className="text-xs text-destructive">
+                      {managedKeys.map((k) => `"${k}"`).join(", ")}{" "}
+                      {managedKeys.length > 1 ? "are" : "is"} already managed by
+                      the fields above (Base URL / API key / Model
+                      {isOpencode ? " / AI SDK" : ""}) — set{" "}
+                      {managedKeys.length > 1 ? "them" : "it"} there instead, not
+                      here.
+                    </p>
+                  )}
                   <Button
                     type="button"
                     variant="outline"

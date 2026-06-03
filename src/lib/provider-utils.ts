@@ -84,3 +84,37 @@ export function baseUrlHelp(app: CliApp): string {
 export function apiKeyHelp(_app: CliApp): string {
   return "Stored locally on this machine and only sent to the provider you choose.";
 }
+
+/**
+ * Whether an "Advanced settings" option key is managed by one of the
+ * provider's own dedicated fields (Base URL / API key / Model / AI SDK).
+ * Managed keys are silently skipped by the backend at write time, so the
+ * editor blocks them up front. MUST mirror `override_key_is_managed` in
+ * `src-tauri/src/providers.rs` — keep the two in sync.
+ */
+export function isManagedOptionKey(app: CliApp, key: string): boolean {
+  const k = key.trim();
+  switch (app) {
+    case "claude":
+      return [
+        "env.ANTHROPIC_BASE_URL",
+        "env.ANTHROPIC_AUTH_TOKEN",
+        "env.ANTHROPIC_API_KEY",
+        "env.ANTHROPIC_MODEL"
+      ].includes(k);
+    case "codex":
+      return (
+        k === "model_provider" ||
+        k === "model" ||
+        k.startsWith("model_providers.")
+      );
+    case "gemini":
+      return ["GOOGLE_GEMINI_BASE_URL", "GEMINI_API_KEY", "GEMINI_MODEL"].includes(
+        k
+      );
+    case "opencode":
+      // Options nest under the provider's own `options` bag; keys are
+      // relative to it, and baseURL/apiKey come from the dedicated fields.
+      return k === "baseURL" || k === "apiKey";
+  }
+}

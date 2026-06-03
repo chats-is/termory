@@ -73,7 +73,7 @@ export function StatsFilterBar({
       {/* Source filter — shadcn Tabs (Radix-backed), styled to match
           the Providers page tab bar (flat, transparent inside a muted
           container) so the two filter shells look identical. */}
-      <div className="flex-1 min-w-0 overflow-x-auto">
+      <div className="flex-1 min-w-0">
         <Tabs
           value={source}
           onValueChange={(v) => onSourceChange(v as SourceFilter)}

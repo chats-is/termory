@@ -121,14 +121,35 @@ pub fn write_config(value: &JsonValue) -> Result<(), Box<dyn Error>> {
 // providers.json — Provider library (contains API keys)
 // ===================================================================
 
-/// Read `~/.termory/providers.json`. Returns `[]` if missing.
+/// Schema version stamped into providers.json. Bump when the on-disk
+/// `Provider` shape changes in a breaking way so a future load can detect
+/// the old format and migrate. The wrap/unwrap lives entirely here —
+/// callers (frontend `config.ts`, `tray.rs`) only ever see the bare
+/// providers array.
+pub const PROVIDERS_SCHEMA_VERSION: u64 = 1;
+
+/// Read the providers array from `~/.termory/providers.json`. Returns
+/// `[]` if missing. The file is `{ "version": N, "providers": [...] }`;
+/// this unwraps to the inner array (tolerating a bare-array file from
+/// older dev builds / hand-edits).
 pub fn read_providers() -> Result<JsonValue, Box<dyn Error>> {
-    read_json(&providers_path()?, JsonValue::Array(Vec::new()))
+    let raw = read_json(&providers_path()?, JsonValue::Array(Vec::new()))?;
+    Ok(match raw {
+        JsonValue::Object(mut map) => map
+            .remove("providers")
+            .unwrap_or(JsonValue::Array(Vec::new())),
+        other => other, // bare array (legacy) or the empty default
+    })
 }
 
 /// Atomically write `~/.termory/providers.json` (chmod 0600 on Unix).
+/// `value` is the bare providers array; it's wrapped in the versioned
+/// envelope here.
 pub fn write_providers(value: &JsonValue) -> Result<(), Box<dyn Error>> {
-    write_json_atomic_0600(&providers_path()?, value)
+    let mut envelope = serde_json::Map::new();
+    envelope.insert("version".into(), JsonValue::from(PROVIDERS_SCHEMA_VERSION));
+    envelope.insert("providers".into(), value.clone());
+    write_json_atomic_0600(&providers_path()?, &JsonValue::Object(envelope))
 }
 
 // ===================================================================
@@ -260,6 +281,37 @@ mod tests {
         write_providers(&payload).unwrap();
         let back = read_providers().unwrap();
         assert_eq!(back, payload);
+    }
+
+    #[test]
+    fn providers_file_carries_schema_version_and_unwraps_on_read() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let tmp = tempdir("providers-versioned");
+        let _h = HomeOverride::new(&tmp);
+        write_providers(&serde_json::json!([{"id": "a", "name": "A"}])).unwrap();
+
+        // On disk: a versioned envelope, not a bare array.
+        let raw: JsonValue =
+            serde_json::from_str(&fs::read_to_string(tmp.join(".termory/providers.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            raw.pointer("/version").and_then(|v| v.as_u64()),
+            Some(PROVIDERS_SCHEMA_VERSION)
+        );
+        assert!(raw.pointer("/providers").unwrap().is_array());
+
+        // A legacy bare-array file still reads back as the array.
+        fs::write(
+            tmp.join(".termory/providers.json"),
+            r#"[{"id":"legacy","name":"Old"}]"#,
+        )
+        .unwrap();
+        let back = read_providers().unwrap();
+        assert_eq!(back.as_array().unwrap().len(), 1);
+        assert_eq!(
+            back.pointer("/0/id").and_then(|v| v.as_str()),
+            Some("legacy")
+        );
     }
 
     #[test]

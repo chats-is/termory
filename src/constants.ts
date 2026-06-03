@@ -27,47 +27,53 @@ export const CLI_APP_SOURCE_BADGE: Record<CliApp, string> = {
   opencode: "OpenCode"
 };
 
-export const OPENCODE_PROVIDER_ID_OPTIONS: {
+// OpenCode `provider.<id>.npm` options — the AI SDK package OpenCode
+// loads for the provider. `value` is the npm package written verbatim to
+// opencode.json (the official config field); `label`/`hint` are display
+// only. Default is the OpenAI-compatible adapter (covers most gateways).
+export const OPENCODE_NPM_OPTIONS: {
   value: string;
   label: string;
   hint: string;
 }[] = [
   {
-    value: "openai-compatible",
-    label: "openai-compatible (default)",
-    hint: "Generic OpenAI-shaped REST. Use for PackyCode, DMXAPI, Open Router, etc."
+    value: "@ai-sdk/openai-compatible",
+    label: "OpenAI-compatible (default)",
+    hint: "Generic OpenAI-shaped REST. Use for PackyCode, DMXAPI, OpenRouter, and most gateways."
   },
   {
-    value: "anthropic",
-    label: "anthropic",
+    value: "@ai-sdk/anthropic",
+    label: "Anthropic",
     hint: "Anthropic Claude API. Use for endpoints that mimic api.anthropic.com."
   },
   {
-    value: "openai",
-    label: "openai",
+    value: "@ai-sdk/openai",
+    label: "OpenAI",
     hint: "Real OpenAI api.openai.com."
   },
   {
-    value: "google",
-    label: "google",
+    value: "@ai-sdk/google",
+    label: "Google",
     hint: "Google Gemini API."
   },
   {
-    value: "azure",
-    label: "azure",
+    value: "@ai-sdk/azure",
+    label: "Azure OpenAI",
     hint: "Azure-hosted OpenAI."
   },
   {
-    value: "amazon-bedrock",
-    label: "amazon-bedrock",
+    value: "@ai-sdk/amazon-bedrock",
+    label: "Amazon Bedrock",
     hint: "AWS Bedrock."
   },
   {
-    value: "google-vertex",
-    label: "google-vertex",
+    value: "@ai-sdk/google-vertex",
+    label: "Google Vertex",
     hint: "Google Vertex AI."
   }
 ];
+
+export const OPENCODE_DEFAULT_NPM = "@ai-sdk/openai-compatible";
 
 export const ACTIVE_STATE_REFRESH_EVENT = "termory:providers-refresh";
 
@@ -85,14 +91,14 @@ export const CLI_INSTALL: Record<
     url: "https://code.claude.com/docs",
     methods: [
       {
-        id: "npm",
-        label: "npm",
-        command: "npm install -g @anthropic-ai/claude-code"
-      },
-      {
         id: "curl",
         label: "curl",
         command: "curl -fsSL https://claude.ai/install.sh | bash"
+      },
+      {
+        id: "npm",
+        label: "npm",
+        command: "npm install -g @anthropic-ai/claude-code"
       }
     ]
   },
