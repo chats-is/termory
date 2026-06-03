@@ -726,7 +726,7 @@ All four are gated on a successful local-time parse — records without a timest
 
 ### Frontend aggregation
 
-`src/lib/stats-utils.ts` exports the pure helpers (`windowTotals` / `dailyTokens` / `dailyActivities` / `filterSessions`). Each one iterates `filtered` sessions once; the Stats page memoizes them per `(filtered, resolved)`. 117 unit tests cover the window-overlap regression, no-fallback enforcement, per-source attribution, and cross-consistency between aggregator outputs.
+`src/lib/stats-utils.ts` exports the pure helpers (`windowTotals` / `dailyTokens` / `dailyActivities` / `filterSessions`). Each one iterates `filtered` sessions once; the Stats page memoizes them per `(filtered, resolved)`. `stats-utils.test.ts` covers the window-overlap regression, no-fallback enforcement, per-source attribution, and cross-consistency between aggregator outputs.
 
 Naming alignment (UI label ↔ data field ↔ file ↔ component) is intentional:
 - "DAILY TOKENS" card → `DailyTokensChart.tsx` (component) ← `DailyTokens[]` (type) ← `dailyTokens()` (function)
@@ -858,7 +858,7 @@ All P0 items have shipped:
 - **Right-click context menus** — on list items ("Re-read this file", "Reveal in Finder", "Copy ID") and on sidebar source rows ("Re-scan this source").
 - **Keyboard navigation** — partial. ✅ `⌘1..6` switch rail routes (App.tsx:235), `⌘K` / `⌘F` summon Cmd-K search palette (CommandPalette.tsx), `Esc` closes palette / dropdowns. ❌ Still TODO: arrow-key navigation inside lists (Records sidebar, session list, Favorites list) and `Enter` to open the focused item.
 - ~~Watcher completion~~ — intentionally not pursued. Per-project files (`<cwd>/CLAUDE.md`, `AGENTS.md`, `.claude/skills/`, etc.) are only read at launch; if a user edits them mid-session the change isn't reflected until next launch / manual refresh, and that's acceptable. Recursive cwd watching would pull in `node_modules` / build noise and isn't worth the complexity.
-- ~~Frontend test baseline~~ — done. 117 Vitest tests covering `session-utils`, `format`, `usePersistentState`, `CopyMenu`, `FreshnessFooter`, `stats-utils`, `favorites` helpers, `FavoritesPage`, and `MessageList` (star wiring). `@tanstack/react-virtual` is `vi.mock`'d in MessageList tests to bypass jsdom layout limits.
+- ~~Frontend test baseline~~ — done. 135 Vitest tests covering `session-utils`, `format`, `usePersistentState`, `CopyMenu`, `FreshnessFooter`, `stats-utils`, `favorites` helpers, `FavoritesPage`, `MessageList` (star wiring), `provider-utils` (incl. `isManagedOptionKey` — mirrors the Rust `override_key_is_managed`), and `ProviderEditor` (RTL: duplicate/managed-key blocking, save trim/drop, OpenCode `{id,name}` models, Claude protected routing template). `@tanstack/react-virtual` is `vi.mock`'d in MessageList tests to bypass jsdom layout limits.
 
 ### P3 — nice to have
 
