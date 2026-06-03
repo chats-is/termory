@@ -32,3 +32,7 @@ npm install
 npm run tauri:dev     # run the desktop app
 npm run tauri:build   # build installers
 ```
+
+## License
+
+[MIT](LICENSE) © 2026 John Ma

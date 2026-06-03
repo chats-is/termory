@@ -2,7 +2,8 @@
 name = "termory"
 version = "0.2.1"
 description = "Local history browser for AI CLIs (Claude Code, Codex, Gemini, OpenCode) with provider profile switching"
-authors = ["Termory"]
+authors = ["John Ma"]
+license = "MIT"
 edition = "2021"
 
 [lib]

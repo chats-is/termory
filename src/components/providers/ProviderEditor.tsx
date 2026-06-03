@@ -132,19 +132,17 @@ export function ProviderEditor({
     update("models", next);
   const modelRows =
     modelList.length > 0 ? modelList : [{ id: "", name: "" }];
-  // Per-CLI help with REAL config keys (verified against each tool's
-  // source): Claude settings.json / Codex config.toml / OpenCode
-  // opencode.json take dot-path + typed values; Gemini's .env takes
-  // env var names with verbatim string values.
+  // Per-CLI help — what these settings let you DO (plain language, not
+  // the config-key encoding). Example keys still hint at what to type.
   const overrideHelp = {
     claude:
-      "The env.ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL rows route Claude Code's /model size picks to upstream model ids — append [1m] for the 1M context window. Add any other settings.json key too (e.g. cleanupPeriodDays, outputStyle). env.* values are kept as strings.",
+      "Map Claude Code's Sonnet / Opus / Haiku sizes to specific upstream models (the three rows below) — handy when your provider doesn't use Claude's native model names. Add [1m] after a model to use its 1M-token context. Other Claude Code preferences work here too.",
     codex:
-      "e.g. model_reasoning_effort, approval_policy — dot-path keys; values typed automatically.",
+      "Tune how Codex behaves with this provider — for example its reasoning effort or approval policy.",
     gemini:
-      "e.g. GOOGLE_CLOUD_PROJECT, GOOGLE_GENAI_USE_VERTEXAI — each key is a .env variable name; values written verbatim.",
+      "Add environment variables Gemini CLI reads — for example to target a Google Cloud project or use Vertex AI instead of the public API.",
     opencode:
-      "Written under this provider's options in opencode.json (e.g. timeout, setCacheKey, headers.X-Token) — dot-path keys; values typed automatically. baseURL / apiKey come from the fields above."
+      "Tune this provider's connection in OpenCode — these go into its official `options` (e.g. timeout, setCacheKey, headers.X-Token) for request timeouts, prompt caching, or custom request headers."
   }[draft.app];
   const modelDatalistId = React.useId();
   // Snapshot the originally-loaded URL so we can decide whether to
