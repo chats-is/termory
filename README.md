@@ -16,9 +16,9 @@
 Termory is a local-first desktop app for **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode**. See every session, memory file, and skill across all your tools in one window, keep the messages worth saving, search across everything, and switch any CLI between API providers without touching a config file. It runs natively on macOS, Linux, and Windows, and everything stays on your machine.
 
 <div align="center">
-  <img src="docs/screenshots/providers.png" alt="Termory — switch any CLI between API providers" width="820">
+  <img src="docs/screenshots/providers.png" alt="Termory — switch any CLI between API providers" width="720">
   <br><br>
-  <img src="docs/screenshots/stats.png" alt="Termory — usage stats across every tool" width="820">
+  <img src="docs/screenshots/stats.png" alt="Termory — usage stats across every tool" width="720">
 </div>
 
 ## Features
