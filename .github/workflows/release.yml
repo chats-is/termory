@@ -10,7 +10,40 @@ permissions:
   contents: write
 
 jobs:
+  # Create the draft release ONCE up front so the platform matrix below
+  # uploads into a single release. (Previously every matrix job ran
+  # tauri-action with releaseDraft + tagName, which raced and produced
+  # duplicate drafts with the assets split across them.)
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.result }}
+    steps:
+      - name: Create draft release
+        uses: actions/github-script@v7
+        id: create
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `Termory ${tag}`,
+              body: [
+                `## Termory ${tag}`,
+                '',
+                'Built artifacts attached below. See the macOS / Windows / Linux',
+                'installers (or pick the matching `.tar.gz` / `.zip` for portable',
+                'use). `latest.json` is consumed by the in-app updater.',
+              ].join('\n'),
+              draft: true,
+              prerelease: false,
+            });
+            return data.id;
+
   build:
+    needs: create-release
     name: Build ${{ matrix.platform }} ${{ matrix.args }}
     strategy:
       fail-fast: false
@@ -66,7 +99,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build & release
+      # releaseId points every matrix job at the single draft created
+      # above, so tauri-action only uploads (no per-job release creation).
+      - name: Build & upload
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -78,14 +113,5 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Termory ${{ github.ref_name }}"
-          releaseBody: |
-            ## Termory ${{ github.ref_name }}
-
-            Built artifacts attached below. See the macOS / Windows / Linux
-            installers (or pick the matching `.tar.gz` / `.zip` for portable
-            use). `latest.json` is consumed by the in-app updater.
-          releaseDraft: true
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
