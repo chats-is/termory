@@ -67,6 +67,17 @@ describe("sessionTimestamp", () => {
 
 describe("resolveRange", () => {
   const now = new Date("2026-05-29T12:00:00Z");
+  it("returns a single local day (00:00 → 23:59:59.999) for 'today'", () => {
+    const r = resolveRange({ preset: "today" }, now);
+    expect(r.from.getHours()).toBe(0);
+    expect(r.from.getMinutes()).toBe(0);
+    expect(r.to.getHours()).toBe(23);
+    expect(r.to.getMinutes()).toBe(59);
+    // Same calendar day, just start-of-day → end-of-day.
+    expect(r.from.getFullYear()).toBe(r.to.getFullYear());
+    expect(r.from.getMonth()).toBe(r.to.getMonth());
+    expect(r.from.getDate()).toBe(r.to.getDate());
+  });
   it("returns 7-day window for '7d'", () => {
     const r = resolveRange({ preset: "7d" }, now);
     const diffDays = (r.to.getTime() - r.from.getTime()) / 86_400_000;

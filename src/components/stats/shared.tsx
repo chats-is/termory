@@ -68,7 +68,7 @@ export function ModelUsageList({
               {m.model}
             </span>
             <span className="shrink-0 font-medium">
-              {formatCompact(m.tokens)}
+              {m.tokens === 0 ? "—" : formatCompact(m.tokens)}
             </span>
           </div>
         ))}

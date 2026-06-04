@@ -14,8 +14,8 @@ import { TOKEN_COLORS, BreakdownRow, ModelUsageList } from "./shared";
  *   Sessions · Messages · Tokens · Models · Projects
  *
  * The Tokens cell reveals an input/output/cached/reasoning breakdown
- * on hover; the Models cell reveals per-model sessions/tokens on hover
- * (both shadcn HoverCard).
+ * on hover; the Models cell reveals a per-model token breakdown on
+ * hover (both shadcn HoverCard).
  */
 
 export function OverviewHero({
@@ -116,8 +116,9 @@ function TokensKpi({ tokens }: { tokens: TokenStats }) {
 }
 
 /** Models cell — main number is the count of distinct *named* models in
- * the window; hovering reveals every model (incl. "Unknown") with its
- * session count and approximate token total. */
+ * the window; hovering reveals each named model's approximate token
+ * total. The "Unknown" bucket (sessions with no recorded model) is
+ * excluded from both the count and the hover. */
 function ModelsKpi({ models }: { models: ModelUsage[] }) {
   // Drop the "Unknown" bucket — sessions whose source recorded no model
   // (no assistant reply / older sessions). It's noise in a model-usage
