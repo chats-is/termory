@@ -604,6 +604,8 @@ A native system-tray icon (the macOS menu bar) for quick provider switching, sep
 **Menu shape** — one submenu per CLI; the active choice is shown inline on the first-level row and the submenu lists Official + the user's providers with the active one checkmarked:
 
 ```
+Open
+─────────────────────
 Claude Code · Official  ▸  ☑ Official
                            ─────────
                            ☐ Anthropic
@@ -612,7 +614,6 @@ Codex · OpenRouter      ▸  …
 Gemini · …              ▸  …
 OpenCode · Official     ▸  …
 ─────────────────────
-Open
 Exit
 ```
 
@@ -634,11 +635,13 @@ The window's title-bar **text is hidden** (`"hiddenTitle": true` on the window i
 
 ## Stats
 
-Three cards stacked under a source filter + date range bar:
+Three cards stacked under a source filter + date range bar. The date-range control (`StatsFilterBar`) offers presets **Today / Last 7 / 30 / 90 days** plus a **Custom range** picker (shadcn `Calendar` in `mode="range"`, two months, embedded in the existing custom-controlled dropdown — NOT a Radix Popover, to avoid the Tauri WebKit overlay freeze). `react-day-picker` is pinned to **v9** because the shadcn `calendar.tsx` registry component targets v9's `classNames` API (v10 renamed `table` → `month_grid` etc. and breaks the stock component). There is no "365 days" or "All time" preset (removed).
 
-1. **OverviewHero** — KPI strip: Sessions / Messages / Tokens / Projects. The Tokens cell hovers a 4-row breakdown (Input / Output / Reasoning / Cached + Total).
+1. **OverviewHero** — KPI strip: Sessions / Messages / Tokens / **Models** / Projects. The Tokens cell hovers a 4-row breakdown (Input / Output / Reasoning / Cached + Total). The **Models** cell shows the count of distinct *named* models; hovering reveals a per-model token breakdown (`ModelUsageList` in `shared.tsx`, shared with the heatmap). Session counts are NOT shown per model — they wouldn't reconcile with the "sessions created" headline without surfacing an "Unknown" bucket — so the breakdown is a pure token-usage view.
 2. **DailyTokensChart** — 4 trend lines (Input / Output / Cached / Reasoning) on a single linear-scale chart. Tooltip per-day shows fixed 5-row breakdown.
-3. **DailyActivitiesHeatmap** — 24-hour × N-date heatmap. Cell intensity blends per-cell messages + tokens via a weighted geometric mean (see "Heatmap intensity rule" below); hover reveals `Sessions / Messages / Tokens` for that exact `(date, hour)` bucket. Hour labels: hand-picked 14 rows, work band 09:00–18:00 highlighted with `text-foreground`.
+3. **DailyActivitiesHeatmap** — 24-hour × N-date heatmap. Cell intensity blends per-cell messages + tokens via a weighted geometric mean (see "Heatmap intensity rule" below); hover reveals `Sessions / Messages / Tokens` for that exact `(date, hour)` bucket, plus a per-model token breakdown for that cell (`activities.models[hour][date]`, same `ModelUsageList`). The card's summary line also shows `N models` with the window-level `ModelUsageList` on hover. Hour labels: hand-picked 14 rows, work band 09:00–18:00 highlighted with `text-foreground`.
+
+**Model attribution is session-level (approximate).** `AppSession.model` is one best-guess id per session, so `modelBreakdown` (window-level) and `dailyActivities.models` (per-cell) attribute a session's whole token contribution to its single recorded model. Sessions with no recorded model bucket under `"Unknown"`, which the UI hides everywhere. There is no per-message / per-day model dimension in `DailyTokenBreakdown`, so model-split time-series (per-model daily lines) is NOT possible without a backend change.
 
 ### Accuracy rules (LOCKED — do not weaken)
 
@@ -726,7 +729,7 @@ All four are gated on a successful local-time parse — records without a timest
 
 ### Frontend aggregation
 
-`src/lib/stats-utils.ts` exports the pure helpers (`windowTotals` / `dailyTokens` / `dailyActivities` / `filterSessions`). Each one iterates `filtered` sessions once; the Stats page memoizes them per `(filtered, resolved)`. `stats-utils.test.ts` covers the window-overlap regression, no-fallback enforcement, per-source attribution, and cross-consistency between aggregator outputs.
+`src/lib/stats-utils.ts` exports the pure helpers (`windowTotals` / `dailyTokens` / `dailyActivities` / `modelBreakdown` / `filterSessions`). Each one iterates `filtered` sessions once; the Stats page memoizes them per `(filtered, resolved)`. `stats-utils.test.ts` covers the window-overlap regression, no-fallback enforcement, per-source attribution, cross-consistency between aggregator outputs, and the model-attribution accounting (`modelBreakdown` + `dailyActivities.models`).
 
 Naming alignment (UI label ↔ data field ↔ file ↔ component) is intentional:
 - "DAILY TOKENS" card → `DailyTokensChart.tsx` (component) ← `DailyTokens[]` (type) ← `dailyTokens()` (function)
@@ -855,8 +858,8 @@ All P0 items have shipped:
 
 ### P2 — quality of life
 
-- **Right-click context menus** — on list items ("Re-read this file", "Reveal in Finder", "Copy ID") and on sidebar source rows ("Re-scan this source").
-- **Keyboard navigation** — partial. ✅ `⌘1..6` switch rail routes (App.tsx:235), `⌘K` / `⌘F` summon Cmd-K search palette (CommandPalette.tsx), `Esc` closes palette / dropdowns. ❌ Still TODO: arrow-key navigation inside lists (Records sidebar, session list, Favorites list) and `Enter` to open the focused item.
+- **Right-click context menus** — partial. ✅ List rows (Records Sessions/Memories/Skills + Favorites) have a right-click menu via `ListItemMenu.tsx` (shadcn `ContextMenu`): "Reveal in Finder" (`revealItemInDir`, its own group) then a copy group mirroring the detail-pane `CopyMenu` — "Copy resume command" (Claude/Codex sessions only, via `resumeCommandFor`), "Copy path", "Copy filename", "Copy session ID" (session/favorite rows). The Favorites menu adds "Copy message ID" (the favorite's own id) via the optional `messageId` prop. List rows carry `select-none` so a right-click doesn't text-select the row; `MemoryCard` is `forwardRef` + spread-rest so it can be a `ContextMenu` `asChild` trigger. ❌ Still TODO: sidebar source rows ("Re-scan this source") and a per-row "Re-read this file".
+- **Keyboard navigation** — ✅ `⌘1..6` switch rail routes (App.tsx:235), `⌘K` / `⌘F` summon Cmd-K search palette (CommandPalette.tsx), `Esc` closes palette / dropdowns. The Cmd-K palette's own ↑/↓/Enter is `cmdk`'s built-in. ❌ Not implemented: arrow-key navigation inside the Records/Favorites lists or the source/project sidebar (a `useListNav` two-step highlight prototype was tried and removed — the focus model was unintuitive).
 - ~~Watcher completion~~ — intentionally not pursued. Per-project files (`<cwd>/CLAUDE.md`, `AGENTS.md`, `.claude/skills/`, etc.) are only read at launch; if a user edits them mid-session the change isn't reflected until next launch / manual refresh, and that's acceptable. Recursive cwd watching would pull in `node_modules` / build noise and isn't worth the complexity.
 - ~~Frontend test baseline~~ — done. 135 Vitest tests covering `session-utils`, `format`, `usePersistentState`, `CopyMenu`, `FreshnessFooter`, `stats-utils`, `favorites` helpers, `FavoritesPage`, `MessageList` (star wiring), `provider-utils` (incl. `isManagedOptionKey` — mirrors the Rust `override_key_is_managed`), and `ProviderEditor` (RTL: duplicate/managed-key blocking, save trim/drop, OpenCode `{id,name}` models, Claude protected routing template). `@tanstack/react-virtual` is `vi.mock`'d in MessageList tests to bypass jsdom layout limits.
 

@@ -59,6 +59,7 @@ import { addSetValue, toggleSetValue } from "@/lib/set-utils";
 import { RAIL_ROUTE_ORDER } from "@/constants";
 import { usePersistentState } from "@/hooks/usePersistentState";
 import { ActivityRail } from "@/components/ActivityRail";
+import { ListItemMenu } from "@/components/ListItemMenu";
 import { BrandIcon } from "@/components/BrandIcon";
 import { CommandPalette } from "@/components/CommandPalette";
 import { CopyMenu } from "@/components/CopyMenu";
@@ -776,14 +777,19 @@ export function App() {
                         const isActive =
                           selected?.path === session.path && selected?.id === session.id;
                         return (
-                          <button
+                          <ListItemMenu
                             key={sessionKey(session)}
+                            path={session.path}
+                            id={session.id}
+                            source={session.source}
+                          >
+                          <button
                             onClick={() => setSelected(session)}
                             className={cn(
-                              "w-full text-left rounded-lg px-2 py-2 transition-colors flex flex-col gap-1",
+                              "w-full text-left rounded-lg px-2 py-2 transition-colors flex flex-col gap-1 select-none",
                               isActive
                                 ? "bg-primary text-primary-foreground [&_*]:text-primary-foreground"
-                                : "hover:bg-accent/60"
+                                : "hover:bg-accent/60 data-[state=open]:bg-accent/60"
                             )}
                           >
                             <div className="flex items-baseline justify-between gap-2">
@@ -823,6 +829,7 @@ export function App() {
                               />
                             )}
                           </button>
+                          </ListItemMenu>
                         );
                       })}
                   </div>
@@ -853,16 +860,17 @@ export function App() {
                       />
                     )}
                     {filteredMemories.map((item) => (
-                      <MemoryCard
-                        key={sessionKey(item)}
-                        item={item}
-                        selected={selected}
-                        onClick={() => setSelected(item)}
-                        query={query.trim()}
-                        contentQuery={contentQuery}
-                        hit={contentHits.get(sessionKey(item))}
-                        showSource={source === "All"}
-                      />
+                      <ListItemMenu key={sessionKey(item)} path={item.path}>
+                        <MemoryCard
+                          item={item}
+                          selected={selected}
+                          onClick={() => setSelected(item)}
+                          query={query.trim()}
+                          contentQuery={contentQuery}
+                          hit={contentHits.get(sessionKey(item))}
+                          showSource={source === "All"}
+                        />
+                      </ListItemMenu>
                     ))}
                   </div>
                 )}
@@ -892,16 +900,17 @@ export function App() {
                       />
                     )}
                     {filteredSkills.map((item) => (
-                      <MemoryCard
-                        key={sessionKey(item)}
-                        item={item}
-                        selected={selected}
-                        onClick={() => setSelected(item)}
-                        query={query.trim()}
-                        contentQuery={contentQuery}
-                        hit={contentHits.get(sessionKey(item))}
-                        showSource={source === "All"}
-                      />
+                      <ListItemMenu key={sessionKey(item)} path={item.path}>
+                        <MemoryCard
+                          item={item}
+                          selected={selected}
+                          onClick={() => setSelected(item)}
+                          query={query.trim()}
+                          contentQuery={contentQuery}
+                          hit={contentHits.get(sessionKey(item))}
+                          showSource={source === "All"}
+                        />
+                      </ListItemMenu>
                     ))}
                   </div>
                 )}
@@ -981,7 +990,7 @@ export function App() {
                               { label: "Copy path", value: selected.path },
                               { label: "Copy filename", value: basename(selected.path) },
                               ...(isSessionItem(selected)
-                                ? [{ label: "Copy ID", value: selected.id }]
+                                ? [{ label: "Copy session ID", value: selected.id }]
                                 : [])
                             ]}
                           />

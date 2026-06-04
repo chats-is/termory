@@ -94,6 +94,10 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
 
     let mut menu = MenuBuilder::new(app);
 
+    // "Open" sits at the very top of the menu.
+    let open = MenuItemBuilder::with_id("tray:open", "Open").build(app)?;
+    menu = menu.item(&open).item(&PredefinedMenuItem::separator(app)?);
+
     for cli in CliApp::all() {
         let providers_for_app: Vec<Provider> =
             providers.iter().filter(|p| p.app == cli).cloned().collect();
@@ -142,11 +146,10 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     }
 
     let sep = PredefinedMenuItem::separator(app)?;
-    let open = MenuItemBuilder::with_id("tray:open", "Open").build(app)?;
     // Plain MenuItem (not PredefinedMenuItem::quit) so macOS doesn't
     // attach the native quit-item icon — keeps the menu icon-free.
     let quit = MenuItemBuilder::with_id("tray:quit", "Exit").build(app)?;
-    menu = menu.item(&sep).item(&open).item(&quit);
+    menu = menu.item(&sep).item(&quit);
 
     menu.build()
 }

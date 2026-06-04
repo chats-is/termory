@@ -1,3 +1,4 @@
+import React from "react";
 import { Folder } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatRelativeDate } from "@/lib/format";
@@ -10,34 +11,47 @@ import type { AppSession, SearchHit } from "@/types";
 import { BrandIcon } from "./BrandIcon";
 import { SnippetLine } from "./SnippetLine";
 
-export function MemoryCard({
-  item,
-  selected,
-  onClick,
-  query,
-  contentQuery,
-  hit,
-  showSource
-}: {
-  item: AppSession;
-  selected: AppSession | null;
-  onClick: () => void;
-  query: string;
-  contentQuery: string;
-  hit: SearchHit | undefined;
-  showSource: boolean;
-}) {
+// forwardRef + ...rest so the call site can make it a context-menu
+// `asChild` trigger (Radix passes a ref + event handlers to the child).
+export const MemoryCard = React.forwardRef<
+  HTMLButtonElement,
+  {
+    item: AppSession;
+    selected: AppSession | null;
+    onClick: () => void;
+    query: string;
+    contentQuery: string;
+    hit: SearchHit | undefined;
+    showSource: boolean;
+  } & Omit<React.ComponentPropsWithoutRef<"button">, "onClick">
+>(function MemoryCard(
+  {
+    item,
+    selected,
+    onClick,
+    query,
+    contentQuery,
+    hit,
+    showSource,
+    className,
+    ...rest
+  },
+  ref
+) {
   const showSnippet = !!hit && query.toLowerCase() === contentQuery.toLowerCase();
   const isActive = selected?.path === item.path && selected?.id === item.id;
   const tools = memoryToolsOf(item);
   return (
     <button
+      ref={ref}
       onClick={onClick}
+      {...rest}
       className={cn(
-        "w-full text-left rounded-lg px-2 py-2 transition-colors flex flex-col gap-1",
+        "w-full text-left rounded-lg px-2 py-2 transition-colors flex flex-col gap-1 select-none",
         isActive
           ? "bg-primary text-primary-foreground [&_*]:text-primary-foreground"
-          : "hover:bg-accent/60"
+          : "hover:bg-accent/60 data-[state=open]:bg-accent/60",
+        className
       )}
     >
       <div className="flex items-baseline justify-between gap-2">
@@ -77,4 +91,4 @@ export function MemoryCard({
       )}
     </button>
   );
-}
+});

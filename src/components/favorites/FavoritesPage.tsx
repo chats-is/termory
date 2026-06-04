@@ -2,6 +2,7 @@ import React from "react";
 import { Calendar, ExternalLink, Folder, Star, Trash2 } from "lucide-react";
 import { BrandIcon } from "@/components/BrandIcon";
 import { EmptyState } from "@/components/EmptyState";
+import { ListItemMenu } from "@/components/ListItemMenu";
 import { MessageBody } from "@/components/MessageBody";
 import {
   Tooltip,
@@ -86,16 +87,22 @@ export function FavoritesPage({
           {sorted.map((fav) => {
             const active = fav.id === selected.id;
             return (
-              <button
+              <ListItemMenu
                 key={fav.id}
+                path={fav.source_session_path}
+                id={fav.source_session_id}
+                messageId={fav.id}
+                source={fav.source}
+              >
+              <button
                 type="button"
                 onClick={() => setSelectedId(fav.id)}
                 aria-current={active ? "true" : undefined}
                 className={cn(
-                  "w-full text-left rounded-lg px-2 py-2 transition-colors flex flex-col gap-1",
+                  "w-full text-left rounded-lg px-2 py-2 transition-colors flex flex-col gap-1 select-none",
                   active
                     ? "bg-primary text-primary-foreground [&_*]:text-primary-foreground"
-                    : "text-sidebar-foreground hover:bg-accent/60"
+                    : "text-sidebar-foreground hover:bg-accent/60 data-[state=open]:bg-accent/60"
                 )}
               >
                 <div className="flex items-baseline justify-between gap-2">
@@ -123,6 +130,7 @@ export function FavoritesPage({
                   </span>
                 </div>
               </button>
+              </ListItemMenu>
             );
           })}
         </div>
