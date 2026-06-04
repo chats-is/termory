@@ -12,8 +12,12 @@ import {
   TooltipContent,
   TooltipTrigger
 } from "@/components/ui/tooltip";
-import type { DailyActivities, WindowTotals } from "@/lib/stats-utils";
-import { formatDateLong, formatDateShort } from "./shared";
+import type {
+  DailyActivities,
+  ModelUsage,
+  WindowTotals
+} from "@/lib/stats-utils";
+import { formatDateLong, formatDateShort, ModelUsageList } from "./shared";
 
 /**
  * Daily workload heatmap — 24-hour rows × N-date columns, CSS Grid
@@ -96,12 +100,17 @@ function cellRatio(
 
 export function DailyActivitiesHeatmap({
   activities,
-  totals
+  totals,
+  modelUsage
 }: {
   activities: DailyActivities;
   totals: WindowTotals;
+  /** Window-level per-model rollup (from `modelBreakdown`) for the
+   * summary line. Per-cell model data lives in `activities.models`. */
+  modelUsage: ModelUsage[];
 }) {
-  const { dates, messages, tokens, sessions } = activities;
+  const { dates, messages, tokens, sessions, models } = activities;
+  const namedModels = modelUsage.filter((m) => m.model !== "Unknown");
 
   // Pre-compute every (h, d) cell's combined intensity ratio in one
   // pass. Tracks per-dimension maxes (so the geometric mean
@@ -162,6 +171,26 @@ export function DailyActivitiesHeatmap({
                   </TooltipContent>
                 </Tooltip>
               )}
+              {namedModels.length > 0 && (
+                <>
+                  {" · "}
+                  <HoverCard openDelay={80} closeDelay={80}>
+                    <HoverCardTrigger asChild>
+                      <span className="cursor-default underline decoration-dotted underline-offset-2">
+                        {namedModels.length}{" "}
+                        {namedModels.length === 1 ? "model" : "models"}
+                      </span>
+                    </HoverCardTrigger>
+                    <HoverCardContent
+                      className="w-auto min-w-[220px] p-3 text-xs leading-tight"
+                      side="bottom"
+                      align="end"
+                    >
+                      <ModelUsageList models={namedModels} />
+                    </HoverCardContent>
+                  </HoverCard>
+                </>
+              )}
             </span>
           )}
         </div>
@@ -214,6 +243,12 @@ export function DailyActivitiesHeatmap({
                   const ratio = ratios[h][i];
                   const colorClass =
                     ratio === 0 ? "bg-primary/10" : tierClass(ratio);
+                  // Per-model rows for this exact (date, hour) cell —
+                  // drop "Unknown" (sessions with no recorded model),
+                  // matching the OverviewHero Models breakdown.
+                  const cellModels = models[h][i].filter(
+                    (m) => m.model !== "Unknown"
+                  );
                   return (
                     <HoverCard
                       key={`${h}-${i}`}
@@ -259,6 +294,11 @@ export function DailyActivitiesHeatmap({
                             </span>
                           </div>
                         </div>
+                        {cellModels.length > 0 && (
+                          <div className="mt-1.5 pt-1.5 border-t border-border/40">
+                            <ModelUsageList models={cellModels} />
+                          </div>
+                        )}
                       </HoverCardContent>
                     </HoverCard>
                   );

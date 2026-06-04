@@ -4,6 +4,7 @@ import {
   dailyTokens,
   filterSessions,
   dailyActivities,
+  modelBreakdown,
   resolveRange,
   sessionTimestamp,
   windowTotals
@@ -71,10 +72,6 @@ describe("resolveRange", () => {
     const diffDays = (r.to.getTime() - r.from.getTime()) / 86_400_000;
     expect(Math.round(diffDays)).toBeGreaterThanOrEqual(6);
     expect(Math.round(diffDays)).toBeLessThanOrEqual(7);
-  });
-  it("returns a long window for 'all'", () => {
-    const r = resolveRange({ preset: "all" }, now);
-    expect(r.from.getFullYear()).toBeLessThan(now.getFullYear() - 30);
   });
   it("returns the literal range for 'custom'", () => {
     const from = new Date("2026-01-01T00:00:00Z");
@@ -272,6 +269,96 @@ describe("windowTotals", () => {
   });
 });
 
+describe("modelBreakdown", () => {
+  const range = {
+    from: new Date("2026-05-28T00:00:00"),
+    to: new Date("2026-05-30T23:59:59")
+  };
+
+  const tk = (total: number) => ({
+    input: total,
+    output: 0,
+    cached: 0,
+    reasoning: 0,
+    total
+  });
+
+  it("groups in-window sessions + tokens by model, sorted by tokens desc", () => {
+    const sessions: AppSession[] = [
+      mk({
+        source: "Claude",
+        model: "claude-opus-4-7",
+        started_at: "2026-05-28T10:00:00",
+        daily_tokens: [{ date: "2026-05-28", tokens: tk(100), messages: 2 }]
+      }),
+      mk({
+        source: "Claude",
+        model: "claude-opus-4-7",
+        started_at: "2026-05-29T10:00:00",
+        daily_tokens: [{ date: "2026-05-29", tokens: tk(50), messages: 1 }]
+      }),
+      mk({
+        source: "Codex",
+        model: "gpt-5",
+        started_at: "2026-05-29T11:00:00",
+        daily_tokens: [{ date: "2026-05-29", tokens: tk(500), messages: 3 }]
+      })
+    ];
+    const b = modelBreakdown(sessions, range);
+    expect(b).toEqual([
+      { model: "gpt-5", sessions: 1, tokens: 500 },
+      { model: "claude-opus-4-7", sessions: 2, tokens: 150 }
+    ]);
+  });
+
+  it("buckets sessions with no model under 'Unknown'", () => {
+    const b = modelBreakdown(
+      [
+        mk({
+          source: "Gemini",
+          started_at: "2026-05-29T10:00:00",
+          daily_tokens: [{ date: "2026-05-29", tokens: tk(30), messages: 1 }]
+        })
+      ],
+      range
+    );
+    expect(b).toEqual([{ model: "Unknown", sessions: 1, tokens: 30 }]);
+  });
+
+  it("uses windowTotals accounting: out-of-window tokens excluded, started_at gates the session count", () => {
+    const b = modelBreakdown(
+      [
+        mk({
+          source: "Claude",
+          model: "claude-opus-4-7",
+          started_at: "2026-05-01T10:00:00", // before window → not counted as a session
+          daily_tokens: [
+            { date: "2026-05-01", tokens: tk(9999), messages: 9 }, // out of window
+            { date: "2026-05-29", tokens: tk(20), messages: 1 } // in window
+          ]
+        })
+      ],
+      range
+    );
+    expect(b).toEqual([{ model: "claude-opus-4-7", sessions: 0, tokens: 20 }]);
+  });
+
+  it("ignores Memory / Skill items", () => {
+    expect(
+      modelBreakdown(
+        [
+          mk({
+            source: "Memory",
+            model: "x",
+            started_at: "2026-05-29T10:00:00"
+          })
+        ],
+        range
+      )
+    ).toEqual([]);
+  });
+});
+
 describe("dailyTokens", () => {
   const range = {
     from: new Date("2026-05-28T00:00:00"),
@@ -426,6 +513,67 @@ describe("dailyActivities", () => {
       for (let d = 0; d < out.dates.length; d++) total += out.sessions[h][d];
     }
     expect(total).toBe(0);
+  });
+
+  it("attributes per-cell messages/tokens to each session's model", () => {
+    const sessions: AppSession[] = [
+      mk({
+        source: "Claude",
+        model: "claude-opus-4-7",
+        started_at: "2026-05-28T10:00:00",
+        daily_tokens: [
+          {
+            date: "2026-05-28",
+            tokens: { input: 0, output: 0, cached: 0, reasoning: 0, total: 0 },
+            hours: hoursWith({ 10: 2 }),
+            hour_tokens: hoursWith({ 10: 1000 })
+          }
+        ]
+      }),
+      mk({
+        source: "Codex",
+        model: "gpt-5",
+        started_at: "2026-05-28T10:00:00",
+        daily_tokens: [
+          {
+            date: "2026-05-28",
+            tokens: { input: 0, output: 0, cached: 0, reasoning: 0, total: 0 },
+            hours: hoursWith({ 10: 1 }),
+            hour_tokens: hoursWith({ 10: 4000 })
+          }
+        ]
+      })
+    ];
+    const out = dailyActivities(sessions, range);
+    // Cell (hour 10, date index 0) — both models, sorted by tokens desc.
+    expect(out.models[10][0]).toEqual([
+      { model: "gpt-5", messages: 1, tokens: 4000 },
+      { model: "claude-opus-4-7", messages: 2, tokens: 1000 }
+    ]);
+    // A cell with no activity is an empty list.
+    expect(out.models[11][0]).toEqual([]);
+  });
+
+  it("buckets model-less sessions under 'Unknown' in the cell", () => {
+    const out = dailyActivities(
+      [
+        mk({
+          started_at: "2026-05-28T09:00:00",
+          daily_tokens: [
+            {
+              date: "2026-05-28",
+              tokens: { input: 0, output: 0, cached: 0, reasoning: 0, total: 0 },
+              hours: hoursWith({ 9: 4 }),
+              hour_tokens: hoursWith({ 9: 200 })
+            }
+          ]
+        })
+      ],
+      range
+    );
+    expect(out.models[9][0]).toEqual([
+      { model: "Unknown", messages: 4, tokens: 200 }
+    ]);
   });
 });
 

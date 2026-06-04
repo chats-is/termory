@@ -5,35 +5,40 @@ import {
   HoverCardTrigger
 } from "@/components/ui/hover-card";
 import { formatCompact, formatFullNumber } from "@/lib/format";
+import type { ModelUsage } from "@/lib/stats-utils";
 import type { TokenStats } from "@/types";
-import { TOKEN_COLORS, BreakdownRow } from "./shared";
+import { TOKEN_COLORS, BreakdownRow, ModelUsageList } from "./shared";
 
 /**
  * One-row KPI strip — basic totals only:
- *   Sessions · Messages · Tokens · Projects
+ *   Sessions · Messages · Tokens · Models · Projects
  *
  * The Tokens cell reveals an input/output/cached/reasoning breakdown
- * on hover (shadcn HoverCard), matching the DailyTokensChart tooltip.
+ * on hover; the Models cell reveals per-model sessions/tokens on hover
+ * (both shadcn HoverCard).
  */
 
 export function OverviewHero({
   sessions,
   messages,
   tokens,
+  models,
   projects
 }: {
   sessions: number;
   messages: number;
   tokens: TokenStats;
+  models: ModelUsage[];
   projects: number;
 }) {
   return (
     <Card className="p-3 gap-0 outline outline-1 outline-transparent bg-card shadow-sm">
       <CardContent className="px-0">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-3">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-x-6 gap-y-3">
           <Kpi label="Sessions" value={sessions} />
           <Kpi label="Messages" value={messages} />
           <TokensKpi tokens={tokens} />
+          <ModelsKpi models={models} />
           <Kpi label="Projects" value={projects} />
         </div>
       </CardContent>
@@ -101,6 +106,42 @@ function TokensKpi({ tokens }: { tokens: TokenStats }) {
                 <span className="font-medium">{formatCompact(tokens.total)}</span>
               </div>
             </div>
+          </HoverCardContent>
+        </HoverCard>
+      ) : (
+        valueNode
+      )}
+    </div>
+  );
+}
+
+/** Models cell — main number is the count of distinct *named* models in
+ * the window; hovering reveals every model (incl. "Unknown") with its
+ * session count and approximate token total. */
+function ModelsKpi({ models }: { models: ModelUsage[] }) {
+  // Drop the "Unknown" bucket — sessions whose source recorded no model
+  // (no assistant reply / older sessions). It's noise in a model-usage
+  // breakdown, and the main count already ignores it.
+  const named = models.filter((m) => m.model !== "Unknown");
+  const valueNode = (
+    <span className="text-3xl font-semibold tabular-nums leading-none cursor-default">
+      {formatFullNumber(named.length)}
+    </span>
+  );
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-xs uppercase tracking-wide text-muted-foreground">
+        Models
+      </span>
+      {named.length > 0 ? (
+        <HoverCard openDelay={80} closeDelay={80}>
+          <HoverCardTrigger asChild>{valueNode}</HoverCardTrigger>
+          <HoverCardContent
+            className="w-auto min-w-[220px] p-3 text-xs leading-tight"
+            side="bottom"
+            align="start"
+          >
+            <ModelUsageList models={named} />
           </HoverCardContent>
         </HoverCard>
       ) : (

@@ -9,7 +9,7 @@
 import type { AppSession, CliApp, TokenStats } from "../types";
 import { isSessionItem } from "./session-utils";
 
-export type DateRangePreset = "7d" | "30d" | "90d" | "365d" | "all" | "custom";
+export type DateRangePreset = "today" | "7d" | "30d" | "90d" | "custom";
 
 export type DateRange =
   | { preset: Exclude<DateRangePreset, "custom"> }
@@ -50,21 +50,14 @@ export function resolveRange(
   }
   const to = new Date(now);
   to.setHours(23, 59, 59, 999);
-  if (range.preset === "all") {
-    // 50 years back covers any conceivable AppSession; cleaner than
-    // dealing with `null`/`undefined` `from` in callers.
-    const from = new Date(now);
-    from.setFullYear(from.getFullYear() - 50);
-    return { from, to };
-  }
   const days =
-    range.preset === "7d"
-      ? 7
-      : range.preset === "30d"
-        ? 30
-        : range.preset === "90d"
-          ? 90
-          : 365;
+    range.preset === "today"
+      ? 1
+      : range.preset === "7d"
+        ? 7
+        : range.preset === "30d"
+          ? 30
+          : 90;
   const from = new Date(now);
   from.setDate(from.getDate() - days + 1);
   from.setHours(0, 0, 0, 0);
@@ -133,12 +126,23 @@ export function localDateKey(d: Date): string {
  *   tokens[hour][date]   — total tokens
  *   sessions[hour][date] — sessions whose `started_at` fell on
  *                          (date, hour). Sparse — most cells are 0.
+ *   models[hour][date]   — per-model messages/tokens in that cell,
+ *                          sorted by tokens desc. Attributed at the
+ *                          session level (one model per session), same
+ *                          approximation as `modelBreakdown`.
  */
+export type ModelCellUsage = {
+  model: string;
+  messages: number;
+  tokens: number;
+};
+
 export type DailyActivities = {
   dates: string[];
   messages: number[][];
   tokens: number[][];
   sessions: number[][];
+  models: ModelCellUsage[][][];
 };
 
 /** Build the 24-hour × N-date matrices for messages / tokens /
@@ -167,6 +171,24 @@ export function dailyActivities(
   const sessionsM: number[][] = Array.from({ length: 24 }, () =>
     dates.map(() => 0)
   );
+  // Per-cell model accumulator — lazily allocated (most cells are empty).
+  type Cell = Map<string, { messages: number; tokens: number }>;
+  const modelCells: (Cell | null)[][] = Array.from({ length: 24 }, () =>
+    dates.map(() => null)
+  );
+  const cellBucket = (h: number, di: number, model: string) => {
+    let cell = modelCells[h][di];
+    if (!cell) {
+      cell = new Map();
+      modelCells[h][di] = cell;
+    }
+    let b = cell.get(model);
+    if (!b) {
+      b = { messages: 0, tokens: 0 };
+      cell.set(model, b);
+    }
+    return b;
+  };
   for (const s of sessions) {
     if (!isSessionItem(s)) continue;
 
@@ -181,22 +203,46 @@ export function dailyActivities(
     }
 
     if (!s.daily_tokens) continue;
+    const model = s.model && s.model.trim() ? s.model : "Unknown";
     for (const entry of s.daily_tokens) {
       const di = dateIndex.get(entry.date);
       if (di == null) continue;
-      if (entry.hours && entry.hours.length === 24) {
-        for (let h = 0; h < 24; h++) {
-          messages[h][di] += entry.hours[h];
-        }
-      }
-      if (entry.hour_tokens && entry.hour_tokens.length === 24) {
-        for (let h = 0; h < 24; h++) {
-          tokens[h][di] += entry.hour_tokens[h];
+      const hours =
+        entry.hours && entry.hours.length === 24 ? entry.hours : null;
+      const hourTokens =
+        entry.hour_tokens && entry.hour_tokens.length === 24
+          ? entry.hour_tokens
+          : null;
+      for (let h = 0; h < 24; h++) {
+        const m = hours ? hours[h] : 0;
+        const t = hourTokens ? hourTokens[h] : 0;
+        if (m) messages[h][di] += m;
+        if (t) tokens[h][di] += t;
+        if (m || t) {
+          const b = cellBucket(h, di, model);
+          b.messages += m;
+          b.tokens += t;
         }
       }
     }
   }
-  return { dates, messages, tokens, sessions: sessionsM };
+  const models: ModelCellUsage[][][] = Array.from({ length: 24 }, (_, h) =>
+    dates.map((_, di) => {
+      const cell = modelCells[h][di];
+      if (!cell) return [];
+      return Array.from(cell, ([model, v]) => ({
+        model,
+        messages: v.messages,
+        tokens: v.tokens
+      })).sort(
+        (a, b) =>
+          b.tokens - a.tokens ||
+          b.messages - a.messages ||
+          a.model.localeCompare(b.model)
+      );
+    })
+  );
+  return { dates, messages, tokens, sessions: sessionsM, models };
 }
 
 /**
@@ -276,6 +322,71 @@ export function windowTotals(
     tokens,
     projects: projects.size
   };
+}
+
+/** Per-model rollup row. `model` is `"Unknown"` for sessions whose
+ * source didn't record one. */
+export type ModelUsage = {
+  model: string;
+  sessions: number;
+  tokens: number;
+};
+
+/**
+ * Group the in-window usage by `session.model`, window-accurate with
+ * the SAME accounting as `windowTotals`:
+ *   - `sessions` counts sessions whose `started_at` falls in the window
+ *   - `tokens`   sums only in-window `daily_tokens` totals
+ *
+ * `model` is session-level (one best-guess id per session), so a
+ * session that switched models mid-run lands entirely under its single
+ * recorded model — this is an approximation, not a per-message split.
+ * Sessions with no recorded model bucket under `"Unknown"`. Rows are
+ * sorted by tokens desc, then sessions desc, then name.
+ */
+export function modelBreakdown(
+  sessions: AppSession[],
+  range: { from: Date; to: Date }
+): ModelUsage[] {
+  const fromKey = localDateKey(range.from);
+  const toKey = localDateKey(range.to);
+  const inRange = (date: string) => date >= fromKey && date <= toKey;
+
+  const map = new Map<string, { sessions: number; tokens: number }>();
+  const bucket = (model: string) => {
+    let b = map.get(model);
+    if (!b) {
+      b = { sessions: 0, tokens: 0 };
+      map.set(model, b);
+    }
+    return b;
+  };
+
+  for (const s of sessions) {
+    if (!isSessionItem(s)) continue;
+    const model = s.model && s.model.trim() ? s.model : "Unknown";
+
+    if (s.started_at) {
+      const startTs = new Date(s.started_at);
+      if (!Number.isNaN(startTs.getTime()) && inRange(localDateKey(startTs))) {
+        bucket(model).sessions += 1;
+      }
+    }
+
+    if (s.daily_tokens) {
+      for (const entry of s.daily_tokens) {
+        if (!inRange(entry.date)) continue;
+        bucket(model).tokens += entry.tokens.total;
+      }
+    }
+  }
+
+  return Array.from(map, ([model, v]) => ({ model, ...v })).sort(
+    (a, b) =>
+      b.tokens - a.tokens ||
+      b.sessions - a.sessions ||
+      a.model.localeCompare(b.model)
+  );
 }
 
 export type DailyTokens = {

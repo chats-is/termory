@@ -1,6 +1,13 @@
 import React from "react";
-import { Calendar, ChevronDown, Layers, RefreshCw } from "lucide-react";
+import {
+  Calendar as CalendarIcon,
+  ChevronDown,
+  Layers,
+  RefreshCw
+} from "lucide-react";
+import type { DateRange as CalendarRange } from "react-day-picker";
 import { BrandIcon } from "@/components/BrandIcon";
+import { Calendar } from "@/components/ui/calendar";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CLI_APP_SOURCE_BADGE } from "@/constants";
 import { cn } from "@/lib/utils";
@@ -9,12 +16,19 @@ import type { CliApp } from "@/types";
 
 type PresetOption = { id: Exclude<DateRangePreset, "custom">; label: string };
 const PRESETS: PresetOption[] = [
+  { id: "today", label: "Today" },
   { id: "7d", label: "Last 7 days" },
   { id: "30d", label: "Last 30 days" },
-  { id: "90d", label: "Last 90 days" },
-  { id: "365d", label: "Last 365 days" },
-  { id: "all", label: "All time" }
+  { id: "90d", label: "Last 90 days" }
 ];
+
+/** `Date` → `YYYY-MM-DD` in local time (used for the trigger label). */
+function toInputDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = `${d.getMonth() + 1}`.padStart(2, "0");
+  const day = `${d.getDate()}`.padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
 
 const SOURCES: SourceFilter[] = ["All", "claude", "codex", "gemini", "opencode"];
 
@@ -41,6 +55,33 @@ export function StatsFilterBar({
   const [presetOpen, setPresetOpen] = React.useState(false);
   const wrapperRef = React.useRef<HTMLDivElement>(null);
 
+  // Draft state for the shadcn Calendar range picker. Seeded from the
+  // active range on open so editing an existing custom window starts
+  // from its current bounds rather than blank.
+  const [draft, setDraft] = React.useState<CalendarRange | undefined>();
+  React.useEffect(() => {
+    if (!presetOpen) return;
+    setDraft(
+      range.preset === "custom"
+        ? { from: range.from, to: range.to }
+        : undefined
+    );
+    // Seed once per open — only re-run when the menu toggles.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [presetOpen]);
+
+  const customValid = !!draft?.from && !!draft?.to;
+
+  const applyCustom = () => {
+    if (!draft?.from || !draft?.to) return;
+    const from = new Date(draft.from);
+    const to = new Date(draft.to);
+    from.setHours(0, 0, 0, 0);
+    to.setHours(23, 59, 59, 999);
+    onRangeChange({ preset: "custom", from, to });
+    setPresetOpen(false);
+  };
+
   // Click-outside / Esc dismiss for the preset menu. Custom controlled
   // implementation rather than Radix DropdownMenu — the latter has a
   // documented freeze in Tauri's WebKit when used alongside Dialogs
@@ -65,7 +106,7 @@ export function StatsFilterBar({
 
   const currentLabel =
     range.preset === "custom"
-      ? "Custom range"
+      ? `${toInputDate(range.from)} → ${toInputDate(range.to)}`
       : PRESETS.find((p) => p.id === range.preset)?.label ?? "Range";
 
   return (
@@ -109,7 +150,7 @@ export function StatsFilterBar({
             "hover:bg-accent hover:text-accent-foreground transition-colors"
           )}
         >
-          <Calendar className="size-4 text-muted-foreground" />
+          <CalendarIcon className="size-4 text-muted-foreground" />
           <span>{currentLabel}</span>
           <ChevronDown className="size-3.5 text-muted-foreground" />
         </button>
@@ -139,6 +180,43 @@ export function StatsFilterBar({
                 {p.label}
               </button>
             ))}
+
+            {/* Custom range — shadcn Calendar in range mode. Embedded in
+                the existing custom-controlled dropdown (not a Radix
+                Popover) to stay clear of the Tauri WebKit overlay freeze
+                noted above. */}
+            <div className="mt-1 border-t pt-1.5">
+              <div
+                className={cn(
+                  "text-xs font-medium px-2 mb-0.5",
+                  range.preset === "custom"
+                    ? "text-foreground"
+                    : "text-muted-foreground"
+                )}
+              >
+                Custom range
+              </div>
+              <Calendar
+                mode="range"
+                selected={draft}
+                onSelect={setDraft}
+                numberOfMonths={2}
+                defaultMonth={draft?.from}
+                className="p-2"
+              />
+              <button
+                type="button"
+                onClick={applyCustom}
+                disabled={!customValid}
+                className={cn(
+                  "mx-2 mb-1 w-[calc(100%-1rem)] h-8 rounded-sm text-sm font-medium transition-colors",
+                  "bg-primary text-primary-foreground hover:bg-primary/90",
+                  "disabled:opacity-50 disabled:pointer-events-none"
+                )}
+              >
+                Apply
+              </button>
+            </div>
           </div>
         )}
       </div>

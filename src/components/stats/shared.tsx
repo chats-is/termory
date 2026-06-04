@@ -37,6 +37,46 @@ export function BreakdownRow({
   );
 }
 
+/** Per-model rows for a hover card: `model    {tokens}`, sorted as
+ * given (callers pass `modelBreakdown` output, already tokens-desc).
+ * Shared by the OverviewHero Models cell and the DailyActivities
+ * summary so the two surfaces never drift. Session counts are
+ * intentionally NOT shown here — per-model session counting doesn't
+ * reconcile with the window's "sessions created" headline (sessions
+ * with no recorded model would have to surface as an "Unknown" row), so
+ * the breakdown is a pure token-usage view. Accepts any row with a
+ * `model` + `tokens` (window-level `ModelUsage` or per-cell
+ * `ModelCellUsage`). */
+export function ModelUsageList({
+  models
+}: {
+  models: { model: string; tokens: number }[];
+}) {
+  return (
+    <>
+      <div className="flex items-center justify-between gap-6 text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
+        <span>Model</span>
+        <span>Tokens</span>
+      </div>
+      <div className="space-y-0.5 tabular-nums">
+        {models.map((m) => (
+          <div
+            key={m.model}
+            className="flex items-center justify-between gap-6"
+          >
+            <span className="truncate max-w-[200px]" title={m.model}>
+              {m.model}
+            </span>
+            <span className="shrink-0 font-medium">
+              {formatCompact(m.tokens)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
 /** Compact `M/D` date label for chart x-axis ticks. */
 export function formatDateShort(date: unknown): string {
   const str = typeof date === "string" ? date : String(date ?? "");

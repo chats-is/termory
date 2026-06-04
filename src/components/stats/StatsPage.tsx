@@ -10,6 +10,7 @@ import {
   dailyActivities,
   dailyTokens,
   filterSessions,
+  modelBreakdown,
   resolveRange,
   windowTotals
 } from "@/lib/stats-utils";
@@ -45,6 +46,11 @@ export function StatsPage({
     [filtered, resolved]
   );
 
+  const models = React.useMemo(
+    () => modelBreakdown(filtered, resolved),
+    [filtered, resolved]
+  );
+
   const tokenData = React.useMemo(
     () => dailyTokens(filtered, resolved),
     [filtered, resolved]
@@ -74,10 +80,15 @@ export function StatsPage({
             sessions={totals.sessions}
             messages={totals.messages}
             tokens={totals.tokens}
+            models={models}
             projects={totals.projects}
           />
           <DailyTokensChart data={tokenData} />
-          <DailyActivitiesHeatmap activities={activities} totals={totals} />
+          <DailyActivitiesHeatmap
+            activities={activities}
+            totals={totals}
+            modelUsage={models}
+          />
         </div>
       </div>
     </div>
