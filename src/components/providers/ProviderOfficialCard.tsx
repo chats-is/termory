@@ -69,7 +69,7 @@ export function ProviderOfficialCard({
             onClick={onSetDefault}
             disabled={settingDefault}
           >
-            {settingDefault ? "Setting…" : "Set as default"}
+            {settingDefault ? "Activating…" : "Activate"}
           </Button>
         )}
       </CardContent>
