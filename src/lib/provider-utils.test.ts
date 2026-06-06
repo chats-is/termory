@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
+  appProtocols,
   blankProvider,
   isManagedOptionKey,
   isProviderList,
+  isGatewayList,
   maskKey,
-  newProviderId
+  newProviderId,
+  npmForProtocol,
+  protocolForBinding,
+  protocolForNpm,
+  providerFromBinding,
+  resolveActiveProviderId,
+  gatewayBaseForProtocol
 } from "./provider-utils";
+import type { ActiveState, Gateway, GatewayCapabilities } from "../types";
 
 // `isManagedOptionKey` MUST mirror `override_key_is_managed` in
 // `src-tauri/src/providers.rs`. These cases pin the frontend side; if the
@@ -117,5 +126,242 @@ describe("newProviderId", () => {
     const b = newProviderId();
     expect(a).toBeTruthy();
     expect(a).not.toBe(b);
+  });
+});
+
+// ── Gateway helpers ─────────────────────────────────────────
+
+function caps(partial: Partial<GatewayCapabilities>): GatewayCapabilities {
+  return {
+    openaiCompatible: false,
+    openai: false,
+    anthropic: false,
+    gemini: false,
+    models: [],
+    ...partial
+  };
+}
+
+describe("gatewayBaseForProtocol", () => {
+  it("openai gets a trailing /v1 (idempotent, any pasted suffix)", () => {
+    expect(gatewayBaseForProtocol("https://r.x", "openai")).toBe("https://r.x/v1");
+    expect(gatewayBaseForProtocol("https://r.x/", "openai")).toBe("https://r.x/v1");
+    expect(gatewayBaseForProtocol("https://r.x/v1", "openai")).toBe("https://r.x/v1");
+    expect(gatewayBaseForProtocol("https://r.x/v1beta", "openai")).toBe(
+      "https://r.x/v1"
+    );
+    expect(gatewayBaseForProtocol("https://r.x", "openai-compatible")).toBe(
+      "https://r.x/v1"
+    );
+  });
+  it("anthropic → bare root regardless of pasted suffix", () => {
+    expect(gatewayBaseForProtocol("https://r.x/v1", "anthropic")).toBe("https://r.x");
+    expect(gatewayBaseForProtocol("https://r.x", "anthropic")).toBe("https://r.x");
+  });
+  it("gemini → bare root, stripping /v1beta OR /v1", () => {
+    expect(gatewayBaseForProtocol("https://r.x/v1beta", "gemini")).toBe("https://r.x");
+    // The bug fix: a base pasted with the OpenAI-style /v1 must still
+    // reduce to the root so Gemini gets /v1beta, not /v1/v1beta.
+    expect(gatewayBaseForProtocol("https://r.x/v1", "gemini")).toBe("https://r.x");
+    expect(gatewayBaseForProtocol("https://r.x", "gemini")).toBe("https://r.x");
+  });
+  it("preserves a non-version sub-path", () => {
+    expect(gatewayBaseForProtocol("https://r.x/gw/v1", "gemini")).toBe(
+      "https://r.x/gw"
+    );
+    expect(gatewayBaseForProtocol("https://r.x/gw", "openai")).toBe(
+      "https://r.x/gw/v1"
+    );
+  });
+});
+
+describe("appProtocols", () => {
+  it("maps capabilities to bindable CLIs (Codex needs Responses)", () => {
+    const p = appProtocols(
+      caps({ openaiCompatible: true, openai: false, anthropic: true })
+    );
+    expect(p.claude).toEqual(["anthropic"]);
+    expect(p.codex).toEqual([]); // chat ok but no Responses route
+    expect(p.gemini).toEqual([]);
+    // OpenCode is flexible — every supported mode (anthropic + chat here).
+    expect(p.opencode).toEqual(["anthropic", "openai-compatible"]);
+  });
+  it("Codex bindable only when the Responses (openai) route exists", () => {
+    const p = appProtocols(caps({ openai: true, openaiCompatible: true }));
+    expect(p.codex).toEqual(["openai"]);
+    expect(p.opencode).toEqual(["openai-compatible", "openai"]);
+  });
+  it("undefined capabilities → nothing bindable", () => {
+    const p = appProtocols(undefined);
+    expect(p.claude).toEqual([]);
+    expect(p.opencode).toEqual([]);
+  });
+});
+
+describe("providerFromBinding", () => {
+  const gateway: Gateway = {
+    kind: "gateway",
+    id: "rel1",
+    name: "My Gateway",
+    baseUrl: "https://r.x",
+    apiKey: "sk-1",
+    bindings: []
+  };
+  it("uses the binding's own id; derives the protocol (Claude → anthropic base)", () => {
+    const claude = providerFromBinding(gateway, {
+      id: "b-claude",
+      app: "claude",
+      model: "claude-x"
+    });
+    expect(claude.id).toBe("b-claude");
+    expect(claude.app).toBe("claude");
+    expect(claude.kind).toBe("custom");
+    expect(claude.baseUrl).toBe("https://r.x"); // anthropic → bare host
+    expect(claude.apiKey).toBe("sk-1");
+    expect(claude.model).toBe("claude-x");
+    expect(claude.npm).toBeUndefined();
+  });
+  it("Codex binding gets a /v1 base (derived openai protocol)", () => {
+    const codex = providerFromBinding(gateway, { id: "b-codex", app: "codex" });
+    expect(codex.baseUrl).toBe("https://r.x/v1");
+  });
+  it("OpenCode protocol is derived from its npm package", () => {
+    const oc = providerFromBinding(gateway, {
+      id: "b-oc",
+      app: "opencode",
+      npm: "@ai-sdk/anthropic"
+    });
+    expect(oc.npm).toBe("@ai-sdk/anthropic");
+    expect(oc.baseUrl).toBe("https://r.x"); // anthropic → bare host
+    // No npm → defaults to @ai-sdk/openai-compatible (Chat Completions).
+    const oc2 = providerFromBinding(gateway, { id: "b-oc2", app: "opencode" });
+    expect(oc2.npm).toBe(npmForProtocol("openai-compatible"));
+    expect(oc2.npm).toBe("@ai-sdk/openai-compatible");
+    expect(oc2.baseUrl).toBe("https://r.x/v1");
+  });
+  it("passes advanced options through to the synthesized provider", () => {
+    const p = providerFromBinding(gateway, {
+      id: "b1",
+      app: "claude",
+      options: [{ key: "env.ANTHROPIC_DEFAULT_OPUS_MODEL", value: "claude-opus" }]
+    });
+    expect(p.options).toEqual([
+      { key: "env.ANTHROPIC_DEFAULT_OPUS_MODEL", value: "claude-opus" }
+    ]);
+  });
+  it("passes OpenCode extra models through; non-OpenCode bindings don't", () => {
+    const oc = providerFromBinding(gateway, {
+      id: "b-oc",
+      app: "opencode",
+      models: [{ id: "m1", name: "M1" }]
+    });
+    expect(oc.models).toEqual([{ id: "m1", name: "M1" }]);
+    const claude = providerFromBinding(gateway, {
+      id: "b-claude",
+      app: "claude",
+      models: [{ id: "m1", name: "M1" }]
+    });
+    expect(claude.models).toBeUndefined();
+  });
+});
+
+describe("protocolForBinding", () => {
+  it("fixes Claude/Codex/Gemini; derives OpenCode from npm", () => {
+    expect(protocolForBinding({ app: "claude" })).toBe("anthropic");
+    expect(protocolForBinding({ app: "codex" })).toBe("openai");
+    expect(protocolForBinding({ app: "gemini" })).toBe("gemini");
+    expect(protocolForBinding({ app: "opencode", npm: "@ai-sdk/anthropic" })).toBe(
+      "anthropic"
+    );
+    expect(protocolForBinding({ app: "opencode", npm: "@ai-sdk/google" })).toBe(
+      "gemini"
+    );
+    // @ai-sdk/openai → Responses; @ai-sdk/openai-compatible → Chat (matched
+    // first since its name also contains "openai"); no npm → compatible.
+    expect(protocolForBinding({ app: "opencode", npm: "@ai-sdk/openai" })).toBe(
+      "openai"
+    );
+    expect(
+      protocolForBinding({ app: "opencode", npm: "@ai-sdk/openai-compatible" })
+    ).toBe("openai-compatible");
+    expect(protocolForBinding({ app: "opencode" })).toBe("openai-compatible");
+  });
+});
+
+describe("isGatewayList", () => {
+  it("accepts gateway-shaped entries, rejects junk", () => {
+    const g = (extra: object) => ({ kind: "gateway", id: "a", name: "A", ...extra });
+    expect(isGatewayList([g({ bindings: [] })])).toBe(true);
+    expect(isGatewayList([g({})])).toBe(true); // bindings optional on read
+    expect(isGatewayList([g({ bindings: [{ id: "b1", app: "claude" }] })])).toBe(
+      true
+    );
+    // Missing the `kind: "gateway"` discriminant → not a gateway entry.
+    expect(isGatewayList([{ id: "a", name: "A", bindings: [] }])).toBe(false);
+    expect(isGatewayList([g({ bindings: "no" })])).toBe(false);
+    // Pre-refactor binding shape (no `id`) is rejected → stale data dropped.
+    expect(
+      isGatewayList([g({ bindings: [{ app: "claude", protocol: "anthropic" }] })])
+    ).toBe(false);
+    expect(isGatewayList([{ kind: "gateway", name: "A" }])).toBe(false);
+    expect(isGatewayList("nope")).toBe(false);
+  });
+});
+
+describe("protocolForNpm", () => {
+  it("maps each AI SDK package; matches openai-compatible BEFORE openai", () => {
+    expect(protocolForNpm("@ai-sdk/openai-compatible")).toBe("openai-compatible");
+    expect(protocolForNpm("@ai-sdk/openai")).toBe("openai"); // Responses
+    expect(protocolForNpm("@ai-sdk/anthropic")).toBe("anthropic");
+    expect(protocolForNpm("@ai-sdk/amazon-bedrock")).toBe("anthropic");
+    expect(protocolForNpm("@ai-sdk/google")).toBe("gemini");
+    // Unknown / azure / empty → default to the OpenAI-compatible package.
+    expect(protocolForNpm("@ai-sdk/azure")).toBe("openai-compatible");
+    expect(protocolForNpm("")).toBe("openai-compatible");
+  });
+});
+
+describe("resolveActiveProviderId", () => {
+  const candidates = [
+    { id: "a", baseUrl: "https://x", apiKey: "sk-aaaaaaaaaaaa" },
+    { id: "b", baseUrl: "https://y", apiKey: "sk-bbbbbbbbbbbb" }
+  ];
+  const stateFor = (
+    matched: string | null,
+    snapBase: string,
+    snapKey: string
+  ): ActiveState => ({
+    app: "opencode",
+    kind: "custom",
+    matchedProviderId: matched,
+    liveSnapshot: { baseUrl: snapBase, apiKeyMasked: maskKey(snapKey) },
+    livePath: "/x"
+  });
+
+  it("returns null without a state", () => {
+    expect(resolveActiveProviderId(null, "a", candidates)).toBeNull();
+    expect(resolveActiveProviderId(undefined, "a", candidates)).toBeNull();
+  });
+
+  it("honors the marker when its creds still match the live snapshot", () => {
+    // live config = a's creds; backend matched b; marker points at a.
+    const state = stateFor("b", "https://x", "sk-aaaaaaaaaaaa");
+    expect(resolveActiveProviderId(state, "a", candidates)).toBe("a");
+  });
+
+  it("ignores a stale marker (creds no longer match) → matchedProviderId", () => {
+    // live config = b's creds; marker still points at a → fall back to b.
+    const state = stateFor("b", "https://y", "sk-bbbbbbbbbbbb");
+    expect(resolveActiveProviderId(state, "a", candidates)).toBe("b");
+  });
+
+  it("falls back to matchedProviderId with no marker", () => {
+    const state = stateFor("b", "https://y", "sk-bbbbbbbbbbbb");
+    expect(resolveActiveProviderId(state, undefined, candidates)).toBe("b");
+  });
+
+  it("falls back when the marker id isn't among the candidates", () => {
+    const state = stateFor("b", "https://x", "sk-aaaaaaaaaaaa");
+    expect(resolveActiveProviderId(state, "zzz", candidates)).toBe("b");
   });
 });

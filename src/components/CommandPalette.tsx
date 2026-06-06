@@ -16,6 +16,7 @@ import {
   sourceDisplayName,
   typeLabelOf
 } from "@/lib/session-utils";
+import { INPUT_NO_AUTO } from "@/lib/utils";
 import type { AppSession, SearchHit } from "@/types";
 
 export function CommandPalette({
@@ -92,7 +93,7 @@ export function CommandPalette({
       description="Find sessions, memories, skills"
       shouldFilter={false}
     >
-      <CommandInput
+      <CommandInput {...INPUT_NO_AUTO}
         placeholder="Find sessions, memories, skills…"
         value={query}
         onValueChange={setQuery}

@@ -683,6 +683,39 @@ pub struct ModelListResult {
 }
 
 // ===================================================================
+// Gateway API-mode detection
+// ===================================================================
+//
+// A gateway is one `{baseUrl, apiKey}` that may speak several API modes.
+// Each mode is probed at ITS OWN real API endpoint (a list endpoint never
+// gates a capability — it only proves an unrelated list route exists, and
+// gives false positives). Naming mirrors the AI SDK packages OpenCode uses:
+//   - openaiCompatible → POST /v1/chat/completions   (@ai-sdk/openai-compatible) → OpenCode
+//   - openai           → POST /v1/responses          (@ai-sdk/openai)            → Codex + OpenCode
+//   - anthropic        → POST /v1/messages           (@ai-sdk/anthropic)         → Claude + OpenCode
+//   - gemini           → GET  /v1beta/models?key= returns data (@ai-sdk/google)  → Gemini + OpenCode
+//     (Gemini-SPECIFIC path — a non-Gemini gateway 404s it, so data = support;
+//     contrast OpenAI's generic /v1/models which every compatible gateway answers)
+// `models` is a single flat catalog (union of the two GET /models lists)
+// used ONLY as autocomplete candidates — the gateway routes by model id,
+// so there's no reliable per-mode model split. Probes never spend tokens.
+
+/// Which API modes a gateway supports + a flat model-id catalog for the
+/// binding editor's autocomplete.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayCapabilities {
+    /// OpenAI Chat Completions (`/v1/chat/completions`) — `@ai-sdk/openai-compatible`.
+    pub openai_compatible: bool,
+    /// OpenAI Responses (`/v1/responses`) — `@ai-sdk/openai`; Codex requires it.
+    pub openai: bool,
+    pub anthropic: bool,
+    pub gemini: bool,
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+// ===================================================================
 // Activation entry point
 // ===================================================================
 
@@ -1840,6 +1873,7 @@ pub async fn test_provider(p: &Provider) -> TestResult {
                 .base_url
                 .trim_end_matches('/')
                 .trim_end_matches("/v1beta")
+                .trim_end_matches("/v1")
                 .to_string();
             (
                 format!("{}/v1beta/models", base),
@@ -1924,6 +1958,7 @@ pub async fn fetch_models(p: &Provider) -> ModelListResult {
                 .base_url
                 .trim_end_matches('/')
                 .trim_end_matches("/v1beta")
+                .trim_end_matches("/v1")
                 .to_string();
             (
                 format!("{}/v1beta/models", base),
@@ -2024,6 +2059,149 @@ pub async fn fetch_models(p: &Provider) -> ModelListResult {
         models,
         status: Some(status_u16),
         message: "OK".into(),
+    }
+}
+
+// ===================================================================
+// Gateway API-mode detection
+// ===================================================================
+
+/// Extract model ids from a list-endpoint body. OpenAI/Anthropic shape
+/// is `{ data: [{ id }] }`; Gemini is `{ models: [{ name }] }` with a
+/// `models/` prefix to strip.
+fn parse_model_ids(body: &serde_json::Value, gemini: bool) -> Vec<String> {
+    let mut ids: Vec<String> = if gemini {
+        body.get("models")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("name").and_then(|n| n.as_str()))
+                    .map(|name| name.trim_start_matches("models/").to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        body.get("data")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("id").and_then(|n| n.as_str()))
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Does a POST route EXIST? We send a deliberately empty body and read
+/// only the status — present unless it answers 404/405 (a 400/401/422/503
+/// means the route is there but rejected/couldn't serve our empty request).
+/// Never spends tokens. `req` must already carry the right auth (Bearer /
+/// x-api-key). Used for the OpenAI/Anthropic gates, whose own list endpoint
+/// (`/v1/models`) is GENERIC (every openai-compatible gateway answers it,
+/// so it can't gate a capability).
+async fn route_exists(req: reqwest::RequestBuilder) -> bool {
+    match req.json(&serde_json::json!({})).send().await {
+        Ok(resp) => {
+            let code = resp.status().as_u16();
+            code != 404 && code != 405
+        }
+        Err(_) => false,
+    }
+}
+
+/// GET a `/models`-style list. Returns `(got_data, models)`. Used both for
+/// the Gemini GATE (its `/v1beta/models` is Gemini-SPECIFIC — a non-Gemini
+/// gateway 404s it — so returning data DOES prove support) and the plain
+/// catalog (where the bool is ignored).
+async fn fetch_models_list(req: reqwest::RequestBuilder, gemini: bool) -> (bool, Vec<String>) {
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let models = resp
+                .json::<serde_json::Value>()
+                .await
+                .map(|b| parse_model_ids(&b, gemini))
+                .unwrap_or_default();
+            (!models.is_empty(), models)
+        }
+        _ => (false, Vec::new()),
+    }
+}
+
+fn with_bearer(req: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
+    if api_key.is_empty() {
+        req
+    } else {
+        req.bearer_auth(api_key)
+    }
+}
+
+fn with_anthropic(req: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
+    if api_key.is_empty() {
+        req
+    } else {
+        req.header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+    }
+}
+
+/// Detect which API modes a gateway's `{base_url, api_key}` supports.
+/// OpenAI/Anthropic are probed at their real POST endpoints (their
+/// `/v1/models` list is generic). Gemini is gated on its Gemini-SPECIFIC
+/// `GET /v1beta/models` returning data (a non-Gemini gateway 404s that
+/// path), and that same response also feeds the catalog. `models` is the
+/// union of the two list endpoints, for autocomplete. All concurrent.
+pub async fn detect_gateway_apis(base_url: &str, api_key: &str) -> GatewayCapabilities {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return GatewayCapabilities::default(),
+    };
+
+    // The gateway base is the bare ROOT (no API-version path); every
+    // per-mode URL is derived from it. Strip any version suffix the user
+    // may have pasted (`/v1` or `/v1beta`) so we don't double it.
+    let root = base_url
+        .trim_end_matches('/')
+        .trim_end_matches("/v1beta")
+        .trim_end_matches("/v1");
+    let chat_url = format!("{root}/v1/chat/completions");
+    let responses_url = format!("{root}/v1/responses");
+    let messages_url = format!("{root}/v1/messages");
+    let oai_models_url = format!("{root}/v1/models");
+    let gemini_models_url = format!("{root}/v1beta/models");
+
+    let (openai_compatible, openai, anthropic, gemini_list, oai_catalog) = tokio::join!(
+        // OpenAI / Anthropic gates — POST the real API endpoint.
+        route_exists(with_bearer(client.post(&chat_url), api_key)),
+        route_exists(with_bearer(client.post(&responses_url), api_key)),
+        route_exists(with_anthropic(client.post(&messages_url), api_key)),
+        // Gemini gate + its catalog in one GET (Gemini-specific path).
+        fetch_models_list(
+            client.get(&gemini_models_url).query(&[("key", api_key)]),
+            true
+        ),
+        // OpenAI catalog (data only — generic list, never a gate).
+        fetch_models_list(with_bearer(client.get(&oai_models_url), api_key), false),
+    );
+
+    let (gemini, gemini_catalog) = gemini_list;
+    let mut models = oai_catalog.1;
+    models.extend(gemini_catalog);
+    models.sort();
+    models.dedup();
+
+    GatewayCapabilities {
+        openai_compatible,
+        openai,
+        anthropic,
+        gemini,
+        models,
     }
 }
 
@@ -2427,6 +2605,29 @@ fn string_match(provider_value: &str, live_value: Option<&str>) -> bool {
 mod tests {
     use super::*;
     use crate::testutils::HOME_LOCK;
+
+    #[test]
+    fn parse_model_ids_openai_shape() {
+        let body = serde_json::json!({ "data": [{ "id": "gpt-5" }, { "id": "gpt-4o" }] });
+        assert_eq!(parse_model_ids(&body, false), vec!["gpt-4o", "gpt-5"]); // sorted+deduped
+    }
+
+    #[test]
+    fn parse_model_ids_gemini_strips_models_prefix() {
+        let body = serde_json::json!({
+            "models": [{ "name": "models/gemini-2.5-pro" }, { "name": "models/gemini-2.5-flash" }]
+        });
+        assert_eq!(
+            parse_model_ids(&body, true),
+            vec!["gemini-2.5-flash", "gemini-2.5-pro"]
+        );
+    }
+
+    #[test]
+    fn parse_model_ids_handles_missing_or_wrong_shape() {
+        assert!(parse_model_ids(&serde_json::json!({}), false).is_empty());
+        assert!(parse_model_ids(&serde_json::json!({ "models": [] }), true).is_empty());
+    }
 
     #[test]
     fn cli_search_paths_includes_opencode_specific_dirs() {

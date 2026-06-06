@@ -37,7 +37,7 @@ describe("ProviderEditor — Advanced settings validation", () => {
     fireEvent.change(screen.getAllByLabelText("Override key")[0], {
       target: { value: "foo" }
     });
-    fireEvent.click(screen.getByRole("button", { name: /add override/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
     fireEvent.change(screen.getAllByLabelText("Override key")[1], {
       target: { value: "foo" }
     });

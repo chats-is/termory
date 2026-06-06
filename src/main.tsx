@@ -12,7 +12,7 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
       <TooltipProvider delayDuration={300}>
         <App />
-        <Toaster richColors position="top-center" duration={2500} offset={20} />
+        <Toaster richColors position="top-center" duration={2000} offset={20} />
       </TooltipProvider>
     </ThemeProvider>
   </React.StrictMode>

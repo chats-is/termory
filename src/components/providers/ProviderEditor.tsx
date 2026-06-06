@@ -1,15 +1,8 @@
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
-import {
-  ChevronRight,
-  Eye,
-  EyeOff,
-  Loader2,
-  Plus,
-  RefreshCw,
-  Trash2
-} from "lucide-react";
+import { ChevronRight, Eye, EyeOff, Loader2, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ModelCombobox } from "@/components/ModelCombobox";
 import {
   Collapsible,
   CollapsibleContent,
@@ -41,8 +34,10 @@ import {
   apiKeyHelp,
   baseUrlHelp,
   baseUrlPlaceholder,
-  isManagedOptionKey
+  isManagedOptionKey,
+  overrideHelpFor
 } from "@/lib/provider-utils";
+import { INPUT_NO_AUTO } from "@/lib/utils";
 import type { Provider } from "@/types";
 
 // Default override rows seeded for a fresh Claude provider — the per-size
@@ -133,18 +128,8 @@ export function ProviderEditor({
   const modelRows =
     modelList.length > 0 ? modelList : [{ id: "", name: "" }];
   // Per-CLI help — what these settings let you DO (plain language, not
-  // the config-key encoding). Example keys still hint at what to type.
-  const overrideHelp = {
-    claude:
-      "Map Claude Code's Sonnet / Opus / Haiku sizes to specific upstream models (the three rows below) — handy when your provider doesn't use Claude's native model names. Add [1m] after a model to use its 1M-token context. Other Claude Code preferences work here too.",
-    codex:
-      "Tune how Codex behaves with this provider — for example its reasoning effort or approval policy.",
-    gemini:
-      "Add environment variables Gemini CLI reads — for example to target a Google Cloud project or use Vertex AI instead of the public API.",
-    opencode:
-      "Tune this provider's connection in OpenCode — these go into its official `options` (e.g. timeout, setCacheKey, headers.X-Token) for request timeouts, prompt caching, or custom request headers."
-  }[draft.app];
-  const modelDatalistId = React.useId();
+  // the config-key encoding). Shared with the gateway binding editor.
+  const overrideHelp = overrideHelpFor(draft.app);
   // Snapshot the originally-loaded URL so we can decide whether to
   // refetch the favicon on save. Captured once at mount — re-rendering
   // with a new `provider` prop happens only on `isNew` flips.
@@ -204,6 +189,23 @@ export function ProviderEditor({
       setFetchingModels(false);
     }
   };
+
+  // Auto-fetch the model list (debounced) once base URL + key are present,
+  // deduped per (base, key) so it fires once per unique pair.
+  const lastFetched = React.useRef("");
+  React.useEffect(() => {
+    const base = (draft.baseUrl ?? "").trim();
+    const key = (draft.apiKey ?? "").trim();
+    if (!base || !key) return;
+    const sig = `${base}\n${key}`;
+    if (lastFetched.current === sig) return;
+    const t = setTimeout(() => {
+      lastFetched.current = sig;
+      void fetchModels();
+    }, 600);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.baseUrl, draft.apiKey]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -277,9 +279,9 @@ export function ProviderEditor({
           </DialogHeader>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-4 items-start -mx-6 max-h-[65vh] overflow-y-auto px-6 py-1">
-            <div className="grid gap-2">
+            <div className="grid gap-2 sm:col-span-2">
               <Label htmlFor="provider-name">Name *</Label>
-              <Input
+              <Input {...INPUT_NO_AUTO}
                 id="provider-name"
                 ref={firstFieldRef}
                 type="text"
@@ -294,42 +296,41 @@ export function ProviderEditor({
               />
             </div>
 
-            <div className="grid gap-2">
+            <div className="grid gap-2 sm:col-span-2">
               <Label htmlFor="provider-baseurl">Base URL *</Label>
-              <Input
+              <Input {...INPUT_NO_AUTO}
                 id="provider-baseurl"
                 type="text"
                 className="font-mono"
-                placeholder={baseUrlPlaceholder(draft.app)}
+                placeholder={baseUrlPlaceholder(draft.app, draft.npm)}
                 value={draft.baseUrl ?? ""}
                 onChange={(e) => update("baseUrl", e.target.value)}
                 required
               />
-              <p className="text-xs text-muted-foreground">{baseUrlHelp(draft.app)}</p>
+              <p className="text-xs text-muted-foreground">
+                {baseUrlHelp(draft.app, draft.npm)}
+              </p>
             </div>
 
-            <div className={`grid gap-2 ${isOpencode ? "" : "sm:col-span-2"}`}>
+            <div className="grid gap-2 sm:col-span-2">
               <Label htmlFor="provider-apikey">API key</Label>
-              <div className="flex gap-1.5">
-                <Input
+              <div className="relative">
+                <Input {...INPUT_NO_AUTO}
                   id="provider-apikey"
                   type={revealKey ? "text" : "password"}
-                  className="font-mono"
+                  className="font-mono pr-9"
                   placeholder="sk-… (leave blank to fill in later)"
                   value={draft.apiKey ?? ""}
                   onChange={(e) => update("apiKey", e.target.value)}
-                  autoComplete="off"
-                  spellCheck={false}
                 />
-                <Button
+                <button
                   type="button"
-                  variant="outline"
-                  size="icon"
                   onClick={() => setRevealKey((c) => !c)}
                   aria-label={revealKey ? "Hide API key" : "Show API key"}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                 >
                   {revealKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                </Button>
+                </button>
               </div>
               <p className="text-xs text-muted-foreground">{apiKeyHelp(draft.app)}</p>
             </div>
@@ -352,62 +353,27 @@ export function ProviderEditor({
                     ))}
                   </SelectContent>
                 </Select>
-                <p className="text-xs text-muted-foreground">
-                  {
-                    OPENCODE_NPM_OPTIONS.find(
-                      (o) => o.value === (draft.npm ?? OPENCODE_DEFAULT_NPM)
-                    )?.hint
-                  }
-                </p>
               </div>
             )}
 
             <div className="grid gap-2 sm:col-span-2">
-              <Label htmlFor="provider-model">{`Model${modelRequired ? " *" : ""}`}</Label>
-              <div className="flex gap-1.5">
-                <Input
-                  id="provider-model"
-                  type="text"
-                  className="font-mono"
-                  placeholder={
-                    modelRequired
-                      ? "Enter the model id (e.g. claude-opus-4-7)"
-                      : "Leave blank to use the default"
-                  }
-                  value={draft.model ?? ""}
-                  onChange={(e) => update("model", e.target.value)}
-                  list={modelOptions.length > 0 ? modelDatalistId : undefined}
-                  autoComplete="off"
-                  required={modelRequired}
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon"
-                  onClick={() => void fetchModels()}
-                  disabled={!canFetchModels}
-                  aria-label="Fetch available models from API"
-                >
-                  {fetchingModels ? (
-                    <Loader2 className="size-4 animate-spin" />
-                  ) : (
-                    <RefreshCw className="size-4" />
-                  )}
-                </Button>
-              </div>
-              {modelOptions.length > 0 && (
-                <datalist id={modelDatalistId}>
-                  {modelOptions.map((m) => (
-                    <option key={m} value={m} />
-                  ))}
-                </datalist>
-              )}
+              <Label>{`Model${modelRequired ? " *" : ""}`}</Label>
+              <ModelCombobox
+                ariaLabel={`Model${modelRequired ? " *" : ""}`}
+                value={draft.model ?? ""}
+                onValueChange={(v) => update("model", v)}
+                options={modelOptions}
+                loading={fetchingModels}
+                ariaInvalid={modelRequired && !(draft.model ?? "").trim()}
+              />
               {modelError && (
                 <p className="text-xs text-destructive">{modelError}</p>
               )}
-              {!modelError && modelOptions.length > 0 && (
+              {!modelError && (fetchingModels || modelOptions.length > 0) && (
                 <p className="text-xs text-muted-foreground">
-                  {modelOptions.length} models available — start typing to pick
+                  {fetchingModels
+                    ? "Fetching available models…"
+                    : `${modelOptions.length} models available`}
                 </p>
               )}
             </div>
@@ -423,22 +389,21 @@ export function ProviderEditor({
                 <div className="flex flex-col gap-2">
                   {modelRows.map((m, i) => (
                     <div key={i} className="flex items-center gap-1.5">
-                      <Input
-                        aria-label="Model ID"
-                        className="font-mono flex-1"
-                        placeholder="model id"
+                      <ModelCombobox
+                        ariaLabel="Model ID"
                         value={m.id}
-                        onChange={(e) =>
+                        onValueChange={(v) =>
                           setModelList(
                             modelRows.map((r, j) =>
-                              j === i ? { ...r, id: e.target.value } : r
+                              j === i ? { ...r, id: v } : r
                             )
                           )
                         }
-                        autoComplete="off"
-                        spellCheck={false}
+                        options={modelOptions}
+                        loading={fetchingModels}
+                        className="flex-1"
                       />
-                      <Input
+                      <Input {...INPUT_NO_AUTO}
                         aria-label="Model display name"
                         className="flex-1"
                         placeholder="Display name (optional)"
@@ -477,7 +442,7 @@ export function ProviderEditor({
                   }
                 >
                   <Plus className="size-4" />
-                  Add model
+                  Add
                 </Button>
               </div>
             )}
@@ -509,13 +474,13 @@ export function ProviderEditor({
                         !isProtected && managedKeys.includes(o.key.trim());
                       return (
                         <div key={i} className="flex items-center gap-1.5">
-                          <Input
+                          <Input {...INPUT_NO_AUTO}
                             aria-label="Override key"
                             aria-invalid={isDup || isManaged || undefined}
                             className={`font-mono flex-1${
                               isProtected ? " text-muted-foreground" : ""
                             }`}
-                            placeholder="key"
+                            placeholder="KEY"
                             value={o.key}
                             readOnly={isProtected}
                             tabIndex={isProtected ? -1 : undefined}
@@ -529,11 +494,11 @@ export function ProviderEditor({
                             autoComplete="off"
                             spellCheck={false}
                           />
-                          <Input
+                          <Input {...INPUT_NO_AUTO}
                             aria-label="Override value"
                             className="font-mono flex-1"
                             placeholder={
-                              isProtected ? "model id (append [1m] for 1M)" : "value"
+                              isProtected ? "Model id (append [1m] for 1M)" : "VALUE"
                             }
                             value={o.value}
                             onChange={(e) =>
@@ -596,7 +561,7 @@ export function ProviderEditor({
                     }
                   >
                     <Plus className="size-4" />
-                    Add override
+                    Add
                   </Button>
                 </div>
               </CollapsibleContent>

@@ -4,6 +4,7 @@ import { Input } from "@/components/ui/input";
 import { useSearchHits } from "@/hooks/useSearchHits";
 import { formatFullNumber } from "@/lib/format";
 import { sessionKey } from "@/lib/session-utils";
+import { INPUT_NO_AUTO } from "@/lib/utils";
 import type { AppSession } from "@/types";
 import { EmptyState } from "@/components/EmptyState";
 import { SearchResultCard } from "./SearchResultCard";
@@ -50,7 +51,7 @@ export function SearchPage({
           ) : (
             <Search className="absolute left-3 size-4 text-muted-foreground pointer-events-none" />
           )}
-          <Input
+          <Input {...INPUT_NO_AUTO}
             ref={inputRef}
             type="search"
             placeholder="Search across sessions, memories, skills…"

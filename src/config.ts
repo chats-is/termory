@@ -26,10 +26,12 @@ const warn = (...args: unknown[]) => {
 };
 
 const PROVIDERS_KEY = "providers";
+const GATEWAYS_KEY = "gateways";
 const FAVORITES_KEY = "favorites";
 
 let configPromise: Promise<ConfigObject> | null = null;
 let providersPromise: Promise<unknown[]> | null = null;
+let gatewaysPromise: Promise<unknown[]> | null = null;
 let favoritesPromise: Promise<unknown[]> | null = null;
 
 function loadConfig(): Promise<ConfigObject> {
@@ -94,6 +96,28 @@ async function flushProviders(next: unknown[]): Promise<void> {
   }
 }
 
+function loadGateways(): Promise<unknown[]> {
+  if (!gatewaysPromise) {
+    gatewaysPromise = invoke<unknown>("read_app_gateways")
+      .then((value) => (Array.isArray(value) ? value : []))
+      .catch((err) => {
+        warn("config: read_app_gateways failed", err);
+        return [];
+      });
+  }
+  return gatewaysPromise;
+}
+
+async function flushGateways(next: unknown[]): Promise<void> {
+  const cleaned = next.map(stripEmpty);
+  gatewaysPromise = Promise.resolve(cleaned);
+  try {
+    await invoke("write_app_gateways", { value: cleaned });
+  } catch (err) {
+    warn("config: write_app_gateways failed", err);
+  }
+}
+
 function loadFavorites(): Promise<unknown[]> {
   if (!favoritesPromise) {
     favoritesPromise = invoke<unknown>("read_app_favorites")
@@ -120,6 +144,10 @@ export async function getConfig<T>(key: string): Promise<T | null> {
     const arr = await loadProviders();
     return arr as unknown as T;
   }
+  if (key === GATEWAYS_KEY) {
+    const arr = await loadGateways();
+    return arr as unknown as T;
+  }
   if (key === FAVORITES_KEY) {
     const arr = await loadFavorites();
     return arr as unknown as T;
@@ -137,6 +165,14 @@ export async function setConfig<T>(key: string, value: T): Promise<void> {
       return;
     }
     await flushProviders(value as unknown[]);
+    return;
+  }
+  if (key === GATEWAYS_KEY) {
+    if (!Array.isArray(value)) {
+      warn("config: gateways value must be an array, ignoring set");
+      return;
+    }
+    await flushGateways(value as unknown[]);
     return;
   }
   if (key === FAVORITES_KEY) {

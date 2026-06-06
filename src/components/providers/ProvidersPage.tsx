@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { AlertTriangle, Plug, Plus } from "lucide-react";
+import { AlertTriangle, Plug, Plus, RadioTower } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -13,12 +13,25 @@ import {
   CLI_APP_LABEL,
   CLI_APP_SOURCE_BADGE
 } from "@/constants";
-import { blankProvider } from "@/lib/provider-utils";
-import type { ActiveState, CliApp, Provider, TestResult } from "@/types";
+import {
+  blankProvider,
+  providerFromBinding,
+  resolveActiveProviderId
+} from "@/lib/provider-utils";
+import type { ActiveState, CliApp, Provider, Gateway, TestResult } from "@/types";
 import { BrandIcon } from "@/components/BrandIcon";
 import { EmptyState } from "@/components/EmptyState";
 import { ProviderCard } from "./ProviderCard";
 import { ProviderOfficialCard } from "./ProviderOfficialCard";
+
+const GatewaysPage = React.lazy(() =>
+  import("./GatewaysPage").then((m) => ({ default: m.GatewaysPage }))
+);
+
+// The tab row mixes the four per-CLI tabs with a separate "Gateways"
+// tab. `"gateways"` is not a CliApp, so the active CLI (`app`)
+// and the selected view are tracked separately.
+const GATEWAYS_TAB = "gateways";
 
 // InstallGuide and ProviderEditor are conditionally rendered (CLI
 // missing / editor open), so lazy-load to keep them out of the main
@@ -66,14 +79,44 @@ let versionsEverResolved = false;
 export function ProvidersPage({
   providers,
   setProviders,
+  gateways,
+  setGateways,
+  activeProviderIds,
+  setActiveProviderIds,
   app,
   setApp
 }: {
   providers: Provider[];
   setProviders: React.Dispatch<React.SetStateAction<Provider[]>>;
+  gateways: Gateway[];
+  setGateways: React.Dispatch<React.SetStateAction<Gateway[]>>;
+  activeProviderIds: Record<string, string>;
+  setActiveProviderIds: React.Dispatch<
+    React.SetStateAction<Record<string, string>>
+  >;
   app: CliApp;
   setApp: (next: CliApp) => void;
 }) {
+  // Record / clear the "last activated" marker for a CLI (see
+  // resolveActiveProviderId — used to disambiguate identical-creds entries).
+  const markActive = React.useCallback(
+    (target: CliApp, id: string | null) => {
+      setActiveProviderIds((cur) => {
+        if (id) return { ...cur, [target]: id };
+        if (!(target in cur)) return cur;
+        const next = { ...cur };
+        delete next[target];
+        return next;
+      });
+    },
+    [setActiveProviderIds]
+  );
+  // Which tab is showing: a per-CLI provider view, or the Gateways view.
+  const [view, setView] = React.useState<"providers" | "gateways">("providers");
+  // Bumped when the header "+" is clicked in the Gateways view — the
+  // header lives here, but the gateway editor state lives in GatewaysPage,
+  // so this signal tells it to open a fresh "add gateway" form.
+  const [gatewayAddSignal, setGatewayAddSignal] = React.useState(0);
   const [editing, setEditing] = React.useState<Provider | null>(null);
   const [editingIsNew, setEditingIsNew] = React.useState(false);
   const [activeStates, setActiveStates] = React.useState<Record<CliApp, ActiveState | null>>({
@@ -108,6 +151,27 @@ export function ProvidersPage({
   const [toggling, setToggling] = React.useState<string | null>(null);
   const [testing, setTesting] = React.useState<string | null>(null);
   const [testResults, setTestResults] = React.useState<Record<string, TestResult>>({});
+  // Per-provider timers that auto-clear a test result 3s after it shows.
+  const testTimers = React.useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  // Show a test result, then auto-hide it after 2s (a re-test resets it).
+  const showTestResult = React.useCallback((id: string, result: TestResult) => {
+    setTestResults((cur) => ({ ...cur, [id]: result }));
+    if (testTimers.current[id]) clearTimeout(testTimers.current[id]);
+    testTimers.current[id] = setTimeout(() => {
+      setTestResults((cur) => {
+        const next = { ...cur };
+        delete next[id];
+        return next;
+      });
+      delete testTimers.current[id];
+    }, 2000);
+  }, []);
+  React.useEffect(
+    () => () => {
+      for (const t of Object.values(testTimers.current)) clearTimeout(t);
+    },
+    []
+  );
   const [settingDefault, setSettingDefault] = React.useState<string | null>(null);
   const [rechecking, setRechecking] = React.useState(false);
 
@@ -206,9 +270,22 @@ export function ProvidersPage({
     }
   };
 
+  // All gateway bindings materialized as providers (one per binding). They
+  // share the per-CLI active-state derivation so a gateway-activated CLI
+  // matches the synthesized id instead of reading as "Unmanaged".
+  const gatewaySynth = React.useMemo(
+    () => gateways.flatMap((r) => r.bindings.map((b) => providerFromBinding(r, b))),
+    [gateways]
+  );
+
   const refreshActive = React.useCallback(async () => {
     try {
-      const states = await invoke<ActiveState[]>("provider_active_states", { providers });
+      // Pass standalone providers + gateway-binding synths; the per-CLI
+      // "in use" highlight is disambiguated client-side via the activation
+      // marker (resolveActiveProviderId) when several share identical creds.
+      const states = await invoke<ActiveState[]>("provider_active_states", {
+        providers: [...providers, ...gatewaySynth]
+      });
       const next: Record<CliApp, ActiveState | null> = {
         claude: null,
         codex: null,
@@ -220,11 +297,14 @@ export function ProvidersPage({
     } catch (err) {
       toast.error(`Read live state failed: ${String(err)}`);
     }
-  }, [providers]);
+  }, [providers, gatewaySynth]);
 
+  // Re-derive on mount AND whenever the visible tab changes — switching
+  // from the Gateways tab (where a binding may have just been activated)
+  // back to a CLI tab must pick up that change in the per-CLI list.
   React.useEffect(() => {
     void refreshActive();
-  }, [refreshActive]);
+  }, [refreshActive, view, app]);
 
   React.useEffect(() => {
     void refreshInstalled();
@@ -320,7 +400,85 @@ export function ProvidersPage({
     () => providersForApp.filter((p) => p.kind === "custom"),
     [providersForApp]
   );
+  // Gateway bindings targeting the current CLI, surfaced in its provider
+  // list (requirement: a bound gateway shows up under the CLI). Managed
+  // from the Gateways tab — Edit jumps there; Delete unbinds.
+  const gatewayBoundForApp = React.useMemo(
+    () =>
+      gateways.flatMap((gateway) =>
+        gateway.bindings
+          .filter((b) => b.app === app)
+          .map((binding) => ({
+            gateway,
+            binding,
+            synth: providerFromBinding(gateway, binding)
+          }))
+      ),
+    [gateways, app]
+  );
   const activeState = activeStates[app];
+  // The "in use" id. OpenCode's matchedProviderId is resolved by the live
+  // default-slot id (not by creds), so it's already unambiguous — running it
+  // through the creds-collision marker only adds risk there (a stale marker
+  // + two identical-creds slots could mismatch). Single-slot CLIs reverse-
+  // derive by creds, so they genuinely need the marker to disambiguate a
+  // standalone provider and a gateway binding that share creds.
+  const effectiveActiveId = React.useMemo(
+    () =>
+      app === "opencode"
+        ? (activeState?.matchedProviderId ?? null)
+        : resolveActiveProviderId(activeState, activeProviderIds[app], [
+            ...customProviders,
+            ...gatewayBoundForApp.map((g) => g.synth)
+          ]),
+    [activeState, activeProviderIds, app, customProviders, gatewayBoundForApp]
+  );
+
+  // Activate a gateway binding's synthesized provider via the normal path.
+  const activateGateway = async (synth: Provider) => {
+    if (!(await ensureCliInstalled(synth.app))) return;
+    setSettingDefault(synth.id);
+    try {
+      await invoke("activate_provider", {
+        provider: synth,
+        providersForApp: [synth]
+      });
+      if (synth.app === "opencode") {
+        await invoke("set_opencode_default_provider", { provider: synth });
+      }
+      markActive(synth.app, synth.id);
+      toast.success(`${synth.name || "(unnamed)"} is now in use.`);
+      await refreshActive();
+    } catch (err) {
+      toast.error(String(err));
+    } finally {
+      setSettingDefault(null);
+    }
+  };
+
+  const toggleGatewayEnabled = async (synth: Provider) => {
+    if (synth.app !== "opencode") return;
+    if (!(await ensureCliInstalled(synth.app))) return;
+    const enabled = (activeStates.opencode?.configuredProviderIds ?? []).includes(
+      synth.id
+    );
+    setToggling(synth.id);
+    try {
+      if (enabled) {
+        await invoke("delete_provider", { provider: synth });
+      } else {
+        await invoke("activate_provider", {
+          provider: synth,
+          providersForApp: [synth]
+        });
+      }
+      await refreshActive();
+    } catch (err) {
+      toast.error(String(err));
+    } finally {
+      setToggling(null);
+    }
+  };
 
   const startNew = () => {
     setEditing(blankProvider(app));
@@ -370,10 +528,17 @@ export function ProvidersPage({
         provider: next,
         providersForApp: stripSet
       });
-      // OpenCode: if it was also the startup default, refresh the
-      // top-level model pointer in case the primary model changed.
-      if (next.app === "opencode" && state?.matchedProviderId === next.id) {
-        await invoke("set_opencode_default_provider", { provider: next });
+      if (next.app === "opencode") {
+        // Re-affirm the startup default ONLY if it was ALREADY the default.
+        // Saving an enabled-but-not-default slot just re-applies its block —
+        // it must NOT be promoted to default (and the marker stays put).
+        if (state?.matchedProviderId === next.id) {
+          await invoke("set_opencode_default_provider", { provider: next });
+          markActive(next.app, next.id);
+        }
+      } else {
+        // Single-slot: re-activating IS the live/default, so mark it.
+        markActive(next.app, next.id);
       }
       await refreshActive();
     } catch (err) {
@@ -422,6 +587,7 @@ export function ProvidersPage({
       return;
     }
     setProviders((cur) => cur.filter((p) => p.id !== id));
+    if (activeProviderIds[target.app] === id) markActive(target.app, null);
     await refreshActive();
   };
 
@@ -458,7 +624,15 @@ export function ProvidersPage({
     if (!(await ensureCliInstalled(target.app))) return;
     setSettingDefault(target.id);
     try {
+      // OpenCode: ensure the slot exists first (auto-enable) — the user can
+      // hit "Set as default" on a not-yet-enabled provider, and
+      // set_opencode_default errors on a missing slot. Single-slot CLIs:
+      // activating IS setting the default.
       if (target.app === "opencode") {
+        await invoke("activate_provider", {
+          provider: target,
+          providersForApp
+        });
         await invoke("set_opencode_default_provider", { provider: target });
       } else {
         await invoke("activate_provider", {
@@ -466,6 +640,7 @@ export function ProvidersPage({
           providersForApp
         });
       }
+      markActive(target.app, target.id);
       toast.success(`${target.name || "(unnamed)"} is now in use.`);
       await refreshActive();
     } catch (err) {
@@ -483,8 +658,16 @@ export function ProvidersPage({
     try {
       await invoke("deactivate_provider", {
         app,
-        providersForApp
+        // Include gateway-binding synths so OpenCode's deactivate can
+        // recognize (and clear) a top-level default that points at a
+        // gateway binding's slot — otherwise switching back to Official
+        // silently no-ops when a gateway binding was the default.
+        providersForApp: [
+          ...providersForApp,
+          ...gatewayBoundForApp.map((g) => g.synth)
+        ]
       });
+      markActive(app, null);
       toast.success(`Official is now in use for ${CLI_APP_LABEL[app]}.`);
       await refreshActive();
     } catch (err) {
@@ -498,17 +681,14 @@ export function ProvidersPage({
     setTesting(target.id);
     try {
       const result = await invoke<TestResult>("test_provider_api", { provider: target });
-      setTestResults((cur) => ({ ...cur, [target.id]: result }));
+      showTestResult(target.id, result);
     } catch (err) {
-      setTestResults((cur) => ({
-        ...cur,
-        [target.id]: {
-          ok: false,
-          status: null,
-          latencyMs: 0,
-          message: String(err)
-        }
-      }));
+      showTestResult(target.id, {
+        ok: false,
+        status: null,
+        latencyMs: 0,
+        message: String(err)
+      });
     } finally {
       setTesting(null);
     }
@@ -519,7 +699,17 @@ export function ProvidersPage({
       <div className="px-3 pt-3 pb-3">
         <div className="flex items-center gap-1 rounded-md bg-muted p-3">
           <div className="flex-1 min-w-0">
-            <Tabs value={app} onValueChange={(v) => setApp(v as CliApp)}>
+            <Tabs
+              value={view === "gateways" ? GATEWAYS_TAB : app}
+              onValueChange={(v) => {
+                if (v === GATEWAYS_TAB) {
+                  setView("gateways");
+                } else {
+                  setApp(v as CliApp);
+                  setView("providers");
+                }
+              }}
+            >
               <TabsList className="w-full justify-start gap-1 bg-transparent p-0 [&>button]:flex-none [&>button]:rounded-md [&>button]:px-3">
                 {CLI_APPS.map((id) => (
                   <TabsTrigger key={id} value={id}>
@@ -527,15 +717,23 @@ export function ProvidersPage({
                     <span>{CLI_APP_LABEL[id]}</span>
                   </TabsTrigger>
                 ))}
+                <TabsTrigger value={GATEWAYS_TAB}>
+                  <RadioTower className="size-4 shrink-0" aria-hidden />
+                  <span>AI Gateways</span>
+                </TabsTrigger>
               </TabsList>
             </Tabs>
           </div>
           <Button
             type="button"
             size="icon"
-            onClick={startNew}
-            disabled={!installed[app]}
-            aria-label="Add provider"
+            onClick={() =>
+              view === "gateways"
+                ? setGatewayAddSignal((n) => n + 1)
+                : startNew()
+            }
+            disabled={view === "providers" && !installed[app]}
+            aria-label={view === "gateways" ? "Add AI Gateway" : "Add provider"}
             className="rounded-md size-8 shrink-0 shadow-sm"
           >
             <Plus className="size-4" />
@@ -543,15 +741,28 @@ export function ProvidersPage({
         </div>
       </div>
 
-      {!installed[app] && customProviders.length === 0 ? (
+      {view === "gateways" && (
         <React.Suspense fallback={null}>
-          <InstallGuide
-            app={app}
-            rechecking={rechecking}
-            onRecheck={() => void handleRecheckInstall()}
+          <GatewaysPage
+            gateways={gateways}
+            setGateways={setGateways}
+            addSignal={gatewayAddSignal}
+            markActive={markActive}
+            activeProviderIds={activeProviderIds}
           />
         </React.Suspense>
-      ) : (
+      )}
+
+      {view === "providers" &&
+        (!installed[app] && customProviders.length === 0 ? (
+          <React.Suspense fallback={null}>
+            <InstallGuide
+              app={app}
+              rechecking={rechecking}
+              onRecheck={() => void handleRecheckInstall()}
+            />
+          </React.Suspense>
+        ) : (
         <div className="flex-1 min-h-0 overflow-auto px-3 pb-0">
           <div className="flex flex-col gap-3">
             {!installed[app] && (
@@ -589,7 +800,7 @@ export function ProvidersPage({
 
             {customProviders.map((p) => {
               const configuredIds = activeState?.configuredProviderIds ?? [];
-              const matchedId = activeState?.matchedProviderId ?? null;
+              const matchedId = effectiveActiveId;
               const isOpencode = p.app === "opencode";
               const isConfigured = isOpencode
                 ? configuredIds.includes(p.id)
@@ -615,7 +826,36 @@ export function ProvidersPage({
               );
             })}
 
-            {customProviders.length === 0 && (
+            {gatewayBoundForApp.map(({ gateway, synth }) => {
+              const configuredIds = activeState?.configuredProviderIds ?? [];
+              const matchedId = effectiveActiveId;
+              const isOpencode = synth.app === "opencode";
+              const isConfigured = isOpencode
+                ? configuredIds.includes(synth.id)
+                : matchedId === synth.id;
+              const isInUse = matchedId === synth.id;
+              return (
+                <ProviderCard
+                  key={synth.id}
+                  provider={synth}
+                  gatewayBadge={gateway.name || "gateway"}
+                  isConfigured={isConfigured}
+                  isInUse={isInUse}
+                  toggling={toggling === synth.id}
+                  settingDefault={settingDefault === synth.id}
+                  testing={testing === synth.id}
+                  testResult={testResults[synth.id]}
+                  activatable={installed[app]}
+                  onToggleEnabled={
+                    isOpencode ? () => void toggleGatewayEnabled(synth) : undefined
+                  }
+                  onSetDefault={() => void activateGateway(synth)}
+                  onTest={() => void testOne(synth)}
+                />
+              );
+            })}
+
+            {customProviders.length === 0 && gatewayBoundForApp.length === 0 && (
               <EmptyState
                 icon={<Plug size={32} />}
                 title="No custom providers yet"
@@ -625,7 +865,7 @@ export function ProvidersPage({
             )}
           </div>
         </div>
-      )}
+        ))}
 
       {editing && (
         <React.Suspense fallback={null}>

@@ -154,6 +154,77 @@ export type Provider = {
   favicon?: string;
 };
 
+// ── Gateway (a SECOND, independent kind of provider management) ──
+// A gateway is ONE {baseUrl, apiKey} that may speak several API modes. It
+// lives in the same providers.json file but in a separate `gateways` array
+// (see config.rs) so it never collides with the per-CLI Provider parse.
+
+/** API mode a binding speaks. Derived per binding from app/npm
+ * (`protocolForBinding`). Mirrors the AI SDK packages: `openai-compatible`
+ * = Chat Completions (`@ai-sdk/openai-compatible`), `openai` = Responses
+ * (`@ai-sdk/openai`). */
+export type GatewayProtocol =
+  | "openai-compatible"
+  | "openai"
+  | "anthropic"
+  | "gemini";
+
+/** Which API modes a gateway supports (backend `GatewayCapabilities`).
+ * Each is probed at its OWN real API endpoint (POST), never a list:
+ *   openaiCompatible → POST /v1/chat/completions   (@ai-sdk/openai-compatible)
+ *   openai           → POST /v1/responses          (@ai-sdk/openai, Codex)
+ *   anthropic        → POST /v1/messages           (@ai-sdk/anthropic)
+ *   gemini           → GET  /v1beta/models?key= returns data (@ai-sdk/google)
+ * `models` is a single flat catalog (union of the two GET /models lists)
+ * used only as autocomplete candidates — the gateway routes by model id,
+ * so there's no reliable per-mode model split. */
+export type GatewayCapabilities = {
+  openaiCompatible: boolean;
+  openai: boolean;
+  anthropic: boolean;
+  gemini: boolean;
+  models: string[];
+};
+
+/** One gateway→CLI binding. The gateway supplies baseUrl/apiKey; the binding
+ * picks the protocol + model (+ OpenCode npm package / options) used to
+ * materialize a per-CLI provider via the existing activate path. */
+export type GatewayBinding = {
+  /** Own stable id — a binding is a full provider minus the gateway's
+   * common fields (name/baseUrl/apiKey). Used as the synthesized
+   * provider id + the activation marker; lets one CLI hold several
+   * bindings without an id collision. */
+  id: string;
+  app: CliApp;
+  model?: string;
+  /** OpenCode-only: AI SDK package. The wire protocol is DERIVED from it
+   * (see `protocolForBinding`), so there's no separate `protocol` field. */
+  npm?: string;
+  /** OpenCode-only: extra models for the picker (`{ id, name }`). */
+  models?: { id: string; name: string }[];
+  /** Advanced settings merged into the CLI config (same as a Provider's
+   * `options`). For Claude this is also where the per-size routing keys
+   * `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL` live. */
+  options?: { key: string; value: string }[];
+};
+
+/** A gateway entry, stored in the unified `providers` array of
+ * providers.json discriminated by `kind: "gateway"` (alongside per-CLI
+ * providers whose `kind` is "official"/"custom"). A gateway is a kind of
+ * provider that fans one `{baseUrl, apiKey}` out to several CLIs. */
+export type Gateway = {
+  kind: "gateway";
+  id: string;
+  name: string;
+  baseUrl?: string;
+  apiKey?: string;
+  /** Last auto-detection result (which API modes responded). */
+  capabilities?: GatewayCapabilities;
+  /** CLIs this gateway is bound to (one entry per CLI). */
+  bindings: GatewayBinding[];
+  favicon?: string;
+};
+
 export type ActiveKind = "official" | "custom" | "unmanaged";
 
 export type LiveSnapshot = {

@@ -121,35 +121,105 @@ pub fn write_config(value: &JsonValue) -> Result<(), Box<dyn Error>> {
 // providers.json — Provider library (contains API keys)
 // ===================================================================
 
-/// Schema version stamped into providers.json. Bump when the on-disk
-/// `Provider` shape changes in a breaking way so a future load can detect
-/// the old format and migrate. The wrap/unwrap lives entirely here —
-/// callers (frontend `config.ts`, `tray.rs`) only ever see the bare
-/// providers array.
+/// Schema version stamped into providers.json. Bump when the on-disk shape
+/// changes in a breaking way so a future load can detect the old format and
+/// migrate it forward (see `migrate_entries`). v1 is the current baseline.
 pub const PROVIDERS_SCHEMA_VERSION: u64 = 1;
 
-/// Read the providers array from `~/.termory/providers.json`. Returns
-/// `[]` if missing. The file is `{ "version": N, "providers": [...] }`;
-/// this unwraps to the inner array (tolerating a bare-array file from
-/// older dev builds / hand-edits).
-pub fn read_providers() -> Result<JsonValue, Box<dyn Error>> {
-    let raw = read_json(&providers_path()?, JsonValue::Array(Vec::new()))?;
-    Ok(match raw {
-        JsonValue::Object(mut map) => map
-            .remove("providers")
-            .unwrap_or(JsonValue::Array(Vec::new())),
-        other => other, // bare array (legacy) or the empty default
-    })
+/// Discriminator value for a gateway entry in the unified `providers` list.
+const GATEWAY_KIND: &str = "gateway";
+
+fn entry_is_gateway(v: &JsonValue) -> bool {
+    v.get("kind").and_then(|k| k.as_str()) == Some(GATEWAY_KIND)
 }
 
-/// Atomically write `~/.termory/providers.json` (chmod 0600 on Unix).
-/// `value` is the bare providers array; it's wrapped in the versioned
-/// envelope here.
+/// Read every entry in providers.json (`{ "version": N, "providers": [...] }`,
+/// where `providers` is the UNIFIED list of per-CLI providers
+/// `kind: "official"|"custom"` and gateways `kind: "gateway"`), running it
+/// through `migrate_entries` so an older on-disk version is upgraded to the
+/// current shape. A missing / empty / non-object file yields `[]`.
+fn read_all_entries() -> Result<Vec<JsonValue>, Box<dyn Error>> {
+    let raw = read_json(&providers_path()?, JsonValue::Object(Map::new()))?;
+    let mut map = match raw {
+        JsonValue::Object(map) => map,
+        _ => return Ok(Vec::new()),
+    };
+    let version = map
+        .get("version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(PROVIDERS_SCHEMA_VERSION);
+    let entries = match map.remove("providers") {
+        Some(JsonValue::Array(a)) => a,
+        _ => Vec::new(),
+    };
+    Ok(migrate_entries(version, entries))
+}
+
+/// Upgrade `providers` entries written by an older schema version to the
+/// current shape. Add an arm when bumping `PROVIDERS_SCHEMA_VERSION`; v1 is
+/// the baseline so there is nothing to migrate yet.
+fn migrate_entries(_version: u64, entries: Vec<JsonValue>) -> Vec<JsonValue> {
+    // e.g. `if _version < 2 { entries = entries.into_iter().map(...).collect() }`
+    entries
+}
+
+/// Persist the unified `providers` array as `{ "version": N, "providers": [...] }`.
+fn write_all_entries(entries: Vec<JsonValue>) -> Result<(), Box<dyn Error>> {
+    let mut env = Map::new();
+    env.insert("version".into(), JsonValue::from(PROVIDERS_SCHEMA_VERSION));
+    env.insert("providers".into(), JsonValue::Array(entries));
+    write_json_atomic_0600(&providers_path()?, &JsonValue::Object(env))
+}
+
+/// Read the per-CLI providers (everything `kind != "gateway"`).
+pub fn read_providers() -> Result<JsonValue, Box<dyn Error>> {
+    Ok(JsonValue::Array(
+        read_all_entries()?
+            .into_iter()
+            .filter(|v| !entry_is_gateway(v))
+            .collect(),
+    ))
+}
+
+/// Write the per-CLI providers, **preserving** the gateway entries already
+/// in the unified list (the two kinds share one array, discriminated by
+/// `kind`, so each writer must keep the other kind intact).
 pub fn write_providers(value: &JsonValue) -> Result<(), Box<dyn Error>> {
-    let mut envelope = serde_json::Map::new();
-    envelope.insert("version".into(), JsonValue::from(PROVIDERS_SCHEMA_VERSION));
-    envelope.insert("providers".into(), value.clone());
-    write_json_atomic_0600(&providers_path()?, &JsonValue::Object(envelope))
+    let mut next: Vec<JsonValue> = match value {
+        JsonValue::Array(a) => a.clone(),
+        _ => Vec::new(),
+    };
+    next.extend(read_all_entries()?.into_iter().filter(entry_is_gateway));
+    write_all_entries(next)
+}
+
+/// Read the gateways (everything `kind == "gateway"`).
+pub fn read_gateways() -> Result<JsonValue, Box<dyn Error>> {
+    Ok(JsonValue::Array(
+        read_all_entries()?
+            .into_iter()
+            .filter(entry_is_gateway)
+            .collect(),
+    ))
+}
+
+/// Write the gateways (each tagged `kind: "gateway"`), preserving the
+/// per-CLI providers in the unified list.
+pub fn write_gateways(value: &JsonValue) -> Result<(), Box<dyn Error>> {
+    let mut next: Vec<JsonValue> = read_all_entries()?
+        .into_iter()
+        .filter(|v| !entry_is_gateway(v))
+        .collect();
+    if let JsonValue::Array(arr) = value {
+        for g in arr {
+            let mut g = g.clone();
+            if let JsonValue::Object(ref mut o) = g {
+                o.insert("kind".into(), JsonValue::from(GATEWAY_KIND));
+            }
+            next.push(g);
+        }
+    }
+    write_all_entries(next)
 }
 
 // ===================================================================
@@ -284,13 +354,14 @@ mod tests {
     }
 
     #[test]
-    fn providers_file_carries_schema_version_and_unwraps_on_read() {
+    fn providers_file_is_a_versioned_object_envelope() {
         let _g = HOME_LOCK.lock().unwrap();
         let tmp = tempdir("providers-versioned");
         let _h = HomeOverride::new(&tmp);
         write_providers(&serde_json::json!([{"id": "a", "name": "A"}])).unwrap();
 
-        // On disk: a versioned envelope, not a bare array.
+        // On disk: `{ "version": N, "providers": [...] }` — an object, never
+        // a bare array.
         let raw: JsonValue =
             serde_json::from_str(&fs::read_to_string(tmp.join(".termory/providers.json")).unwrap())
                 .unwrap();
@@ -299,18 +370,84 @@ mod tests {
             Some(PROVIDERS_SCHEMA_VERSION)
         );
         assert!(raw.pointer("/providers").unwrap().is_array());
-
-        // A legacy bare-array file still reads back as the array.
-        fs::write(
-            tmp.join(".termory/providers.json"),
-            r#"[{"id":"legacy","name":"Old"}]"#,
-        )
-        .unwrap();
         let back = read_providers().unwrap();
-        assert_eq!(back.as_array().unwrap().len(), 1);
+        assert_eq!(back.pointer("/0/id").and_then(|v| v.as_str()), Some("a"));
+    }
+
+    #[test]
+    fn read_missing_gateways_returns_empty_array() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let tmp = tempdir("gateways-empty");
+        let _h = HomeOverride::new(&tmp);
+        assert!(read_gateways().unwrap().as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn providers_and_gateways_coexist_without_clobbering() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let tmp = tempdir("prov-gateways");
+        let _h = HomeOverride::new(&tmp);
+
+        write_providers(&serde_json::json!([{"id": "p1", "app": "claude", "name": "P"}])).unwrap();
+        write_gateways(&serde_json::json!([
+            {"id": "r1", "name": "Gateway", "baseUrl": "https://x", "bindings": [{"app": "codex"}]}
+        ]))
+        .unwrap();
+
+        // Both arrays survive in the one file.
+        let providers = read_providers().unwrap();
+        let gateways = read_gateways().unwrap();
         assert_eq!(
-            back.pointer("/0/id").and_then(|v| v.as_str()),
-            Some("legacy")
+            providers.pointer("/0/id").and_then(|v| v.as_str()),
+            Some("p1")
+        );
+        assert_eq!(
+            gateways.pointer("/0/id").and_then(|v| v.as_str()),
+            Some("r1")
+        );
+        assert_eq!(
+            gateways
+                .pointer("/0/bindings/0/app")
+                .and_then(|v| v.as_str()),
+            Some("codex")
+        );
+
+        // Rewriting providers must NOT drop gateways, and vice versa.
+        write_providers(&serde_json::json!([{"id": "p2", "app": "gemini", "name": "P2"}])).unwrap();
+        assert_eq!(
+            read_gateways()
+                .unwrap()
+                .pointer("/0/id")
+                .and_then(|v| v.as_str()),
+            Some("r1")
+        );
+        write_gateways(&serde_json::json!([{"id": "r2", "name": "R2"}])).unwrap();
+        assert_eq!(
+            read_providers()
+                .unwrap()
+                .pointer("/0/id")
+                .and_then(|v| v.as_str()),
+            Some("p2")
+        );
+
+        // Single file on disk: ONE unified `providers` array, no separate
+        // `gateways` key; the gateway entry is tagged `kind: "gateway"`.
+        let raw: JsonValue =
+            serde_json::from_str(&fs::read_to_string(tmp.join(".termory/providers.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            raw.pointer("/version").and_then(|v| v.as_u64()),
+            Some(PROVIDERS_SCHEMA_VERSION)
+        );
+        assert!(raw.pointer("/gateways").is_none());
+        let entries = raw.pointer("/providers").unwrap().as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|v| v.get("kind").and_then(|k| k.as_str()) == Some("gateway"))
+                .count(),
+            1
         );
     }
 

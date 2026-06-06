@@ -15,10 +15,11 @@ pub(crate) mod testutils {
 }
 
 use providers::{
-    activate, deactivate, delete_provider_traces, detect_cli_versions, detect_installed_clis,
+    activate, deactivate, delete_provider_traces, detect_cli_versions,
+    detect_gateway_apis as providers_detect_gateway_apis, detect_installed_clis,
     fetch_favicon as providers_fetch_favicon, fetch_models, read_active_state,
-    set_opencode_default, test_provider, ActiveState, CliApp, ModelListResult, Provider,
-    TestResult,
+    set_opencode_default, test_provider, ActiveState, CliApp, GatewayCapabilities, ModelListResult,
+    Provider, TestResult,
 };
 use sessions::{get_session, scan_sessions, search_sessions, AppSession, SearchHit, SessionDetail};
 use tauri::Manager;
@@ -283,6 +284,38 @@ async fn write_app_providers(
     Ok(())
 }
 
+/// Probe a gateway's `{baseUrl, apiKey}` and report which API modes it
+/// supports (OpenAI / OpenAI-Responses / Anthropic / Gemini), so the
+/// gateway tab can offer only the matching CLIs for binding.
+#[tauri::command]
+async fn detect_gateway_apis(
+    base_url: String,
+    api_key: String,
+) -> Result<GatewayCapabilities, String> {
+    Ok(providers_detect_gateway_apis(&base_url, &api_key).await)
+}
+
+/// Read the `gateways` array from ~/.termory/providers.json (
+/// entries with `bindings`). Returns `[]` if missing. Same file as the
+/// per-CLI providers, separate array.
+#[tauri::command]
+async fn read_app_gateways() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| config::read_gateways().map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Atomically write the `gateways` array (preserving the sibling
+/// `providers` array), file mode 0600 on Unix.
+#[tauri::command]
+async fn write_app_gateways(value: serde_json::Value) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        config::write_gateways(&value).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Read ~/.termory/favorites.json. Returns an empty `[]` if missing.
 /// Stored separately because favorites can contain user-typed prompts
 /// with PII or accidentally-pasted secrets — file is chmod 0600.
@@ -352,10 +385,13 @@ pub fn run() {
             test_provider_api,
             fetch_provider_models,
             fetch_provider_favicon,
+            detect_gateway_apis,
             read_app_config,
             write_app_config,
             read_app_providers,
             write_app_providers,
+            read_app_gateways,
+            write_app_gateways,
             read_app_favorites,
             write_app_favorites,
         ])

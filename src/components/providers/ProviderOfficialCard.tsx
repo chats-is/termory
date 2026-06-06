@@ -31,7 +31,9 @@ export function ProviderOfficialCard({
       className={cn(
         "p-3 gap-0 outline outline-1 outline-transparent shadow-sm",
         isInUse
-          ? "border-l-4 border-l-primary bg-primary/5"
+          ? // Active accent stripe drawn as an overlay (::before) so it adds
+            // NO box width — content stays aligned with inactive cards.
+            "relative overflow-hidden bg-primary/5 before:content-[''] before:absolute before:inset-y-0 before:left-0 before:w-1 before:bg-primary"
           : "bg-card hover:bg-accent/40 transition-colors"
       )}
     >

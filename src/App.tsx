@@ -31,6 +31,7 @@ import type {
   Favorite,
   MemoryTool,
   Provider,
+  Gateway,
   Route,
   SearchHit,
   SessionDetail,
@@ -49,7 +50,7 @@ import {
   sessionKey,
   sourceDisplayName
 } from "@/lib/session-utils";
-import { isProviderList } from "@/lib/provider-utils";
+import { isProviderList, isGatewayList } from "@/lib/provider-utils";
 import {
   favoriteKeySet,
   isFavoriteList,
@@ -154,6 +155,23 @@ export function App() {
     "providers",
     [],
     isProviderList
+  );
+  const [gateways, setGateways] = usePersistentState<Gateway[]>(
+    "gateways",
+    [],
+    isGatewayList
+  );
+  // Per-CLI marker: the provider / gateway-binding id the user last
+  // activated through Termory. Disambiguates entries that share identical
+  // base+key on disk (a standalone provider vs a gateway binding). Only a
+  // hint — validated against the live config before it's trusted.
+  const [activeProviderIds, setActiveProviderIds] = usePersistentState<
+    Record<string, string>
+  >(
+    "active_provider_ids",
+    {},
+    (raw): raw is Record<string, string> =>
+      !!raw && typeof raw === "object" && !Array.isArray(raw)
   );
   const [providersApp, setProvidersApp] = usePersistentState<CliApp>(
     "providers_app",
@@ -572,6 +590,10 @@ export function App() {
               <ProvidersPage
                 providers={providers}
                 setProviders={setProviders}
+                gateways={gateways}
+                setGateways={setGateways}
+                activeProviderIds={activeProviderIds}
+                setActiveProviderIds={setActiveProviderIds}
                 app={providersApp}
                 setApp={setProvidersApp}
               />

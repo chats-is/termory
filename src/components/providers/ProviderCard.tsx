@@ -6,6 +6,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { maskKey } from "@/lib/provider-utils";
+import { OPENCODE_DEFAULT_NPM } from "@/constants";
 import type { Provider, TestResult } from "@/types";
 
 function ProviderFavicon({
@@ -50,6 +51,7 @@ export function ProviderCard({
   testing,
   testResult,
   activatable = true,
+  gatewayBadge,
   onToggleEnabled,
   onSetDefault,
   onEdit,
@@ -57,6 +59,12 @@ export function ProviderCard({
   onTest
 }: {
   provider: Provider;
+  // When set, this card represents a gateway binding rather than a
+  // standalone provider — shows an "AI Gateway" badge so the user can tell
+  // where it comes from (managed in the Gateways tab). The value is the
+  // gateway name, used only as a truthy flag (the name already shows as
+  // the card title).
+  gatewayBadge?: string;
   // OpenCode: slot exists in opencode.json. Other CLIs: same as isInUse
   // (single-slot — Enabled ≡ In use, so the Enable concept doesn't
   // surface separately).
@@ -77,8 +85,10 @@ export function ProviderCard({
   // other CLIs (their Enabled state isn't separately controllable).
   onToggleEnabled?: () => void;
   onSetDefault: () => void;
-  onEdit: () => void;
-  onDelete: () => void;
+  // Edit / Delete are omitted for gateway-binding cards — those are
+  // managed from the Gateways tab, not from the per-CLI source list.
+  onEdit?: () => void;
+  onDelete?: () => void;
   onTest: () => void;
 }) {
   const isOpencode = provider.app === "opencode";
@@ -92,7 +102,9 @@ export function ProviderCard({
         //   etc.) can get away with.
         // Inactive: standard card surface with hover affordance.
         isInUse
-          ? "border-l-4 border-l-primary bg-primary/5"
+          ? // Active accent stripe drawn as an overlay (::before) so it
+            // adds NO box width — content stays aligned with inactive cards.
+            "relative overflow-hidden bg-primary/5 before:content-[''] before:absolute before:inset-y-0 before:left-0 before:w-1 before:bg-primary"
           : "bg-card hover:bg-accent/40 transition-colors"
       )}
     >
@@ -109,8 +121,19 @@ export function ProviderCard({
                   In use
                 </Badge>
               )}
+              {gatewayBadge && (
+                <Badge
+                  variant="outline"
+                  className="text-[9px] tracking-wide px-1.5 py-0"
+                >
+                  AI Gateway
+                </Badge>
+              )}
             </div>
-            {(provider.baseUrl || provider.apiKey || provider.model) && (
+            {(provider.baseUrl ||
+              provider.apiKey ||
+              provider.model ||
+              provider.app === "opencode") && (
               <dl className="grid grid-cols-[max-content_1fr] gap-x-3.5 gap-y-1 text-xs">
                 {provider.baseUrl && (
                   <>
@@ -130,21 +153,19 @@ export function ProviderCard({
                     <dd className="font-mono break-all">{provider.model}</dd>
                   </>
                 )}
+                {provider.app === "opencode" && (
+                  <>
+                    <dt className="text-muted-foreground">AI SDK</dt>
+                    <dd className="font-mono break-all">
+                      {provider.npm || OPENCODE_DEFAULT_NPM}
+                    </dd>
+                  </>
+                )}
               </dl>
             )}
           </div>
-          <div className="inline-flex items-center gap-1.5 shrink-0">
-            {!isInUse && (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={onSetDefault}
-                disabled={settingDefault || !activatable || (isOpencode && !isConfigured)}
-              >
-                {settingDefault ? "Setting…" : "Set as default"}
-              </Button>
-            )}
+          <div className="flex flex-col items-end gap-1.5 shrink-0">
+            <div className="inline-flex items-center gap-1.5">
             {onToggleEnabled && (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -187,32 +208,54 @@ export function ProviderCard({
               </TooltipTrigger>
               <TooltipContent side="bottom">Test</TooltipContent>
             </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={onEdit}
-                  aria-label="Edit"
-                  className="inline-flex items-center justify-center size-8 rounded-md hover:bg-accent hover:text-accent-foreground transition-colors"
-                >
-                  <Pencil className="size-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">Edit</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={onDelete}
-                  aria-label="Delete"
-                  className="inline-flex items-center justify-center size-8 rounded-md text-destructive hover:text-destructive hover:bg-destructive/10 transition-colors"
-                >
-                  <Trash2 className="size-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">Delete</TooltipContent>
-            </Tooltip>
+            {onEdit && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={onEdit}
+                    aria-label="Edit"
+                    className="inline-flex items-center justify-center size-8 rounded-md hover:bg-accent hover:text-accent-foreground transition-colors"
+                  >
+                    <Pencil className="size-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">Edit</TooltipContent>
+              </Tooltip>
+            )}
+            {onDelete && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={onDelete}
+                    aria-label="Delete"
+                    className="inline-flex items-center justify-center size-8 rounded-md text-destructive hover:text-destructive hover:bg-destructive/10 transition-colors"
+                  >
+                    <Trash2 className="size-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">Delete</TooltipContent>
+              </Tooltip>
+            )}
+            </div>
+            {!isInUse && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={onSetDefault}
+                disabled={settingDefault || !activatable}
+              >
+                {isOpencode
+                  ? settingDefault
+                    ? "Setting…"
+                    : "Set as default"
+                  : settingDefault
+                    ? "Activating…"
+                    : "Activate"}
+              </Button>
+            )}
           </div>
         </div>
         {testResult && (
