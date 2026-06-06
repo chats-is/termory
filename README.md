@@ -2,35 +2,34 @@
 
 # Termory
 
-**One place to browse your AI coding-CLI history — and switch API providers in a click.**
+**The memory for your terminal AI coding tools — browse every session, and switch API providers in a click.**
 
 [![Release](https://img.shields.io/github/v/release/copilot-is/termory?include_prereleases&sort=semver)](https://github.com/copilot-is/termory/releases)
+[![Downloads](https://img.shields.io/github/downloads/copilot-is/termory/total?color=success)](https://github.com/copilot-is/termory/releases)
 [![License](https://img.shields.io/github/license/copilot-is/termory?color=blue)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platform-macOS%20·%20Linux%20·%20Windows-555)
 ![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%20v2-24C8DB)
 
 </div>
 
----
-
-Termory is a local-first desktop app for **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode**. See every session, memory file, and skill across all your tools in one window, keep the messages worth saving, search across everything, and switch any CLI between API providers without touching a config file. It runs natively on macOS, Linux, and Windows, and everything stays on your machine.
+Termory brings **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode** together in one window. Browse every past session, memory file, and skill from all your tools, keep the messages worth saving, search across everything at once, and resume any session right back in your terminal. When you want a different model or platform, switch any CLI to another API provider in a click — no config files, no copy-pasting keys. It runs natively on macOS, Linux, and Windows, and your history never leaves your machine.
 
 <div align="center">
-  <img src="docs/screenshots/providers.png" alt="Termory — switch any CLI between API providers" width="720">
-  <br><br>
-  <img src="docs/screenshots/stats.png" alt="Termory — usage stats across every tool" width="720">
+  <img src="docs/screenshots/providers.png" alt="Termory — switch any CLI between API providers" width="49%">
+  <img src="docs/screenshots/stats.png" alt="Termory — usage stats across every tool" width="49%">
 </div>
 
 ## Features
 
 | | |
 |---|---|
-| **Providers** | Keep named API profiles per CLI and switch the active one with a click — or from the macOS menu bar. Your native login is never touched, so it survives the switch. |
-| **Records** | All your sessions, memory files, and skills from every tool, rendered the way each tool shows them. |
+| **Records** | Every session, memory file, and skill from all your tools, in one place — each rendered the way its own tool shows it. |
+| **Resume** | Reopen any recent session straight in your terminal, running the CLI's own resume command — one click from the menu bar or a right-click. |
+| **Providers** | Keep named API profiles for each CLI and switch the active one with a click, or from the menu bar. |
 | **Favorites** | Star any message; it's saved as a snapshot that stays readable even after the original session is gone. |
 | **Search** | Instant search across all your history, with a `⌘K` command palette. |
 | **Stats** | Tokens, messages, projects, and an activity heatmap over any date range. |
-| **Local-first** | No servers, no telemetry. Termory reads your history in place and never modifies it. |
+| **Private** | No servers, no accounts, no telemetry. Termory reads your history where it already lives and never changes it. |
 
 ## Supported tools
 
@@ -40,6 +39,12 @@ Termory is a local-first desktop app for **Codex**, **Claude Code**, **Gemini CL
 | Claude Code | ✅ | ✅ | ✅ | ✅ |
 | Gemini CLI | ✅ | ✅ | ✅ | ✅ |
 | OpenCode | ✅ | ✅ | ✅ | ✅ |
+
+## Switch providers in a click
+
+Every CLI keeps its own library of named API profiles — your OpenRouter key, a local model, an alternate gateway, or the official login. Pick the one you want and Termory sets it up for that CLI; the next launch just uses it. Switch from the app or straight from the macOS menu bar.
+
+Going back to **Official** restores your original setup exactly — your native login (OAuth tokens and credentials) is never overwritten, so you can bounce between providers as often as you like without re-logging-in.
 
 ## Download
 
@@ -54,19 +59,6 @@ Grab the installer for your platform from the [**Releases**](https://github.com/
 > [!NOTE]
 > Current builds are unsigned, so the OS may warn on first launch. On macOS, right-click the app and choose **Open**.
 
-## Providers
-
-A **provider** is a named snapshot of a CLI's API settings (`base URL`, `API key`, `model`, …). Each CLI keeps its own library, and switching one materializes its settings into that CLI's live config so the next launch picks it up:
-
-| CLI | Live config written |
-|-----|---------------------|
-| Claude Code | `~/.claude/settings.json` |
-| Codex | `~/.codex/auth.json` + `~/.codex/config.toml` |
-| Gemini CLI | `~/.gemini/.env` |
-| OpenCode | `~/.config/opencode/opencode.json` |
-
-Switching back to **Official** only clears the fields Termory injected — your native credentials (OAuth tokens, `.credentials.json`, …) are never written. **Advanced settings** let you merge extra per-provider options that are removed again when you switch away.
-
 ## Build from source
 
 Requires [Node.js](https://nodejs.org/) 20+, the [Rust toolchain](https://rustup.rs/), and the [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/).
@@ -76,14 +68,3 @@ npm install
 npm run tauri:dev     # run the desktop app
 npm run tauri:build   # build installers
 ```
-
-Tests:
-
-```bash
-cargo test --manifest-path src-tauri/Cargo.toml --lib   # Rust
-npm test                                                # frontend
-```
-
-## License
-
-[MIT](LICENSE) © 2026 John Ma
