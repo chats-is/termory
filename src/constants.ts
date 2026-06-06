@@ -91,14 +91,14 @@ export const CLI_INSTALL: Record<
     url: "https://code.claude.com/docs",
     methods: [
       {
-        id: "curl",
-        label: "curl",
-        command: "curl -fsSL https://claude.ai/install.sh | bash"
-      },
-      {
         id: "npm",
         label: "npm",
         command: "npm install -g @anthropic-ai/claude-code"
+      },
+      {
+        id: "curl",
+        label: "curl",
+        command: "curl -fsSL https://claude.ai/install.sh | bash"
       }
     ]
   },
@@ -127,12 +127,12 @@ export const CLI_INSTALL: Record<
     binary: "opencode",
     url: "https://opencode.ai/docs",
     methods: [
+      { id: "npm", label: "npm", command: "npm i -g opencode-ai@latest" },
       {
         id: "curl",
         label: "curl",
         command: "curl -fsSL https://opencode.ai/install | bash"
       },
-      { id: "npm", label: "npm", command: "npm i -g opencode-ai@latest" },
       { id: "bun", label: "bun", command: "bun install -g opencode-ai" },
       {
         id: "brew",
