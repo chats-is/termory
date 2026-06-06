@@ -1,6 +1,7 @@
 mod config;
 mod providers;
 mod sessions;
+mod terminal;
 mod tray;
 mod watcher;
 
@@ -26,10 +27,11 @@ use tauri::Manager;
 
 #[tauri::command]
 async fn scan_all_sessions(
+    app: tauri::AppHandle,
     watcher: tauri::State<'_, watcher::WatcherHandle>,
 ) -> Result<Vec<AppSession>, String> {
     let handle = watcher.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let sessions = tauri::async_runtime::spawn_blocking(move || {
         let sessions = scan_sessions().map_err(|err| err.to_string())?;
         // Tell the watcher about the project cwds we just discovered so
         // it can dynamically watch them (catching per-project
@@ -38,10 +40,13 @@ async fn scan_all_sessions(
         let cwds =
             watcher::dynamic_paths_from_sessions(sessions.iter().map(|s| s.project.as_str()));
         handle.reconfigure_dynamic(cwds);
-        Ok(sessions)
+        Ok::<_, String>(sessions)
     })
     .await
-    .map_err(|err| err.to_string())?
+    .map_err(|err| err.to_string())??;
+    // Refresh the tray's "recent sessions" list from this scan.
+    tray::refresh_recent(&app, &sessions);
+    Ok(sessions)
 }
 
 /// Open one record by `(source, id)`. The Rust side looks up the
@@ -83,6 +88,27 @@ async fn detect_clis() -> Result<std::collections::HashMap<String, bool>, String
     })
     .await
     .map_err(|err| err.to_string())?
+}
+
+/// Mainstream terminals installed on this OS (+ "auto"), for the
+/// Settings → Terminal dropdown.
+#[tauri::command]
+async fn detect_terminals() -> Result<Vec<terminal::TerminalOption>, String> {
+    tauri::async_runtime::spawn_blocking(terminal::detect)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Open a recorded session in the user's chosen terminal and resume it in its
+/// CLI (Settings → Terminal). Driven by the Records / Favorites right-click
+/// menu — same path the tray's recent-session click uses.
+#[tauri::command]
+fn resume_session_in_terminal(
+    source: String,
+    id: String,
+    project: Option<String>,
+) -> Result<(), String> {
+    terminal::resume_session(&source, &id, project.as_deref())
 }
 
 /// Spawn each installed CLI with `--version` and return the parsed
@@ -375,6 +401,8 @@ pub fn run() {
             load_session,
             search_all_sessions,
             detect_clis,
+            detect_terminals,
+            resume_session_in_terminal,
             detect_cli_versions_cmd,
             provider_active_state,
             provider_active_states,

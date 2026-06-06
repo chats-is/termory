@@ -66,7 +66,7 @@ pub struct DailyTokenBreakdown {
     pub hour_tokens: Vec<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppSession {
     pub id: String,
     pub source: String,

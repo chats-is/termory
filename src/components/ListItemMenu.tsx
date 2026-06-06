@@ -1,4 +1,5 @@
 import React from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import {
@@ -21,6 +22,7 @@ export function ListItemMenu({
   id,
   messageId,
   source,
+  project,
   children
 }: {
   path: string;
@@ -30,6 +32,8 @@ export function ListItemMenu({
   messageId?: string;
   /** Session source (Claude / Codex / …) — enables the resume command. */
   source?: string;
+  /** Session project/cwd — the terminal `cd`s here before resuming. */
+  project?: string;
   children: React.ReactNode;
 }) {
   const resumeCmd = source && id ? resumeCommandFor(source, id) : null;
@@ -37,6 +41,12 @@ export function ListItemMenu({
   const copy = (value: string, what: string) => {
     void copyToClipboard(value);
     toast.success(`${what} copied`);
+  };
+
+  const resumeInTerminal = () => {
+    void invoke("resume_session_in_terminal", { source, id, project }).catch(
+      (err) => toast.error(`Couldn't open terminal: ${String(err)}`)
+    );
   };
 
   return (
@@ -48,9 +58,14 @@ export function ListItemMenu({
         </ContextMenuItem>
         <ContextMenuSeparator />
         {resumeCmd && (
-          <ContextMenuItem onSelect={() => copy(resumeCmd, "Resume command")}>
-            Copy resume command
-          </ContextMenuItem>
+          <>
+            <ContextMenuItem onSelect={resumeInTerminal}>
+              Resume in terminal
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={() => copy(resumeCmd, "Resume command")}>
+              Copy resume command
+            </ContextMenuItem>
+          </>
         )}
         <ContextMenuItem onSelect={() => copy(path, "Path")}>
           Copy path

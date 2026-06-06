@@ -159,14 +159,17 @@ describe("basename", () => {
 });
 
 describe("resumeCommandFor", () => {
-  it("returns the right CLI invocation for Claude and Codex", () => {
+  it("returns the right CLI invocation for each session source", () => {
     expect(resumeCommandFor("Claude", "uuid-1")).toBe("claude --resume uuid-1");
     expect(resumeCommandFor("Codex", "thread-2")).toBe("codex resume thread-2");
+    expect(resumeCommandFor("OpenCode", "ses-3")).toBe(
+      "opencode --session ses-3"
+    );
+    expect(resumeCommandFor("Gemini", "g-4")).toBe("gemini --resume g-4");
   });
-  it("returns null for sources without a direct resume-by-id flag", () => {
-    expect(resumeCommandFor("Gemini", "x")).toBeNull();
-    expect(resumeCommandFor("OpenCode", "x")).toBeNull();
+  it("returns null for non-session sources", () => {
     expect(resumeCommandFor("Memory", "x")).toBeNull();
+    expect(resumeCommandFor("Skill", "x")).toBeNull();
   });
 });
 

@@ -804,6 +804,7 @@ export function App() {
                             path={session.path}
                             id={session.id}
                             source={session.source}
+                            project={session.project}
                           >
                           <button
                             onClick={() => setSelected(session)}

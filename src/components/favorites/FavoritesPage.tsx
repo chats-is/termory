@@ -93,6 +93,7 @@ export function FavoritesPage({
                 id={fav.source_session_id}
                 messageId={fav.id}
                 source={fav.source}
+                project={fav.source_session_project}
               >
               <button
                 type="button"

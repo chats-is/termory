@@ -1,5 +1,6 @@
 import React from "react";
 import { useTheme } from "next-themes";
+import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -7,6 +8,14 @@ import { toast } from "sonner";
 import { Folder, FolderOpen, Loader2, Monitor, Moon, RefreshCw, Sun, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from "@/components/ui/select";
+import { getConfig, setConfig } from "@/config";
 import { cn } from "@/lib/utils";
 
 type ThemeChoice = "system" | "light" | "dark";
@@ -43,6 +52,10 @@ export function SettingsPage({
   const [mounted, setMounted] = React.useState(false);
   const [termoryDir, setTermoryDir] = React.useState<string | null>(null);
   const [checking, setChecking] = React.useState(false);
+  const [terminal, setTerminal] = React.useState("auto");
+  const [terminals, setTerminals] = React.useState<{ id: string; label: string }[]>([
+    { id: "auto", label: "Default" }
+  ]);
 
   React.useEffect(() => {
     setMounted(true);
@@ -54,7 +67,26 @@ export function SettingsPage({
         setTermoryDir(null);
       }
     })();
+    void (async () => {
+      try {
+        const [saved, list] = await Promise.all([
+          getConfig<string>("terminal"),
+          invoke<{ id: string; label: string }[]>("detect_terminals")
+        ]);
+        if (list.length > 0) setTerminals(list);
+        if (saved) setTerminal(saved);
+      } catch {
+        /* keep defaults */
+      }
+    })();
   }, []);
+
+  const handleTerminalChange = (value: string) => {
+    setTerminal(value);
+    void setConfig("terminal", value).catch((err) =>
+      toast.error(`Couldn't save terminal: ${String(err)}`)
+    );
+  };
 
   const handleCheckUpdate = async () => {
     setChecking(true);
@@ -102,6 +134,27 @@ export function SettingsPage({
                   );
                 })}
               </div>
+          </SettingsSection>
+
+          <SettingsSection title="Terminal">
+            <div className="flex flex-col gap-2">
+              <div className="text-xs text-muted-foreground">
+                Which terminal opens when you resume a recent session from the
+                menu-bar tray. Only terminals found on this machine are listed.
+              </div>
+              <Select value={terminal} onValueChange={handleTerminalChange}>
+                <SelectTrigger className="w-full sm:w-72">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {terminals.map((t) => (
+                    <SelectItem key={t.id} value={t.id}>
+                      {t.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           </SettingsSection>
 
           <SettingsSection title="Storage">

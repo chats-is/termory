@@ -8,6 +8,12 @@
 //
 // Menu shape (each CLI row shows its active choice inline):
 //
+//   Open
+//   ─────────────────────
+//   Fix the flaky stats test          ← up to 5 most-recent session titles
+//   Refactor the gateway editor          (newest first; click opens a terminal
+//   …                                     and resumes it in its CLI).
+//   ─────────────────────
 //   Claude Code · Official  ▸  ☑ Official
 //                              ─────────
 //                              ☐ Anthropic
@@ -16,7 +22,6 @@
 //   Gemini · …              ▸  …
 //   OpenCode · Official     ▸  …
 //   ─────────────────────
-//   Open
 //   Exit
 //
 // Click handler dispatches by id `tray:{app}:official` /
@@ -28,6 +33,8 @@ use crate::config;
 use crate::providers::{
     activate, deactivate, read_active_state, set_opencode_default, CliApp, Provider,
 };
+use crate::sessions::AppSession;
+use std::sync::Mutex;
 use tauri::{
     menu::{
         CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem,
@@ -38,6 +45,23 @@ use tauri::{
 };
 
 const TRAY_ID: &str = "termory-main";
+
+/// How many recent session titles to surface under "Open".
+const RECENT_LIMIT: usize = 5;
+
+/// One cached recent-session row. A click opens a terminal in `project` and
+/// resumes the session in its CLI (`source` + `id`); `label` is the menu text.
+#[derive(Clone, PartialEq)]
+struct RecentSession {
+    source: String,
+    project: String,
+    id: String,
+    label: String,
+}
+
+/// Recent sessions shown under "Open", refreshed from each scan (watcher +
+/// the `scan_all_sessions` IPC) — the tray never scans on its own.
+static RECENT: Mutex<Vec<RecentSession>> = Mutex::new(Vec::new());
 
 /// Menu-bar glyph: the three-card terminal "chip" from the app icon,
 /// pure black on transparent so macOS renders it as a template image
@@ -86,6 +110,60 @@ pub fn rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Recompute the recent-sessions cache from a fresh scan and rebuild the
+/// menu so the titles under "Open" stay current. Reuses the caller's scan
+/// (watcher / `scan_all_sessions`); skips the rebuild when nothing changed
+/// so active CLI use doesn't churn the menu on every file event.
+pub fn refresh_recent(app: &AppHandle, sessions: &[AppSession]) {
+    let recent = select_recent(sessions);
+    match RECENT.lock() {
+        Ok(mut guard) if *guard != recent => *guard = recent,
+        _ => return, // unchanged (or poisoned) → no rebuild
+    }
+    if let Err(err) = rebuild_menu(app) {
+        log::error!("tray recent rebuild failed: {err}");
+    }
+}
+
+/// The (pure) selection: drop Memory/Skill, newest first, cap at
+/// `RECENT_LIMIT`, map to the cached row.
+fn select_recent(sessions: &[AppSession]) -> Vec<RecentSession> {
+    let mut picked: Vec<&AppSession> = sessions
+        .iter()
+        .filter(|s| !matches!(s.source.as_str(), "Memory" | "Skill"))
+        .collect();
+    // Newest first. ISO-8601 `updated_at` sorts lexicographically =
+    // chronologically; `None` sorts last under descending order.
+    picked.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    picked
+        .into_iter()
+        .take(RECENT_LIMIT)
+        .map(|s| RecentSession {
+            source: s.source.clone(),
+            project: s.project.clone(),
+            id: s.id.clone(),
+            label: recent_label(&s.title, &s.snippet),
+        })
+        .collect()
+}
+
+/// Menu label for a recent session: title, else snippet, else "(untitled)",
+/// truncated so the menu stays narrow.
+fn recent_label(title: &str, snippet: &str) -> String {
+    let raw = if !title.trim().is_empty() {
+        title.trim()
+    } else if !snippet.trim().is_empty() {
+        snippet.trim()
+    } else {
+        "(untitled)"
+    };
+    let mut out: String = raw.chars().take(44).collect();
+    if raw.chars().count() > 44 {
+        out.push('…');
+    }
+    out
+}
+
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let providers: Vec<Provider> = config::read_providers()
         .ok()
@@ -97,6 +175,17 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     // "Open" sits at the very top of the menu.
     let open = MenuItemBuilder::with_id("tray:open", "Open").build(app)?;
     menu = menu.item(&open).item(&PredefinedMenuItem::separator(app)?);
+
+    // Recent sessions (newest first) — each opens in Records on click.
+    let recent = RECENT.lock().map(|g| g.clone()).unwrap_or_default();
+    if !recent.is_empty() {
+        for (idx, r) in recent.iter().enumerate() {
+            let item =
+                MenuItemBuilder::with_id(format!("tray:session:{idx}"), &r.label).build(app)?;
+            menu = menu.item(&item);
+        }
+        menu = menu.item(&PredefinedMenuItem::separator(app)?);
+    }
 
     for cli in CliApp::all() {
         let providers_for_app: Vec<Provider> =
@@ -154,20 +243,36 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     menu.build()
 }
 
+fn show_main_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        // A window is going on screen → restore the Dock icon.
+        #[cfg(target_os = "macos")]
+        let _ = app.set_dock_visibility(true);
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+}
+
 fn handle_menu_event(app: &AppHandle, id: &str) {
     if id == "tray:open" {
-        if let Some(win) = app.get_webview_window("main") {
-            // A window is going on screen → restore the Dock icon.
-            #[cfg(target_os = "macos")]
-            let _ = app.set_dock_visibility(true);
-            let _ = win.show();
-            let _ = win.unminimize();
-            let _ = win.set_focus();
-        }
+        show_main_window(app);
         return;
     }
     if id == "tray:quit" {
         app.exit(0);
+        return;
+    }
+    // A recent-session row → open a fresh OS terminal in that session's
+    // project and resume it in its CLI (`claude --resume <id>` etc.).
+    if let Some(idx) = id
+        .strip_prefix("tray:session:")
+        .and_then(|n| n.parse::<usize>().ok())
+    {
+        if let Some(r) = RECENT.lock().ok().and_then(|g| g.get(idx).cloned()) {
+            // Fire-and-forget from the tray (no toast surface); errors logged.
+            let _ = crate::terminal::resume_session(&r.source, &r.id, Some(&r.project));
+        }
         return;
     }
     let Some(rest) = id.strip_prefix("tray:") else {
@@ -241,5 +346,61 @@ fn cli_key(cli: CliApp) -> &'static str {
         CliApp::Codex => "codex",
         CliApp::Gemini => "gemini",
         CliApp::Opencode => "opencode",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recent_label_fallbacks_and_truncation() {
+        assert_eq!(recent_label("Fix bug", "snip"), "Fix bug");
+        // Blank title falls back to the snippet (trimmed).
+        assert_eq!(recent_label("   ", "  the snippet  "), "the snippet");
+        // Both blank → placeholder.
+        assert_eq!(recent_label("", ""), "(untitled)");
+        // Over-long titles truncate to 44 chars + an ellipsis.
+        let out = recent_label(&"x".repeat(60), "");
+        assert_eq!(out.chars().count(), 45);
+        assert!(out.ends_with('…'));
+    }
+
+    fn sess(source: &str, id: &str, updated: &str) -> AppSession {
+        AppSession {
+            source: source.into(),
+            id: id.into(),
+            project: "/p".into(),
+            updated_at: Some(updated.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn select_recent_drops_docs_and_sorts_newest_first() {
+        let sessions = vec![
+            sess("Claude", "c1", "2026-01-01T00:00:00Z"),
+            sess("Codex", "x1", "2026-06-01T00:00:00Z"),
+            sess("Memory", "m1", "2026-12-01T00:00:00Z"), // excluded
+            sess("Skill", "s1", "2026-12-01T00:00:00Z"),  // excluded
+            sess("Gemini", "g1", "2026-03-01T00:00:00Z"),
+        ];
+        let recent = select_recent(&sessions);
+        let ids: Vec<&str> = recent.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["x1", "g1", "c1"]);
+    }
+
+    #[test]
+    fn select_recent_caps_at_limit() {
+        let sessions: Vec<AppSession> = (0..10)
+            .map(|i| {
+                sess(
+                    "Claude",
+                    &format!("c{i}"),
+                    &format!("2026-06-{:02}T00:00:00Z", i + 1),
+                )
+            })
+            .collect();
+        assert_eq!(select_recent(&sessions).len(), RECENT_LIMIT);
     }
 }

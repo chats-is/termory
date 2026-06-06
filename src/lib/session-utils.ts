@@ -85,6 +85,10 @@ export function resumeCommandFor(source: string, id: string): string | null {
       return `claude --resume ${id}`;
     case "Codex":
       return `codex resume ${id}`;
+    case "OpenCode":
+      return `opencode --session ${id}`;
+    case "Gemini":
+      return `gemini --resume ${id}`;
     default:
       return null;
   }

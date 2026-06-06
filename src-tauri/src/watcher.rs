@@ -236,6 +236,9 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
                     };
                     handle.reconfigure_dynamic(new_cwds);
 
+                    // Keep the tray's "recent sessions" list current.
+                    crate::tray::refresh_recent(&app_handle, &sessions);
+
                     if let Err(err) = app_handle.emit(SOURCES_CHANGED_EVENT, sessions) {
                         log::warn!("watcher sources-changed emit failed: {err}");
                     }
