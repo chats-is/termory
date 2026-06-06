@@ -31,7 +31,8 @@
 
 use crate::config;
 use crate::providers::{
-    activate, deactivate, read_active_state, set_opencode_default, CliApp, Provider,
+    activate, deactivate, detect_installed_clis, gateway_providers, read_active_state,
+    set_opencode_default, CliApp, Provider,
 };
 use crate::sessions::AppSession;
 use std::sync::Mutex;
@@ -131,6 +132,9 @@ fn select_recent(sessions: &[AppSession]) -> Vec<RecentSession> {
     let mut picked: Vec<&AppSession> = sessions
         .iter()
         .filter(|s| !matches!(s.source.as_str(), "Memory" | "Skill"))
+        // Drop "sessions" that are really just a CLI slash command
+        // (`/model`, `/clear`, …) — they're system commands, not chats.
+        .filter(|s| !is_slash_command(label_text(&s.title, &s.snippet)))
         .collect();
     // Newest first. ISO-8601 `updated_at` sorts lexicographically =
     // chronologically; `None` sorts last under descending order.
@@ -147,16 +151,37 @@ fn select_recent(sessions: &[AppSession]) -> Vec<RecentSession> {
         .collect()
 }
 
-/// Menu label for a recent session: title, else snippet, else "(untitled)",
-/// truncated so the menu stays narrow.
-fn recent_label(title: &str, snippet: &str) -> String {
-    let raw = if !title.trim().is_empty() {
+/// The text a recent row shows before truncation: title, else snippet, else
+/// empty (the caller renders "(untitled)").
+fn label_text<'a>(title: &'a str, snippet: &'a str) -> &'a str {
+    if !title.trim().is_empty() {
         title.trim()
     } else if !snippet.trim().is_empty() {
         snippet.trim()
     } else {
-        "(untitled)"
+        ""
+    }
+}
+
+/// Is `text` a bare CLI slash command (`/model`, `/clear`, `/user:cmd`)? True
+/// when the first whitespace token is `/` + a command word (alphanumeric /
+/// `-_:`, no inner `/` — so file paths like `/Users/...` are NOT commands).
+fn is_slash_command(text: &str) -> bool {
+    let Some(first) = text.split_whitespace().next() else {
+        return false;
     };
+    first.len() > 1
+        && first.starts_with('/')
+        && first[1..]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'))
+}
+
+/// Menu label for a recent session: title, else snippet, else "(untitled)",
+/// truncated so the menu stays narrow.
+fn recent_label(title: &str, snippet: &str) -> String {
+    let raw = label_text(title, snippet);
+    let raw = if raw.is_empty() { "(untitled)" } else { raw };
     let mut out: String = raw.chars().take(44).collect();
     if raw.chars().count() > 44 {
         out.push('…');
@@ -187,9 +212,24 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         menu = menu.item(&PredefinedMenuItem::separator(app)?);
     }
 
+    // Only surface CLIs actually installed on this machine — same probe the
+    // Providers page uses (`detect_clis`), so the two agree. Uninstalled CLIs
+    // get no submenu (nothing to switch).
+    let installed = detect_installed_clis();
+    // Read the gateway bindings ONCE, then group per CLI in the loop.
+    let gateways = gateway_providers();
+
     for cli in CliApp::all() {
-        let providers_for_app: Vec<Provider> =
+        if !installed.get(&cli).copied().unwrap_or(false) {
+            continue;
+        }
+        // The user's standalone providers PLUS this CLI's gateway bindings
+        // (synthesized into the same Provider shape), so both appear as
+        // switchable choices and the active checkmark lands on whichever is
+        // live.
+        let mut providers_for_app: Vec<Provider> =
             providers.iter().filter(|p| p.app == cli).cloned().collect();
+        providers_for_app.extend(gateways.iter().filter(|p| p.app == cli).cloned());
         // Reverse-derive the active provider id. Anything other than
         // `Some(matching id)` (None, or matched-by-config-but-not-in-list)
         // falls back to "Official is the active row".
@@ -289,8 +329,12 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
 
     let providers_value = config::read_providers().unwrap_or_default();
     let providers: Vec<Provider> = serde_json::from_value(providers_value).unwrap_or_default();
-    let providers_for_app: Vec<Provider> =
+    // Standalone providers + this CLI's gateway bindings, so a click on a
+    // gateway row resolves to its synthesized provider and activates via the
+    // same path.
+    let mut providers_for_app: Vec<Provider> =
         providers.iter().filter(|p| p.app == cli).cloned().collect();
+    providers_for_app.extend(gateway_providers().into_iter().filter(|p| p.app == cli));
 
     let result = match (kind, provider_id) {
         ("official", _) => deactivate(cli, &providers_for_app),
@@ -388,6 +432,30 @@ mod tests {
         let recent = select_recent(&sessions);
         let ids: Vec<&str> = recent.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["x1", "g1", "c1"]);
+    }
+
+    #[test]
+    fn is_slash_command_detects_bare_commands_not_paths() {
+        assert!(is_slash_command("/model"));
+        assert!(is_slash_command("/clear"));
+        assert!(is_slash_command("/user:cmd"));
+        assert!(is_slash_command("/compact some args")); // still a command invocation
+                                                         // Real prompts / paths are NOT commands.
+        assert!(!is_slash_command("fix the bug"));
+        assert!(!is_slash_command("/Users/john/project")); // inner "/" → path
+        assert!(!is_slash_command(""));
+        assert!(!is_slash_command("/"));
+    }
+
+    #[test]
+    fn select_recent_drops_slash_command_sessions() {
+        let mut cmd = sess("Claude", "cmd1", "2026-12-01T00:00:00Z");
+        cmd.title = "/clear".into(); // newest, but a bare command → dropped
+        let mut chat = sess("Codex", "chat1", "2026-06-01T00:00:00Z");
+        chat.title = "Fix the flaky test".into();
+        let recent = select_recent(&vec![cmd, chat]);
+        let ids: Vec<&str> = recent.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["chat1"]);
     }
 
     #[test]

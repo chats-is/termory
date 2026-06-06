@@ -622,6 +622,147 @@ impl Provider {
 
 const OPENCODE_DEFAULT_NPM: &str = "@ai-sdk/openai-compatible";
 
+// ===================================================================
+// Gateway → Provider synthesis. Mirrors the frontend
+// `providerFromBinding` / `gatewayBaseForProtocol` / `protocolForBinding`
+// (src/lib/provider-utils.ts) — keep the two in sync. Lets the tray
+// surface gateway bindings as activatable providers via the SAME
+// `activate` / `read_active_state` path standalone providers use.
+// ===================================================================
+
+/// One gateway binding: a CLI target of a gateway, minus the gateway's
+/// shared base/key, with its own id. Protocol is derived from app / npm.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayBinding {
+    pub id: String,
+    pub app: CliApp,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub npm: Option<String>,
+    #[serde(default)]
+    pub models: Vec<ProviderModel>,
+    #[serde(default)]
+    pub options: Vec<ProviderOption>,
+}
+
+/// A gateway: one `{baseUrl, apiKey}` fanned out to several CLIs.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Gateway {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub bindings: Vec<GatewayBinding>,
+    #[serde(default)]
+    pub favicon: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum GatewayProtocol {
+    OpenaiCompatible,
+    Openai,
+    Anthropic,
+    Gemini,
+}
+
+fn protocol_for_npm(npm: &str) -> GatewayProtocol {
+    if npm.contains("anthropic") || npm.contains("bedrock") {
+        GatewayProtocol::Anthropic
+    } else if npm.contains("google") {
+        GatewayProtocol::Gemini
+    } else if npm.contains("openai-compatible") {
+        GatewayProtocol::OpenaiCompatible
+    } else if npm.contains("openai") {
+        GatewayProtocol::Openai
+    } else {
+        GatewayProtocol::OpenaiCompatible
+    }
+}
+
+fn protocol_for_binding(b: &GatewayBinding) -> GatewayProtocol {
+    match b.app {
+        CliApp::Claude => GatewayProtocol::Anthropic,
+        CliApp::Codex => GatewayProtocol::Openai,
+        CliApp::Gemini => GatewayProtocol::Gemini,
+        CliApp::Opencode => protocol_for_npm(b.npm.as_deref().unwrap_or("")),
+    }
+}
+
+fn npm_for_protocol(p: GatewayProtocol) -> &'static str {
+    match p {
+        GatewayProtocol::OpenaiCompatible => "@ai-sdk/openai-compatible",
+        GatewayProtocol::Openai => "@ai-sdk/openai",
+        GatewayProtocol::Anthropic => "@ai-sdk/anthropic",
+        GatewayProtocol::Gemini => "@ai-sdk/google",
+    }
+}
+
+/// Derive a CLI's real base URL from the gateway's path-less root: strip a
+/// trailing `/v1beta` or `/v1`, then re-add `/v1` for the OpenAI flavors
+/// (Anthropic / Gemini keep the bare root and append their own path).
+fn gateway_base_for_protocol(base: &str, p: GatewayProtocol) -> String {
+    let mut b = base.trim().trim_end_matches('/');
+    b = b.strip_suffix("/v1beta").unwrap_or(b);
+    b = b.strip_suffix("/v1").unwrap_or(b);
+    match p {
+        GatewayProtocol::OpenaiCompatible | GatewayProtocol::Openai => format!("{b}/v1"),
+        GatewayProtocol::Anthropic | GatewayProtocol::Gemini => b.to_string(),
+    }
+}
+
+fn provider_from_binding(g: &Gateway, b: &GatewayBinding) -> Provider {
+    let protocol = protocol_for_binding(b);
+    let is_opencode = b.app == CliApp::Opencode;
+    Provider {
+        id: b.id.clone(),
+        app: b.app,
+        kind: ProviderKind::Custom,
+        name: g.name.clone(),
+        base_url: gateway_base_for_protocol(&g.base_url, protocol),
+        api_key: g.api_key.clone(),
+        model: b.model.clone(),
+        npm: if is_opencode {
+            Some(
+                b.npm
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| npm_for_protocol(protocol).to_string()),
+            )
+        } else {
+            None
+        },
+        models: if is_opencode {
+            b.models.clone()
+        } else {
+            Vec::new()
+        },
+        options: b.options.clone(),
+        favicon: g.favicon.clone(),
+    }
+}
+
+/// Every gateway binding synthesized as an activatable Provider (id = the
+/// binding's own id, `app` = its target CLI). Reads the gateways from
+/// `~/.termory/providers.json` ONCE; returns `[]` on any read/parse failure.
+/// Callers filter by `app` (the tray reads this once and groups per CLI
+/// rather than re-reading the file per CLI).
+pub fn gateway_providers() -> Vec<Provider> {
+    let gateways: Vec<Gateway> = crate::config::read_gateways()
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    gateways
+        .iter()
+        .flat_map(|g| g.bindings.iter().map(|b| provider_from_binding(g, b)))
+        .collect()
+}
+
 /// Reverse-derived active state for a single CLI.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2605,6 +2746,96 @@ fn string_match(provider_value: &str, live_value: Option<&str>) -> bool {
 mod tests {
     use super::*;
     use crate::testutils::HOME_LOCK;
+
+    fn binding(app: CliApp, npm: Option<&str>) -> GatewayBinding {
+        GatewayBinding {
+            id: "b1".into(),
+            app,
+            model: "m".into(),
+            npm: npm.map(str::to_string),
+            models: vec![],
+            options: vec![],
+        }
+    }
+
+    #[test]
+    fn gateway_base_for_protocol_derives_per_protocol() {
+        // Path-less root + OpenAI flavors get /v1; Anthropic/Gemini stay bare.
+        assert_eq!(
+            gateway_base_for_protocol("https://r.x", GatewayProtocol::Openai),
+            "https://r.x/v1"
+        );
+        assert_eq!(
+            gateway_base_for_protocol("https://r.x/", GatewayProtocol::OpenaiCompatible),
+            "https://r.x/v1"
+        );
+        // A pasted /v1 or /v1beta is stripped before re-deriving.
+        assert_eq!(
+            gateway_base_for_protocol("https://r.x/v1", GatewayProtocol::Gemini),
+            "https://r.x"
+        );
+        assert_eq!(
+            gateway_base_for_protocol("https://r.x/v1beta", GatewayProtocol::Anthropic),
+            "https://r.x"
+        );
+    }
+
+    #[test]
+    fn protocol_for_binding_maps_app_and_npm() {
+        assert!(matches!(
+            protocol_for_binding(&binding(CliApp::Claude, None)),
+            GatewayProtocol::Anthropic
+        ));
+        assert!(matches!(
+            protocol_for_binding(&binding(CliApp::Codex, None)),
+            GatewayProtocol::Openai
+        ));
+        assert!(matches!(
+            protocol_for_binding(&binding(CliApp::Gemini, None)),
+            GatewayProtocol::Gemini
+        ));
+        // OpenCode derives from npm; openai-compatible matched before openai.
+        assert!(matches!(
+            protocol_for_binding(&binding(
+                CliApp::Opencode,
+                Some("@ai-sdk/openai-compatible")
+            )),
+            GatewayProtocol::OpenaiCompatible
+        ));
+        assert!(matches!(
+            protocol_for_binding(&binding(CliApp::Opencode, Some("@ai-sdk/openai"))),
+            GatewayProtocol::Openai
+        ));
+        assert!(matches!(
+            protocol_for_binding(&binding(CliApp::Opencode, None)),
+            GatewayProtocol::OpenaiCompatible
+        ));
+    }
+
+    #[test]
+    fn provider_from_binding_synthesizes_provider() {
+        let g = Gateway {
+            name: "Router".into(),
+            base_url: "https://gw.x".into(),
+            api_key: "sk-1".into(),
+            bindings: vec![],
+            favicon: Some("data:img".into()),
+        };
+        // Claude binding → Anthropic base (bare root), no npm/models.
+        let claude = provider_from_binding(&g, &binding(CliApp::Claude, None));
+        assert_eq!(claude.id, "b1");
+        assert_eq!(claude.app, CliApp::Claude);
+        assert_eq!(claude.name, "Router");
+        assert_eq!(claude.base_url, "https://gw.x");
+        assert_eq!(claude.api_key, "sk-1");
+        assert_eq!(claude.favicon.as_deref(), Some("data:img"));
+        assert!(claude.npm.is_none());
+
+        // OpenCode binding → /v1 base + npm filled (defaulted from protocol).
+        let oc = provider_from_binding(&g, &binding(CliApp::Opencode, None));
+        assert_eq!(oc.base_url, "https://gw.x/v1");
+        assert_eq!(oc.npm.as_deref(), Some("@ai-sdk/openai-compatible"));
+    }
 
     #[test]
     fn parse_model_ids_openai_shape() {
