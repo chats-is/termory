@@ -16,6 +16,7 @@ import {
   TooltipTrigger
 } from "@/components/ui/tooltip";
 import type { DailyTokens } from "@/lib/stats-utils";
+import { useT } from "@/i18n";
 import {
   BreakdownRow,
   TOKEN_COLORS,
@@ -48,6 +49,7 @@ function CustomTooltip({
   payload?: ReadonlyArray<{ payload?: DailyTokens }>;
   label?: string;
 }) {
+  const t = useT();
   if (!active || !payload || payload.length === 0) return null;
   const row = payload[0]?.payload;
   if (!row) return null;
@@ -62,19 +64,19 @@ function CustomTooltip({
         {formatDateLong(String(label ?? ""))}
       </div>
       <div className="space-y-0.5 tabular-nums">
-        <BreakdownRow color={TOKEN_COLORS.input} label="Input" value={row.input} />
-        <BreakdownRow color={TOKEN_COLORS.output} label="Output" value={row.output} />
+        <BreakdownRow color={TOKEN_COLORS.input} label={t("stats.tokens.input")} value={row.input} />
+        <BreakdownRow color={TOKEN_COLORS.output} label={t("stats.tokens.output")} value={row.output} />
         <BreakdownRow
           color={TOKEN_COLORS.reasoning}
-          label="Reasoning"
+          label={t("stats.tokens.reasoning")}
           value={row.reasoning}
         />
-        <BreakdownRow color={TOKEN_COLORS.cached} label="Cached" value={row.cached} />
+        <BreakdownRow color={TOKEN_COLORS.cached} label={t("stats.tokens.cached")} value={row.cached} />
       </div>
       <div className="border-t border-border/40 mt-1.5 pt-1">
         <div className="flex items-center gap-2 tabular-nums">
           <span aria-hidden className="inline-block w-3 shrink-0" />
-          <span className="text-muted-foreground w-20">Total</span>
+          <span className="text-muted-foreground w-20">{t("stats.tokens.total")}</span>
           <span className="font-medium">{formatCompact(row.total)}</span>
         </div>
       </div>
@@ -83,6 +85,7 @@ function CustomTooltip({
 }
 
 export function DailyTokensChart({ data }: { data: DailyTokens[] }) {
+  const t = useT();
   const total = React.useMemo(
     () => data.reduce((acc, b) => acc + b.total, 0),
     [data]
@@ -104,13 +107,13 @@ export function DailyTokensChart({ data }: { data: DailyTokens[] }) {
       <CardContent className="px-0 flex flex-col gap-3">
         <div className="flex items-baseline justify-between gap-2 flex-wrap">
           <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wide">
-            Daily tokens
+            {t("stats.dailyTokens")}
           </h3>
           {total > 0 && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <span className="text-[11px] text-muted-foreground tabular-nums cursor-default">
-                  {formatCompact(total)} tokens
+                  {formatCompact(total)} {t("stats.kpi.tokens")}
                 </span>
               </TooltipTrigger>
               <TooltipContent>{formatFullNumber(total)} tokens</TooltipContent>
@@ -194,10 +197,10 @@ export function DailyTokensChart({ data }: { data: DailyTokens[] }) {
           </div>
         )}
         <div className="flex justify-end items-center gap-3 text-[10px] text-muted-foreground">
-          <Legend color={TOKEN_COLORS.input} label="Input" />
-          <Legend color={TOKEN_COLORS.output} label="Output" />
-          <Legend color={TOKEN_COLORS.reasoning} label="Reasoning" />
-          <Legend color={TOKEN_COLORS.cached} label="Cached" />
+          <Legend color={TOKEN_COLORS.input} label={t("stats.tokens.input")} />
+          <Legend color={TOKEN_COLORS.output} label={t("stats.tokens.output")} />
+          <Legend color={TOKEN_COLORS.reasoning} label={t("stats.tokens.reasoning")} />
+          <Legend color={TOKEN_COLORS.cached} label={t("stats.tokens.cached")} />
         </div>
       </CardContent>
     </Card>

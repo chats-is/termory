@@ -7,6 +7,7 @@ import {
 import { formatCompact, formatFullNumber } from "@/lib/format";
 import type { ModelUsage } from "@/lib/stats-utils";
 import type { TokenStats } from "@/types";
+import { useT } from "@/i18n";
 import { TOKEN_COLORS, BreakdownRow, ModelUsageList } from "./shared";
 
 /**
@@ -31,15 +32,16 @@ export function OverviewHero({
   models: ModelUsage[];
   projects: number;
 }) {
+  const t = useT();
   return (
     <Card className="p-3 gap-0 outline outline-1 outline-transparent bg-card shadow-sm">
       <CardContent className="px-0">
         <div className="grid grid-cols-2 md:grid-cols-5 gap-x-6 gap-y-3">
-          <Kpi label="Sessions" value={sessions} />
-          <Kpi label="Messages" value={messages} />
+          <Kpi label={t("stats.kpi.sessions")} value={sessions} />
+          <Kpi label={t("stats.kpi.messages")} value={messages} />
           <TokensKpi tokens={tokens} />
           <ModelsKpi models={models} />
-          <Kpi label="Projects" value={projects} />
+          <Kpi label={t("stats.kpi.projects")} value={projects} />
         </div>
       </CardContent>
     </Card>
@@ -69,6 +71,7 @@ function Kpi({
 }
 
 function TokensKpi({ tokens }: { tokens: TokenStats }) {
+  const t = useT();
   const hasBreakdown =
     tokens.input + tokens.output + tokens.cached + tokens.reasoning > 0;
   const valueNode = (
@@ -79,7 +82,7 @@ function TokensKpi({ tokens }: { tokens: TokenStats }) {
   return (
     <div className="flex flex-col gap-1">
       <span className="text-xs uppercase tracking-wide text-muted-foreground">
-        Tokens
+        {t("stats.kpi.tokens")}
       </span>
       {hasBreakdown ? (
         <HoverCard openDelay={80} closeDelay={80}>
@@ -90,19 +93,19 @@ function TokensKpi({ tokens }: { tokens: TokenStats }) {
             align="start"
           >
             <div className="space-y-0.5 tabular-nums">
-              <BreakdownRow color={TOKEN_COLORS.input} label="Input" value={tokens.input} />
-              <BreakdownRow color={TOKEN_COLORS.output} label="Output" value={tokens.output} />
+              <BreakdownRow color={TOKEN_COLORS.input} label={t("stats.tokens.input")} value={tokens.input} />
+              <BreakdownRow color={TOKEN_COLORS.output} label={t("stats.tokens.output")} value={tokens.output} />
               <BreakdownRow
                 color={TOKEN_COLORS.reasoning}
-                label="Reasoning"
+                label={t("stats.tokens.reasoning")}
                 value={tokens.reasoning}
               />
-              <BreakdownRow color={TOKEN_COLORS.cached} label="Cached" value={tokens.cached} />
+              <BreakdownRow color={TOKEN_COLORS.cached} label={t("stats.tokens.cached")} value={tokens.cached} />
             </div>
             <div className="border-t border-border/40 mt-1.5 pt-1">
               <div className="flex items-center gap-2 tabular-nums">
                 <span aria-hidden className="inline-block w-3 shrink-0" />
-                <span className="text-muted-foreground w-20">Total</span>
+                <span className="text-muted-foreground w-20">{t("stats.tokens.total")}</span>
                 <span className="font-medium">{formatCompact(tokens.total)}</span>
               </div>
             </div>
@@ -120,6 +123,7 @@ function TokensKpi({ tokens }: { tokens: TokenStats }) {
  * total. The "Unknown" bucket (sessions with no recorded model) is
  * excluded from both the count and the hover. */
 function ModelsKpi({ models }: { models: ModelUsage[] }) {
+  const t = useT();
   // Drop the "Unknown" bucket — sessions whose source recorded no model
   // (no assistant reply / older sessions). It's noise in a model-usage
   // breakdown, and the main count already ignores it.
@@ -132,7 +136,7 @@ function ModelsKpi({ models }: { models: ModelUsage[] }) {
   return (
     <div className="flex flex-col gap-1">
       <span className="text-xs uppercase tracking-wide text-muted-foreground">
-        Models
+        {t("stats.kpi.models")}
       </span>
       {named.length > 0 ? (
         <HoverCard openDelay={80} closeDelay={80}>

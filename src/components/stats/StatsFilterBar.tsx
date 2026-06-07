@@ -11,15 +11,16 @@ import { Calendar } from "@/components/ui/calendar";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CLI_APP_SOURCE_BADGE } from "@/constants";
 import { cn } from "@/lib/utils";
+import { useT, type MessageKey } from "@/i18n";
 import type { DateRange, DateRangePreset, SourceFilter } from "@/lib/stats-utils";
 import type { CliApp } from "@/types";
 
-type PresetOption = { id: Exclude<DateRangePreset, "custom">; label: string };
+type PresetOption = { id: Exclude<DateRangePreset, "custom">; labelKey: MessageKey };
 const PRESETS: PresetOption[] = [
-  { id: "today", label: "Today" },
-  { id: "7d", label: "Last 7 days" },
-  { id: "30d", label: "Last 30 days" },
-  { id: "90d", label: "Last 90 days" }
+  { id: "today", labelKey: "stats.range.today" },
+  { id: "7d", labelKey: "stats.range.7d" },
+  { id: "30d", labelKey: "stats.range.30d" },
+  { id: "90d", labelKey: "stats.range.90d" }
 ];
 
 /** `Date` → `YYYY-MM-DD` in local time (used for the trigger label). */
@@ -52,6 +53,7 @@ export function StatsFilterBar({
   refreshing: boolean;
   onRefresh: () => void;
 }) {
+  const t = useT();
   const [presetOpen, setPresetOpen] = React.useState(false);
   const wrapperRef = React.useRef<HTMLDivElement>(null);
 
@@ -104,10 +106,13 @@ export function StatsFilterBar({
     };
   }, [presetOpen]);
 
+  const currentPreset = PRESETS.find((p) => p.id === range.preset);
   const currentLabel =
     range.preset === "custom"
       ? `${toInputDate(range.from)} → ${toInputDate(range.to)}`
-      : PRESETS.find((p) => p.id === range.preset)?.label ?? "Range";
+      : currentPreset
+        ? t(currentPreset.labelKey)
+        : t("stats.range.label");
 
   return (
     <div className="flex items-center gap-1 rounded-md bg-muted p-3 flex-wrap">
@@ -118,7 +123,7 @@ export function StatsFilterBar({
         <Tabs
           value={source}
           onValueChange={(v) => onSourceChange(v as SourceFilter)}
-          aria-label="Source filter"
+          aria-label={t("stats.sourceFilter")}
         >
           <TabsList className="w-full justify-start gap-1 bg-transparent p-0 [&>button]:flex-none [&>button]:rounded-md [&>button]:px-3">
             {SOURCES.map((s) => (
@@ -128,7 +133,7 @@ export function StatsFilterBar({
                 ) : (
                   <BrandIcon source={sourceLabel(s)} />
                 )}
-                <span>{sourceLabel(s)}</span>
+                <span>{s === "All" ? t("stats.source.all") : sourceLabel(s)}</span>
               </TabsTrigger>
             ))}
           </TabsList>
@@ -177,7 +182,7 @@ export function StatsFilterBar({
                   range.preset === p.id && "bg-accent/50"
                 )}
               >
-                {p.label}
+                {t(p.labelKey)}
               </button>
             ))}
 
@@ -194,7 +199,7 @@ export function StatsFilterBar({
                     : "text-muted-foreground"
                 )}
               >
-                Custom range
+                {t("stats.range.custom")}
               </div>
               <Calendar
                 mode="range"
@@ -214,7 +219,7 @@ export function StatsFilterBar({
                   "disabled:opacity-50 disabled:pointer-events-none"
                 )}
               >
-                Apply
+                {t("stats.range.apply")}
               </button>
             </div>
           </div>
@@ -225,7 +230,7 @@ export function StatsFilterBar({
         type="button"
         onClick={onRefresh}
         disabled={refreshing}
-        aria-label="Refresh stats"
+        aria-label={t("stats.refresh")}
         className={cn(
           "h-9 w-9 rounded-md border bg-card shadow-sm",
           "inline-flex items-center justify-center transition-colors",

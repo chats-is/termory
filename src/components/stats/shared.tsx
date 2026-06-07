@@ -1,6 +1,7 @@
 // Constants and small atoms shared between Stats sub-components.
 
 import { formatCompact } from "@/lib/format";
+import { useT } from "@/i18n";
 
 /** Series colors — used in both the DailyTokensChart lines/tooltip
  * and the OverviewHero Tokens hover-card breakdown. Single source of
@@ -52,11 +53,12 @@ export function ModelUsageList({
 }: {
   models: { model: string; tokens: number }[];
 }) {
+  const t = useT();
   return (
     <>
       <div className="flex items-center justify-between gap-6 text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
-        <span>Model</span>
-        <span>Tokens</span>
+        <span>{t("stats.col.model")}</span>
+        <span>{t("stats.col.tokens")}</span>
       </div>
       <div className="space-y-0.5 tabular-nums">
         {models.map((m) => (

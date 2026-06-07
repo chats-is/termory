@@ -18,6 +18,7 @@ import type {
   WindowTotals
 } from "@/lib/stats-utils";
 import { formatDateLong, formatDateShort, ModelUsageList } from "./shared";
+import { useT } from "@/i18n";
 
 /**
  * Daily workload heatmap — 24-hour rows × N-date columns, CSS Grid
@@ -109,6 +110,7 @@ export function DailyActivitiesHeatmap({
    * summary line. Per-cell model data lives in `activities.models`. */
   modelUsage: ModelUsage[];
 }) {
+  const t = useT();
   const { dates, messages, tokens, sessions, models } = activities;
   const namedModels = modelUsage.filter((m) => m.model !== "Unknown");
 
@@ -152,22 +154,23 @@ export function DailyActivitiesHeatmap({
       <CardContent className="px-0 flex flex-col gap-3">
         <div className="flex items-baseline justify-between gap-2 flex-wrap">
           <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wide">
-            Daily activities
+            {t("stats.dailyActivities")}
           </h3>
           {hasAnyActivity && (
             <span className="text-[11px] text-muted-foreground tabular-nums">
-              {totals.sessions} sessions · {totals.messages.toLocaleString()} messages ·{" "}
+              {t("stats.summarySessions", { n: totals.sessions })} ·{" "}
+              {t("stats.summaryMessages", { n: totals.messages.toLocaleString() })} ·{" "}
               {totals.tokens.total === 0 ? (
-                <span>— tokens</span>
+                <span>— {t("stats.kpi.tokens")}</span>
               ) : (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <span className="cursor-default">
-                      {formatCompact(totals.tokens.total)} tokens
+                      {formatCompact(totals.tokens.total)} {t("stats.kpi.tokens")}
                     </span>
                   </TooltipTrigger>
                   <TooltipContent>
-                    {formatFullNumber(totals.tokens.total)} tokens
+                    {formatFullNumber(totals.tokens.total)} {t("stats.kpi.tokens")}
                   </TooltipContent>
                 </Tooltip>
               )}
@@ -177,8 +180,12 @@ export function DailyActivitiesHeatmap({
                   <HoverCard openDelay={80} closeDelay={80}>
                     <HoverCardTrigger asChild>
                       <span className="cursor-default underline decoration-dotted underline-offset-2">
-                        {namedModels.length}{" "}
-                        {namedModels.length === 1 ? "model" : "models"}
+                        {t(
+                          namedModels.length === 1
+                            ? "stats.modelCount_one"
+                            : "stats.modelCount_other",
+                          { n: namedModels.length }
+                        )}
                       </span>
                     </HoverCardTrigger>
                     <HoverCardContent
@@ -275,19 +282,19 @@ export function DailyActivitiesHeatmap({
                         <div className="space-y-0.5 tabular-nums">
                           <div className="flex items-center gap-2">
                             <span className="text-muted-foreground w-20">
-                              Sessions
+                              {t("stats.kpi.sessions")}
                             </span>
                             <span>{sessCount}</span>
                           </div>
                           <div className="flex items-center gap-2">
                             <span className="text-muted-foreground w-20">
-                              Messages
+                              {t("stats.kpi.messages")}
                             </span>
                             <span>{msgCount}</span>
                           </div>
                           <div className="flex items-center gap-2">
                             <span className="text-muted-foreground w-20">
-                              Tokens
+                              {t("stats.kpi.tokens")}
                             </span>
                             <span>
                               {tokCount === 0 ? "—" : formatCompact(tokCount)}
@@ -321,7 +328,7 @@ export function DailyActivitiesHeatmap({
           </div>
         )}
         <div className="flex justify-end items-center gap-1 text-[10px] text-muted-foreground">
-          <span>Less</span>
+          <span>{t("stats.less")}</span>
           <span className="size-2.5 bg-foreground/[0.04]" />
           <span className="size-2.5 bg-primary/15" />
           <span className="size-2.5 bg-primary/30" />
@@ -329,7 +336,7 @@ export function DailyActivitiesHeatmap({
           <span className="size-2.5 bg-primary/60" />
           <span className="size-2.5 bg-primary/75" />
           <span className="size-2.5 bg-primary/90" />
-          <span>More</span>
+          <span>{t("stats.more")}</span>
         </div>
       </CardContent>
     </Card>
