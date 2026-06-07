@@ -47,6 +47,7 @@ Current alignment target: data acquisition and message preview formatting should
 
 - Frontend: `src/main.tsx`
 - Styles: `src/styles.css`
+- i18n (en / 简体 / 繁體): `src/i18n/index.tsx` (`<I18nProvider>` + `useT()`) + `src/i18n/locales/{en,zh-Hans,zh-Hant}.ts` — see "Internationalization (i18n)" under UI conventions
 - Frontend local-store wrapper: `src/config.ts` (routes `getConfig`/`setConfig` to the three backing files via IPC — `providers` → providers.json, `favorites` → favorites.json, everything else → config.json)
 - Tauri IPC commands: `src-tauri/src/lib.rs`
 - Session/Memory/Skill scanning, parsing, and formatting: `src-tauri/src/sessions.rs`
@@ -832,6 +833,30 @@ Three sites navigate "into a specific message" — Favorites "Open original", Se
 The callback identity is stable (`useCallback` with empty deps) so the MessageList effect's dep array doesn't oscillate. SearchPage / CommandPalette pass `hit.first_match_index` through to `onOpenItem`; Favorites passes `source_message_index`.
 
 ## UI conventions
+
+### Internationalization (i18n)
+
+The whole frontend UI is translated into **English / 简体中文 / 繁體中文** via a lightweight, type-safe in-house i18n (no `i18next` — the languages are a fixed bundled set, and Chinese has no plural rules, so the heavy machinery isn't warranted).
+
+**Module: `src/i18n/`**
+
+- `locales/en.ts` — the **source dictionary**. A flat `{ "dot.key": "text" }` object `as const`; its keys form the `MessageKey` union type.
+- `locales/zh-Hans.ts` / `locales/zh-Hant.ts` — `Record<MessageKey, string>`, so **omitting any key the English dict defines is a compile error** (this is the completeness check — there's also a runtime test in `i18n.test.ts` asserting the three key sets are identical).
+- `index.tsx` — `<I18nProvider>` + `useI18n()` / `useT()`, `{var}` interpolation, `resolveLocale()` (system locale → one of ours), and `LOCALES` (the picker list, each language shown in its own name).
+
+**Wiring & behavior**
+
+- `<I18nProvider>` wraps the app in `main.tsx` (outside `ThemeProvider`). It seeds the locale from `navigator.language` (`resolveLocale`), then overrides with the saved `language` config key on mount; `setLocale` persists back via `config.ts` and sets `<html lang>`. Switching re-renders all `useT()` consumers immediately.
+- `useI18n()` falls back to a **default English context when no provider is mounted** (e.g. a unit test rendering a component in isolation) — so component tests don't need to wrap in `<I18nProvider>` and assert the English strings. `t()` itself falls back missing-translation → English → the raw key.
+
+**Adding / changing UI text (the rule)**
+
+1. Add the key to **`en.ts`** first (this defines the `MessageKey`), then add the SAME key to **both** `zh-Hans.ts` and `zh-Hant.ts` — the build breaks until all three have it. Keep keys grouped by area (`nav.*`, `search.*`, `stats.*`, `records.*`, `menu.*`, `providers.*`, `toast.*`, `update.*`, `install.*`, `settings.*`, `common.*`).
+2. In the component: `const t = useT();` then `t("area.key")` / `t("area.key", { var })`. For a string passed to a child as a prop (e.g. `EmptyState title`, `Kpi label`, a const array of `{ labelKey }`), store the `MessageKey` and call `t()` at the render site. For module-level constants (preset/theme/shortcut tables) store a `labelKey: MessageKey`, not the literal.
+- **English plurals** use two keys (`*_one` / `*_other`) selected by the caller (`t(n === 1 ? "x_one" : "x_other", { n })`); Chinese just maps both to one form.
+- Brand / product names (CLI labels via `CLI_APP_LABEL`, `BrandIcon source`, `config.json`, `chmod 0600`, `sk-…`) are **not** translated. `BrandIcon source` must stay a source literal, so translate the *display* text separately from the icon's `source` prop (see `StatsFilterBar` / sidebar "All").
+- Toasts and `ask()` confirm dialogs are translated too; the only deliberate English left is `toast.error(String(err))` — a raw pass-through of a backend error with no template.
+- The Rust backend's user-facing strings are mostly technical error pass-throughs surfaced via those `String(err)` toasts, so the backend is not part of the i18n system.
 
 ### Never hand-edit `src/components/ui/*` (LOCKED)
 
