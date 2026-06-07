@@ -130,8 +130,14 @@ pub fn open(id: &str, project: Option<&str>, cmd: &str) -> Result<(), String> {
     match id {
         "iterm" => {
             let esc = applescript_escape(&shell_cmd);
+            // Same cold-launch double-window issue as Terminal.app: launching
+            // iTerm opens a default window AND `create window` opens a second.
+            // Already running → open a fresh window (don't disturb existing).
+            // Cold launch → reuse the window the launch creates; the `delay`
+            // lets it appear so the count check doesn't race, and a new window
+            // is created if the user's startup pref opens none.
             let script = format!(
-                "tell application \"iTerm\"\n  activate\n  create window with default profile command \"{esc}\"\nend tell"
+                "tell application \"iTerm\"\n  if it is running then\n    create window with default profile command \"{esc}\"\n  else\n    activate\n    delay 0.3\n    if (count of windows) is 0 then\n      create window with default profile command \"{esc}\"\n    else\n      tell current session of current window to write text \"{esc}\"\n    end if\n  end if\nend tell"
             );
             spawn_args("osascript", &["-e", &script])
         }
