@@ -130,16 +130,7 @@ pub fn open(id: &str, project: Option<&str>, cmd: &str) -> Result<(), String> {
     match id {
         "iterm" => {
             let esc = applescript_escape(&shell_cmd);
-            // Same cold-launch double-window issue as Terminal.app: launching
-            // iTerm opens a default window AND `create window` opens a second.
-            // Already running → open a fresh window (don't disturb existing).
-            // Cold launch → reuse the window the launch creates; the `delay`
-            // lets it appear so the count check doesn't race, and a new window
-            // is created if the user's startup pref opens none.
-            let script = format!(
-                "tell application \"iTerm\"\n  if it is running then\n    create window with default profile command \"{esc}\"\n  else\n    activate\n    delay 0.3\n    if (count of windows) is 0 then\n      create window with default profile command \"{esc}\"\n    else\n      tell current session of current window to write text \"{esc}\"\n    end if\n  end if\nend tell"
-            );
-            spawn_args("osascript", &["-e", &script])
+            spawn_args("osascript", &["-e", &iterm_script(&esc)])
         }
         "ghostty" => {
             // App-based launch works whether or not the CLI is on PATH.
@@ -155,16 +146,7 @@ pub fn open(id: &str, project: Option<&str>, cmd: &str) -> Result<(), String> {
         // "auto" / "terminal" / unknown → Terminal.app.
         _ => {
             let esc = applescript_escape(&shell_cmd);
-            // When Terminal isn't already running, `activate` opens a default
-            // empty window AND `do script` (with no target) opens a second —
-            // two windows. Launching via `do script … in window 1` reuses the
-            // window the launch creates, so we get exactly one. When Terminal
-            // is already running, a fresh `do script` opens a new window
-            // without disturbing the user's existing ones.
-            let script = format!(
-                "tell application \"Terminal\"\n  if it is running then\n    do script \"{esc}\"\n  else\n    do script \"{esc}\" in window 1\n  end if\n  activate\nend tell"
-            );
-            spawn_args("osascript", &["-e", &script])
+            spawn_args("osascript", &["-e", &terminal_app_script(&esc)])
         }
     }
 }
@@ -172,6 +154,32 @@ pub fn open(id: &str, project: Option<&str>, cmd: &str) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 fn applescript_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// AppleScript that runs `esc` (an already-escaped command) in Terminal.app.
+/// When Terminal isn't already running, `activate` opens a default empty
+/// window AND a bare `do script` opens a SECOND — two windows, one unused.
+/// Running it `in window 1` reuses the window the launch creates, so we get
+/// exactly one. When Terminal is already running, a fresh `do script` opens a
+/// new window without disturbing the user's existing ones.
+#[cfg(target_os = "macos")]
+fn terminal_app_script(esc: &str) -> String {
+    format!(
+        "tell application \"Terminal\"\n  if it is running then\n    do script \"{esc}\"\n  else\n    do script \"{esc}\" in window 1\n  end if\n  activate\nend tell"
+    )
+}
+
+/// AppleScript that runs `esc` in iTerm. Same cold-launch double-window issue
+/// as Terminal.app: launching iTerm opens a default window AND `create window`
+/// opens a second. Already running → a fresh window (don't disturb existing);
+/// cold launch → reuse the window the launch creates (the `delay` lets it
+/// appear so the count check doesn't race; a new window is created if the
+/// user's startup preference opens none).
+#[cfg(target_os = "macos")]
+fn iterm_script(esc: &str) -> String {
+    format!(
+        "tell application \"iTerm\"\n  if it is running then\n    create window with default profile command \"{esc}\"\n  else\n    activate\n    delay 0.3\n    if (count of windows) is 0 then\n      create window with default profile command \"{esc}\"\n    else\n      tell current session of current window to write text \"{esc}\"\n    end if\n  end if\nend tell"
+    )
 }
 
 // ===================================================================
@@ -346,6 +354,32 @@ mod tests {
         assert_eq!(with_cd(None, "run"), "run");
         // A single quote in the path is escaped, not broken out of.
         assert_eq!(with_cd(Some("/a'b"), "run"), "cd '/a'\\''b' && run");
+    }
+
+    // The double-window fix lives in the AppleScript: on a cold launch the
+    // command must reuse the window the launch creates, not open a second.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn terminal_app_script_reuses_launch_window_on_cold_start() {
+        let s = terminal_app_script("echo hi");
+        assert!(s.contains("if it is running then"), "{s}");
+        // Cold launch → run in window 1 (reuse the launch's default window).
+        assert!(s.contains("do script \"echo hi\" in window 1"), "{s}");
+        // Already running → a fresh `do script` (its own new window).
+        assert!(s.contains("    do script \"echo hi\"\n  else"), "{s}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn iterm_script_reuses_launch_window_on_cold_start() {
+        let s = iterm_script("echo hi");
+        assert!(s.contains("if it is running then"), "{s}");
+        // Cold launch → reuse the launch window instead of a second one.
+        assert!(s.contains("(count of windows) is 0"), "{s}");
+        assert!(
+            s.contains("tell current session of current window to write text \"echo hi\""),
+            "{s}"
+        );
     }
 
     #[test]
