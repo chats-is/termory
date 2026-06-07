@@ -48,7 +48,7 @@ export function ProviderOfficialCard({
             <h3 className="text-lg font-medium">{t("providers.official")}</h3>
             {isInUse && (
               <Badge className="uppercase text-[9px] tracking-wide px-1.5 py-0">
-                In use
+                {t("providers.inUse")}
               </Badge>
             )}
           </div>

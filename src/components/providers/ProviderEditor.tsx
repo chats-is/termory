@@ -131,7 +131,7 @@ export function ProviderEditor({
     modelList.length > 0 ? modelList : [{ id: "", name: "" }];
   // Per-CLI help — what these settings let you DO (plain language, not
   // the config-key encoding). Shared with the gateway binding editor.
-  const overrideHelp = overrideHelpFor(draft.app);
+  const overrideHelp = overrideHelpFor(draft.app, t);
   // Snapshot the originally-loaded URL so we can decide whether to
   // refetch the favicon on save. Captured once at mount — re-rendering
   // with a new `provider` prop happens only on `isNew` flips.
@@ -310,7 +310,7 @@ export function ProviderEditor({
                 required
               />
               <p className="text-xs text-muted-foreground">
-                {baseUrlHelp(draft.app, draft.npm)}
+                {baseUrlHelp(draft.app, draft.npm, t)}
               </p>
             </div>
 
@@ -334,7 +334,7 @@ export function ProviderEditor({
                   {revealKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                 </button>
               </div>
-              <p className="text-xs text-muted-foreground">{apiKeyHelp(draft.app)}</p>
+              <p className="text-xs text-muted-foreground">{apiKeyHelp(draft.app, t)}</p>
             </div>
 
             {isOpencode && (
@@ -374,8 +374,8 @@ export function ProviderEditor({
               {!modelError && (fetchingModels || modelOptions.length > 0) && (
                 <p className="text-xs text-muted-foreground">
                   {fetchingModels
-                    ? "Fetching available models…"
-                    : `${modelOptions.length} models available`}
+                    ? t("help.fetchingModels")
+                    : t("help.modelsAvailable", { n: modelOptions.length })}
                 </p>
               )}
             </div>
@@ -384,9 +384,7 @@ export function ProviderEditor({
               <div className="grid gap-2 sm:col-span-2">
                 <Label>{t("providers.additionalModels")}</Label>
                 <p className="text-xs text-muted-foreground">
-                  Extra models surfaced in OpenCode's picker (the primary
-                  "Model" above is always included). ID is the model id; name
-                  is the display label (defaults to the id if left blank).
+                  {t("help.extraModels")}
                 </p>
                 <div className="flex flex-col gap-2">
                   {modelRows.map((m, i) => (
@@ -459,8 +457,7 @@ export function ProviderEditor({
               <CollapsibleContent className="-mx-1.5 overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
                 <div className="grid gap-3 px-1.5 py-1.5">
                   <p className="text-xs text-muted-foreground">
-                    Extra settings merged into {CLI_APP_LABEL[draft.app]}'s config
-                    while this provider is active, and removed when you switch away.{" "}
+                    {t("help.overrideIntro", { app: CLI_APP_LABEL[draft.app] })}{" "}
                     {overrideHelp}
                   </p>
                   <div className="flex flex-col gap-2">
@@ -536,19 +533,16 @@ export function ProviderEditor({
                   </div>
                   {duplicateKeys.length > 0 && (
                     <p className="text-xs text-destructive">
-                      Duplicate key{duplicateKeys.length > 1 ? "s" : ""}:{" "}
-                      {duplicateKeys.map((k) => `"${k}"`).join(", ")} — each key
-                      must be unique.
+                      {t("errors.duplicateKeys", {
+                        keys: duplicateKeys.map((k) => `"${k}"`).join(", ")
+                      })}
                     </p>
                   )}
                   {managedKeys.length > 0 && (
                     <p className="text-xs text-destructive">
-                      {managedKeys.map((k) => `"${k}"`).join(", ")}{" "}
-                      {managedKeys.length > 1 ? "are" : "is"} already managed by
-                      the fields above (Base URL / API key / Model
-                      {isOpencode ? " / AI SDK" : ""}) — set{" "}
-                      {managedKeys.length > 1 ? "them" : "it"} there instead, not
-                      here.
+                      {t("errors.managedKeys", {
+                        keys: managedKeys.map((k) => `"${k}"`).join(", ")
+                      })}
                     </p>
                   )}
                   <Button

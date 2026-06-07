@@ -375,8 +375,7 @@ export function GatewayEditor({
               placeholder={t("providers.gwUrlPlaceholder")}
             />
             <p className="text-xs text-muted-foreground">
-              The gateway host. Termory appends the right path per CLI
-              (`/v1`, `/v1beta`, …) when binding.
+              {t("help.gatewayHost")}
             </p>
           </div>
 
@@ -442,8 +441,7 @@ export function GatewayEditor({
             </div>
             {!detectAttempted && !detecting && (
               <p className="text-xs text-muted-foreground">
-                Enter the base URL and API key — detection needs the key
-                (auto, or via the refresh button).
+                {t("help.detectNeedsKey")}
               </p>
             )}
             <div className="relative flex flex-col gap-2">
@@ -554,10 +552,7 @@ export function GatewayEditor({
                               {t("providers.additionalModels")}
                             </Label>
                             <p className="text-xs text-muted-foreground">
-                              Extra models surfaced in OpenCode&apos;s picker
-                              (the primary &quot;Model&quot; above is always
-                              included). ID is the model id; name is the display
-                              label (defaults to the id if left blank).
+                              {t("help.extraModels")}
                             </p>
                             {modelRows.map((m, i) => (
                               <div key={i} className="flex items-center gap-1.5">
@@ -624,9 +619,8 @@ export function GatewayEditor({
                             Claude seeds the per-size routing keys. */}
                         <Label className="text-xs mt-1">{t("providers.advancedSettings")}</Label>
                         <p className="text-xs text-muted-foreground">
-                          Extra settings merged into {CLI_APP_LABEL[app]}&apos;s
-                          config while this provider is active, and removed when
-                          you switch away. {overrideHelpFor(app)}
+                          {t("help.overrideIntro", { app: CLI_APP_LABEL[app] })}{" "}
+                          {overrideHelpFor(app, t)}
                         </p>
                         {optionRows(app).map((o, i) => {
                           const rows = optionRows(app);

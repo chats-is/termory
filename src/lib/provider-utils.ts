@@ -7,6 +7,11 @@ import type {
   GatewayCapabilities,
   GatewayProtocol
 } from "../types";
+import type { MessageKey } from "@/i18n";
+
+/** Translator passed into the per-CLI help builders so their copy
+ * renders in the active locale (the functions are pure / outside React). */
+type Translate = (key: MessageKey, params?: Record<string, string | number>) => string;
 
 export function newProviderId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -118,45 +123,45 @@ export function baseUrlPlaceholder(app: CliApp, npm?: string): string {
   }
 }
 
-export function baseUrlHelp(app: CliApp, npm?: string): string {
+export function baseUrlHelp(app: CliApp, npm: string | undefined, t: Translate): string {
   switch (app) {
     case "claude":
-      return "Don't include /v1 — Claude appends it.";
+      return t("help.baseUrl.claudeNoV1");
     case "codex":
-      return "Include /v1 at the end of the URL.";
+      return t("help.baseUrl.includeV1");
     case "gemini":
-      return "The base URL of your provider's API.";
+      return t("help.baseUrl.generic");
     case "opencode":
       // The required path depends on the selected AI SDK package.
       switch (protocolForNpm(npm ?? "")) {
         case "openai-compatible":
         case "openai":
-          return "Include /v1 — the OpenAI AI SDK appends the rest.";
+          return t("help.baseUrl.openaiV1");
         case "anthropic":
-          return "Don't include /v1 — the Anthropic AI SDK appends it.";
+          return t("help.baseUrl.anthropicNoV1");
         case "gemini":
-          return "Use the bare host — the Google AI SDK appends /v1beta.";
+          return t("help.baseUrl.googleBare");
       }
   }
 }
 
-export function apiKeyHelp(_app: CliApp): string {
-  return "Stored locally on this machine and only sent to the provider you choose.";
+export function apiKeyHelp(_app: CliApp, t: Translate): string {
+  return t("help.apiKey");
 }
 
 /** Per-CLI help for the "Advanced settings" / overrides section. Shared
  * by ProviderEditor and the gateway binding editor so the wording stays
  * identical. */
-export function overrideHelpFor(app: CliApp): string {
+export function overrideHelpFor(app: CliApp, t: Translate): string {
   switch (app) {
     case "claude":
-      return "Map Claude Code's Sonnet / Opus / Haiku sizes to specific upstream models (the three rows below) — handy when your provider doesn't use Claude's native model names. Add [1m] after a model to use its 1M-token context. Other Claude Code preferences work here too.";
+      return t("help.override.claude");
     case "codex":
-      return "Tune how Codex behaves with this provider — for example its reasoning effort or approval policy.";
+      return t("help.override.codex");
     case "gemini":
-      return "Add environment variables Gemini CLI reads — for example to target a Google Cloud project or use Vertex AI instead of the public API.";
+      return t("help.override.gemini");
     case "opencode":
-      return "Tune this provider's connection in OpenCode — these go into its official `options` (e.g. timeout, setCacheKey, headers.X-Token) for request timeouts, prompt caching, or custom request headers.";
+      return t("help.override.opencode");
   }
 }
 

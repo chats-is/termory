@@ -444,8 +444,8 @@ export function GatewaysPage({
                                     disabled={busy === b.id}
                                     aria-label={
                                       configured
-                                        ? "Remove from opencode.json"
-                                        : "Add to opencode.json"
+                                        ? t("providers.removeFromOpencode")
+                                        : t("providers.addToOpencode")
                                     }
                                     className="inline-flex items-center justify-center size-8 rounded-md hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:pointer-events-none transition-colors"
                                   >
@@ -460,8 +460,8 @@ export function GatewaysPage({
                                 </TooltipTrigger>
                                 <TooltipContent side="bottom">
                                   {configured
-                                    ? "Added to opencode.json — click to remove"
-                                    : "Not in opencode.json — click to add"}
+                                    ? t("providers.addedToOpencode")
+                                    : t("providers.notInOpencode")}
                                 </TooltipContent>
                               </Tooltip>
                               {isDefault ? (
@@ -473,9 +473,7 @@ export function GatewaysPage({
                                   onClick={() =>
                                     void clearBindingDefault(gateway, b)
                                   }
-                                >
-                                  In use — turn off
-                                </Button>
+                                >{t("providers.inUseTurnOff")}</Button>
                               ) : (
                                 <Button
                                   type="button"
@@ -483,9 +481,7 @@ export function GatewaysPage({
                                   variant="outline"
                                   disabled={busy === b.id}
                                   onClick={() => void activateBinding(gateway, b)}
-                                >
-                                  Set as default
-                                </Button>
+                                >{t("providers.setDefault")}</Button>
                               )}
                             </div>
                           ) : (
@@ -500,7 +496,7 @@ export function GatewaysPage({
                                   : void activateBinding(gateway, b)
                               }
                             >
-                              {isDefault ? "In use — turn off" : "Activate"}
+                              {isDefault ? t("providers.inUseTurnOff") : t("providers.activate")}
                             </Button>
                           )}
                         </div>
