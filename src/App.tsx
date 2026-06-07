@@ -71,6 +71,7 @@ import { MemoryCard } from "@/components/MemoryCard";
 import { MessageBody } from "@/components/MessageBody";
 import { MessageList } from "@/components/MessageList";
 import { SnippetLine } from "@/components/SnippetLine";
+import { useT } from "@/i18n";
 
 // Route + modal code-splitting (M6). Each lazy chunk only ships when
 // its surface mounts: Providers / Search / Settings are gated on the
@@ -122,6 +123,7 @@ export function App() {
     return () => clearInterval(id);
   }, []);
 
+  const t = useT();
   const [sessions, setSessions] = React.useState<AppSession[]>([]);
   const [selected, setSelected] = React.useState<AppSession | null>(null);
   const [detail, setDetail] = React.useState<SessionDetail | null>(null);
@@ -686,7 +688,7 @@ export function App() {
                           )}
                         </span>
                         <span className="flex-1 min-w-0 truncate font-medium text-base">
-                          {sourceDisplayName(group.source)}
+                          {group.source === "All" ? t("common.all") : sourceDisplayName(group.source)}
                         </span>
                         <span
                           className={cn(
@@ -760,9 +762,9 @@ export function App() {
                     onValueChange={(v) => setPane(v as "sessions" | "memory" | "skills")}
                   >
                     <TabsList className="w-full gap-1 bg-transparent p-0 [&>button]:flex-1 [&>button]:rounded-full [&>button]:px-3 [&>button]:bg-muted [&>button]:whitespace-nowrap">
-                      <TabsTrigger value="sessions">Sessions</TabsTrigger>
-                      <TabsTrigger value="memory">Memories</TabsTrigger>
-                      <TabsTrigger value="skills">Skills</TabsTrigger>
+                      <TabsTrigger value="sessions">{t("records.pane.sessions")}</TabsTrigger>
+                      <TabsTrigger value="memory">{t("records.pane.memories")}</TabsTrigger>
+                      <TabsTrigger value="skills">{t("records.pane.skills")}</TabsTrigger>
                     </TabsList>
                   </Tabs>
                 </div>
@@ -775,18 +777,18 @@ export function App() {
                     {!loading && filtered.length === 0 && sessionItems.length === 0 && (
                       <EmptyState
                         icon={<FileJson size={32} />}
-                        title="No sessions yet"
-                        description="Termory scans Codex, Claude Code, Gemini, and OpenCode for chat history. None of those tools have recorded sessions here yet."
+                        title={t("records.noSessions")}
+                        description={t("records.noSessionsDesc")}
                       />
                     )}
                     {!loading && filtered.length === 0 && sessionItems.length > 0 && (
                       <EmptyState
                         icon={<FileJson size={32} />}
-                        title="No sessions match"
+                        title={t("records.noSessionsMatch")}
                         description={
                           hasActiveFilters
-                            ? "Try a different source, project, or query."
-                            : "Nothing matches your current view."
+                            ? t("records.tryFilters")
+                            : t("records.nothingMatches")
                         }
                         action={undefined}
                       />
@@ -866,18 +868,18 @@ export function App() {
                     {!loading && filteredMemories.length === 0 && memoryItems.length === 0 && (
                       <EmptyState
                         icon={<BookOpen size={32} />}
-                        title="No memory files yet"
-                        description="Termory looks for AGENTS.md, CLAUDE.md, GEMINI.md, and per-project memory folders in the current working directory and your home folder."
+                        title={t("records.noMemory")}
+                        description={t("records.noMemoryDesc")}
                       />
                     )}
                     {!loading && filteredMemories.length === 0 && memoryItems.length > 0 && (
                       <EmptyState
                         icon={<BookOpen size={32} />}
-                        title="No memory matches"
+                        title={t("records.noMemoryMatch")}
                         description={
                           hasActiveFilters
-                            ? "Try a different source or query."
-                            : "Nothing matches your current view."
+                            ? t("records.tryFilters")
+                            : t("records.nothingMatches")
                         }
                         action={undefined}
                       />
@@ -906,18 +908,18 @@ export function App() {
                     {!loading && filteredSkills.length === 0 && skillItems.length === 0 && (
                       <EmptyState
                         icon={<Sparkles size={32} />}
-                        title="No skills yet"
-                        description="Termory scans ~/.claude/skills, ~/.codex/skills, ~/.gemini/skills, and ~/.agents/skills, plus project-local .agents/skills folders."
+                        title={t("records.noSkills")}
+                        description={t("records.noSkillsDesc")}
                       />
                     )}
                     {!loading && filteredSkills.length === 0 && skillItems.length > 0 && (
                       <EmptyState
                         icon={<Sparkles size={32} />}
-                        title="No skill matches"
+                        title={t("records.noSkillsMatch")}
                         description={
                           hasActiveFilters
-                            ? "Try a different source or query."
-                            : "Nothing matches your current view."
+                            ? t("records.tryFilters")
+                            : t("records.nothingMatches")
                         }
                         action={undefined}
                       />
@@ -991,13 +993,13 @@ export function App() {
                               <button
                                 type="button"
                                 onClick={() => revealItemInDir(selected.path)}
-                                aria-label="Open in Finder"
+                                aria-label={t("records.openInFinder")}
                                 className="inline-flex shrink-0 text-muted-foreground hover:text-foreground transition-colors"
                               >
                                 <FolderOpen size={12} />
                               </button>
                             </TooltipTrigger>
-                            <TooltipContent>Open in Finder</TooltipContent>
+                            <TooltipContent>{t("records.openInFinder")}</TooltipContent>
                           </Tooltip>
                           <CopyMenu
                             items={[
@@ -1005,15 +1007,15 @@ export function App() {
                               resumeCommandFor(selected.source, selected.id)
                                 ? [
                                     {
-                                      label: "Copy resume command",
+                                      label: t("menu.copyResumeCommand"),
                                       value: resumeCommandFor(selected.source, selected.id)!
                                     }
                                   ]
                                 : []),
-                              { label: "Copy path", value: selected.path },
-                              { label: "Copy filename", value: basename(selected.path) },
+                              { label: t("menu.copyPath"), value: selected.path },
+                              { label: t("menu.copyFilename"), value: basename(selected.path) },
                               ...(isSessionItem(selected)
-                                ? [{ label: "Copy session ID", value: selected.id }]
+                                ? [{ label: t("menu.copySessionId"), value: selected.id }]
                                 : [])
                             ]}
                           />

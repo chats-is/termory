@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/context-menu";
 import { copyToClipboard } from "@/lib/clipboard";
 import { basename, resumeCommandFor } from "@/lib/session-utils";
+import { useT } from "@/i18n";
 
 /**
  * Right-click context menu for a list row (`children` becomes the
@@ -36,16 +37,17 @@ export function ListItemMenu({
   project?: string;
   children: React.ReactNode;
 }) {
+  const t = useT();
   const resumeCmd = source && id ? resumeCommandFor(source, id) : null;
 
-  const copy = (value: string, what: string) => {
+  const copy = (value: string) => {
     void copyToClipboard(value);
-    toast.success(`${what} copied`);
+    toast.success(t("menu.copied"));
   };
 
   const resumeInTerminal = () => {
     void invoke("resume_session_in_terminal", { source, id, project }).catch(
-      (err) => toast.error(`Couldn't open terminal: ${String(err)}`)
+      (err) => toast.error(t("menu.terminalError", { error: String(err) }))
     );
   };
 
@@ -54,33 +56,33 @@ export function ListItemMenu({
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
       <ContextMenuContent className="w-52">
         <ContextMenuItem onSelect={() => void revealItemInDir(path)}>
-          Reveal in Finder
+          {t("menu.revealInFinder")}
         </ContextMenuItem>
         <ContextMenuSeparator />
         {resumeCmd && (
           <>
             <ContextMenuItem onSelect={resumeInTerminal}>
-              Resume in terminal
+              {t("menu.resumeInTerminal")}
             </ContextMenuItem>
-            <ContextMenuItem onSelect={() => copy(resumeCmd, "Resume command")}>
-              Copy resume command
+            <ContextMenuItem onSelect={() => copy(resumeCmd)}>
+              {t("menu.copyResumeCommand")}
             </ContextMenuItem>
           </>
         )}
-        <ContextMenuItem onSelect={() => copy(path, "Path")}>
-          Copy path
+        <ContextMenuItem onSelect={() => copy(path)}>
+          {t("menu.copyPath")}
         </ContextMenuItem>
-        <ContextMenuItem onSelect={() => copy(basename(path), "Filename")}>
-          Copy filename
+        <ContextMenuItem onSelect={() => copy(basename(path))}>
+          {t("menu.copyFilename")}
         </ContextMenuItem>
         {id && (
-          <ContextMenuItem onSelect={() => copy(id, "Session ID")}>
-            Copy session ID
+          <ContextMenuItem onSelect={() => copy(id)}>
+            {t("menu.copySessionId")}
           </ContextMenuItem>
         )}
         {messageId && (
-          <ContextMenuItem onSelect={() => copy(messageId, "Message ID")}>
-            Copy message ID
+          <ContextMenuItem onSelect={() => copy(messageId)}>
+            {t("menu.copyMessageId")}
           </ContextMenuItem>
         )}
       </ContextMenuContent>

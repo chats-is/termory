@@ -63,6 +63,37 @@ export const zhHans: Record<MessageKey, string> = {
   "stats.sourceFilter": "来源筛选",
   "stats.refresh": "刷新统计",
 
+  "records.pane.sessions": "会话",
+  "records.pane.memories": "记忆",
+  "records.pane.skills": "技能",
+  "records.noSessions": "还没有会话",
+  "records.noSessionsDesc":
+    "Termory 会扫描 Codex、Claude Code、Gemini 和 OpenCode 的聊天历史。这些工具目前还没有在此记录任何会话。",
+  "records.noSessionsMatch": "没有匹配的会话",
+  "records.noMemory": "还没有记忆文件",
+  "records.noMemoryDesc":
+    "Termory 会在当前工作目录和主目录中查找 AGENTS.md、CLAUDE.md、GEMINI.md 以及各项目的记忆文件夹。",
+  "records.noMemoryMatch": "没有匹配的记忆",
+  "records.noSkills": "还没有技能",
+  "records.noSkillsDesc":
+    "Termory 会扫描 ~/.claude/skills、~/.codex/skills、~/.gemini/skills 和 ~/.agents/skills,以及项目内的 .agents/skills 文件夹。",
+  "records.noSkillsMatch": "没有匹配的技能",
+  "records.tryFilters": "换个来源、项目或关键词试试。",
+  "records.nothingMatches": "没有符合当前视图的内容。",
+  "records.openInFinder": "在 Finder 中打开",
+  "common.all": "全部",
+  "favorites.add": "加入收藏",
+
+  "menu.revealInFinder": "在 Finder 中显示",
+  "menu.resumeInTerminal": "在终端中恢复",
+  "menu.copyResumeCommand": "复制恢复命令",
+  "menu.copyPath": "复制路径",
+  "menu.copyFilename": "复制文件名",
+  "menu.copySessionId": "复制会话 ID",
+  "menu.copyMessageId": "复制消息 ID",
+  "menu.copied": "已复制到剪贴板",
+  "menu.terminalError": "无法打开终端:{error}",
+
   "settings.appearance": "外观",
   "settings.theme.system": "跟随系统",
   "settings.theme.light": "浅色",

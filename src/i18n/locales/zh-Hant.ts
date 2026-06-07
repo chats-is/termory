@@ -63,6 +63,37 @@ export const zhHant: Record<MessageKey, string> = {
   "stats.sourceFilter": "來源篩選",
   "stats.refresh": "重新整理統計",
 
+  "records.pane.sessions": "會話",
+  "records.pane.memories": "記憶",
+  "records.pane.skills": "技能",
+  "records.noSessions": "還沒有會話",
+  "records.noSessionsDesc":
+    "Termory 會掃描 Codex、Claude Code、Gemini 和 OpenCode 的聊天歷史。這些工具目前還沒有在此記錄任何會話。",
+  "records.noSessionsMatch": "沒有符合的會話",
+  "records.noMemory": "還沒有記憶檔案",
+  "records.noMemoryDesc":
+    "Termory 會在目前工作目錄和家目錄中尋找 AGENTS.md、CLAUDE.md、GEMINI.md 以及各專案的記憶資料夾。",
+  "records.noMemoryMatch": "沒有符合的記憶",
+  "records.noSkills": "還沒有技能",
+  "records.noSkillsDesc":
+    "Termory 會掃描 ~/.claude/skills、~/.codex/skills、~/.gemini/skills 和 ~/.agents/skills,以及專案內的 .agents/skills 資料夾。",
+  "records.noSkillsMatch": "沒有符合的技能",
+  "records.tryFilters": "換個來源、專案或關鍵字試試。",
+  "records.nothingMatches": "沒有符合目前檢視的內容。",
+  "records.openInFinder": "在 Finder 中開啟",
+  "common.all": "全部",
+  "favorites.add": "加入收藏",
+
+  "menu.revealInFinder": "在 Finder 中顯示",
+  "menu.resumeInTerminal": "在終端機中恢復",
+  "menu.copyResumeCommand": "複製恢復指令",
+  "menu.copyPath": "複製路徑",
+  "menu.copyFilename": "複製檔名",
+  "menu.copySessionId": "複製會話 ID",
+  "menu.copyMessageId": "複製訊息 ID",
+  "menu.copied": "已複製到剪貼簿",
+  "menu.terminalError": "無法開啟終端機:{error}",
+
   "settings.appearance": "外觀",
   "settings.theme.system": "跟隨系統",
   "settings.theme.light": "淺色",

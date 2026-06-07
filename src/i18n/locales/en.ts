@@ -70,6 +70,39 @@ export const en = {
   "stats.sourceFilter": "Source filter",
   "stats.refresh": "Refresh stats",
 
+  // Records
+  "records.pane.sessions": "Sessions",
+  "records.pane.memories": "Memories",
+  "records.pane.skills": "Skills",
+  "records.noSessions": "No sessions yet",
+  "records.noSessionsDesc":
+    "Termory scans Codex, Claude Code, Gemini, and OpenCode for chat history. None of those tools have recorded sessions here yet.",
+  "records.noSessionsMatch": "No sessions match",
+  "records.noMemory": "No memory files yet",
+  "records.noMemoryDesc":
+    "Termory looks for AGENTS.md, CLAUDE.md, GEMINI.md, and per-project memory folders in the current working directory and your home folder.",
+  "records.noMemoryMatch": "No memory matches",
+  "records.noSkills": "No skills yet",
+  "records.noSkillsDesc":
+    "Termory scans ~/.claude/skills, ~/.codex/skills, ~/.gemini/skills, and ~/.agents/skills, plus project-local .agents/skills folders.",
+  "records.noSkillsMatch": "No skill matches",
+  "records.tryFilters": "Try a different source, project, or query.",
+  "records.nothingMatches": "Nothing matches your current view.",
+  "records.openInFinder": "Open in Finder",
+  "common.all": "All",
+  "favorites.add": "Add to favorites",
+
+  // Context menu
+  "menu.revealInFinder": "Reveal in Finder",
+  "menu.resumeInTerminal": "Resume in terminal",
+  "menu.copyResumeCommand": "Copy resume command",
+  "menu.copyPath": "Copy path",
+  "menu.copyFilename": "Copy filename",
+  "menu.copySessionId": "Copy session ID",
+  "menu.copyMessageId": "Copy message ID",
+  "menu.copied": "Copied to clipboard",
+  "menu.terminalError": "Couldn't open terminal: {error}",
+
   // Appearance
   "settings.appearance": "Appearance",
   "settings.theme.system": "System",

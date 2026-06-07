@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { favoriteKey } from "@/lib/favorites";
+import { useT } from "@/i18n";
 import type { AppSession, SessionMessage } from "@/types";
 import { roleClass } from "@/lib/session-utils";
 
@@ -44,6 +45,7 @@ export function MessageList({
    * doesn't re-fire when the user toggles selection away and back. */
   onScrolled?: () => void;
 }) {
+  const t = useT();
   const parentRef = React.useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
     count: messages.length,
@@ -127,9 +129,7 @@ export function MessageList({
                           favorites.onToggle(message, idx);
                         }}
                         aria-label={
-                          isFavorited
-                            ? "Remove from favorites"
-                            : "Add to favorites"
+                          isFavorited ? t("favorites.remove") : t("favorites.add")
                         }
                         className={cn(
                           "p-1 -mr-1 rounded transition-colors",
@@ -148,9 +148,7 @@ export function MessageList({
                       </button>
                     </TooltipTrigger>
                     <TooltipContent>
-                      {isFavorited
-                        ? "Remove from favorites"
-                        : "Add to favorites"}
+                      {isFavorited ? t("favorites.remove") : t("favorites.add")}
                     </TooltipContent>
                   </Tooltip>
                 )}
