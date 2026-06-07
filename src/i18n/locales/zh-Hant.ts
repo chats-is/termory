@@ -1,0 +1,75 @@
+import type { MessageKey } from "../index";
+
+/** 繁體中文 — must define every key in `en` (enforced by the type). */
+export const zhHant: Record<MessageKey, string> = {
+  "nav.providers": "供應商",
+  "nav.records": "記錄",
+  "nav.favorites": "收藏",
+  "nav.search": "搜尋",
+  "nav.stats": "統計",
+  "nav.settings": "設定",
+
+  "search.placeholder": "搜尋會話、記憶、技能…",
+  "search.hint": "在 Termory 掃描的每個會話、記憶、技能裡搜尋。",
+  "search.press": "按",
+  "search.summon": "可隨時喚起搜尋。",
+  "search.indexed": "已索引 {n} 筆記錄。",
+  "search.recent": "最近",
+  "search.clear": "清除",
+  "search.noMatch": "沒有符合「{query}」的結果",
+
+  "favorites.emptyTitle": "還沒有收藏",
+  "favorites.emptyDesc":
+    "在「記錄」裡點任意訊息旁的星標即可收藏到這裡。收藏會快照完整訊息內容,即使原會話之後被刪除也仍可檢視。",
+  "favorites.openOriginal": "開啟原始會話",
+  "favorites.remove": "取消收藏",
+  "favorites.archived": "已封存",
+
+  "common.copy": "複製",
+  "footer.syncFailed": "同步失敗",
+  "footer.syncing": "同步中…",
+  "footer.syncedJustNow": "剛剛同步",
+  "footer.synced": "{ago}同步",
+  "footer.status": "同步狀態",
+
+  "settings.appearance": "外觀",
+  "settings.theme.system": "跟隨系統",
+  "settings.theme.light": "淺色",
+  "settings.theme.dark": "深色",
+
+  "settings.language": "語言",
+  "settings.language.desc": "應用程式介面使用的語言。",
+
+  "settings.terminal": "終端機",
+  "settings.terminal.desc":
+    "從選單列托盤恢復最近會話時開啟哪個終端機。只列出本機已安裝的終端機。",
+  "settings.terminal.saveError": "儲存終端機失敗:{error}",
+
+  "settings.storage": "儲存",
+  "settings.storage.dir": "Termory 資料目錄",
+  "settings.storage.open": "開啟",
+  "settings.storage.note":
+    "介面偏好存於 config.json,供應商庫存於 providers.json。兩個檔案在 Unix 上皆為 chmod 0600。",
+
+  "settings.search": "搜尋歷史",
+  "settings.search.recent": "最近搜尋",
+  "settings.search.count_one": "已存 {n} 筆",
+  "settings.search.count_other": "已存 {n} 筆",
+  "settings.search.clear": "清除",
+
+  "settings.shortcuts": "鍵盤快速鍵",
+  "settings.shortcuts.searchPalette": "開啟搜尋面板",
+  "settings.shortcuts.searchPaletteAlias": "開啟搜尋面板(別名)",
+  "settings.shortcuts.switchRoute": "切換導覽路由",
+  "settings.shortcuts.closePalette": "關閉面板 / 下拉",
+
+  "settings.about": "關於",
+  "settings.about.app": "應用程式",
+  "settings.about.version": "版本",
+  "settings.about.check": "檢查更新",
+  "settings.about.checking": "檢查中…",
+  "settings.about.latest": "已是最新版本。",
+  "settings.about.checkFailed": "檢查更新失敗:{error}",
+  "settings.about.auto": "自動檢查更新",
+  "settings.about.autoDesc": "應用程式啟動幾秒後自動檢查一次。"
+};

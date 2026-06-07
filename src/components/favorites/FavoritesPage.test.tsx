@@ -251,7 +251,7 @@ describe("FavoritesPage — remove", () => {
         onRemove={onRemove}
       />
     );
-    const removeBtn = screen.getByRole("button", { name: /remove favorite/i });
+    const removeBtn = screen.getByRole("button", { name: /remove from favorites/i });
     fireEvent.click(removeBtn);
     expect(onRemove).toHaveBeenCalledWith("to-remove");
   });

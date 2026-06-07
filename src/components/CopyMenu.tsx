@@ -7,8 +7,10 @@ import {
   TooltipTrigger
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { useT } from "@/i18n";
 
 export function CopyMenu({ items }: { items: { label: string; value: string }[] }) {
+  const t = useT();
   const [open, setOpen] = React.useState(false);
   const [copied, setCopied] = React.useState<string | null>(null);
   const wrapperRef = React.useRef<HTMLDivElement>(null);
@@ -49,13 +51,13 @@ export function CopyMenu({ items }: { items: { label: string; value: string }[] 
             onClick={() => setOpen((prev) => !prev)}
             aria-haspopup="menu"
             aria-expanded={open}
-            aria-label="Copy"
+            aria-label={t("common.copy")}
             className="inline-flex shrink-0 text-muted-foreground hover:text-foreground transition-colors"
           >
             <Copy size={12} />
           </button>
         </TooltipTrigger>
-        <TooltipContent>Copy</TooltipContent>
+        <TooltipContent>{t("common.copy")}</TooltipContent>
       </Tooltip>
       {open && (
         <div

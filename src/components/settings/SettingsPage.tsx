@@ -16,21 +16,22 @@ import {
   SelectValue
 } from "@/components/ui/select";
 import { getConfig, setConfig } from "@/config";
+import { useI18n, LOCALES, type MessageKey } from "@/i18n";
 import { cn } from "@/lib/utils";
 
 type ThemeChoice = "system" | "light" | "dark";
 
-const THEME_OPTIONS: { value: ThemeChoice; label: string; icon: React.ReactNode }[] = [
-  { value: "system", label: "System", icon: <Monitor className="size-6" /> },
-  { value: "light", label: "Light", icon: <Sun className="size-6" /> },
-  { value: "dark", label: "Dark", icon: <Moon className="size-6" /> }
+const THEME_OPTIONS: { value: ThemeChoice; labelKey: MessageKey; icon: React.ReactNode }[] = [
+  { value: "system", labelKey: "settings.theme.system", icon: <Monitor className="size-6" /> },
+  { value: "light", labelKey: "settings.theme.light", icon: <Sun className="size-6" /> },
+  { value: "dark", labelKey: "settings.theme.dark", icon: <Moon className="size-6" /> }
 ];
 
-const SHORTCUTS: { keys: string[]; label: string }[] = [
-  { keys: ["⌘", "K"], label: "Open search palette" },
-  { keys: ["⌘", "F"], label: "Open search palette (alias)" },
-  { keys: ["⌘", "1..6"], label: "Switch rail route" },
-  { keys: ["Esc"], label: "Close palette / dropdown" }
+const SHORTCUTS: { keys: string[]; labelKey: MessageKey }[] = [
+  { keys: ["⌘", "K"], labelKey: "settings.shortcuts.searchPalette" },
+  { keys: ["⌘", "F"], labelKey: "settings.shortcuts.searchPaletteAlias" },
+  { keys: ["⌘", "1..6"], labelKey: "settings.shortcuts.switchRoute" },
+  { keys: ["Esc"], labelKey: "settings.shortcuts.closePalette" }
 ];
 
 export function SettingsPage({
@@ -48,6 +49,7 @@ export function SettingsPage({
   appVersion: string;
   onUpdateFound: (update: Update) => void;
 }) {
+  const { t, locale, setLocale } = useI18n();
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = React.useState(false);
   const [termoryDir, setTermoryDir] = React.useState<string | null>(null);
@@ -84,7 +86,7 @@ export function SettingsPage({
   const handleTerminalChange = (value: string) => {
     setTerminal(value);
     void setConfig("terminal", value).catch((err) =>
-      toast.error(`Couldn't save terminal: ${String(err)}`)
+      toast.error(t("settings.terminal.saveError", { error: String(err) }))
     );
   };
 
@@ -95,10 +97,10 @@ export function SettingsPage({
       if (result) {
         onUpdateFound(result);
       } else {
-        toast.success("You're on the latest version.");
+        toast.success(t("settings.about.latest"));
       }
     } catch (err) {
-      toast.error(`Update check failed: ${String(err)}`);
+      toast.error(t("settings.about.checkFailed", { error: String(err) }));
     } finally {
       setChecking(false);
     }
@@ -110,7 +112,7 @@ export function SettingsPage({
     <div className="flex-1 min-h-0 flex flex-col bg-background">
       <div className="flex-1 min-h-0 overflow-auto px-3 pt-3 pb-0">
         <div className="flex flex-col gap-2">
-          <SettingsSection title="Appearance">
+          <SettingsSection title={t("settings.appearance")}>
               <div className="grid grid-cols-3 gap-2">
                 {THEME_OPTIONS.map((opt) => {
                   const active = current === opt.value;
@@ -129,27 +131,26 @@ export function SettingsPage({
                       <span className="inline-flex items-center justify-center size-8">
                         {opt.icon}
                       </span>
-                      <span>{opt.label}</span>
+                      <span>{t(opt.labelKey)}</span>
                     </button>
                   );
                 })}
               </div>
           </SettingsSection>
 
-          <SettingsSection title="Terminal">
+          <SettingsSection title={t("settings.language")}>
             <div className="flex flex-col gap-2">
               <div className="text-xs text-muted-foreground">
-                Which terminal opens when you resume a recent session from the
-                menu-bar tray. Only terminals found on this machine are listed.
+                {t("settings.language.desc")}
               </div>
-              <Select value={terminal} onValueChange={handleTerminalChange}>
+              <Select value={locale} onValueChange={(v) => setLocale(v as typeof locale)}>
                 <SelectTrigger className="w-full sm:w-72">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {terminals.map((t) => (
-                    <SelectItem key={t.id} value={t.id}>
-                      {t.label}
+                  {LOCALES.map((l) => (
+                    <SelectItem key={l.value} value={l.value}>
+                      {l.label}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -157,9 +158,29 @@ export function SettingsPage({
             </div>
           </SettingsSection>
 
-          <SettingsSection title="Storage">
+          <SettingsSection title={t("settings.terminal")}>
             <div className="flex flex-col gap-2">
-              <div className="text-xs text-muted-foreground">Termory data directory</div>
+              <div className="text-xs text-muted-foreground">
+                {t("settings.terminal.desc")}
+              </div>
+              <Select value={terminal} onValueChange={handleTerminalChange}>
+                <SelectTrigger className="w-full sm:w-72">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {terminals.map((tm) => (
+                    <SelectItem key={tm.id} value={tm.id}>
+                      {tm.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection title={t("settings.storage")}>
+            <div className="flex flex-col gap-2">
+              <div className="text-xs text-muted-foreground">{t("settings.storage.dir")}</div>
               <div className="flex items-center gap-2">
                 <Folder size={14} className="shrink-0 text-muted-foreground" />
                 <span className="flex-1 min-w-0 truncate text-sm font-mono">
@@ -173,22 +194,26 @@ export function SettingsPage({
                   onClick={() => termoryDir && void revealItemInDir(termoryDir)}
                 >
                   <FolderOpen className="size-4" />
-                  Open
+                  {t("settings.storage.open")}
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground leading-relaxed">
-                UI preferences live in <span className="font-mono">config.json</span>, provider library in{" "}
-                <span className="font-mono">providers.json</span>. Both files are <span className="font-mono">chmod 0600</span> on Unix.
+                {t("settings.storage.note")}
               </p>
             </div>
           </SettingsSection>
 
-          <SettingsSection title="Search history">
+          <SettingsSection title={t("settings.search")}>
             <div className="flex items-center justify-between gap-3">
               <div className="flex flex-col gap-0.5">
-                <div className="text-sm">Recent searches</div>
+                <div className="text-sm">{t("settings.search.recent")}</div>
                 <div className="text-xs text-muted-foreground">
-                  {recentSearches.length} stored {recentSearches.length === 1 ? "entry" : "entries"}
+                  {t(
+                    recentSearches.length === 1
+                      ? "settings.search.count_one"
+                      : "settings.search.count_other",
+                    { n: recentSearches.length }
+                  )}
                 </div>
               </div>
               <Button
@@ -199,16 +224,16 @@ export function SettingsPage({
                 onClick={onClearRecent}
               >
                 <Trash2 className="size-4" />
-                Clear
+                {t("settings.search.clear")}
               </Button>
             </div>
           </SettingsSection>
 
-          <SettingsSection title="Keyboard shortcuts">
+          <SettingsSection title={t("settings.shortcuts")}>
             <ul className="flex flex-col gap-2">
               {SHORTCUTS.map((sc) => (
-                <li key={sc.label} className="flex items-center justify-between gap-3 text-sm">
-                  <span className="text-muted-foreground">{sc.label}</span>
+                <li key={sc.labelKey} className="flex items-center justify-between gap-3 text-sm">
+                  <span className="text-muted-foreground">{t(sc.labelKey)}</span>
                   <span className="flex items-center gap-1 shrink-0">
                     {sc.keys.map((k) => (
                       <kbd
@@ -224,13 +249,13 @@ export function SettingsPage({
             </ul>
           </SettingsSection>
 
-          <SettingsSection title="About">
+          <SettingsSection title={t("settings.about")}>
             <div className="flex flex-col gap-3">
               <div className="flex items-center justify-between gap-3">
                 <div className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm min-w-0">
-                  <span className="text-muted-foreground">App</span>
+                  <span className="text-muted-foreground">{t("settings.about.app")}</span>
                   <span>Termory</span>
-                  <span className="text-muted-foreground">Version</span>
+                  <span className="text-muted-foreground">{t("settings.about.version")}</span>
                   <span className="font-mono">{appVersion ? `v${appVersion}` : "—"}</span>
                 </div>
                 <Button
@@ -245,14 +270,14 @@ export function SettingsPage({
                   ) : (
                     <RefreshCw className="size-4" />
                   )}
-                  {checking ? "Checking…" : "Check for updates"}
+                  {checking ? t("settings.about.checking") : t("settings.about.check")}
                 </Button>
               </div>
               <div className="flex items-center justify-between gap-3 pt-1">
                 <div className="flex flex-col gap-0.5 min-w-0">
-                  <div className="text-sm">Check for updates automatically</div>
+                  <div className="text-sm">{t("settings.about.auto")}</div>
                   <div className="text-xs text-muted-foreground">
-                    Runs once a few seconds after the app launches.
+                    {t("settings.about.autoDesc")}
                   </div>
                 </div>
                 <button

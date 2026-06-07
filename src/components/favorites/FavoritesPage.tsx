@@ -13,6 +13,7 @@ import { formatDate, formatRelativeDate } from "@/lib/format";
 import { sortFavoritesDesc } from "@/lib/favorites";
 import { roleClass, sourceDisplayName, basename } from "@/lib/session-utils";
 import { cn } from "@/lib/utils";
+import { useT } from "@/i18n";
 import type { AppSession, Favorite } from "@/types";
 
 /**
@@ -38,6 +39,7 @@ export function FavoritesPage({
   onOpenSource: (session: AppSession, messageIndex: number) => void;
   onRemove: (id: string) => void;
 }) {
+  const t = useT();
   const sorted = React.useMemo(() => sortFavoritesDesc(favorites), [favorites]);
 
   // `${source}::${id}` → AppSession (when still present).
@@ -67,8 +69,8 @@ export function FavoritesPage({
       <div className="flex-1 min-h-0 flex items-center justify-center px-6 py-10">
         <EmptyState
           icon={<Star size={32} />}
-          title="No favorites yet"
-          description="Click the star next to any message in Records to save it here. The full message content is snapshotted, so favorites survive even if the original session is later deleted."
+          title={t("favorites.emptyTitle")}
+          description={t("favorites.emptyDesc")}
         />
       </div>
     );
@@ -178,17 +180,17 @@ export function FavoritesPage({
                           selected.source_message_index
                         )
                       }
-                      aria-label="Open original session"
+                      aria-label={t("favorites.openOriginal")}
                       className="inline-flex shrink-0 text-muted-foreground hover:text-foreground transition-colors"
                     >
                       <ExternalLink size={12} />
                     </button>
                   </TooltipTrigger>
-                  <TooltipContent>Open original session</TooltipContent>
+                  <TooltipContent>{t("favorites.openOriginal")}</TooltipContent>
                 </Tooltip>
               ) : (
                 <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                  archived
+                  {t("favorites.archived")}
                 </span>
               )}
               <Tooltip>
@@ -196,13 +198,13 @@ export function FavoritesPage({
                   <button
                     type="button"
                     onClick={() => onRemove(selected.id)}
-                    aria-label="Remove favorite"
+                    aria-label={t("favorites.remove")}
                     className="inline-flex shrink-0 text-muted-foreground hover:text-destructive transition-colors"
                   >
                     <Trash2 size={12} />
                   </button>
                 </TooltipTrigger>
-                <TooltipContent>Remove from favorites</TooltipContent>
+                <TooltipContent>{t("favorites.remove")}</TooltipContent>
               </Tooltip>
             </div>
           </div>

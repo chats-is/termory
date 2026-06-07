@@ -5,6 +5,7 @@ import { useSearchHits } from "@/hooks/useSearchHits";
 import { formatFullNumber } from "@/lib/format";
 import { sessionKey } from "@/lib/session-utils";
 import { INPUT_NO_AUTO } from "@/lib/utils";
+import { useT } from "@/i18n";
 import type { AppSession } from "@/types";
 import { EmptyState } from "@/components/EmptyState";
 import { SearchResultCard } from "./SearchResultCard";
@@ -22,6 +23,7 @@ export function SearchPage({
   onCommitSearch: (query: string) => void;
   onClearRecent: () => void;
 }) {
+  const t = useT();
   const [query, setQuery] = React.useState("");
   const { hits, loading, committedQuery, error } = useSearchHits(query);
   const inputRef = React.useRef<HTMLInputElement>(null);
@@ -54,7 +56,7 @@ export function SearchPage({
           <Input {...INPUT_NO_AUTO}
             ref={inputRef}
             type="search"
-            placeholder="Search across sessions, memories, skills…"
+            placeholder={t("search.placeholder")}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             autoFocus
@@ -75,24 +77,24 @@ export function SearchPage({
         {trimmed.length < 2 && !loading && (
           <div className="flex flex-col items-center justify-center text-center gap-3 py-12 text-muted-foreground">
             <Search className="size-7" />
-            <p className="text-sm">Search inside every session, memory, and skill Termory scans.</p>
+            <p className="text-sm">{t("search.hint")}</p>
             <p className="flex items-center gap-1 text-xs">
-              <span>Press</span>
+              <span>{t("search.press")}</span>
               <kbd className="inline-flex h-5 items-center justify-center rounded bg-muted px-1.5 text-[10px] font-medium font-mono">⌘</kbd>
               <kbd className="inline-flex h-5 items-center justify-center rounded bg-muted px-1.5 text-[10px] font-medium font-mono">K</kbd>
-              <span>to summon search from anywhere.</span>
+              <span>{t("search.summon")}</span>
             </p>
-            <p className="text-xs">{formatFullNumber(sessions.length)} records indexed.</p>
+            <p className="text-xs">{t("search.indexed", { n: formatFullNumber(sessions.length) })}</p>
             {recentSearches.length > 0 && (
               <div className="w-full max-w-md mt-4 flex flex-col gap-2 items-center">
                 <div className="flex items-center gap-3 text-xs">
-                  <span>Recent</span>
+                  <span>{t("search.recent")}</span>
                   <button
                     type="button"
                     onClick={onClearRecent}
                     className="text-muted-foreground hover:text-foreground"
                   >
-                    Clear
+                    {t("search.clear")}
                   </button>
                 </div>
                 <div className="flex flex-wrap justify-center gap-1.5">
@@ -111,7 +113,9 @@ export function SearchPage({
             )}
           </div>
         )}
-        {noResults && <EmptyState icon={<Search />} title={`No matches for "${trimmed}"`} />}
+        {noResults && (
+          <EmptyState icon={<Search />} title={t("search.noMatch", { query: trimmed })} />
+        )}
         {hits.length > 0 && (
           <div className="flex flex-col gap-1.5">
             {hits.slice(0, 200).map((hit) => (

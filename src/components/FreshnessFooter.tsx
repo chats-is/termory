@@ -2,6 +2,7 @@ import React from "react";
 import { AlertTriangle, Check, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatTimeAgo } from "@/lib/format";
+import { useT } from "@/i18n";
 
 export function FreshnessFooter({
   syncing,
@@ -12,6 +13,7 @@ export function FreshnessFooter({
   lastSyncedAt: number | null;
   error: string | null;
 }) {
+  const t = useT();
   // Bump every 30s so "Synced 2m ago" stays accurate without
   // re-rendering the rest of the app. tick is intentionally unused —
   // its only job is to invalidate the rendered label.
@@ -50,20 +52,20 @@ export function FreshnessFooter({
   if (error) {
     state = "error";
     icon = <AlertTriangle size={12} strokeWidth={2.25} />;
-    label = "Sync failed";
+    label = t("footer.syncFailed");
     tooltip = error;
   } else if (syncing) {
     state = "syncing";
     icon = <RefreshCw size={12} strokeWidth={2.25} className="animate-spin" />;
-    label = "Syncing…";
+    label = t("footer.syncing");
   } else if (justSynced) {
     state = "done";
     icon = <Check size={12} strokeWidth={2.25} />;
-    label = "Synced just now";
+    label = t("footer.syncedJustNow");
   } else if (lastSyncedAt != null) {
     state = "idle";
     icon = <Check size={12} strokeWidth={2.25} />;
-    label = `Synced ${formatTimeAgo(lastSyncedAt)}`;
+    label = t("footer.synced", { ago: formatTimeAgo(lastSyncedAt) });
     tooltip = new Date(lastSyncedAt).toLocaleString();
   }
 
@@ -76,7 +78,7 @@ export function FreshnessFooter({
 
   return (
     <footer
-      aria-label={label || "Freshness status"}
+      aria-label={label || t("footer.status")}
       className={cn(
         "absolute bottom-0 right-0 flex items-center gap-1.5 rounded-tl-md bg-sidebar px-3 py-1 text-[11px]",
         stateClass

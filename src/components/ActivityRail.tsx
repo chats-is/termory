@@ -13,6 +13,7 @@ import {
   TooltipTrigger
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { useT, type MessageKey } from "@/i18n";
 import type { Route } from "@/types";
 
 export function ActivityRail({
@@ -22,13 +23,14 @@ export function ActivityRail({
   route: Route;
   onChange: (next: Route) => void;
 }) {
-  const items: { id: Route; icon: React.ReactNode; label: string }[] = [
-    { id: "providers", icon: <Plug size={20} />, label: "Providers" },
-    { id: "records", icon: <History size={20} />, label: "Records" },
-    { id: "favorites", icon: <Star size={20} />, label: "Favorites" },
-    { id: "search", icon: <Search size={20} />, label: "Search" },
-    { id: "stats", icon: <BarChart3 size={20} />, label: "Stats" },
-    { id: "settings", icon: <SettingsIcon size={20} />, label: "Settings" }
+  const t = useT();
+  const items: { id: Route; icon: React.ReactNode; labelKey: MessageKey }[] = [
+    { id: "providers", icon: <Plug size={20} />, labelKey: "nav.providers" },
+    { id: "records", icon: <History size={20} />, labelKey: "nav.records" },
+    { id: "favorites", icon: <Star size={20} />, labelKey: "nav.favorites" },
+    { id: "search", icon: <Search size={20} />, labelKey: "nav.search" },
+    { id: "stats", icon: <BarChart3 size={20} />, labelKey: "nav.stats" },
+    { id: "settings", icon: <SettingsIcon size={20} />, labelKey: "nav.settings" }
   ];
   return (
     <nav
@@ -43,7 +45,7 @@ export function ActivityRail({
               <button
                 type="button"
                 onClick={() => onChange(item.id)}
-                aria-label={item.label}
+                aria-label={t(item.labelKey)}
                 aria-current={isActive ? "page" : undefined}
                 className={cn(
                   "inline-flex items-center justify-center rounded-md size-9 transition-colors",
@@ -55,7 +57,7 @@ export function ActivityRail({
                 {item.icon}
               </button>
             </TooltipTrigger>
-            <TooltipContent side="right">{item.label}</TooltipContent>
+            <TooltipContent side="right">{t(item.labelKey)}</TooltipContent>
           </Tooltip>
         );
       })}
