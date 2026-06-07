@@ -65,7 +65,7 @@ export function FreshnessFooter({
   } else if (lastSyncedAt != null) {
     state = "idle";
     icon = <Check size={12} strokeWidth={2.25} />;
-    label = t("footer.synced", { ago: formatTimeAgo(lastSyncedAt) });
+    label = t("footer.synced", { ago: formatTimeAgo(lastSyncedAt, t) });
     tooltip = new Date(lastSyncedAt).toLocaleString();
   }
 

@@ -26,6 +26,12 @@ export const zhHans: Record<MessageKey, string> = {
   "favorites.archived": "已归档",
 
   "common.copy": "复制",
+  "time.justNow": "刚刚",
+  "time.secondsAgo": "{n} 秒前",
+  "time.minutesAgo": "{n} 分钟前",
+  "time.hoursAgo": "{n} 小时前",
+  "time.daysAgo": "{n} 天前",
+  "time.yesterday": "昨天",
   "footer.syncFailed": "同步失败",
   "footer.syncing": "同步中…",
   "footer.syncedJustNow": "刚刚同步",

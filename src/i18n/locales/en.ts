@@ -32,6 +32,12 @@ export const en = {
 
   // Common
   "common.copy": "Copy",
+  "time.justNow": "just now",
+  "time.secondsAgo": "{n}s ago",
+  "time.minutesAgo": "{n}m ago",
+  "time.hoursAgo": "{n}h ago",
+  "time.daysAgo": "{n}d ago",
+  "time.yesterday": "Yesterday",
   "footer.syncFailed": "Sync failed",
   "footer.syncing": "Syncing…",
   "footer.syncedJustNow": "Synced just now",

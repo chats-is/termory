@@ -2,6 +2,7 @@ import React from "react";
 import { Folder } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatRelativeDate } from "@/lib/format";
+import { useT } from "@/i18n";
 import {
   memoryToolsOf,
   projectDisplayName,
@@ -38,6 +39,7 @@ export const MemoryCard = React.forwardRef<
   },
   ref
 ) {
+  const t = useT();
   const showSnippet = !!hit && query.toLowerCase() === contentQuery.toLowerCase();
   const isActive = selected?.path === item.path && selected?.id === item.id;
   const tools = memoryToolsOf(item);
@@ -59,7 +61,7 @@ export const MemoryCard = React.forwardRef<
           {item.title}
         </h2>
         <span className="text-xs text-muted-foreground shrink-0">
-          {formatRelativeDate(item.updated_at ?? item.started_at)}
+          {formatRelativeDate(item.updated_at ?? item.started_at, t)}
         </span>
       </div>
       <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">

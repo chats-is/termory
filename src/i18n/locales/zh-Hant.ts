@@ -26,6 +26,12 @@ export const zhHant: Record<MessageKey, string> = {
   "favorites.archived": "已封存",
 
   "common.copy": "複製",
+  "time.justNow": "剛剛",
+  "time.secondsAgo": "{n} 秒前",
+  "time.minutesAgo": "{n} 分鐘前",
+  "time.hoursAgo": "{n} 小時前",
+  "time.daysAgo": "{n} 天前",
+  "time.yesterday": "昨天",
   "footer.syncFailed": "同步失敗",
   "footer.syncing": "同步中…",
   "footer.syncedJustNow": "剛剛同步",

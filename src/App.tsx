@@ -822,7 +822,7 @@ export function App() {
                                 {session.title}
                               </h2>
                               <span className="text-xs text-muted-foreground shrink-0">
-                                {formatRelativeDate(session.updated_at ?? session.started_at)}
+                                {formatRelativeDate(session.updated_at ?? session.started_at, t)}
                               </span>
                             </div>
                             <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">

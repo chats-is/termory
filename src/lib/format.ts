@@ -1,7 +1,14 @@
+import type { MessageKey } from "@/i18n";
+
 // `Intl.DateTimeFormat` construction is expensive (loads locale data
 // the first time per option set). Cache one instance per format and
 // reuse — formatDate runs hundreds of times per App re-render across
 // the session list + detail messages.
+
+/** Optional translator. When omitted, the relative-time formatters fall
+ * back to English literals (keeps pure-unit tests simple); when a `t` is
+ * passed they render the localized `time.*` strings. */
+type Translate = (key: MessageKey, params?: Record<string, string | number>) => string;
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
   month: "short",
@@ -34,18 +41,18 @@ export function formatDate(value?: string | null): string {
 // `Yesterday`, `May 23`, `2024`. Drops absolute precision in
 // exchange for scannability — older absolute formats stay in
 // places that still need them (detail header, etc.).
-export function formatRelativeDate(value?: string | null): string {
+export function formatRelativeDate(value?: string | null, t?: Translate): string {
   if (!value) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   const now = Date.now();
   const diffMs = now - date.getTime();
   const sec = Math.round(diffMs / 1000);
-  if (sec < 60) return "just now";
+  if (sec < 60) return t ? t("time.justNow") : "just now";
   const min = Math.round(sec / 60);
-  if (min < 60) return `${min}m ago`;
+  if (min < 60) return t ? t("time.minutesAgo", { n: min }) : `${min}m ago`;
   const hr = Math.round(min / 60);
-  if (hr < 24) return `${hr}h ago`;
+  if (hr < 24) return t ? t("time.hoursAgo", { n: hr }) : `${hr}h ago`;
   // Compare calendar dates for "Yesterday" / "Today" so a 23h-old
   // session at 11pm yesterday doesn't show "23h ago" forever.
   const startOfToday = new Date();
@@ -55,25 +62,25 @@ export function formatRelativeDate(value?: string | null): string {
   const dayDiff = Math.round(
     (startOfToday.getTime() - startOfDate.getTime()) / 86_400_000
   );
-  if (dayDiff === 0) return `${hr}h ago`;
-  if (dayDiff === 1) return "Yesterday";
-  if (dayDiff < 7) return `${dayDiff}d ago`;
+  if (dayDiff === 0) return t ? t("time.hoursAgo", { n: hr }) : `${hr}h ago`;
+  if (dayDiff === 1) return t ? t("time.yesterday") : "Yesterday";
+  if (dayDiff < 7) return t ? t("time.daysAgo", { n: dayDiff }) : `${dayDiff}d ago`;
   if (date.getFullYear() === new Date().getFullYear()) {
     return shortDateFormatter.format(date);
   }
   return yearDateFormatter.format(date);
 }
 
-export function formatTimeAgo(timestamp: number): string {
+export function formatTimeAgo(timestamp: number, t?: Translate): string {
   const sec = Math.floor((Date.now() - timestamp) / 1000);
-  if (sec < 5) return "just now";
-  if (sec < 60) return `${sec}s ago`;
+  if (sec < 5) return t ? t("time.justNow") : "just now";
+  if (sec < 60) return t ? t("time.secondsAgo", { n: sec }) : `${sec}s ago`;
   const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
+  if (min < 60) return t ? t("time.minutesAgo", { n: min }) : `${min}m ago`;
   const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
+  if (hr < 24) return t ? t("time.hoursAgo", { n: hr }) : `${hr}h ago`;
   const day = Math.floor(hr / 24);
-  return `${day}d ago`;
+  return t ? t("time.daysAgo", { n: day }) : `${day}d ago`;
 }
 
 export function formatFullNumber(value: number): string {

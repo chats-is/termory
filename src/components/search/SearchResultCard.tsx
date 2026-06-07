@@ -1,6 +1,7 @@
 import { Folder, MessageSquare } from "lucide-react";
 import type { SearchHit } from "@/types";
 import { formatDate, formatRelativeDate } from "@/lib/format";
+import { useT } from "@/i18n";
 import {
   isSessionItem,
   memoryToolsOf,
@@ -19,6 +20,7 @@ export function SearchResultCard({
   query: string;
   onOpen: () => void;
 }) {
+  const t = useT();
   const session = hit.session;
   const isMemoryOrSkill = !isSessionItem(session);
   const tools = memoryToolsOf(session);
@@ -32,7 +34,7 @@ export function SearchResultCard({
           {session.title || "(untitled)"}
         </h2>
         <span className="text-xs text-muted-foreground shrink-0">
-          {formatRelativeDate(session.updated_at ?? session.started_at)}
+          {formatRelativeDate(session.updated_at ?? session.started_at, t)}
         </span>
       </div>
       <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">

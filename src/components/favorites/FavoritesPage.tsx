@@ -113,7 +113,7 @@ export function FavoritesPage({
                     {fav.source_session_title || "(untitled)"}
                   </span>
                   <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
-                    {formatRelativeDate(fav.favorited_at)}
+                    {formatRelativeDate(fav.favorited_at, t)}
                   </span>
                 </div>
                 <div className="flex items-start gap-2 text-[11px] text-muted-foreground min-w-0">
