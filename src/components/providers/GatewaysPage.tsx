@@ -30,6 +30,7 @@ import {
   providerFromBinding
 } from "@/lib/provider-utils";
 import type { ActiveState, CliApp, Gateway, GatewayBinding } from "@/types";
+import { useT } from "@/i18n";
 
 const GatewayEditor = React.lazy(() =>
   import("./GatewayEditor").then((m) => ({ default: m.GatewayEditor }))
@@ -62,6 +63,7 @@ export function GatewaysPage({
    * standalone provider shares the same endpoint). */
   activeProviderIds: Record<string, string>;
 }) {
+  const t = useT();
   const [editing, setEditing] = React.useState<Gateway | null>(null);
   const [editingIsNew, setEditingIsNew] = React.useState(false);
   const [activeStates, setActiveStates] = React.useState<
@@ -327,9 +329,9 @@ export function GatewaysPage({
           {gateways.length === 0 ? (
             <EmptyState
               icon={<RadioTower size={32} />}
-              title="No AI Gateways yet"
-              description="Add an AI Gateway: one base URL + key. Termory detects which API modes it supports and lets you bind it to the matching CLIs."
-              action={{ label: "Add AI Gateway", onClick: startNew }}
+              title={t("providers.noGateways")}
+              description={t("providers.gwEmptyDesc")}
+              action={{ label: t("providers.addGateway"), onClick: startNew }}
             />
           ) : (
             gateways.map((gateway) => (
@@ -355,10 +357,10 @@ export function GatewaysPage({
                     )}
                     <div className="min-w-0">
                       <div className="text-lg font-medium truncate">
-                        {gateway.name || "(unnamed gateway)"}
+                        {gateway.name || t("providers.unnamedGateway")}
                       </div>
                       <div className="text-xs text-muted-foreground truncate">
-                        {gateway.baseUrl || "no base URL"}
+                        {gateway.baseUrl || t("providers.noBaseUrl")}
                       </div>
                     </div>
                   </div>
@@ -368,7 +370,7 @@ export function GatewaysPage({
                       variant="ghost"
                       size="icon"
                       className="size-7"
-                      aria-label="Edit AI Gateway"
+                      aria-label={t("providers.editGateway")}
                       onClick={() => startEdit(gateway)}
                     >
                       <Pencil className="size-4" />
@@ -378,7 +380,7 @@ export function GatewaysPage({
                       variant="ghost"
                       size="icon"
                       className="size-7 text-muted-foreground hover:text-destructive"
-                      aria-label="Delete AI Gateway"
+                      aria-label={t("providers.deleteGateway")}
                       onClick={() => void deleteGateway(gateway)}
                     >
                       <Trash2 className="size-4" />
@@ -389,7 +391,7 @@ export function GatewaysPage({
                 {/* Bindings. */}
                 {gateway.bindings.length === 0 ? (
                   <p className="text-xs text-muted-foreground">
-                    No CLI bindings yet — edit to bind.
+                    {t("providers.noBindings")}
                   </p>
                 ) : (
                   <div className="flex flex-col gap-1.5 pt-1">

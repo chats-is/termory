@@ -21,6 +21,7 @@ import {
 import type { ActiveState, CliApp, Provider, Gateway, TestResult } from "@/types";
 import { BrandIcon } from "@/components/BrandIcon";
 import { EmptyState } from "@/components/EmptyState";
+import { useT } from "@/i18n";
 import { ProviderCard } from "./ProviderCard";
 import { ProviderOfficialCard } from "./ProviderOfficialCard";
 
@@ -97,6 +98,7 @@ export function ProvidersPage({
   app: CliApp;
   setApp: (next: CliApp) => void;
 }) {
+  const t = useT();
   // Record / clear the "last activated" marker for a CLI (see
   // resolveActiveProviderId — used to disambiguate identical-creds entries).
   const markActive = React.useCallback(
@@ -719,7 +721,7 @@ export function ProvidersPage({
                 ))}
                 <TabsTrigger value={GATEWAYS_TAB}>
                   <RadioTower className="size-4 shrink-0" aria-hidden />
-                  <span>AI Gateways</span>
+                  <span>{t("providers.aiGateways")}</span>
                 </TabsTrigger>
               </TabsList>
             </Tabs>
@@ -733,7 +735,7 @@ export function ProvidersPage({
                 : startNew()
             }
             disabled={view === "providers" && !installed[app]}
-            aria-label={view === "gateways" ? "Add AI Gateway" : "Add provider"}
+            aria-label={view === "gateways" ? t("providers.addGateway") : t("providers.addProvider")}
             className="rounded-md size-8 shrink-0 shadow-sm"
           >
             <Plus className="size-4" />
@@ -858,9 +860,9 @@ export function ProvidersPage({
             {customProviders.length === 0 && gatewayBoundForApp.length === 0 && (
               <EmptyState
                 icon={<Plug size={32} />}
-                title="No custom providers yet"
+                title={t("providers.noCustomProviders")}
                 description={`Add a third-party API platform for ${CLI_APP_LABEL[app]} and switch to it with one click.`}
-                action={{ label: "Add provider", onClick: startNew }}
+                action={{ label: t("providers.addProvider"), onClick: startNew }}
               />
             )}
           </div>

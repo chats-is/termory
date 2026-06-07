@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { useT } from "@/i18n";
 import { maskKey } from "@/lib/provider-utils";
 import { OPENCODE_DEFAULT_NPM } from "@/constants";
 import type { Provider, TestResult } from "@/types";
@@ -91,6 +92,7 @@ export function ProviderCard({
   onDelete?: () => void;
   onTest: () => void;
 }) {
+  const t = useT();
   const isOpencode = provider.app === "opencode";
   return (
     <Card
@@ -114,11 +116,11 @@ export function ProviderCard({
           <div className="flex-1 min-w-0 flex flex-col gap-2">
             <div className="flex items-center gap-2">
               <h3 className="text-lg font-medium">
-                {provider.name || "(unnamed)"}
+                {provider.name || t("providers.unnamed")}
               </h3>
               {isInUse && (
                 <Badge className="uppercase text-[9px] tracking-wide px-1.5 py-0">
-                  In use
+                  {t("providers.inUse")}
                 </Badge>
               )}
               {gatewayBadge && (
@@ -126,7 +128,7 @@ export function ProviderCard({
                   variant="outline"
                   className="text-[9px] tracking-wide px-1.5 py-0"
                 >
-                  AI Gateway
+                  {t("providers.aiGateway")}
                 </Badge>
               )}
             </div>
@@ -137,25 +139,25 @@ export function ProviderCard({
               <dl className="grid grid-cols-[max-content_1fr] gap-x-3.5 gap-y-1 text-xs">
                 {provider.baseUrl && (
                   <>
-                    <dt className="text-muted-foreground">Base URL</dt>
+                    <dt className="text-muted-foreground">{t("providers.baseUrl")}</dt>
                     <dd className="font-mono break-all">{provider.baseUrl}</dd>
                   </>
                 )}
                 {provider.apiKey && (
                   <>
-                    <dt className="text-muted-foreground">API key</dt>
+                    <dt className="text-muted-foreground">{t("providers.apiKey")}</dt>
                     <dd className="font-mono break-all">{maskKey(provider.apiKey)}</dd>
                   </>
                 )}
                 {provider.model && (
                   <>
-                    <dt className="text-muted-foreground">Model</dt>
+                    <dt className="text-muted-foreground">{t("providers.model")}</dt>
                     <dd className="font-mono break-all">{provider.model}</dd>
                   </>
                 )}
                 {provider.app === "opencode" && (
                   <>
-                    <dt className="text-muted-foreground">AI SDK</dt>
+                    <dt className="text-muted-foreground">{t("providers.aiSdk")}</dt>
                     <dd className="font-mono break-all">
                       {provider.npm || OPENCODE_DEFAULT_NPM}
                     </dd>
@@ -173,7 +175,7 @@ export function ProviderCard({
                     type="button"
                     onClick={onToggleEnabled}
                     disabled={toggling || !activatable}
-                    aria-label={isConfigured ? "Disable" : "Enable"}
+                    aria-label={isConfigured ? t("providers.disable") : t("providers.enable")}
                     className="inline-flex items-center justify-center size-8 rounded-md hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:pointer-events-none transition-colors"
                   >
                     {toggling ? (
@@ -187,10 +189,10 @@ export function ProviderCard({
                 </TooltipTrigger>
                 <TooltipContent side="bottom">
                   {!activatable
-                    ? "Install it first."
+                    ? t("providers.installFirst")
                     : isConfigured
-                      ? "Disable"
-                      : "Enable"}
+                      ? t("providers.disable")
+                      : t("providers.enable")}
                 </TooltipContent>
               </Tooltip>
             )}
@@ -200,13 +202,13 @@ export function ProviderCard({
                   type="button"
                   onClick={onTest}
                   disabled={testing}
-                  aria-label="Test"
+                  aria-label={t("providers.test")}
                   className="inline-flex items-center justify-center size-8 rounded-md hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:pointer-events-none transition-colors"
                 >
                   {testing ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" />}
                 </button>
               </TooltipTrigger>
-              <TooltipContent side="bottom">Test</TooltipContent>
+              <TooltipContent side="bottom">{t("providers.test")}</TooltipContent>
             </Tooltip>
             {onEdit && (
               <Tooltip>
@@ -214,13 +216,13 @@ export function ProviderCard({
                   <button
                     type="button"
                     onClick={onEdit}
-                    aria-label="Edit"
+                    aria-label={t("providers.edit")}
                     className="inline-flex items-center justify-center size-8 rounded-md hover:bg-accent hover:text-accent-foreground transition-colors"
                   >
                     <Pencil className="size-4" />
                   </button>
                 </TooltipTrigger>
-                <TooltipContent side="bottom">Edit</TooltipContent>
+                <TooltipContent side="bottom">{t("providers.edit")}</TooltipContent>
               </Tooltip>
             )}
             {onDelete && (
@@ -229,13 +231,13 @@ export function ProviderCard({
                   <button
                     type="button"
                     onClick={onDelete}
-                    aria-label="Delete"
+                    aria-label={t("providers.delete")}
                     className="inline-flex items-center justify-center size-8 rounded-md text-destructive hover:text-destructive hover:bg-destructive/10 transition-colors"
                   >
                     <Trash2 className="size-4" />
                   </button>
                 </TooltipTrigger>
-                <TooltipContent side="bottom">Delete</TooltipContent>
+                <TooltipContent side="bottom">{t("providers.delete")}</TooltipContent>
               </Tooltip>
             )}
             </div>
@@ -249,11 +251,11 @@ export function ProviderCard({
               >
                 {isOpencode
                   ? settingDefault
-                    ? "Setting…"
-                    : "Set as default"
+                    ? t("providers.setting")
+                    : t("providers.setDefault")
                   : settingDefault
-                    ? "Activating…"
-                    : "Activate"}
+                    ? t("providers.activating")
+                    : t("providers.activate")}
               </Button>
             )}
           </div>
@@ -269,7 +271,7 @@ export function ProviderCard({
           >
             {testResult.ok ? <Check className="size-3.5" /> : <AlertTriangle className="size-3.5" />}
             <span>
-              {testResult.status ? `HTTP ${testResult.status}` : "no response"} ·{" "}
+              {testResult.status ? `HTTP ${testResult.status}` : t("providers.noResponse")} ·{" "}
               {testResult.latencyMs}ms · {testResult.message}
             </span>
           </div>

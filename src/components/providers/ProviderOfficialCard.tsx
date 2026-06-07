@@ -4,6 +4,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { BrandIcon } from "@/components/BrandIcon";
 import { CLI_APP_SOURCE_BADGE } from "@/constants";
 import { cn } from "@/lib/utils";
+import { useT } from "@/i18n";
 import type { CliApp } from "@/types";
 
 export function ProviderOfficialCard({
@@ -26,6 +27,7 @@ export function ProviderOfficialCard({
   versionLoading?: boolean;
   onSetDefault: () => void;
 }) {
+  const t = useT();
   return (
     <Card
       className={cn(
@@ -43,7 +45,7 @@ export function ProviderOfficialCard({
         </span>
         <div className="flex-1 min-w-0 flex flex-col">
           <div className="flex items-center gap-2">
-            <h3 className="text-lg font-medium">Official</h3>
+            <h3 className="text-lg font-medium">{t("providers.official")}</h3>
             {isInUse && (
               <Badge className="uppercase text-[9px] tracking-wide px-1.5 py-0">
                 In use
@@ -69,7 +71,7 @@ export function ProviderOfficialCard({
             onClick={onSetDefault}
             disabled={settingDefault}
           >
-            {settingDefault ? "Activating…" : "Activate"}
+            {settingDefault ? t("providers.activating") : t("providers.activate")}
           </Button>
         )}
       </CardContent>
