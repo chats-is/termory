@@ -735,7 +735,7 @@ export function ProvidersPage({
                 : startNew()
             }
             disabled={view === "providers" && !installed[app]}
-            aria-label={view === "gateways" ? t("providers.addGateway") : t("providers.addProvider")}
+            aria-label={t("providers.addProvider")}
             className="rounded-md size-8 shrink-0 shadow-sm"
           >
             <Plus className="size-4" />

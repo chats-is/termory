@@ -115,7 +115,6 @@ export const zhHant: Record<MessageKey, string> = {
   "menu.copied": "已複製到剪貼簿",
   "menu.terminalError": "無法開啟終端機:{error}",
 
-  "providers.tabGateways": "Gateways",
   "providers.official": "官方",
   "providers.activate": "啟用",
   "providers.activating": "啟用中…",
@@ -131,7 +130,6 @@ export const zhHant: Record<MessageKey, string> = {
   "providers.addProvider": "新增供應商",
   "providers.noCustomProviders": "還沒有自訂供應商",
   "providers.aiGateways": "AI Gateways",
-  "providers.addGateway": "新增 AI Gateway",
   "providers.deleteGateway": "刪除 AI Gateway",
   "providers.editGateway": "編輯 AI Gateway",
   "providers.noGateways": "還沒有 AI Gateway",

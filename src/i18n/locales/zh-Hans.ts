@@ -115,7 +115,6 @@ export const zhHans: Record<MessageKey, string> = {
   "menu.copied": "已复制到剪贴板",
   "menu.terminalError": "无法打开终端:{error}",
 
-  "providers.tabGateways": "Gateways",
   "providers.official": "官方",
   "providers.activate": "激活",
   "providers.activating": "激活中…",
@@ -131,7 +130,6 @@ export const zhHans: Record<MessageKey, string> = {
   "providers.addProvider": "添加供应商",
   "providers.noCustomProviders": "还没有自定义供应商",
   "providers.aiGateways": "AI Gateways",
-  "providers.addGateway": "添加 AI Gateway",
   "providers.deleteGateway": "删除 AI Gateway",
   "providers.editGateway": "编辑 AI Gateway",
   "providers.noGateways": "还没有 AI Gateway",

@@ -345,7 +345,7 @@ export function GatewayEditor({
           className="contents"
         >
         <DialogHeader className="flex-row items-baseline gap-2">
-          <DialogTitle>{isNew ? t("providers.addGateway") : t("providers.editGateway")}</DialogTitle>
+          <DialogTitle>{isNew ? t("providers.addProvider") : t("providers.editProvider")}</DialogTitle>
           <DialogDescription>{t("providers.aiGateway")}</DialogDescription>
         </DialogHeader>
 

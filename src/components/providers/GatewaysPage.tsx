@@ -331,7 +331,7 @@ export function GatewaysPage({
               icon={<RadioTower size={32} />}
               title={t("providers.noGateways")}
               description={t("providers.gwEmptyDesc")}
-              action={{ label: t("providers.addGateway"), onClick: startNew }}
+              action={{ label: t("providers.addProvider"), onClick: startNew }}
             />
           ) : (
             gateways.map((gateway) => (

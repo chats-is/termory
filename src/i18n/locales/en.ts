@@ -125,7 +125,6 @@ export const en = {
   "menu.terminalError": "Couldn't open terminal: {error}",
 
   // Providers
-  "providers.tabGateways": "Gateways",
   "providers.official": "Official",
   "providers.activate": "Activate",
   "providers.activating": "Activating…",
@@ -141,7 +140,6 @@ export const en = {
   "providers.addProvider": "Add provider",
   "providers.noCustomProviders": "No custom providers yet",
   "providers.aiGateways": "AI Gateways",
-  "providers.addGateway": "Add AI Gateway",
   "providers.deleteGateway": "Delete AI Gateway",
   "providers.editGateway": "Edit AI Gateway",
   "providers.noGateways": "No AI Gateways yet",
