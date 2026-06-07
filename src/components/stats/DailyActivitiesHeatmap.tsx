@@ -22,7 +22,11 @@ import { useT } from "@/i18n";
 
 /**
  * Daily workload heatmap — 24-hour rows × N-date columns, CSS Grid
- * with `1fr` columns so the date axis auto-stretches.
+ * with `minmax(14px, 1fr)` columns: the grid fills the card width, but
+ * each column never shrinks below 14px (wide ranges scroll horizontally
+ * instead of squashing to a sliver). Each cell is capped at 30px and
+ * centered in its column, so sparse ranges (1 / 7 days) show centered
+ * squares rather than wide bars while the grid still spans full width.
  *
  * Cells with no activity are inert: no hover effect, no hover card.
  * Active cells get a thin outline on hover (ring, not background
@@ -206,125 +210,134 @@ export function DailyActivitiesHeatmap({
             No activity in this range.
           </div>
         ) : (
-          <div
-            className="grid w-full gap-1"
-            style={{
-              gridTemplateColumns: `42px repeat(${dates.length}, 1fr)`
-            }}
-          >
-            {Array.from({ length: 24 }, (_, h) => (
-              <React.Fragment key={`row-${h}`}>
-                <div
-                  className={cn(
-                    "text-[9px] tabular-nums leading-none flex items-center justify-end pr-2",
-                    // Highlight working hours (09:00–18:00) with the
-                    // full foreground tone; others stay muted.
-                    h >= 9 && h <= 18
-                      ? "text-foreground"
-                      : "text-muted-foreground"
-                  )}
-                >
-                  {hourLabel(h)}
-                </div>
-                {dates.map((d, i) => {
-                  const msgCount = messages[h][i];
-                  const sessCount = sessions[h][i];
-                  const tokCount = tokens[h][i];
-                  // Inert cell only when NOTHING happened — no messages
-                  // AND no session was created in this hour. The
-                  // sessions-only case (started at 22:55, first message
-                  // at 23:00) should still be hoverable.
-                  if (msgCount === 0 && sessCount === 0) {
-                    return (
-                      <div
-                        key={`${h}-${i}`}
-                        className={cn("h-[10px]", tierClass(0))}
-                      />
-                    );
-                  }
-                  // Read the pre-computed combined intensity. A
-                  // sessions-only cell (msg=0, tok=0) gets a dedicated
-                  // floor color (`bg-primary/10`) — lighter than
-                  // tier 1 — so it stays distinguishable from inert
-                  // AND from real-but-low activity cells.
-                  const ratio = ratios[h][i];
-                  const colorClass =
-                    ratio === 0 ? "bg-primary/10" : tierClass(ratio);
-                  // Per-model rows for this exact (date, hour) cell —
-                  // drop "Unknown" (sessions with no recorded model),
-                  // matching the OverviewHero Models breakdown.
-                  const cellModels = models[h][i].filter(
-                    (m) => m.model !== "Unknown"
-                  );
-                  return (
-                    <HoverCard
-                      key={`${h}-${i}`}
-                      openDelay={50}
-                      closeDelay={80}
-                    >
-                      <HoverCardTrigger asChild>
+          <div className="overflow-x-auto">
+            <div
+              className="grid min-w-full gap-1"
+              style={{
+                gridTemplateColumns: `42px repeat(${dates.length}, minmax(14px, 1fr))`
+              }}
+            >
+              {Array.from({ length: 24 }, (_, h) => (
+                <React.Fragment key={`row-${h}`}>
+                  <div
+                    className={cn(
+                      // Sticky first column: stays pinned to the left while the
+                      // date cells scroll horizontally. `bg-card` hides cells
+                      // sliding underneath; z above the hover ring (z-10).
+                      "sticky left-0 z-20 bg-card text-[9px] tabular-nums leading-none flex items-center justify-end pr-2",
+                      // Highlight working hours (09:00–18:00) with the
+                      // full foreground tone; others stay muted.
+                      h >= 9 && h <= 18
+                        ? "text-foreground"
+                        : "text-muted-foreground"
+                    )}
+                  >
+                    {hourLabel(h)}
+                  </div>
+                  {dates.map((d, i) => {
+                    const msgCount = messages[h][i];
+                    const sessCount = sessions[h][i];
+                    const tokCount = tokens[h][i];
+                    // Inert cell only when NOTHING happened — no messages
+                    // AND no session was created in this hour. The
+                    // sessions-only case (started at 22:55, first message
+                    // at 23:00) should still be hoverable.
+                    if (msgCount === 0 && sessCount === 0) {
+                      return (
                         <div
+                          key={`${h}-${i}`}
                           className={cn(
-                            "h-[10px] cursor-default transition-shadow duration-75",
-                            colorClass,
-                            "hover:ring-1 hover:ring-foreground/50 hover:relative hover:z-10"
+                            "h-[10px] w-full max-w-[30px] justify-self-center",
+                            tierClass(0)
                           )}
                         />
-                      </HoverCardTrigger>
-                      <HoverCardContent
-                        className="w-auto p-3 text-xs leading-tight"
-                        side="top"
-                        align="center"
+                      );
+                    }
+                    // Read the pre-computed combined intensity. A
+                    // sessions-only cell (msg=0, tok=0) gets a dedicated
+                    // floor color (`bg-primary/10`) — lighter than
+                    // tier 1 — so it stays distinguishable from inert
+                    // AND from real-but-low activity cells.
+                    const ratio = ratios[h][i];
+                    const colorClass =
+                      ratio === 0 ? "bg-primary/10" : tierClass(ratio);
+                    // Per-model rows for this exact (date, hour) cell —
+                    // drop "Unknown" (sessions with no recorded model),
+                    // matching the OverviewHero Models breakdown.
+                    const cellModels = models[h][i].filter(
+                      (m) => m.model !== "Unknown"
+                    );
+                    return (
+                      <HoverCard
+                        key={`${h}-${i}`}
+                        openDelay={50}
+                        closeDelay={80}
                       >
-                        <div className="font-medium pb-1.5 mb-1.5 border-b border-border/40">
-                          {formatDateLong(d)} · {formatHourRange24(h)}
-                        </div>
-                        <div className="space-y-0.5 tabular-nums">
-                          <div className="flex items-center gap-2">
-                            <span className="text-muted-foreground w-20">
-                              {t("stats.kpi.sessions")}
-                            </span>
-                            <span>{sessCount}</span>
+                        <HoverCardTrigger asChild>
+                          <div
+                            className={cn(
+                              "h-[10px] w-full max-w-[30px] justify-self-center cursor-default transition-shadow duration-75",
+                              colorClass,
+                              "hover:ring-1 hover:ring-foreground/50 hover:relative hover:z-10"
+                            )}
+                          />
+                        </HoverCardTrigger>
+                        <HoverCardContent
+                          className="w-auto p-3 text-xs leading-tight"
+                          side="right"
+                          align="center"
+                        >
+                          <div className="font-medium pb-1.5 mb-1.5 border-b border-border/40">
+                            {formatDateLong(d)} · {formatHourRange24(h)}
                           </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-muted-foreground w-20">
-                              {t("stats.kpi.messages")}
-                            </span>
-                            <span>{msgCount}</span>
+                          <div className="space-y-0.5 tabular-nums">
+                            <div className="flex items-center gap-2">
+                              <span className="text-muted-foreground w-20">
+                                {t("stats.kpi.sessions")}
+                              </span>
+                              <span>{sessCount}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-muted-foreground w-20">
+                                {t("stats.kpi.messages")}
+                              </span>
+                              <span>{msgCount}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-muted-foreground w-20">
+                                {t("stats.kpi.tokens")}
+                              </span>
+                              <span>
+                                {tokCount === 0 ? "—" : formatCompact(tokCount)}
+                              </span>
+                            </div>
                           </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-muted-foreground w-20">
-                              {t("stats.kpi.tokens")}
-                            </span>
-                            <span>
-                              {tokCount === 0 ? "—" : formatCompact(tokCount)}
-                            </span>
-                          </div>
-                        </div>
-                        {cellModels.length > 0 && (
-                          <div className="mt-1.5 pt-1.5 border-t border-border/40">
-                            <ModelUsageList models={cellModels} />
-                          </div>
-                        )}
-                      </HoverCardContent>
-                    </HoverCard>
-                  );
-                })}
-              </React.Fragment>
-            ))}
-            <div />
-            {dates.map((d, i) =>
-              dateTickIndices.has(i) ? (
-                <div
-                  key={`dl-${i}`}
-                  className="text-[9px] text-muted-foreground tabular-nums leading-none pt-1 text-center"
-                >
-                  {formatDateShort(d)}
-                </div>
-              ) : (
-                <div key={`dl-${i}`} />
-              )
-            )}
+                          {cellModels.length > 0 && (
+                            <div className="mt-1.5 pt-1.5 border-t border-border/40">
+                              <ModelUsageList models={cellModels} />
+                            </div>
+                          )}
+                        </HoverCardContent>
+                      </HoverCard>
+                    );
+                  })}
+                </React.Fragment>
+              ))}
+              {/* Bottom-left corner — sticky too, so date labels scroll under it. */}
+              <div className="sticky left-0 z-20 bg-card" />
+              {dates.map((d, i) =>
+                dateTickIndices.has(i) ? (
+                  <div
+                    key={`dl-${i}`}
+                    className="text-[9px] text-muted-foreground tabular-nums leading-none pt-1 text-center"
+                  >
+                    {formatDateShort(d)}
+                  </div>
+                ) : (
+                  <div key={`dl-${i}`} />
+                )
+              )}
+            </div>
           </div>
         )}
         <div className="flex justify-end items-center gap-1 text-[10px] text-muted-foreground">

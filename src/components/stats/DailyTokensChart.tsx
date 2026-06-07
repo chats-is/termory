@@ -40,6 +40,25 @@ import {
  * even when their lines hug the baseline.
  */
 
+// Layout constants shared by the sticky Y-axis chart and the scrollable plot
+// — they MUST match (top margin + X_AXIS_H + height) for the axis ticks to
+// line up with the lines.
+const Y_AXIS_W = 42;
+const X_AXIS_H = 20;
+const CHART_H = 220;
+const PX_PER_DATE = 24; // min horizontal room per day before scrolling
+
+/** Round up to a clean axis bound (1 / 2 / 2.5 / 5 × 10ⁿ). Used to pin BOTH
+ * the sticky Y-axis chart and the plot to the SAME domain — the axis chart
+ * has no <Line>, so `domain={[0,"auto"]}` there would have nothing to scale
+ * from and render blank. */
+function niceMax(v: number): number {
+  if (v <= 0) return 1;
+  const base = 10 ** Math.floor(Math.log10(v));
+  const f = v / base;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * base;
+}
+
 function CustomTooltip({
   active,
   payload,
@@ -102,6 +121,13 @@ export function DailyTokensChart({ data }: { data: DailyTokens[] }) {
     indices.reverse();
     return indices.map((i) => data[i].date);
   }, [data]);
+  // Shared Y domain so the sticky axis chart and the plot scale identically.
+  const yDomainMax = React.useMemo(() => {
+    let m = 0;
+    for (const d of data)
+      m = Math.max(m, d.input, d.output, d.cached, d.reasoning);
+    return niceMax(m);
+  }, [data]);
   return (
     <Card className="p-3 gap-2 outline outline-1 outline-transparent bg-card shadow-sm">
       <CardContent className="px-0 flex flex-col gap-3">
@@ -125,75 +151,119 @@ export function DailyTokensChart({ data }: { data: DailyTokens[] }) {
             No token data in this range.
           </div>
         ) : (
-          <div className="h-[220px] w-full">
-            <ResponsiveContainer>
+          <div className="flex h-[220px]">
+            {/* Sticky Y axis — a tiny chart rendering ONLY the axis, kept out
+                of the horizontal scroll so the value labels stay pinned left.
+                Same height + top margin + X-axis strip as the plot, so its
+                ticks line up with the lines. */}
+            <div className="shrink-0">
+              {/* +4px so there's a sliver of plot area for recharts to lay the
+                  axis out (a 0-width plot renders blank). */}
               <LineChart
+                width={Y_AXIS_W + 4}
+                height={CHART_H}
                 data={data}
                 margin={{ top: 6, right: 0, bottom: 0, left: 0 }}
               >
-                <CartesianGrid
-                  strokeDasharray="3 3"
-                  stroke="currentColor"
-                  opacity={0.08}
-                  vertical={false}
-                />
-                <XAxis
-                  dataKey="date"
-                  tick={{ fontSize: 10, fill: "currentColor", opacity: 0.7 }}
-                  axisLine={false}
-                  tickLine={false}
-                  tickFormatter={formatDateShort}
-                  ticks={xTicks}
-                  interval={0}
-                  padding={{ left: 0, right: 16 }}
-                />
                 <YAxis
                   tick={{ fontSize: 11, fill: "currentColor", opacity: 0.7 }}
                   axisLine={false}
                   tickLine={false}
-                  width={42}
+                  width={Y_AXIS_W}
                   tickFormatter={formatCompact}
-                  domain={[0, "auto"]}
+                  domain={[0, yDomainMax]}
                 />
-                <RechartsTooltip content={<CustomTooltip />} />
+                <XAxis
+                  dataKey="date"
+                  height={X_AXIS_H}
+                  tick={false}
+                  axisLine={false}
+                  tickLine={false}
+                />
+                {/* Invisible series — recharts only computes Y-axis ticks for
+                    an axis that has a data series feeding it. */}
                 <Line
-                  type="monotone"
                   dataKey="cached"
-                  stroke={TOKEN_COLORS.cached}
-                  strokeWidth={2}
+                  stroke="transparent"
                   dot={false}
-                  activeDot={{ r: 4, strokeWidth: 0 }}
-                  isAnimationActive={false}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="output"
-                  stroke={TOKEN_COLORS.output}
-                  strokeWidth={2}
-                  dot={false}
-                  activeDot={{ r: 4, strokeWidth: 0 }}
-                  isAnimationActive={false}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="input"
-                  stroke={TOKEN_COLORS.input}
-                  strokeWidth={2}
-                  dot={false}
-                  activeDot={{ r: 4, strokeWidth: 0 }}
-                  isAnimationActive={false}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="reasoning"
-                  stroke={TOKEN_COLORS.reasoning}
-                  strokeWidth={2}
-                  dot={false}
-                  activeDot={{ r: 4, strokeWidth: 0 }}
                   isAnimationActive={false}
                 />
               </LineChart>
-            </ResponsiveContainer>
+            </div>
+            {/* Scrollable plot — width grows with the date count (min
+                PX_PER_DATE per day) so points aren't cramped; scrolls
+                horizontally past the card width. */}
+            <div className="overflow-x-auto flex-1">
+              <div
+                className="h-full min-w-full"
+                style={{ width: data.length * PX_PER_DATE }}
+              >
+                <ResponsiveContainer width="100%" height={CHART_H}>
+                  <LineChart
+                    data={data}
+                    margin={{ top: 6, right: 0, bottom: 0, left: 0 }}
+                  >
+                    <CartesianGrid
+                      strokeDasharray="3 3"
+                      stroke="currentColor"
+                      opacity={0.08}
+                      vertical={false}
+                    />
+                    <XAxis
+                      dataKey="date"
+                      height={X_AXIS_H}
+                      tick={{ fontSize: 10, fill: "currentColor", opacity: 0.7 }}
+                      axisLine={false}
+                      tickLine={false}
+                      tickFormatter={formatDateShort}
+                      ticks={xTicks}
+                      interval={0}
+                      padding={{ left: 0, right: 16 }}
+                    />
+                    {/* Hidden — the scale lives here (lines read it) but the
+                        visible axis is the sticky one on the left. */}
+                    <YAxis hide width={Y_AXIS_W} domain={[0, yDomainMax]} />
+                    <RechartsTooltip content={<CustomTooltip />} />
+                    <Line
+                      type="monotone"
+                      dataKey="cached"
+                      stroke={TOKEN_COLORS.cached}
+                      strokeWidth={2}
+                      dot={false}
+                      activeDot={{ r: 4, strokeWidth: 0 }}
+                      isAnimationActive={false}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="output"
+                      stroke={TOKEN_COLORS.output}
+                      strokeWidth={2}
+                      dot={false}
+                      activeDot={{ r: 4, strokeWidth: 0 }}
+                      isAnimationActive={false}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="input"
+                      stroke={TOKEN_COLORS.input}
+                      strokeWidth={2}
+                      dot={false}
+                      activeDot={{ r: 4, strokeWidth: 0 }}
+                      isAnimationActive={false}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="reasoning"
+                      stroke={TOKEN_COLORS.reasoning}
+                      strokeWidth={2}
+                      dot={false}
+                      activeDot={{ r: 4, strokeWidth: 0 }}
+                      isAnimationActive={false}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
           </div>
         )}
         <div className="flex justify-end items-center gap-3 text-[10px] text-muted-foreground">
