@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -1557,7 +1557,11 @@ fn scan_claude_memory() -> Result<Vec<AppSession>, Box<dyn Error>> {
             .and_then(|n| n.to_str())
             .unwrap_or_default()
             .to_string();
-        let project_name = decode_claude_project_slug(&slug);
+        // Prefer the real cwd from a sibling session JSONL — the slug is
+        // lossy (see claude_cwd_from_project_dir); fall back to slug decode
+        // for memory-only projects with no session.
+        let project_name = claude_cwd_from_project_dir(&project_dir)
+            .unwrap_or_else(|| decode_claude_project_slug(&slug));
         push_memory_files_recursive(
             &memory_dir,
             &memory_dir,
@@ -1981,11 +1985,88 @@ fn decode_claude_project_slug(slug: &str) -> String {
     if slug.is_empty() {
         return String::new();
     }
-    if let Some(rest) = slug.strip_prefix('-') {
-        format!("/{}", rest.replace('-', "/"))
-    } else {
-        slug.replace('-', "/")
+    // Claude sanitizes a cwd into the slug by replacing `/` separators with
+    // `-`. A directory name that ITSELF contains `-` (e.g. `copilot-is`)
+    // then becomes indistinguishable from a separator, so a blind
+    // `-`→`/` decode would split `…/copilot-is` into `…/copilot/is`.
+    // Reverse it against the filesystem: at each component take the LONGEST
+    // run of `-`-joined segments that names an existing directory, so a real
+    // `copilot-is` folder is recovered. When nothing exists on disk
+    // (project moved/deleted) this degrades to the naive `-`→`/` decode.
+    let (base, body) = match slug.strip_prefix('-') {
+        Some(rest) => (std::path::PathBuf::from("/"), rest),
+        None => (std::path::PathBuf::new(), slug),
+    };
+    let segments: Vec<&str> = body.split('-').collect();
+    resolve_dashed_path(&base, &segments)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The real project cwd for a Claude slug dir (`~/.claude/projects/<slug>/`),
+/// read from the `cwd` field on a sibling session JSONL's first records.
+/// This is authoritative: the slug itself is lossy — Claude replaces `/`,
+/// `.`, `_` etc. ALL with `-`, so `copilot.is`, `copilot-is` and `copilot/is`
+/// collapse to the same `-…-copilot-is` and can't be reversed from the slug
+/// alone. Returns None for a memory-only project (no parseable session), so
+/// the caller falls back to the best-effort slug decode.
+fn claude_cwd_from_project_dir(project_dir: &Path) -> Option<String> {
+    let entries = fs::read_dir(project_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(file) = fs::File::open(&path) else {
+            continue;
+        };
+        // The cwd is on every message record, and these files can be tens of
+        // MB — read only the first few lines, never the whole file.
+        let mut reader = std::io::BufReader::new(file);
+        for _ in 0..8 {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            if let Some(cwd) = extract_json_string_field(&line, "cwd").filter(|s| !s.is_empty()) {
+                return Some(cwd);
+            }
+        }
     }
+    None
+}
+
+/// Rebuild a path from `-`-split `segments` under `base`, merging adjacent
+/// segments with `-` when that names a real directory (resolves the
+/// `copilot-is` vs `copilot/is` ambiguity). Falls back to one segment per
+/// component when no directory matches, reproducing the naive decode.
+fn resolve_dashed_path(base: &Path, segments: &[&str]) -> std::path::PathBuf {
+    let mut current = base.to_path_buf();
+    let mut i = 0;
+    while i < segments.len() {
+        // Default: this single segment is its own component.
+        let mut chosen = segments[i].to_string();
+        let mut chosen_end = i + 1;
+        // Probe increasingly long `-`-joined runs; keep the longest that
+        // exists as a directory under `current`.
+        let mut acc = String::new();
+        for end in (i + 1)..=segments.len() {
+            if acc.is_empty() {
+                acc.push_str(segments[i]);
+            } else {
+                acc.push('-');
+                acc.push_str(segments[end - 1]);
+            }
+            if current.join(&acc).is_dir() {
+                chosen = acc.clone();
+                chosen_end = end;
+            }
+        }
+        current.push(&chosen);
+        i = chosen_end;
+    }
+    current
 }
 
 fn memory_session_from_file(path: &Path, project: &str) -> Option<AppSession> {
@@ -2212,7 +2293,9 @@ fn derive_memory_project_label(path: &Path) -> String {
     let claude_projects_root = claude_root.join("projects");
     if let Ok(rel) = path.strip_prefix(&claude_projects_root) {
         if let Some(slug) = rel.iter().next().and_then(|c| c.to_str()) {
-            return decode_claude_project_slug(slug);
+            let project_dir = claude_projects_root.join(slug);
+            return claude_cwd_from_project_dir(&project_dir)
+                .unwrap_or_else(|| decode_claude_project_slug(slug));
         }
     }
 
@@ -12414,6 +12497,56 @@ mod tests {
         );
         assert_eq!(decode_claude_project_slug("foo"), "foo");
         assert_eq!(decode_claude_project_slug(""), "");
+    }
+
+    #[test]
+    fn resolve_dashed_path_recovers_hyphenated_directory() {
+        // A real `copilot-is` folder: the slug split yields ["copilot",
+        // "is"], and resolution must merge them back because `base/copilot`
+        // doesn't exist but `base/copilot-is` does.
+        let dir = TestDir::new("dashed-merge");
+        fs::create_dir_all(dir.path().join("copilot-is")).unwrap();
+        assert_eq!(
+            resolve_dashed_path(dir.path(), &["copilot", "is"]),
+            dir.path().join("copilot-is")
+        );
+
+        // When the un-merged path exists instead, keep it split.
+        let split = TestDir::new("dashed-split");
+        fs::create_dir_all(split.path().join("copilot").join("is")).unwrap();
+        assert_eq!(
+            resolve_dashed_path(split.path(), &["copilot", "is"]),
+            split.path().join("copilot").join("is")
+        );
+
+        // Nothing on disk → naive one-segment-per-component.
+        let missing = TestDir::new("dashed-missing");
+        assert_eq!(
+            resolve_dashed_path(missing.path(), &["copilot", "is"]),
+            missing.path().join("copilot").join("is")
+        );
+    }
+
+    #[test]
+    fn claude_cwd_from_project_dir_reads_real_cwd_from_session() {
+        // The slug `-Users-john-Documents-copilot-is` is lossy (Claude turned
+        // the `.` in `copilot.is` into `-`), so only the session's recorded
+        // `cwd` recovers the true path.
+        let dir = TestDir::new("claude-cwd");
+        fs::write(
+            dir.path()
+                .join("141fb4c2-477d-4fbd-85da-44ac71cbc842.jsonl"),
+            "{\"type\":\"user\",\"cwd\":\"/Users/john/Documents/copilot.is\",\"message\":{}}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            claude_cwd_from_project_dir(dir.path()).as_deref(),
+            Some("/Users/john/Documents/copilot.is")
+        );
+
+        // No session JSONL → None (caller falls back to slug decode).
+        let empty = TestDir::new("claude-cwd-empty");
+        assert_eq!(claude_cwd_from_project_dir(empty.path()), None);
     }
 
     #[test]
