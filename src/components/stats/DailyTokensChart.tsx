@@ -15,7 +15,7 @@ import {
   TooltipContent,
   TooltipTrigger
 } from "@/components/ui/tooltip";
-import type { DailyTokens } from "@/lib/stats-utils";
+import { type DailyTokens, niceMax } from "@/lib/stats-utils";
 import { useT } from "@/i18n";
 import {
   BreakdownRow,
@@ -47,17 +47,6 @@ const Y_AXIS_W = 42;
 const X_AXIS_H = 20;
 const CHART_H = 220;
 const PX_PER_DATE = 24; // min horizontal room per day before scrolling
-
-/** Round up to a clean axis bound (1 / 2 / 2.5 / 5 × 10ⁿ). Used to pin BOTH
- * the sticky Y-axis chart and the plot to the SAME domain — the axis chart
- * has no <Line>, so `domain={[0,"auto"]}` there would have nothing to scale
- * from and render blank. */
-function niceMax(v: number): number {
-  if (v <= 0) return 1;
-  const base = 10 ** Math.floor(Math.log10(v));
-  const f = v / base;
-  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * base;
-}
 
 function CustomTooltip({
   active,

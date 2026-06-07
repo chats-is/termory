@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppSession } from "../types";
 import {
+  niceMax,
   dailyTokens,
   filterSessions,
   dailyActivities,
@@ -612,5 +613,29 @@ describe("integration: filter → bucket", () => {
     const range = resolveRange({ preset: "30d" });
     const filtered = filterSessions(sessions, range, "All");
     expect(filtered).toHaveLength(3);
+  });
+});
+
+describe("niceMax", () => {
+  it("rounds up to a clean 1 / 2 / 2.5 / 5 × 10ⁿ bound", () => {
+    expect(niceMax(1)).toBe(1);
+    expect(niceMax(1.1)).toBe(2);
+    expect(niceMax(2)).toBe(2);
+    expect(niceMax(2.1)).toBe(2.5);
+    expect(niceMax(2.5)).toBe(2.5);
+    expect(niceMax(3)).toBe(5);
+    expect(niceMax(5)).toBe(5);
+    expect(niceMax(6)).toBe(10);
+  });
+
+  it("scales across magnitudes (K → B)", () => {
+    expect(niceMax(50_000)).toBe(50_000);
+    expect(niceMax(1_800_000_000)).toBe(2_000_000_000);
+    expect(niceMax(2_100_000_000)).toBe(2_500_000_000);
+  });
+
+  it("returns 1 for non-positive input (empty axis)", () => {
+    expect(niceMax(0)).toBe(1);
+    expect(niceMax(-5)).toBe(1);
   });
 });

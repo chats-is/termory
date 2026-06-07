@@ -407,6 +407,19 @@ export type DailyTokens = {
 };
 
 /**
+ * Round a value up to a clean axis bound (1 / 2 / 2.5 / 5 × 10ⁿ). Used by the
+ * DailyTokensChart to pin its sticky Y-axis chart and its scrollable plot to
+ * the SAME domain — the axis-only chart has no data series, so it can't derive
+ * `"auto"` and needs an explicit shared max.
+ */
+export function niceMax(v: number): number {
+  if (v <= 0) return 1;
+  const base = 10 ** Math.floor(Math.log10(v));
+  const f = v / base;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * base;
+}
+
+/**
  * Per-day token rollups for the daily-usage chart.
  *
  * Source: each session's `daily_tokens` array (produced by the four

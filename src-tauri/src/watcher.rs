@@ -451,3 +451,24 @@ fn event_touches_install(event: &notify::Event, targets: &[(PathBuf, RecursiveMo
         .iter()
         .any(|path| targets.iter().any(|(target, _)| path.starts_with(target)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_paths_keeps_absolute_dedups_and_drops_empty_or_relative() {
+        let paths = vec![
+            "/abs/one",
+            "/abs/two",
+            "/abs/one",      // duplicate → deduped by the HashSet
+            "",              // empty → dropped
+            "relative/path", // not absolute → dropped
+        ];
+        let result = dynamic_paths_from_sessions(paths);
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&PathBuf::from("/abs/one")));
+        assert!(result.contains(&PathBuf::from("/abs/two")));
+        assert!(!result.contains(&PathBuf::from("relative/path")));
+    }
+}
