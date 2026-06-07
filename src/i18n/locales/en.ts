@@ -135,7 +135,6 @@ export const en = {
   "providers.addedToOpencode": "Added to opencode.json — click to remove",
   "providers.notInOpencode": "Not in opencode.json — click to add",
   "providers.inUse": "In use",
-  "providers.unmanaged": "Unmanaged",
   "providers.enable": "Enable",
   "providers.disable": "Disable",
   "providers.delete": "Delete",

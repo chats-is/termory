@@ -125,7 +125,6 @@ export const zhHans: Record<MessageKey, string> = {
   "providers.addedToOpencode": "已加入 opencode.json — 点此移除",
   "providers.notInOpencode": "不在 opencode.json — 点此添加",
   "providers.inUse": "使用中",
-  "providers.unmanaged": "未管理",
   "providers.enable": "启用",
   "providers.disable": "禁用",
   "providers.delete": "删除",
