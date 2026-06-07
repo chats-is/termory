@@ -149,8 +149,14 @@ pub fn open(id: &str, project: Option<&str>, cmd: &str) -> Result<(), String> {
         // "auto" / "terminal" / unknown → Terminal.app.
         _ => {
             let esc = applescript_escape(&shell_cmd);
+            // When Terminal isn't already running, `activate` opens a default
+            // empty window AND `do script` (with no target) opens a second —
+            // two windows. Launching via `do script … in window 1` reuses the
+            // window the launch creates, so we get exactly one. When Terminal
+            // is already running, a fresh `do script` opens a new window
+            // without disturbing the user's existing ones.
             let script = format!(
-                "tell application \"Terminal\"\n  activate\n  do script \"{esc}\"\nend tell"
+                "tell application \"Terminal\"\n  if it is running then\n    do script \"{esc}\"\n  else\n    do script \"{esc}\" in window 1\n  end if\n  activate\nend tell"
             );
             spawn_args("osascript", &["-e", &script])
         }
