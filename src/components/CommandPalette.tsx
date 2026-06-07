@@ -17,7 +17,14 @@ import {
   typeLabelOf
 } from "@/lib/session-utils";
 import { INPUT_NO_AUTO } from "@/lib/utils";
+import { useT, type MessageKey } from "@/i18n";
 import type { AppSession, SearchHit } from "@/types";
+
+const TYPE_KEY: Record<"Session" | "Memory" | "Skill", MessageKey> = {
+  Session: "command.typeSession",
+  Memory: "command.typeMemory",
+  Skill: "command.typeSkill"
+};
 
 export function CommandPalette({
   sessions,
@@ -31,6 +38,7 @@ export function CommandPalette({
   onCommitSearch: (query: string) => void;
   onClearRecent: () => void;
 }) {
+  const t = useT();
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const { hits, loading, committedQuery } = useSearchHits(query);
@@ -89,22 +97,22 @@ export function CommandPalette({
     <CommandDialog
       open={open}
       onOpenChange={setOpen}
-      title="Quick search"
-      description="Find sessions, memories, skills"
+      title={t("command.title")}
+      description={t("command.description")}
       shouldFilter={false}
     >
       <CommandInput {...INPUT_NO_AUTO}
-        placeholder="Find sessions, memories, skills…"
+        placeholder={t("command.placeholder")}
         value={query}
         onValueChange={setQuery}
       />
       <CommandList>
         {trimmed.length === 0 && recentSearches.length === 0 && (
-          <CommandEmpty>Type to search across all records.</CommandEmpty>
+          <CommandEmpty>{t("command.typeToSearch")}</CommandEmpty>
         )}
-        {showEmpty && <CommandEmpty>No matches.</CommandEmpty>}
+        {showEmpty && <CommandEmpty>{t("command.noMatches")}</CommandEmpty>}
         {showRecents && (
-          <CommandGroup heading="Recent searches">
+          <CommandGroup heading={t("command.recentSearches")}>
             {recentSearches.map((entry) => (
               <CommandItem
                 key={`recent:${entry}`}
@@ -118,10 +126,10 @@ export function CommandPalette({
           </CommandGroup>
         )}
         {rows.length > 0 && (
-          <CommandGroup heading={hits.length > 0 ? "Results" : "Matching"}>
+          <CommandGroup heading={hits.length > 0 ? t("command.results") : t("command.matching")}>
             {rows.map((row) => {
               const session = row.session;
-              const typeLabel = typeLabelOf(session);
+              const typeLabel = t(TYPE_KEY[typeLabelOf(session)]);
               return (
                 <CommandItem
                   key={sessionKey(session)}

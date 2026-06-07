@@ -11,6 +11,18 @@ export const en = {
   "nav.search": "Search",
   "nav.stats": "Stats",
   "nav.settings": "Settings",
+  "nav.primary": "Primary",
+  "command.title": "Quick search",
+  "command.description": "Find sessions, memories, skills",
+  "command.placeholder": "Find sessions, memories, skills…",
+  "command.typeToSearch": "Type to search across all records.",
+  "command.noMatches": "No matches.",
+  "command.recentSearches": "Recent searches",
+  "command.results": "Results",
+  "command.matching": "Matching",
+  "command.typeSession": "Session",
+  "command.typeMemory": "Memory",
+  "command.typeSkill": "Skill",
 
   // Search
   "search.placeholder": "Search across sessions, memories, skills…",
@@ -95,6 +107,9 @@ export const en = {
   "records.tryFilters": "Try a different source, project, or query.",
   "records.nothingMatches": "Nothing matches your current view.",
   "records.openInFinder": "Open in Finder",
+  "records.nothingToView": "Nothing to view yet",
+  "records.nothingToViewDesc": "Once Termory finds local history, sessions, memories, and skills will show up here.",
+  "records.selectRecord": "Select a record",
   "common.all": "All",
   "favorites.add": "Add to favorites",
 

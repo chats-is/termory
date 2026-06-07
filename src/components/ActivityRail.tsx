@@ -34,7 +34,7 @@ export function ActivityRail({
   ];
   return (
     <nav
-      aria-label="Primary"
+      aria-label={t("nav.primary")}
       className="flex flex-col items-center gap-2 p-3 bg-sidebar my-3 ml-3 rounded-md"
     >
       {items.map((item) => {

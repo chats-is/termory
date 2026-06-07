@@ -945,12 +945,12 @@ export function App() {
                 {!selected && sessions.length === 0 && (
                   <EmptyState
                     icon={<Sparkles size={32} />}
-                    title="Nothing to view yet"
-                    description="Once Termory finds local history, sessions, memories, and skills will show up here."
+                    title={t("records.nothingToView")}
+                    description={t("records.nothingToViewDesc")}
                   />
                 )}
                 {!selected && sessions.length > 0 && (
-                  <EmptyState icon={<Sparkles />} title="Select a record" />
+                  <EmptyState icon={<Sparkles />} title={t("records.selectRecord")} />
                 )}
                 {selected && (
                   <>
