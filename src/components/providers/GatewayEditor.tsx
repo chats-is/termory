@@ -209,7 +209,7 @@ export function GatewayEditor({
         result.openai ||
         result.anthropic ||
         result.gemini;
-      if (!any) setDetectError("No supported API modes responded at this URL.");
+      if (!any) setDetectError(t("providers.noModesResponded"));
     } catch (err) {
       if (seq !== detectSeq.current) return;
       setDetectError(String(err));
@@ -346,7 +346,7 @@ export function GatewayEditor({
         >
         <DialogHeader className="flex-row items-baseline gap-2">
           <DialogTitle>{isNew ? t("providers.addGateway") : t("providers.editGateway")}</DialogTitle>
-          <DialogDescription>AI Gateway</DialogDescription>
+          <DialogDescription>{t("providers.aiGateway")}</DialogDescription>
         </DialogHeader>
 
         <div className="flex flex-col gap-3 -mx-6 max-h-[65vh] overflow-y-auto px-6 py-1">
@@ -417,7 +417,7 @@ export function GatewayEditor({
                 {!detecting && detectAttempted && !hasModes && (
                   <span className="text-xs text-destructive truncate">
                     {detectError ??
-                      "No supported sources detected — refresh to retry."}
+                      t("providers.noSourcesDetected")}
                   </span>
                 )}
               </div>

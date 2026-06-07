@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { BrandIcon } from "@/components/BrandIcon";
 import { CLI_APP_LABEL, CLI_APP_SOURCE_BADGE, CLI_INSTALL } from "@/constants";
 import { cn } from "@/lib/utils";
+import { useT } from "@/i18n";
 import type { CliApp } from "@/types";
 
 export function InstallGuide({
@@ -16,6 +17,7 @@ export function InstallGuide({
   rechecking: boolean;
   onRecheck: () => void;
 }) {
+  const t = useT();
   const info = CLI_INSTALL[app];
   const label = CLI_APP_LABEL[app];
   const [methodId, setMethodId] = React.useState(info.methods[0].id);
@@ -46,10 +48,9 @@ export function InstallGuide({
       <div className="mx-auto flex flex-col items-center gap-4 max-w-md text-center">
         <BrandIcon source={CLI_APP_SOURCE_BADGE[app]} className="size-12" />
         <div className="flex flex-col gap-1.5">
-          <h2 className="text-lg font-medium">{label} is not installed</h2>
+          <h2 className="text-lg font-medium">{t("install.notInstalled", { name: label })}</h2>
           <p className="text-sm text-muted-foreground leading-relaxed">
-            Install {label} first to manage providers for it. Pick a method
-            below and run it in your terminal.
+            {t("install.desc", { name: label })}
           </p>
         </div>
 
@@ -82,7 +83,7 @@ export function InstallGuide({
             <button
               type="button"
               onClick={() => void copy()}
-              aria-label="Copy install command"
+              aria-label={t("install.copyCommand")}
               className="inline-flex items-center justify-center size-7 rounded hover:bg-accent hover:text-accent-foreground transition-colors"
             >
               {copied ? (
@@ -102,7 +103,7 @@ export function InstallGuide({
             onClick={() => void openUrl(info.url)}
           >
             <ExternalLink className="size-4" />
-            Docs
+            {t("install.docs")}
           </Button>
           <Button
             type="button"
@@ -115,7 +116,7 @@ export function InstallGuide({
             ) : (
               <RefreshCw className="size-4" />
             )}
-            {rechecking ? "Checking…" : "Recheck"}
+            {rechecking ? t("install.checking") : t("providers.recheck")}
           </Button>
         </div>
       </div>

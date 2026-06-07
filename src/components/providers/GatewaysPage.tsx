@@ -96,7 +96,7 @@ export function GatewaysPage({
       // activated/deactivated here.
       window.dispatchEvent(new Event(ACTIVE_STATE_REFRESH_EVENT));
     } catch (err) {
-      toast.error(`Read live state failed: ${String(err)}`);
+      toast.error(t("toast.readStateFailed", { error: String(err) }));
     }
   }, [synthProviders]);
 
@@ -175,14 +175,14 @@ export function GatewaysPage({
       }
       await refreshActive();
     } catch (err) {
-      toast.error(`Saved, but couldn't update live config: ${String(err)}`);
+      toast.error(t("toast.savedButFailed", { error: String(err) }));
     }
   };
 
   const deleteGateway = async (gateway: Gateway) => {
     const confirmed = await ask(
-      `Delete ${gateway.name || "this AI Gateway"}? Active bindings will be cleared from each CLI.`,
-      { title: "Delete AI Gateway", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" }
+      t("providers.deleteGatewayMsg", { name: gateway.name || t("providers.thisGateway") }),
+      { title: t("providers.deleteGateway"), kind: "warning", okLabel: t("providers.delete"), cancelLabel: t("providers.cancel") }
     );
     if (!confirmed) return;
     // Clear any live config this AI Gateway's bindings injected — but only
@@ -241,7 +241,7 @@ export function GatewaysPage({
         await invoke("set_opencode_default_provider", { provider: synth });
       }
       markActive(b.app, synth.id);
-      toast.success(`${gateway.name} → ${CLI_APP_LABEL[b.app]} activated.`);
+      toast.success(t("toast.bindingActivated", { name: gateway.name, app: CLI_APP_LABEL[b.app] }));
       await refreshActive();
     } catch (err) {
       toast.error(String(err));
@@ -263,7 +263,7 @@ export function GatewaysPage({
         });
       }
       markActive(b.app, null);
-      toast.success(`${gateway.name} → ${CLI_APP_LABEL[b.app]} deactivated.`);
+      toast.success(t("toast.bindingDeactivated", { name: gateway.name, app: CLI_APP_LABEL[b.app] }));
       await refreshActive();
     } catch (err) {
       toast.error(String(err));

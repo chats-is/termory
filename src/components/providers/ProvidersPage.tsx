@@ -235,13 +235,13 @@ export function ProvidersPage({
       };
       setInstalled(next);
       if (next[app]) {
-        toast.success(`${CLI_APP_LABEL[app]} detected.`);
+        toast.success(t("toast.detected", { app: CLI_APP_LABEL[app] }));
         void refreshVersions();
       } else {
-        toast.error(`${CLI_APP_LABEL[app]} still not installed.`);
+        toast.error(t("toast.notInstalled", { app: CLI_APP_LABEL[app] }));
       }
     } catch (err) {
-      toast.error(`Detection failed: ${String(err)}`);
+      toast.error(t("toast.detectionFailed", { error: String(err) }));
     } finally {
       setRechecking(false);
     }
@@ -262,7 +262,7 @@ export function ProvidersPage({
       });
       if (!map[target]) {
         toast.error(
-          `${CLI_APP_LABEL[target]} is not installed. Install it first.`
+          t("toast.notInstalledFull", { app: CLI_APP_LABEL[target] })
         );
         return false;
       }
@@ -297,7 +297,7 @@ export function ProvidersPage({
       for (const s of states) next[s.app] = s;
       setActiveStates(next);
     } catch (err) {
-      toast.error(`Read live state failed: ${String(err)}`);
+      toast.error(t("toast.readStateFailed", { error: String(err) }));
     }
   }, [providers, gatewaySynth]);
 
@@ -449,7 +449,7 @@ export function ProvidersPage({
         await invoke("set_opencode_default_provider", { provider: synth });
       }
       markActive(synth.app, synth.id);
-      toast.success(`${synth.name || "(unnamed)"} is now in use.`);
+      toast.success(t("toast.nowInUse", { name: synth.name || t("providers.unnamed") }));
       await refreshActive();
     } catch (err) {
       toast.error(String(err));
@@ -545,7 +545,7 @@ export function ProvidersPage({
       await refreshActive();
     } catch (err) {
       toast.error(
-        `Saved, but couldn't update ${CLI_APP_LABEL[next.app]} live config: ${String(err)}`
+        t("toast.savedButFailedApp", { app: CLI_APP_LABEL[next.app], error: String(err) })
       );
     }
   };
@@ -559,12 +559,12 @@ export function ProvidersPage({
     // browser `window.confirm` which used to render an out-of-place
     // generic "OK / Cancel" alert.
     const confirmed = await ask(
-      `Delete ${target.name || "this provider"}? This can't be undone.`,
+      t("providers.deleteProviderMsg", { name: target.name || t("providers.thisProvider") }),
       {
-        title: "Delete provider",
+        title: t("providers.deleteProvider"),
         kind: "warning",
-        okLabel: "Delete",
-        cancelLabel: "Cancel"
+        okLabel: t("providers.delete"),
+        cancelLabel: t("providers.cancel")
       }
     );
     if (!confirmed) return;
@@ -585,7 +585,7 @@ export function ProvidersPage({
         });
       }
     } catch (err) {
-      toast.error(`Could not clear ${CLI_APP_LABEL[target.app]} live config: ${String(err)}`);
+      toast.error(t("toast.clearFailed", { app: CLI_APP_LABEL[target.app], error: String(err) }));
       return;
     }
     setProviders((cur) => cur.filter((p) => p.id !== id));
@@ -605,13 +605,13 @@ export function ProvidersPage({
     try {
       if (enabled) {
         await invoke("delete_provider", { provider: target });
-        toast.success(`Disabled ${target.name || "(unnamed)"}.`);
+        toast.success(t("toast.disabled", { name: target.name || t("providers.unnamed") }));
       } else {
         await invoke("activate_provider", {
           provider: target,
           providersForApp
         });
-        toast.success(`Enabled ${target.name || "(unnamed)"}.`);
+        toast.success(t("toast.enabled", { name: target.name || t("providers.unnamed") }));
       }
       await refreshActive();
     } catch (err) {
@@ -643,7 +643,7 @@ export function ProvidersPage({
         });
       }
       markActive(target.app, target.id);
-      toast.success(`${target.name || "(unnamed)"} is now in use.`);
+      toast.success(t("toast.nowInUse", { name: target.name || t("providers.unnamed") }));
       await refreshActive();
     } catch (err) {
       toast.error(String(err));
@@ -670,7 +670,7 @@ export function ProvidersPage({
         ]
       });
       markActive(app, null);
-      toast.success(`Official is now in use for ${CLI_APP_LABEL[app]}.`);
+      toast.success(t("toast.officialInUse", { app: CLI_APP_LABEL[app] }));
       await refreshActive();
     } catch (err) {
       toast.error(String(err));

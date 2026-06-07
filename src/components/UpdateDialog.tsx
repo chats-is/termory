@@ -12,6 +12,7 @@ import {
   DialogTitle
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
+import { useT } from "@/i18n";
 
 export function UpdateDialog({
   update,
@@ -22,6 +23,7 @@ export function UpdateDialog({
   currentVersion: string;
   onClose: () => void;
 }) {
+  const t = useT();
   const [installing, setInstalling] = React.useState(false);
   const [progress, setProgress] = React.useState<{ downloaded: number; total: number | null } | null>(
     null
@@ -47,10 +49,10 @@ export function UpdateDialog({
           setProgress((prev) => (prev ? { ...prev, downloaded: prev.total ?? prev.downloaded } : null));
         }
       });
-      toast.success("Update installed. Restarting…");
+      toast.success(t("update.installed"));
       await relaunch();
     } catch (err) {
-      toast.error(`Install failed: ${String(err)}`);
+      toast.error(t("update.installFailed", { error: String(err) }));
       setInstalling(false);
       setProgress(null);
     }
@@ -80,7 +82,7 @@ export function UpdateDialog({
               <Sparkles className="size-5" />
             </span>
             <div className="flex flex-col">
-              <DialogTitle>Update available</DialogTitle>
+              <DialogTitle>{t("update.available")}</DialogTitle>
               <DialogDescription className="font-mono">
                 v{currentVersion || "?"} → v{update?.version ?? "?"}
               </DialogDescription>
@@ -97,7 +99,7 @@ export function UpdateDialog({
         {installing && (
           <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>Downloading…</span>
+              <span>{t("update.downloading")}</span>
               {progressPct != null && <span className="tabular-nums">{progressPct}%</span>}
             </div>
             <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
@@ -115,9 +117,7 @@ export function UpdateDialog({
             variant="outline"
             disabled={installing}
             onClick={onClose}
-          >
-            Later
-          </Button>
+          >{t("update.later")}</Button>
           <Button
             type="button"
             disabled={installing}
@@ -128,7 +128,7 @@ export function UpdateDialog({
             ) : (
               <Download className="size-4" />
             )}
-            {installing ? "Installing…" : "Install now"}
+            {installing ? t("update.installing") : t("update.installNow")}
           </Button>
         </DialogFooter>
       </DialogContent>
