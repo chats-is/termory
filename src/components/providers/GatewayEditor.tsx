@@ -53,6 +53,7 @@ import type {
   GatewayBinding,
   GatewayCapabilities
 } from "@/types";
+import { useT } from "@/i18n";
 
 // Claude per-size routing keys, seeded as an options template for a
 // Claude binding (mirrors ProviderEditor's CLAUDE_OVERRIDE_TEMPLATE).
@@ -97,6 +98,7 @@ export function GatewayEditor({
   onSave: (r: Gateway) => void;
   onClose: () => void;
 }) {
+  const t = useT();
   const [name, setName] = React.useState(gateway.name);
   const [baseUrl, setBaseUrl] = React.useState(gateway.baseUrl ?? "");
   const [apiKey, setApiKey] = React.useState(gateway.apiKey ?? "");
@@ -343,24 +345,24 @@ export function GatewayEditor({
           className="contents"
         >
         <DialogHeader className="flex-row items-baseline gap-2">
-          <DialogTitle>{isNew ? "Add provider" : "Edit provider"}</DialogTitle>
+          <DialogTitle>{isNew ? t("providers.addGateway") : t("providers.editGateway")}</DialogTitle>
           <DialogDescription>AI Gateway</DialogDescription>
         </DialogHeader>
 
         <div className="flex flex-col gap-3 -mx-6 max-h-[65vh] overflow-y-auto px-6 py-1">
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="gateway-name">Name</Label>
+            <Label htmlFor="gateway-name">{t("providers.name")}</Label>
             <Input {...INPUT_NO_AUTO}
               id="gateway-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="My gateway"
+              placeholder={t("providers.namePlaceholder")}
               autoFocus
             />
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="gateway-base">Base URL</Label>
+            <Label htmlFor="gateway-base">{t("providers.baseUrl")}</Label>
             <Input {...INPUT_NO_AUTO}
               id="gateway-base"
               value={baseUrl}
@@ -370,7 +372,7 @@ export function GatewayEditor({
                 setDetectAttempted(false);
                 setDetectError(null);
               }}
-              placeholder="https://your-gateway.example.com"
+              placeholder={t("providers.gwUrlPlaceholder")}
             />
             <p className="text-xs text-muted-foreground">
               The gateway host. Termory appends the right path per CLI
@@ -379,7 +381,7 @@ export function GatewayEditor({
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="gateway-key">API key</Label>
+            <Label htmlFor="gateway-key">{t("providers.apiKey")}</Label>
             <div className="relative">
               <Input {...INPUT_NO_AUTO}
                 id="gateway-key"
@@ -391,13 +393,13 @@ export function GatewayEditor({
                   setDetectAttempted(false);
                   setDetectError(null);
                 }}
-                placeholder="sk-…"
+                placeholder={t("providers.apiKeyPlaceholder")}
                 className="pr-9"
               />
               <button
                 type="button"
                 onClick={() => setRevealKey((v) => !v)}
-                aria-label={revealKey ? "Hide API key" : "Show API key"}
+                aria-label={revealKey ? t("providers.hideApiKey") : t("providers.showApiKey")}
                 className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
               >
                 {revealKey ? <EyeOff size={16} /> : <Eye size={16} />}
@@ -411,7 +413,7 @@ export function GatewayEditor({
           <div className="flex flex-col gap-2 pt-2">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-baseline gap-2 min-w-0">
-                <Label className="shrink-0">Bind to sources</Label>
+                <Label className="shrink-0">{t("providers.bindToSources")}</Label>
                 {!detecting && detectAttempted && !hasModes && (
                   <span className="text-xs text-destructive truncate">
                     {detectError ??
@@ -424,7 +426,7 @@ export function GatewayEditor({
                 variant="ghost"
                 size="icon"
                 className="size-7 shrink-0"
-                aria-label="Detect APIs"
+                aria-label={t("providers.detectApis")}
                 disabled={
                   !baseUrl.trim() ||
                   !apiKey.trim() ||
@@ -485,7 +487,7 @@ export function GatewayEditor({
                         type="checkbox"
                         checked={bindable && draft.checked}
                         disabled={!bindable}
-                        aria-label={`Bind ${CLI_APP_LABEL[app]}`}
+                        aria-label={t("providers.bindTo", { app: CLI_APP_LABEL[app] })}
                         onChange={(e) =>
                           setBind(app, { checked: e.target.checked })
                         }
@@ -494,7 +496,7 @@ export function GatewayEditor({
                       {/* The whole label + chevron row toggles collapse. */}
                       <CollapsibleTrigger
                         disabled={!bindable}
-                        aria-label="Toggle settings"
+                        aria-label={t("providers.toggleSettings")}
                         className="group flex flex-1 items-center gap-2 rounded-sm text-left disabled:opacity-50 disabled:pointer-events-none"
                       >
                         <BrandIcon source={CLI_APP_SOURCE_BADGE[app]} />
@@ -511,10 +513,10 @@ export function GatewayEditor({
                     <CollapsibleContent className="overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
                       <div className="flex flex-col gap-2 pl-6 pt-2">
                         <Label className="text-xs">
-                          {app === "opencode" ? "Model *" : "Model"}
+                          {app === "opencode" ? `${t("providers.model")} *` : t("providers.model")}
                         </Label>
                         <ModelCombobox
-                          ariaLabel={app === "opencode" ? "Model *" : "Model"}
+                          ariaLabel={app === "opencode" ? `${t("providers.model")} *` : t("providers.model")}
                           value={draft.model}
                           onValueChange={(v) => setBind(app, { model: v })}
                           options={models}
@@ -532,7 +534,7 @@ export function GatewayEditor({
                         {/* OpenCode: AI SDK package + extra models. */}
                         {app === "opencode" && (
                           <>
-                            <Label className="text-xs mt-1">AI SDK</Label>
+                            <Label className="text-xs mt-1">{t("providers.aiSdk")}</Label>
                             <Select
                               value={effectiveNpm}
                               onValueChange={(v) => setBind(app, { npm: v })}
@@ -549,7 +551,7 @@ export function GatewayEditor({
                               </SelectContent>
                             </Select>
                             <Label className="text-xs mt-1">
-                              Additional models
+                              {t("providers.additionalModels")}
                             </Label>
                             <p className="text-xs text-muted-foreground">
                               Extra models surfaced in OpenCode&apos;s picker
@@ -560,7 +562,7 @@ export function GatewayEditor({
                             {modelRows.map((m, i) => (
                               <div key={i} className="flex items-center gap-1.5">
                                 <ModelCombobox
-                                  ariaLabel="Model ID"
+                                  ariaLabel={t("providers.modelId")}
                                   value={m.id}
                                   onValueChange={(v) =>
                                     setBind(app, {
@@ -574,9 +576,9 @@ export function GatewayEditor({
                                   className="flex-1"
                                 />
                                 <Input {...INPUT_NO_AUTO}
-                                  aria-label="Model display name"
+                                  aria-label={t("providers.modelDisplayName")}
                                   className="flex-1 h-8"
-                                  placeholder="Display name (optional)"
+                                  placeholder={t("providers.displayNameOptional")}
                                   value={m.name}
                                   onChange={(e) =>
                                     setBind(app, {
@@ -591,7 +593,7 @@ export function GatewayEditor({
                                   variant="ghost"
                                   size="icon"
                                   className="size-8 shrink-0"
-                                  aria-label="Remove model"
+                                  aria-label={t("providers.removeModel")}
                                   onClick={() =>
                                     setBind(app, {
                                       models: modelRows.filter((_, j) => j !== i)
@@ -613,15 +615,14 @@ export function GatewayEditor({
                                 })
                               }
                             >
-                              <Plus className="size-4" />
-                              Add
+                              {t("providers.add")}
                             </Button>
                           </>
                         )}
 
                         {/* Advanced settings — same wording as ProviderEditor;
                             Claude seeds the per-size routing keys. */}
-                        <Label className="text-xs mt-1">Advanced settings</Label>
+                        <Label className="text-xs mt-1">{t("providers.advancedSettings")}</Label>
                         <p className="text-xs text-muted-foreground">
                           Extra settings merged into {CLI_APP_LABEL[app]}&apos;s
                           config while this provider is active, and removed when
@@ -636,7 +637,7 @@ export function GatewayEditor({
                               <Input {...INPUT_NO_AUTO}
                                 value={o.key}
                                 readOnly={isTemplate}
-                                placeholder="KEY"
+                                placeholder={t("providers.keyUpper")}
                                 className={cn(
                                   "font-mono flex-1 h-8",
                                   isTemplate && "text-muted-foreground"
@@ -651,7 +652,7 @@ export function GatewayEditor({
                               />
                               <Input {...INPUT_NO_AUTO}
                                 value={o.value}
-                                placeholder="VALUE"
+                                placeholder={t("providers.valueUpper")}
                                 className="flex-1 h-8"
                                 onChange={(e) =>
                                   setBind(app, {
@@ -667,7 +668,7 @@ export function GatewayEditor({
                                   variant="ghost"
                                   size="icon"
                                   className="size-8 shrink-0"
-                                  aria-label="Remove override"
+                                  aria-label={t("providers.removeOverride")}
                                   onClick={() =>
                                     setBind(app, {
                                       options: rows.filter((_, j) => j !== i)
@@ -691,8 +692,7 @@ export function GatewayEditor({
                             })
                           }
                         >
-                          <Plus className="size-4" />
-                          Add
+                          {t("providers.add")}
                         </Button>
                       </div>
                     </CollapsibleContent>
@@ -705,15 +705,15 @@ export function GatewayEditor({
 
         <DialogFooter>
           <Button type="button" variant="ghost" onClick={onClose}>
-            Cancel
+            {t("providers.cancel")}
           </Button>
           <Button type="submit" disabled={!canSave || saving}>
             {saving ? (
               <Loader2 className="size-4 animate-spin" />
             ) : isNew ? (
-              "Create"
+              t("providers.create")
             ) : (
-              "Save"
+              t("providers.save")
             )}
           </Button>
         </DialogFooter>

@@ -38,6 +38,7 @@ import {
   overrideHelpFor
 } from "@/lib/provider-utils";
 import { INPUT_NO_AUTO } from "@/lib/utils";
+import { useT } from "@/i18n";
 import type { Provider } from "@/types";
 
 // Default override rows seeded for a fresh Claude provider — the per-size
@@ -61,6 +62,7 @@ export function ProviderEditor({
   onSave: (p: Provider) => void;
   onClose: () => void;
 }) {
+  const t = useT();
   const [draft, setDraft] = React.useState<Provider>(provider);
   const [revealKey, setRevealKey] = React.useState(false);
   const firstFieldRef = React.useRef<HTMLInputElement>(null);
@@ -274,18 +276,18 @@ export function ProviderEditor({
       <DialogContent className="sm:max-w-2xl">
         <form onSubmit={handleSubmit} className="contents">
           <DialogHeader className="flex-row items-baseline gap-2">
-            <DialogTitle>{isNew ? "Add provider" : "Edit provider"}</DialogTitle>
+            <DialogTitle>{isNew ? t("providers.addProvider") : t("providers.editProvider")}</DialogTitle>
             <DialogDescription>{CLI_APP_LABEL[draft.app]}</DialogDescription>
           </DialogHeader>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-4 items-start -mx-6 max-h-[65vh] overflow-y-auto px-6 py-1">
             <div className="grid gap-2 sm:col-span-2">
-              <Label htmlFor="provider-name">Name *</Label>
+              <Label htmlFor="provider-name">{t("providers.name")} *</Label>
               <Input {...INPUT_NO_AUTO}
                 id="provider-name"
                 ref={firstFieldRef}
                 type="text"
-                placeholder="Display name for this provider"
+                placeholder={t("providers.displayNameForProvider")}
                 value={draft.name}
                 onChange={(e) => update("name", e.target.value)}
                 autoComplete="off"
@@ -297,7 +299,7 @@ export function ProviderEditor({
             </div>
 
             <div className="grid gap-2 sm:col-span-2">
-              <Label htmlFor="provider-baseurl">Base URL *</Label>
+              <Label htmlFor="provider-baseurl">{t("providers.baseUrl")} *</Label>
               <Input {...INPUT_NO_AUTO}
                 id="provider-baseurl"
                 type="text"
@@ -313,20 +315,20 @@ export function ProviderEditor({
             </div>
 
             <div className="grid gap-2 sm:col-span-2">
-              <Label htmlFor="provider-apikey">API key</Label>
+              <Label htmlFor="provider-apikey">{t("providers.apiKey")}</Label>
               <div className="relative">
                 <Input {...INPUT_NO_AUTO}
                   id="provider-apikey"
                   type={revealKey ? "text" : "password"}
                   className="font-mono pr-9"
-                  placeholder="sk-… (leave blank to fill in later)"
+                  placeholder={t("providers.apiKeyBlank")}
                   value={draft.apiKey ?? ""}
                   onChange={(e) => update("apiKey", e.target.value)}
                 />
                 <button
                   type="button"
                   onClick={() => setRevealKey((c) => !c)}
-                  aria-label={revealKey ? "Hide API key" : "Show API key"}
+                  aria-label={revealKey ? t("providers.hideApiKey") : t("providers.showApiKey")}
                   className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                 >
                   {revealKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
@@ -337,7 +339,7 @@ export function ProviderEditor({
 
             {isOpencode && (
               <div className="grid gap-2">
-                <Label>AI SDK *</Label>
+                <Label>{t("providers.aiSdk")} *</Label>
                 <Select
                   value={draft.npm ?? OPENCODE_DEFAULT_NPM}
                   onValueChange={(v) => update("npm", v)}
@@ -357,7 +359,7 @@ export function ProviderEditor({
             )}
 
             <div className="grid gap-2 sm:col-span-2">
-              <Label>{`Model${modelRequired ? " *" : ""}`}</Label>
+              <Label>{`${t("providers.model")}${modelRequired ? " *" : ""}`}</Label>
               <ModelCombobox
                 ariaLabel={`Model${modelRequired ? " *" : ""}`}
                 value={draft.model ?? ""}
@@ -380,7 +382,7 @@ export function ProviderEditor({
 
             {isOpencode && (
               <div className="grid gap-2 sm:col-span-2">
-                <Label>Additional models</Label>
+                <Label>{t("providers.additionalModels")}</Label>
                 <p className="text-xs text-muted-foreground">
                   Extra models surfaced in OpenCode's picker (the primary
                   "Model" above is always included). ID is the model id; name
@@ -390,7 +392,7 @@ export function ProviderEditor({
                   {modelRows.map((m, i) => (
                     <div key={i} className="flex items-center gap-1.5">
                       <ModelCombobox
-                        ariaLabel="Model ID"
+                        ariaLabel={t("providers.modelId")}
                         value={m.id}
                         onValueChange={(v) =>
                           setModelList(
@@ -404,9 +406,9 @@ export function ProviderEditor({
                         className="flex-1"
                       />
                       <Input {...INPUT_NO_AUTO}
-                        aria-label="Model display name"
+                        aria-label={t("providers.modelDisplayName")}
                         className="flex-1"
-                        placeholder="Display name (optional)"
+                        placeholder={t("providers.displayNameOptional")}
                         value={m.name}
                         onChange={(e) =>
                           setModelList(
@@ -422,7 +424,7 @@ export function ProviderEditor({
                         type="button"
                         variant="ghost"
                         size="icon"
-                        aria-label="Remove model"
+                        aria-label={t("providers.removeModel")}
                         onClick={() =>
                           setModelList(modelRows.filter((_, j) => j !== i))
                         }
@@ -442,7 +444,7 @@ export function ProviderEditor({
                   }
                 >
                   <Plus className="size-4" />
-                  Add
+                  {t("providers.add")}
                 </Button>
               </div>
             )}
@@ -452,9 +454,7 @@ export function ProviderEditor({
               onOpenChange={setOverridesOpen}
               className="grid gap-2 sm:col-span-2"
             >
-              <CollapsibleTrigger className="flex w-full items-center justify-between gap-1.5 text-sm font-medium select-none [&[data-state=open]>svg]:rotate-90">
-                Advanced settings
-                <ChevronRight className="size-3.5 text-muted-foreground transition-transform" />
+              <CollapsibleTrigger className="flex w-full items-center justify-between gap-1.5 text-sm font-medium select-none [&[data-state=open]>svg]:rotate-90">{t("providers.advancedSettings")}<ChevronRight className="size-3.5 text-muted-foreground transition-transform" />
               </CollapsibleTrigger>
               <CollapsibleContent className="-mx-1.5 overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
                 <div className="grid gap-3 px-1.5 py-1.5">
@@ -475,12 +475,12 @@ export function ProviderEditor({
                       return (
                         <div key={i} className="flex items-center gap-1.5">
                           <Input {...INPUT_NO_AUTO}
-                            aria-label="Override key"
+                            aria-label={t("providers.overrideKey")}
                             aria-invalid={isDup || isManaged || undefined}
                             className={`font-mono flex-1${
                               isProtected ? " text-muted-foreground" : ""
                             }`}
-                            placeholder="KEY"
+                            placeholder={t("providers.keyUpper")}
                             value={o.key}
                             readOnly={isProtected}
                             tabIndex={isProtected ? -1 : undefined}
@@ -495,10 +495,10 @@ export function ProviderEditor({
                             spellCheck={false}
                           />
                           <Input {...INPUT_NO_AUTO}
-                            aria-label="Override value"
+                            aria-label={t("providers.overrideValue")}
                             className="font-mono flex-1"
                             placeholder={
-                              isProtected ? "Model id (append [1m] for 1M)" : "VALUE"
+                              isProtected ? t("providers.modelIdHint") : t("providers.valueUpper")
                             }
                             value={o.value}
                             onChange={(e) =>
@@ -520,7 +520,7 @@ export function ProviderEditor({
                               type="button"
                               variant="ghost"
                               size="icon"
-                              aria-label="Remove override"
+                              aria-label={t("providers.removeOverride")}
                               onClick={() =>
                                 setOverrides(
                                   overrideRows.filter((_, j) => j !== i)
@@ -561,7 +561,7 @@ export function ProviderEditor({
                     }
                   >
                     <Plus className="size-4" />
-                    Add
+                    {t("providers.add")}
                   </Button>
                 </div>
               </CollapsibleContent>
@@ -569,19 +569,17 @@ export function ProviderEditor({
           </div>
 
           <DialogFooter>
-            <Button type="button" variant="ghost" onClick={onClose}>
-              Cancel
-            </Button>
+            <Button type="button" variant="ghost" onClick={onClose}>{t("providers.cancel")}</Button>
             <Button type="submit" disabled={!canSave || saving}>
               {saving ? (
                 <>
                   <Loader2 className="size-4 animate-spin" />
-                  {isNew ? "Creating…" : "Saving…"}
+                  {isNew ? t("providers.creating") : t("providers.saving")}
                 </>
               ) : isNew ? (
-                "Create"
+                t("providers.create")
               ) : (
-                "Save"
+                t("providers.save")
               )}
             </Button>
           </DialogFooter>

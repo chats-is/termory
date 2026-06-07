@@ -160,6 +160,16 @@ export const en = {
   "providers.unnamedGateway": "(unnamed gateway)",
   "providers.noBaseUrl": "no base URL",
   "providers.noBindings": "No CLI bindings yet — edit to bind.",
+  "providers.displayNameForProvider": "Display name for this provider",
+  "providers.apiKeyBlank": "sk-… (leave blank to fill in later)",
+  "providers.keyUpper": "KEY",
+  "providers.valueUpper": "VALUE",
+  "providers.modelIdHint": "Model id (append [1m] for 1M)",
+  "providers.add": "Add",
+  "providers.creating": "Creating…",
+  "providers.saving": "Saving…",
+  "providers.gwUrlPlaceholder": "https://your-gateway.example.com",
+  "providers.bindTo": "Bind {app}",
 
   // Appearance
   "settings.appearance": "Appearance",

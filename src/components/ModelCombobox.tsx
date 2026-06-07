@@ -1,6 +1,7 @@
 import React from "react";
 import { ChevronsUpDown } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useT } from "@/i18n";
 import {
   Command,
   CommandEmpty,
@@ -24,7 +25,7 @@ export function ModelCombobox({
   onValueChange,
   options,
   loading,
-  placeholder = "Select or type a model id",
+  placeholder,
   ariaInvalid,
   ariaLabel,
   className
@@ -39,6 +40,8 @@ export function ModelCombobox({
   ariaLabel?: string;
   className?: string;
 }) {
+  const t = useT();
+  const placeholderText = placeholder ?? t("providers.modelPlaceholder");
   const [open, setOpen] = React.useState(false);
   // The fetched catalog can be a union of two `/models` lists → dedupe so
   // duplicate ids don't collide on the `key` / drop a row.
@@ -60,7 +63,7 @@ export function ModelCombobox({
         onValueChange={onValueChange}
         onFocus={() => setOpen(true)}
         onBlur={() => setOpen(false)}
-        placeholder={placeholder}
+        placeholder={placeholderText}
         aria-invalid={ariaInvalid}
         aria-label={ariaLabel}
         className="font-mono pr-8"
