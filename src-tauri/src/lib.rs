@@ -463,6 +463,21 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // macOS: re-launching the app from Finder / the Dock when it's
+            // already running (the window was closed → hidden in the menu
+            // bar, Dock icon gone) fires a Reopen event instead of a fresh
+            // launch. Without handling it the click does nothing and the app
+            // looks stuck. Re-show the window, same as the tray's "Open".
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                tray::show_main_window(app_handle);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (app_handle, event);
+            }
+        });
 }

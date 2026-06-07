@@ -283,7 +283,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     menu.build()
 }
 
-fn show_main_window(app: &AppHandle) {
+pub(crate) fn show_main_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         // A window is going on screen → restore the Dock icon.
         #[cfg(target_os = "macos")]
