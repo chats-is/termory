@@ -72,7 +72,7 @@ export const MemoryCard = React.forwardRef<
         {showSource && (
           <span className="flex items-center gap-1 shrink-0">
             {tools.map((tool) => {
-              const label = tool === "Other" ? "Memory" : sourceDisplayName(tool);
+              const label = tool === "Other" ? t("command.typeMemory") : sourceDisplayName(tool);
               return (
                 <span key={tool} aria-label={label}>
                   <BrandIcon source={tool === "Other" ? "Memory" : tool} />
