@@ -27,8 +27,6 @@ emit() {
   fi
 }
 
-printf '## Termory %s\n\n' "$TAG"
-
 emit feat     '✨ Features'
 emit fix      '🐛 Bug Fixes'
 emit perf     '⚡ Performance'
@@ -49,17 +47,16 @@ cat <<'MD'
 | Linux | `Termory_*_amd64.AppImage` · `*_amd64.deb` · `*_x86_64.rpm` |
 
 ### 🍎 macOS — first launch
-Builds are not Apple-notarized, so Gatekeeper warns the first time. Right-click
-**Termory** in Applications → **Open** → **Open**. If it says *"Termory is
-damaged and can't be opened"* (common on Apple Silicon), clear the download
-quarantine once, then open normally:
+Builds are not Apple-notarized, so macOS quarantines the download and may say
+*"Termory is damaged and can't be opened"* (common on Apple Silicon). The app
+is fine — clear the quarantine flag once, then open it normally:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Termory.app
 ```
 
-(Windows SmartScreen: **More info → Run anyway**.) The app is fine — this is
-just the unsigned-app prompt.
+(Drag Termory into **Applications** first; adjust the path if it lives
+elsewhere.) Windows SmartScreen: **More info → Run anyway**.
 
 ### 🔄 Auto-update
 The in-app updater (**Settings → Check for updates**) reads the signed
