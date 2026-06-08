@@ -103,10 +103,17 @@ export function UpdateDialog({
               {progressPct != null && <span className="tabular-nums">{progressPct}%</span>}
             </div>
             <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-              <div
-                className="h-full bg-primary transition-[width] duration-150"
-                style={{ width: progressPct != null ? `${progressPct}%` : "33%" }}
-              />
+              {progressPct != null ? (
+                // Known total → real progress, starting at 0%.
+                <div
+                  className="h-full bg-primary transition-[width] duration-150"
+                  style={{ width: `${progressPct}%` }}
+                />
+              ) : (
+                // Total / first chunk not known yet → indeterminate slide
+                // (never sits at a fake position that then resets to 0).
+                <div className="h-full w-2/5 rounded-full bg-primary animate-[progress-indeterminate_1.1s_ease-in-out_infinite]" />
+              )}
             </div>
           </div>
         )}
