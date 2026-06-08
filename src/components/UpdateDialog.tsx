@@ -103,17 +103,14 @@ export function UpdateDialog({
               {progressPct != null && <span className="tabular-nums">{progressPct}%</span>}
             </div>
             <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-              {progressPct != null ? (
-                // Known total → real progress, starting at 0%.
-                <div
-                  className="h-full bg-primary transition-[width] duration-150"
-                  style={{ width: `${progressPct}%` }}
-                />
-              ) : (
-                // Total / first chunk not known yet → indeterminate slide
-                // (never sits at a fake position that then resets to 0).
-                <div className="h-full w-2/5 rounded-full bg-primary animate-[progress-indeterminate_1.1s_ease-in-out_infinite]" />
-              )}
+              {/* Always start at 0% and only grow — never a fake mid-track
+                  position (or a segment that sweeps through the middle) that
+                  then snaps back to 0. Unknown total → stays 0% until the
+                  first chunk lands, which for the Tauri updater is ~immediate. */}
+              <div
+                className="h-full bg-primary transition-[width] duration-150"
+                style={{ width: `${progressPct ?? 0}%` }}
+              />
             </div>
           </div>
         )}

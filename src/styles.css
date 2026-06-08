@@ -207,11 +207,3 @@ input {
 [data-role="tool"] .message-body p + p {
   padding-left: 1em;
 }
-
-/* Indeterminate progress bar (UpdateDialog download before the total size /
- * first chunk is known): a segment that slides across the track instead of
- * sitting at a fake fixed position. */
-@keyframes progress-indeterminate {
-  0% { transform: translateX(-120%); }
-  100% { transform: translateX(360%); }
-}
