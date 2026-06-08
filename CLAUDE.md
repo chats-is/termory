@@ -126,9 +126,13 @@ A draft GitHub Release is created with the platform installers attached plus `la
 - `capabilities/default.json` grants `updater:default` + `process:default`.
 - Frontend: `Settings` page exposes "Check for updates" → `@tauri-apps/plugin-updater::check()` → "Download and install" → `update.downloadAndInstall()` → `@tauri-apps/plugin-process::relaunch()`.
 
-### One-time signing key setup (required before first signed release)
+### One-time signing key setup (DONE as of v0.2.6)
 
 The updater only installs artifacts whose signature matches a pubkey baked into the binary. Without a keypair, in-app updates won't work (but the GitHub Actions builds still produce installers — users can download manually).
+
+**Status: configured.** The keypair lives at `~/.tauri/termory.key` (local, password-protected — back it up; losing it means no more signed updates for existing users, and the locked bundle id makes that unrecoverable). The pubkey is baked into `tauri.conf.json` `plugins.updater.pubkey`, `bundle.createUpdaterArtifacts` is `true`, and the GitHub repo secrets `TAURI_SIGNING_PRIVATE_KEY` + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` are set. Signed updater artifacts (`.sig` + `latest.json`) ship from v0.2.6 on, so **auto-update works only for users already on ≥0.2.6** — earlier installs (no baked pubkey) must download the new version manually once. CI still creates a **draft** release; publish it (un-draft) so `…/releases/latest/download/latest.json` resolves.
+
+The original setup steps, kept for reference / re-keying:
 
 ```sh
 # Generates ~/.tauri/termory.key (private, password-protected) + termory.key.pub

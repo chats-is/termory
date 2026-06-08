@@ -28,7 +28,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "createUpdaterArtifacts": false,
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -44,7 +44,7 @@
         "https://github.com/chats-is/termory/releases/latest/download/latest.json"
       ],
       "dialog": false,
-      "pubkey": ""
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVGNUJENkNCRTAyRjExNDQKUldSRUVTL2d5OVpiWDY2Smh4cHF6OWpyUWMzdmRIc2hselRiNXZISkovWTY2eTF0clZBYk9EMzMK"
     }
   }
 }
