@@ -6,3 +6,8 @@ src-tauri/gen
 *.log
 .audit-sources/
 .claude/
+
+# Tauri updater signing key backup — PRIVATE. Never commit. The repo is
+# public; leaking this key lets anyone sign malicious auto-updates.
+.secrets/
+*.key
