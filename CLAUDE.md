@@ -122,7 +122,7 @@ A draft GitHub Release is created with the platform installers attached plus `la
 ### In-app updater (`tauri-plugin-updater`)
 
 - Plugin registered in `lib.rs`: `tauri_plugin_updater::Builder::new().build()` + `tauri_plugin_process::init()` for `relaunch()`.
-- `tauri.conf.json` declares `bundle.createUpdaterArtifacts: true` and `plugins.updater.endpoints` pointing at `https://github.com/copilot-is/termory/releases/latest/download/latest.json`.
+- `tauri.conf.json` declares `bundle.createUpdaterArtifacts: true` and `plugins.updater.endpoints` pointing at `https://github.com/chats-is/termory/releases/latest/download/latest.json`.
 - `capabilities/default.json` grants `updater:default` + `process:default`.
 - Frontend: `Settings` page exposes "Check for updates" → `@tauri-apps/plugin-updater::check()` → "Download and install" → `update.downloadAndInstall()` → `@tauri-apps/plugin-process::relaunch()`.
 

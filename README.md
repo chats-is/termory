@@ -4,9 +4,9 @@
 
 **The memory for your terminal AI coding tools — browse every session, and switch API providers in a click.**
 
-[![Release](https://img.shields.io/github/v/release/copilot-is/termory?include_prereleases&sort=semver)](https://github.com/copilot-is/termory/releases)
-[![Downloads](https://img.shields.io/github/downloads/copilot-is/termory/total?color=success)](https://github.com/copilot-is/termory/releases)
-[![License](https://img.shields.io/github/license/copilot-is/termory?color=blue)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/chats-is/termory?include_prereleases&sort=semver)](https://github.com/chats-is/termory/releases)
+[![Downloads](https://img.shields.io/github/downloads/chats-is/termory/total?color=success)](https://github.com/chats-is/termory/releases)
+[![License](https://img.shields.io/github/license/chats-is/termory?color=blue)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platform-macOS%20·%20Linux%20·%20Windows-555)
 ![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%20v2-24C8DB)
 
@@ -48,7 +48,7 @@ Going back to **Official** restores your original setup exactly — your native 
 
 ## Download
 
-Grab the installer for your platform from the [**Releases**](https://github.com/copilot-is/termory/releases) page:
+Grab the installer for your platform from the [**Releases**](https://github.com/chats-is/termory/releases) page:
 
 | Platform | File |
 |----------|------|

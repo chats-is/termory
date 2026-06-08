@@ -41,7 +41,7 @@
     "updater": {
       "active": true,
       "endpoints": [
-        "https://github.com/copilot-is/termory/releases/latest/download/latest.json"
+        "https://github.com/chats-is/termory/releases/latest/download/latest.json"
       ],
       "dialog": false,
       "pubkey": ""
