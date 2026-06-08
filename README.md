@@ -57,7 +57,13 @@ Grab the installer for your platform from the [**Releases**](https://github.com/
 | Windows | `.msi` · `.exe` |
 
 > [!NOTE]
-> Current builds are unsigned, so the OS may warn on first launch. On macOS, right-click the app and choose **Open**.
+> Builds are not Apple-notarized, so macOS Gatekeeper warns on first launch.
+> - **First try:** right-click Termory in Applications → **Open** → **Open** again.
+> - **If it says _"Termory is damaged and can't be opened"_** (common on Apple Silicon), clear the download quarantine flag once, then open normally:
+>   ```bash
+>   xattr -dr com.apple.quarantine /Applications/Termory.app
+>   ```
+> The app is fine — this is just the unsigned-app prompt. (Windows SmartScreen: **More info → Run anyway**.)
 
 ## Build from source
 
