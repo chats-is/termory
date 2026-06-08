@@ -288,7 +288,6 @@ export const en = {
   "settings.about.app": "App",
   "settings.about.version": "Version",
   "settings.about.check": "Check for updates",
-  "settings.about.checking": "Checking…",
   "settings.about.latest": "You're on the latest version.",
   "settings.about.checkFailed": "Update check failed: {error}",
   "settings.about.auto": "Check for updates automatically",

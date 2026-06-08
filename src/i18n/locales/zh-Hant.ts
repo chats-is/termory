@@ -270,7 +270,6 @@ export const zhHant: Record<MessageKey, string> = {
   "settings.about.app": "應用程式",
   "settings.about.version": "版本",
   "settings.about.check": "檢查更新",
-  "settings.about.checking": "檢查中…",
   "settings.about.latest": "已是最新版本。",
   "settings.about.checkFailed": "檢查更新失敗:{error}",
   "settings.about.auto": "自動檢查更新",

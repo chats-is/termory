@@ -5,9 +5,10 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { toast } from "sonner";
-import { Folder, FolderOpen, Loader2, Monitor, Moon, RefreshCw, Sun, Trash2 } from "lucide-react";
+import { Folder, FolderOpen, Monitor, Moon, RefreshCw, Sun, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -17,7 +18,6 @@ import {
 } from "@/components/ui/select";
 import { getConfig, setConfig } from "@/config";
 import { useI18n, LOCALES, type MessageKey } from "@/i18n";
-import { cn } from "@/lib/utils";
 
 type ThemeChoice = "system" | "light" | "dark";
 
@@ -117,22 +117,18 @@ export function SettingsPage({
                 {THEME_OPTIONS.map((opt) => {
                   const active = current === opt.value;
                   return (
-                    <button
+                    <Button
                       key={opt.value}
                       type="button"
+                      variant={active ? "default" : "outline"}
                       onClick={() => setTheme(opt.value)}
-                      className={cn(
-                        "flex flex-col items-center gap-1.5 rounded-md px-3 py-3 text-sm transition-colors outline outline-1",
-                        active
-                          ? "bg-primary text-primary-foreground outline-transparent"
-                          : "outline-foreground/5 hover:bg-accent hover:text-accent-foreground"
-                      )}
+                      className="flex-col h-auto gap-1.5 px-3 py-3 font-normal"
                     >
                       <span className="inline-flex items-center justify-center size-8">
                         {opt.icon}
                       </span>
                       <span>{t(opt.labelKey)}</span>
-                    </button>
+                    </Button>
                   );
                 })}
               </div>
@@ -265,12 +261,8 @@ export function SettingsPage({
                   disabled={checking}
                   onClick={() => void handleCheckUpdate()}
                 >
-                  {checking ? (
-                    <Loader2 className="size-4 animate-spin" />
-                  ) : (
-                    <RefreshCw className="size-4" />
-                  )}
-                  {checking ? t("settings.about.checking") : t("settings.about.check")}
+                  <RefreshCw className="size-4" />
+                  {t("settings.about.check")}
                 </Button>
               </div>
               <div className="flex items-center justify-between gap-3 pt-1">
@@ -280,23 +272,10 @@ export function SettingsPage({
                     {t("settings.about.autoDesc")}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={autoCheckUpdates}
-                  onClick={() => onAutoCheckUpdatesChange(!autoCheckUpdates)}
-                  className={cn(
-                    "relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors",
-                    autoCheckUpdates ? "bg-primary" : "bg-muted"
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "absolute top-0.5 inline-block size-4 rounded-full bg-background shadow-sm transition-transform",
-                      autoCheckUpdates ? "translate-x-[18px]" : "translate-x-0.5"
-                    )}
-                  />
-                </button>
+                <Switch
+                  checked={autoCheckUpdates}
+                  onCheckedChange={onAutoCheckUpdatesChange}
+                />
               </div>
             </div>
           </SettingsSection>
