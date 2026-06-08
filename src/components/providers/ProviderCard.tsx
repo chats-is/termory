@@ -1,5 +1,5 @@
 import React from "react";
-import { AlertTriangle, Check, CircleCheckBig, CircleOff, Loader2, Pencil, Trash2, Zap } from "lucide-react";
+import { CircleCheckBig, CircleOff, Loader2, Pencil, Trash2, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 import { useT } from "@/i18n";
 import { maskKey } from "@/lib/provider-utils";
 import { OPENCODE_DEFAULT_NPM } from "@/constants";
-import type { Provider, TestResult } from "@/types";
+import type { Provider } from "@/types";
 
 function ProviderFavicon({
   favicon,
@@ -50,7 +50,6 @@ export function ProviderCard({
   toggling,
   settingDefault,
   testing,
-  testResult,
   activatable = true,
   gatewayBadge,
   onToggleEnabled,
@@ -76,7 +75,6 @@ export function ProviderCard({
   toggling: boolean;
   settingDefault: boolean;
   testing: boolean;
-  testResult: TestResult | undefined;
   // False when the underlying CLI binary is missing from PATH — Set as
   // default / Enable toggle are hard-disabled because writing the live
   // config has no effect without a CLI to consume it. Edit / Delete /
@@ -260,22 +258,6 @@ export function ProviderCard({
             )}
           </div>
         </div>
-        {testResult && (
-          <div
-            className={cn(
-              "flex items-center gap-2 text-xs px-2.5 py-1.5 rounded-md",
-              testResult.ok
-                ? "bg-primary/10 text-primary"
-                : "bg-destructive/10 text-destructive"
-            )}
-          >
-            {testResult.ok ? <Check className="size-3.5" /> : <AlertTriangle className="size-3.5" />}
-            <span>
-              {testResult.status ? `HTTP ${testResult.status}` : t("providers.noResponse")} ·{" "}
-              {testResult.latencyMs}ms · {testResult.message}
-            </span>
-          </div>
-        )}
       </CardContent>
     </Card>
   );

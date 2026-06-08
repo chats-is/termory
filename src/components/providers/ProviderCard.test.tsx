@@ -8,7 +8,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { blankProvider } from "@/lib/provider-utils";
-import type { Provider, TestResult } from "@/types";
+import type { Provider } from "@/types";
 import { ProviderCard } from "./ProviderCard";
 
 // jsdom lacks ResizeObserver, which Radix Tooltip touches when a tooltip
@@ -43,8 +43,7 @@ const baseProps = {
   isInUse: false,
   toggling: false,
   settingDefault: false,
-  testing: false,
-  testResult: undefined as TestResult | undefined
+  testing: false
 };
 
 describe("ProviderCard — Edit/Delete visibility", () => {
@@ -135,22 +134,5 @@ describe("ProviderCard — test/connectivity", () => {
     );
     await user.click(screen.getByRole("button", { name: "Test" }));
     expect(onTest).toHaveBeenCalledTimes(1);
-  });
-
-  it("renders a connectivity result banner when testResult is present", () => {
-    render(
-      <ProviderCard
-        provider={makeProvider()}
-        {...baseProps}
-        testResult={{ ok: true, status: 200, latencyMs: 123, message: "OK" }}
-        onSetDefault={vi.fn()}
-        onTest={vi.fn()}
-        onEdit={vi.fn()}
-        onDelete={vi.fn()}
-      />
-    );
-    expect(screen.getByText(/HTTP 200/)).toBeInTheDocument();
-    expect(screen.getByText(/123ms/)).toBeInTheDocument();
-    expect(screen.getByText(/OK/)).toBeInTheDocument();
   });
 });

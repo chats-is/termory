@@ -152,28 +152,6 @@ export function ProvidersPage({
   }, [versionsLoading]);
   const [toggling, setToggling] = React.useState<string | null>(null);
   const [testing, setTesting] = React.useState<string | null>(null);
-  const [testResults, setTestResults] = React.useState<Record<string, TestResult>>({});
-  // Per-provider timers that auto-clear a test result 3s after it shows.
-  const testTimers = React.useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  // Show a test result, then auto-hide it after 2s (a re-test resets it).
-  const showTestResult = React.useCallback((id: string, result: TestResult) => {
-    setTestResults((cur) => ({ ...cur, [id]: result }));
-    if (testTimers.current[id]) clearTimeout(testTimers.current[id]);
-    testTimers.current[id] = setTimeout(() => {
-      setTestResults((cur) => {
-        const next = { ...cur };
-        delete next[id];
-        return next;
-      });
-      delete testTimers.current[id];
-    }, 2000);
-  }, []);
-  React.useEffect(
-    () => () => {
-      for (const t of Object.values(testTimers.current)) clearTimeout(t);
-    },
-    []
-  );
   const [settingDefault, setSettingDefault] = React.useState<string | null>(null);
   const [rechecking, setRechecking] = React.useState(false);
 
@@ -683,14 +661,12 @@ export function ProvidersPage({
     setTesting(target.id);
     try {
       const result = await invoke<TestResult>("test_provider_api", { provider: target });
-      showTestResult(target.id, result);
+      const detail = `${result.status ? `HTTP ${result.status}` : t("providers.noResponse")} · ${result.latencyMs}ms · ${result.message}`;
+      const msg = `${target.name} · ${detail}`;
+      if (result.ok) toast.success(msg);
+      else toast.error(msg);
     } catch (err) {
-      showTestResult(target.id, {
-        ok: false,
-        status: null,
-        latencyMs: 0,
-        message: String(err)
-      });
+      toast.error(`${target.name} · ${String(err)}`);
     } finally {
       setTesting(null);
     }
@@ -817,7 +793,6 @@ export function ProvidersPage({
                   toggling={toggling === p.id}
                   settingDefault={settingDefault === p.id}
                   testing={testing === p.id}
-                  testResult={testResults[p.id]}
                   activatable={installed[app]}
                   onToggleEnabled={isOpencode ? () => void toggleEnabled(p) : undefined}
                   onSetDefault={() => void setAsDefault(p)}
@@ -846,7 +821,6 @@ export function ProvidersPage({
                   toggling={toggling === synth.id}
                   settingDefault={settingDefault === synth.id}
                   testing={testing === synth.id}
-                  testResult={testResults[synth.id]}
                   activatable={installed[app]}
                   onToggleEnabled={
                     isOpencode ? () => void toggleGatewayEnabled(synth) : undefined
