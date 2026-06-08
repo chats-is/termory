@@ -19,34 +19,28 @@ jobs:
     outputs:
       release_id: ${{ steps.create.outputs.result }}
     steps:
+      # Full history + tags so release-notes.sh can diff against the previous
+      # tag and build the conventional-commit changelog.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes
+        run: bash .github/release-notes.sh "${GITHUB_REF#refs/tags/}" > release-notes.md
+
       - name: Create draft release
         uses: actions/github-script@v7
         id: create
         with:
           script: |
+            const fs = require('fs');
             const tag = context.ref.replace('refs/tags/', '');
             const { data } = await github.rest.repos.createRelease({
               owner: context.repo.owner,
               repo: context.repo.repo,
               tag_name: tag,
               name: `Termory ${tag}`,
-              body: [
-                `## Termory ${tag}`,
-                '',
-                'Built artifacts attached below. See the macOS / Windows / Linux',
-                'installers (or pick the matching `.tar.gz` / `.zip` for portable',
-                'use). `latest.json` is consumed by the in-app updater.',
-                '',
-                '### macOS — first launch',
-                'Builds are not Apple-notarized, so Gatekeeper warns the first time.',
-                'Right-click Termory → **Open** → **Open**. If it says *"Termory is',
-                'damaged and can\'t be opened"* (common on Apple Silicon), clear the',
-                'download quarantine once, then open normally:',
-                '```',
-                'xattr -dr com.apple.quarantine /Applications/Termory.app',
-                '```',
-                'The app is fine — this is just the unsigned-app prompt.',
-              ].join('\n'),
+              body: fs.readFileSync('release-notes.md', 'utf8'),
               draft: true,
               prerelease: false,
             });
