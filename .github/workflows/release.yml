@@ -115,3 +115,23 @@ jobs:
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
+
+  # Every platform build uploaded into the draft → flip it to published so
+  # the release goes live and …/releases/latest/download/latest.json
+  # resolves for the in-app updater. `needs: build` gates this on ALL matrix
+  # jobs succeeding, so a partial/failed build leaves the release a draft
+  # (manually publishable) instead of shipping an incomplete release.
+  publish:
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish release (un-draft)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: ${{ needs.create-release.outputs.release_id }},
+              draft: false,
+            });
