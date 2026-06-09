@@ -10,7 +10,12 @@ import {
   ContextMenuTrigger
 } from "@/components/ui/context-menu";
 import { copyToClipboard } from "@/lib/clipboard";
-import { basename, resumeCommandFor } from "@/lib/session-utils";
+import { basename, recordRel, resumeCommandFor } from "@/lib/session-utils";
+import {
+  runClaudeMigration,
+  runRecordDelete,
+  type MigrateResult
+} from "@/lib/migrate";
 import { useT } from "@/i18n";
 
 /**
@@ -24,6 +29,8 @@ export function ListItemMenu({
   messageId,
   source,
   project,
+  onLocalDelete,
+  onLocalMigrate,
   children
 }: {
   path: string;
@@ -35,6 +42,10 @@ export function ListItemMenu({
   source?: string;
   /** Session project/cwd — the terminal `cd`s here before resuming. */
   project?: string;
+  /** Drop this row from the list after a successful delete (local, no re-scan). */
+  onLocalDelete?: () => void;
+  /** Re-point this row after a successful migrate (local, no re-scan). */
+  onLocalMigrate?: (res: MigrateResult) => void;
   children: React.ReactNode;
 }) {
   const t = useT();
@@ -50,6 +61,31 @@ export function ListItemMenu({
       (err) => toast.error(t("menu.terminalError", { error: String(err) }))
     );
   };
+
+  // Per-record migration: a Claude session row migrates that one session; a
+  // Claude auto-memory row (a .md under ~/.claude/projects/<slug>/memory/)
+  // migrates that one file. Whole-project migration lives on the sidebar
+  // project row, not here.
+  const isClaudeSession = source === "Claude" && !!id;
+  const isClaudeAutoMemory =
+    !id &&
+    path.includes("/projects/") &&
+    path.includes("/memory/") &&
+    path.endsWith(".md");
+  // Gemini: delete only (migration of Gemini is not implemented yet).
+  const isGeminiSession = source === "Gemini" && !!id;
+  const isGeminiAutoMemory =
+    !id &&
+    path.includes("/.gemini/") &&
+    path.includes("/memory/") &&
+    path.endsWith(".md");
+
+  // Migrate/delete locate every record by project + `rel` (the file's path
+  // within its project dir) — uniform across Claude/Gemini, session/memory.
+  // The backend rebuilds the path under the bounded project dir, so the
+  // frontend never passes a raw filesystem path.
+  const proj = project ?? "";
+  const rel = recordRel(path);
 
   return (
     <ContextMenu>
@@ -84,6 +120,106 @@ export function ListItemMenu({
           <ContextMenuItem onSelect={() => copy(messageId)}>
             {t("menu.copyMessageId")}
           </ContextMenuItem>
+        )}
+        {isClaudeSession && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              onSelect={() =>
+                void runClaudeMigration(
+                  "migrate_claude_session",
+                  { project: proj, rel },
+                  t,
+                  onLocalMigrate
+                )
+              }
+            >
+              {t("menu.migrateSession")}
+            </ContextMenuItem>
+            <ContextMenuItem
+              variant="destructive"
+              onSelect={() =>
+                void runRecordDelete(
+                  "delete_claude_session",
+                  { project: proj, rel },
+                  id ?? basename(path),
+                  t,
+                  onLocalDelete
+                )
+              }
+            >
+              {t("menu.deleteSession")}
+            </ContextMenuItem>
+          </>
+        )}
+        {isClaudeAutoMemory && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              onSelect={() =>
+                void runClaudeMigration(
+                  "migrate_claude_memory",
+                  { project: proj, rel },
+                  t,
+                  onLocalMigrate
+                )
+              }
+            >
+              {t("menu.migrateMemory")}
+            </ContextMenuItem>
+            <ContextMenuItem
+              variant="destructive"
+              onSelect={() =>
+                void runRecordDelete(
+                  "delete_claude_memory",
+                  { project: proj, rel },
+                  basename(path),
+                  t,
+                  onLocalDelete
+                )
+              }
+            >
+              {t("menu.deleteMemory")}
+            </ContextMenuItem>
+          </>
+        )}
+        {isGeminiSession && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              variant="destructive"
+              onSelect={() =>
+                void runRecordDelete(
+                  "delete_gemini_session",
+                  { project: proj, rel },
+                  id ?? basename(path),
+                  t,
+                  onLocalDelete
+                )
+              }
+            >
+              {t("menu.deleteSession")}
+            </ContextMenuItem>
+          </>
+        )}
+        {isGeminiAutoMemory && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              variant="destructive"
+              onSelect={() =>
+                void runRecordDelete(
+                  "delete_gemini_memory",
+                  { project: proj, rel },
+                  basename(path),
+                  t,
+                  onLocalDelete
+                )
+              }
+            >
+              {t("menu.deleteMemory")}
+            </ContextMenuItem>
+          </>
         )}
       </ContextMenuContent>
     </ContextMenu>

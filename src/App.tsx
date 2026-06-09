@@ -30,9 +30,11 @@ import type {
   CliApp,
   Favorite,
   MemoryTool,
+  Project,
   Provider,
   Gateway,
   Route,
+  ScanResult,
   SearchHit,
   SessionDetail,
   SessionMessage
@@ -59,6 +61,25 @@ import {
 import { addSetValue, toggleSetValue } from "@/lib/set-utils";
 import { RAIL_ROUTE_ORDER } from "@/constants";
 import { usePersistentState } from "@/hooks/usePersistentState";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger
+} from "@/components/ui/context-menu";
+import {
+  runClaudeMigration,
+  runRecordDelete,
+  type MigrateResult
+} from "@/lib/migrate";
+import {
+  remappedPath,
+  reconcileTombstones,
+  projectKey,
+  projectDirOf,
+  recordUnderFolder,
+  withProject
+} from "@/lib/records";
 import { ActivityRail } from "@/components/ActivityRail";
 import { ListItemMenu } from "@/components/ListItemMenu";
 import { BrandIcon } from "@/components/BrandIcon";
@@ -125,6 +146,9 @@ export function App() {
 
   const t = useT();
   const [sessions, setSessions] = React.useState<AppSession[]>([]);
+  // First-class projects (folders/entities), independent of records. The
+  // sidebar renders from this; deleting a record never removes a project here.
+  const [projects, setProjects] = React.useState<Project[]>([]);
   const [selected, setSelected] = React.useState<AppSession | null>(null);
   const [detail, setDetail] = React.useState<SessionDetail | null>(null);
   const [query, setQuery] = React.useState("");
@@ -342,12 +366,31 @@ export function App() {
     [setPane]
   );
 
-  const applyScanResult = React.useCallback((result: AppSession[]) => {
-    setSessions(result);
+  // Records / projects just deleted/migrated locally. A background re-scan that
+  // predates the mutation (stale, still in-flight) would otherwise re-add them
+  // and clobber the optimistic update — so we hide tombstoned keys until a scan
+  // confirms they're gone, then drop the tombstone. Records key by path,
+  // projects by source+cwd.
+  const tombstonesRef = React.useRef<Set<string>>(new Set());
+  const projectTombstonesRef = React.useRef<Set<string>>(new Set());
+
+  const applyScanResult = React.useCallback((incoming: ScanResult) => {
+    const records = reconcileTombstones(
+      incoming.records,
+      tombstonesRef.current,
+      (s) => s.path
+    );
+    const projs = reconcileTombstones(
+      incoming.projects,
+      projectTombstonesRef.current,
+      projectKey
+    );
+    setSessions(records);
+    setProjects(projs);
     setSelected((current) => {
       if (!current) return null;
       return (
-        result.find(
+        records.find(
           (session) =>
             session.source === current.source &&
             session.path === current.path &&
@@ -362,7 +405,7 @@ export function App() {
     setLoading(true);
     setError(null);
     try {
-      const result = await invoke<AppSession[]>("scan_all_sessions");
+      const result = await invoke<ScanResult>("scan_all_sessions");
       applyScanResult(result);
     } catch (err) {
       console.error("scan_all_sessions failed", err);
@@ -372,8 +415,120 @@ export function App() {
     }
   }, [applyScanResult]);
 
+  // After a migrate/delete, mutate the in-memory lists directly instead of
+  // re-scanning every CLI. Deleting a record only removes the record — its
+  // project stays in `projects` (it's first-class, the folder still exists), so
+  // deleting a project's last session leaves it showing as an empty project.
+  // `removeProject` is passed ONLY for a whole-project delete (the folder is
+  // gone), which also drops the project from `projects`.
+  const removeRecordsLocally = React.useCallback(
+    (
+      match: (s: AppSession) => boolean,
+      removeProject?: { source: string; project: string }
+    ) => {
+      setSessions((prev) => {
+        for (const s of prev) if (match(s)) tombstonesRef.current.add(s.path);
+        return prev.filter((s) => !match(s));
+      });
+      if (removeProject) {
+        const k = projectKey(removeProject);
+        projectTombstonesRef.current.add(k);
+        setProjects((prev) => prev.filter((p) => projectKey(p) !== k));
+      }
+      setSelected((cur) => (cur && match(cur) ? null : cur));
+    },
+    []
+  );
+  // Migrate (move). Matched records are re-pointed to the new project.
+  // `opts.newProjectSource` (a CLI source) adds the destination project to
+  // `projects` — set it only when a *session* moves there (a project shows
+  // because it has a session; a lone migrated memory wouldn't, so the scan
+  // wouldn't list it and adding it here would flicker). `opts.removeProject`
+  // (whole-project migrate, move mode) drops the old project — its folder moved
+  // away; a single-record migrate omits it so the source project stays.
+  const remapRecordsLocally = React.useCallback(
+    (
+      match: (s: AppSession) => boolean,
+      res: MigrateResult,
+      opts: {
+        newProjectSource?: string;
+        removeProject?: { source: string; project: string };
+      } = {}
+    ) => {
+      const remap = (s: AppSession): AppSession => ({
+        ...s,
+        project: res.new_project,
+        path: remappedPath(s.path, res.old_dir, res.new_dir)
+      });
+      setSessions((prev) => {
+        for (const s of prev) if (match(s)) tombstonesRef.current.add(s.path);
+        return prev.map((s) => (match(s) ? remap(s) : s));
+      });
+      setProjects((prev) => {
+        let next = prev;
+        if (opts.removeProject) {
+          const k = projectKey(opts.removeProject);
+          projectTombstonesRef.current.add(k);
+          next = next.filter((p) => projectKey(p) !== k);
+        }
+        if (opts.newProjectSource) {
+          const newProj = {
+            source: opts.newProjectSource,
+            project: res.new_project
+          };
+          projectTombstonesRef.current.delete(projectKey(newProj));
+          next = withProject(next, newProj);
+        }
+        return next;
+      });
+      setSelected((cur) => (cur && match(cur) ? remap(cur) : cur));
+    },
+    []
+  );
+
+  // Match EVERY record stored in a project's CLI folder (the slug/hash dir) —
+  // its sessions AND its auto-memory — so delete/migrate-project drop all of
+  // them from display (the backend removed/moved the whole folder). The folder
+  // is found from a session, or — for a project with only memory left — from
+  // the auto-memory under it (path under the CLI's project tree + `/memory/`).
+  // A cwd-level CLAUDE.md/AGENTS.md lives OUTSIDE this folder, so it's never
+  // matched (the backend never deletes it; it keeps showing).
+  const projectRecordMatch = React.useCallback(
+    (source: string, project: string) => {
+      const marker = source === "Gemini" ? "/.gemini/tmp/" : "/projects/";
+      const anyRecord =
+        sessions.find((s) => s.source === source && s.project === project) ??
+        sessions.find(
+          (s) =>
+            s.project === project &&
+            s.path.includes(marker) &&
+            s.path.includes("/memory/")
+        );
+      if (anyRecord) {
+        return recordUnderFolder(projectDirOf(anyRecord.path));
+      }
+      return (s: AppSession) => s.source === source && s.project === project;
+    },
+    [sessions]
+  );
+
+  // Everything that SHOWS under a project (source S, cwd C): its sessions, plus
+  // the memory/skills at that cwd tagged for S — the auto-memory AND the cwd's
+  // own CLAUDE.md / AGENTS.md / skills. Delete-project drops ALL of it from
+  // display ("project gone → no data"). The backend only removed the slug
+  // folder, so the cwd's own files stay on disk but stop showing here.
+  const projectDataMatch = React.useCallback(
+    (source: string, project: string) =>
+      (r: AppSession): boolean =>
+        r.project === project &&
+        (r.source === source ||
+          ((isMemoryItem(r) || isSkillItem(r)) &&
+            memoryToolsOf(r).includes(source as MemoryTool))),
+    []
+  );
+
   React.useEffect(() => {
-    const unlisten = listen<AppSession[]>("termory:sources-changed", (event) => {
+    const unlisten = listen<ScanResult>("termory:sources-changed", (event) => {
       setError(null);
       applyScanResult(event.payload);
     });
@@ -552,23 +707,42 @@ export function App() {
 
   const sourceGroups = React.useMemo(() => {
     const sources: string[] = ["All", "Codex", "Claude", "Gemini", "OpenCode"];
+    // Session count per (source, cwd) — empty projects simply get 0.
+    const counts = new Map<string, number>();
+    for (const session of sessionItems) {
+      if (!session.project) continue;
+      const key = `${session.source}\n${session.project}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
     return sources.map((item) => {
       const sourceSessions =
         item === "All"
           ? sessionItems
           : sessionItems.filter((session) => session.source === item);
-      const projects = Array.from(
-        sourceSessions
-          .filter((session) => item !== "All" && session.project)
-          .reduce((map, session) => {
-            map.set(session.project, (map.get(session.project) ?? 0) + 1);
-            return map;
-          }, new Map<string, number>())
-      ).sort(([left], [right]) => left.localeCompare(right));
+      // Project list comes from the first-class `projects` (so empty projects
+      // show), not from grouping records — deleting a project's last record
+      // can't make it vanish here.
+      const projectList: [string, number][] =
+        item === "All"
+          ? []
+          : projects
+              .filter((p) => p.source === item)
+              .map(
+                (p) =>
+                  [p.project, counts.get(`${p.source}\n${p.project}`) ?? 0] as [
+                    string,
+                    number
+                  ]
+              )
+              .sort(([left], [right]) => left.localeCompare(right));
 
-      return { source: item, count: sourceSessions.length, projects };
+      return {
+        source: item,
+        count: sourceSessions.length,
+        projects: projectList
+      };
     });
-  }, [sessionItems]);
+  }, [sessionItems, projects]);
 
   return (
     <div className="relative grid grid-rows-[1fr_auto] w-full h-screen text-foreground bg-background">
@@ -705,9 +879,10 @@ export function App() {
                       for (const [projectName, count] of group.projects) {
                         const projActive =
                           source === group.source && project === projectName;
-                        rows.push(
+                        const projKey = `project:${group.source}:${projectName}`;
+                        const projRow = (
                           <div
-                            key={`project:${group.source}:${projectName}`}
+                            key={projKey}
                             role="button"
                             tabIndex={0}
                             aria-current={projActive ? "page" : undefined}
@@ -746,6 +921,82 @@ export function App() {
                               {count}
                             </span>
                           </div>
+                        );
+                        // Claude + Gemini project rows get a right-click menu.
+                        // Delete is available for both; whole-project migration
+                        // is Claude-only for now.
+                        rows.push(
+                          group.source === "Claude" ||
+                          group.source === "Gemini" ? (
+                            <ContextMenu key={projKey}>
+                              <ContextMenuTrigger asChild>
+                                {projRow}
+                              </ContextMenuTrigger>
+                              <ContextMenuContent className="w-56">
+                                {/* Migrate is Claude-only and pointless for an
+                                    empty project (count 0) — delete only there. */}
+                                {group.source === "Claude" && count > 0 && (
+                                  <ContextMenuItem
+                                    onSelect={() =>
+                                      void runClaudeMigration(
+                                        "migrate_claude_project",
+                                        { oldPath: projectName },
+                                        t,
+                                        (res) =>
+                                          remapRecordsLocally(
+                                            projectRecordMatch(
+                                              group.source,
+                                              projectName
+                                            ),
+                                            res,
+                                            {
+                                              newProjectSource: group.source,
+                                              removeProject: {
+                                                source: group.source,
+                                                project: projectName
+                                              }
+                                            }
+                                          )
+                                      )
+                                    }
+                                  >
+                                    {t("menu.migrateProject")}
+                                  </ContextMenuItem>
+                                )}
+                                <ContextMenuItem
+                                  variant="destructive"
+                                  onSelect={() =>
+                                    void runRecordDelete(
+                                      group.source === "Gemini"
+                                        ? "delete_gemini_project"
+                                        : "delete_claude_project",
+                                      { project: projectName },
+                                      projectDisplayName(projectName),
+                                      t,
+                                      () =>
+                                        removeRecordsLocally(
+                                          // Project gone → drop ALL its data
+                                          // (sessions + auto-memory + the cwd's
+                                          // own CLAUDE.md/skills) from display.
+                                          projectDataMatch(
+                                            group.source,
+                                            projectName
+                                          ),
+                                          {
+                                            source: group.source,
+                                            project: projectName
+                                          }
+                                        )
+                                    )
+                                  }
+                                >
+                                  {t("menu.deleteProject")}
+                                </ContextMenuItem>
+                              </ContextMenuContent>
+                            </ContextMenu>
+                          ) : (
+                            projRow
+                          )
                         );
                       }
                     }
@@ -807,11 +1058,23 @@ export function App() {
                             id={session.id}
                             source={session.source}
                             project={session.project}
+                            onLocalDelete={() =>
+                              removeRecordsLocally((s) => s.path === session.path)
+                            }
+                            onLocalMigrate={(res) =>
+                              remapRecordsLocally(
+                                (s) => s.path === session.path,
+                                res,
+                                // A migrated session lands in (and surfaces) the
+                                // destination project.
+                                { newProjectSource: session.source }
+                              )
+                            }
                           >
                           <button
                             onClick={() => setSelected(session)}
                             className={cn(
-                              "w-full text-left rounded-lg px-2 py-2 transition-colors flex flex-col gap-1 select-none",
+                              "w-full text-left rounded-lg px-2 py-2 flex flex-col gap-1 select-none",
                               isActive
                                 ? "bg-primary text-primary-foreground [&_*]:text-primary-foreground"
                                 : "hover:bg-accent/60 data-[state=open]:bg-accent/60"
@@ -885,7 +1148,17 @@ export function App() {
                       />
                     )}
                     {filteredMemories.map((item) => (
-                      <ListItemMenu key={sessionKey(item)} path={item.path}>
+                      <ListItemMenu
+                        key={sessionKey(item)}
+                        path={item.path}
+                        project={item.project}
+                        onLocalDelete={() =>
+                          removeRecordsLocally((s) => s.path === item.path)
+                        }
+                        onLocalMigrate={(res) =>
+                          remapRecordsLocally((s) => s.path === item.path, res)
+                        }
+                      >
                         <MemoryCard
                           item={item}
                           selected={selected}
@@ -925,7 +1198,17 @@ export function App() {
                       />
                     )}
                     {filteredSkills.map((item) => (
-                      <ListItemMenu key={sessionKey(item)} path={item.path}>
+                      <ListItemMenu
+                        key={sessionKey(item)}
+                        path={item.path}
+                        project={item.project}
+                        onLocalDelete={() =>
+                          removeRecordsLocally((s) => s.path === item.path)
+                        }
+                        onLocalMigrate={(res) =>
+                          remapRecordsLocally((s) => s.path === item.path, res)
+                        }
+                      >
                         <MemoryCard
                           item={item}
                           selected={selected}

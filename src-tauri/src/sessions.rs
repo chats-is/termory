@@ -66,6 +66,24 @@ pub struct DailyTokenBreakdown {
     pub hour_tokens: Vec<u64>,
 }
 
+/// A first-class project: a working directory a CLI keeps records for. Shown
+/// in the sidebar as long as its backing folder / entity exists, independently
+/// of whether it currently has any records. `project` is the cwd string that
+/// records carry in their own `project` field — the join key between a project
+/// and its records. An empty project = one in the list that no record points at.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Project {
+    pub source: String,
+    pub project: String,
+}
+
+/// What a scan returns: the projects that exist + the records inside them.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ScanResult {
+    pub projects: Vec<Project>,
+    pub records: Vec<AppSession>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppSession {
     pub id: String,
@@ -464,7 +482,7 @@ pub fn search_sessions(query: &str) -> Result<Vec<SearchHit>, Box<dyn Error>> {
         return Ok(Vec::new());
     }
     let needle = trimmed.to_lowercase();
-    let sessions = scan_sessions()?;
+    let sessions = scan_sessions()?.records;
     let mut hits = Vec::new();
     for session in sessions {
         let Some(detail) = get_session_for_search(&session) else {
@@ -725,22 +743,177 @@ fn collapse_whitespace(s: &str) -> String {
     out
 }
 
-pub fn scan_sessions() -> Result<Vec<AppSession>, Box<dyn Error>> {
-    let mut sessions = Vec::new();
-    sessions.extend(scan_codex()?);
-    sessions.extend(scan_claude()?);
-    sessions.extend(scan_gemini()?);
-    sessions.extend(scan_opencode()?);
-    let project_cwds: HashSet<String> = sessions
+pub fn scan_sessions() -> Result<ScanResult, Box<dyn Error>> {
+    // Records (sessions + memory + skills) — the contents that live INSIDE
+    // projects. Scanned independently of the project list.
+    let mut records = Vec::new();
+    records.extend(scan_codex()?);
+    records.extend(scan_claude()?);
+    records.extend(scan_gemini()?);
+    records.extend(scan_opencode()?);
+    let project_cwds: HashSet<String> = records
         .iter()
         .filter(|s| !s.project.is_empty() && Path::new(&s.project).is_absolute())
         .map(|s| s.project.clone())
         .collect();
-    sessions.extend(scan_memory(&project_cwds)?);
-    sessions.extend(scan_skills(&project_cwds)?);
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    refresh_session_path_index(&sessions);
-    Ok(sessions)
+    records.extend(scan_memory(&project_cwds)?);
+    records.extend(scan_skills(&project_cwds)?);
+    records.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+    // Projects = the project ENTITIES each CLI actually keeps, enumerated
+    // directly and INDEPENDENTLY of records. A project shows because its entity
+    // exists (folder / row / cwd), not because a record groups under it. The
+    // folder-based CLIs (Claude, Gemini) are enumerated from disk;
+    // `add_record_projects` fills in CLIs that have no enumerable folder entity
+    // (Codex — sessions in one DB keyed by cwd; OpenCode — likewise for now).
+    let mut projects = scan_project_folders();
+    // OpenCode keeps projects in a `project` table independent of sessions, so a
+    // project with no sessions (empty) still exists — surface those by worktree.
+    // Projects WITH sessions come from `add_record_projects` below (by the
+    // session's directory), so there's no overlap.
+    projects.extend(opencode_empty_projects());
+    add_record_projects(&mut projects, &records);
+
+    refresh_session_path_index(&records);
+    Ok(ScanResult { projects, records })
+}
+
+/// Enumerate the project FOLDERS each folder-based CLI keeps on disk — the
+/// project list, independent of whether any record lives inside. Claude: every
+/// slug dir under `~/.claude/projects/`. Gemini: every `~/.gemini/tmp/<id>/`
+/// carrying a `.project_root` marker.
+fn scan_project_folders() -> Vec<Project> {
+    let mut projects = Vec::new();
+    if let Some(root) = claude_projects_root() {
+        projects.extend(claude_project_folders_in(&root));
+    }
+    if let Some(tmp) = gemini_tmp_root() {
+        projects.extend(gemini_project_folders_in(&tmp));
+    }
+    projects
+}
+
+/// Every slug dir under `~/.claude/projects/` is a Claude project. The cwd is
+/// read from a sibling session (authoritative) or, for a session-less dir,
+/// decoded from the slug (lossy fallback). A real slug is a sanitized absolute
+/// path, so it always contains `-`; skip plain single-word dirs.
+fn claude_project_folders_in(projects: &Path) -> Vec<Project> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(projects) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(slug) = dir.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !slug.contains('-') {
+            continue;
+        }
+        let cwd =
+            claude_cwd_from_project_dir(&dir).unwrap_or_else(|| decode_claude_project_slug(slug));
+        out.push(Project {
+            source: "Claude".to_string(),
+            project: cwd,
+        });
+    }
+    out
+}
+
+/// Every `~/.gemini/tmp/<id>/` dir with a `.project_root` marker is a Gemini
+/// project (the marker excludes `bin` and other non-project temp dirs); the
+/// project path is the marker's contents.
+fn gemini_project_folders_in(tmp: &Path) -> Vec<Project> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(tmp) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if dir.is_dir() {
+            if let Some(root) = gemini_project_root(&dir) {
+                out.push(Project {
+                    source: "Gemini".to_string(),
+                    project: root,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// OpenCode persists projects in a `project` table independently of sessions
+/// (deleting/archiving a session never removes the row), so a project with no
+/// live session still exists. Surface those session-less rows as projects keyed
+/// by `worktree` — projects WITH sessions come from `add_record_projects` (by
+/// the session's `directory`), so the two don't overlap.
+fn opencode_empty_projects() -> Vec<Project> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let db = home
+        .join(".local")
+        .join("share")
+        .join("opencode")
+        .join("opencode.db");
+    if !db.exists() {
+        return Vec::new();
+    }
+    opencode_empty_projects_in(&db).unwrap_or_default()
+}
+
+fn opencode_empty_projects_in(path: &Path) -> Result<Vec<Project>, Box<dyn Error>> {
+    if fs::metadata(path).map(|m| m.len() == 0).unwrap_or(false) {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    if !table_exists(&conn, "project")? || !table_exists(&conn, "session")? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "select worktree from project p \
+         where not exists ( \
+            select 1 from session s \
+            where s.project_id = p.id and s.parent_id is null and s.time_archived is null \
+         )",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for worktree in rows.flatten() {
+        if !worktree.is_empty() {
+            out.push(Project {
+                source: "OpenCode".to_string(),
+                project: worktree,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Fill in projects for CLIs that keep no enumerable folder entity (Codex;
+/// OpenCode sessions are keyed by `directory`): each session-type record's
+/// (source, cwd) becomes a project if not already present. Memory / Skill are
+/// excluded — they're contents, and a folder-based CLI's projects already come
+/// from disk.
+fn add_record_projects(projects: &mut Vec<Project>, records: &[AppSession]) {
+    let mut seen: HashSet<(String, String)> = projects
+        .iter()
+        .map(|p| (p.source.clone(), p.project.clone()))
+        .collect();
+    for s in records {
+        if s.source == "Memory" || s.source == "Skill" || s.project.is_empty() {
+            continue;
+        }
+        if seen.insert((s.source.clone(), s.project.clone())) {
+            projects.push(Project {
+                source: s.source.clone(),
+                project: s.project.clone(),
+            });
+        }
+    }
 }
 
 /// Lookup table `(source, id) → path` for every record we returned to
@@ -1182,6 +1355,9 @@ fn scan_claude_projects(root: &Path) -> Result<Vec<AppSession>, Box<dyn Error>> 
         return Ok(Vec::new());
     }
 
+    // Sessions only — the project LIST comes from `scan_project_folders`, which
+    // enumerates the slug dirs directly (so empty / memory-only projects show
+    // regardless of records). This function returns just the session records.
     let mut sessions = Vec::new();
     for project_entry in fs::read_dir(root)? {
         let project_entry = project_entry?;
@@ -1189,7 +1365,7 @@ fn scan_claude_projects(root: &Path) -> Result<Vec<AppSession>, Box<dyn Error>> 
         if !project_dir.is_dir() {
             continue;
         }
-        for entry in fs::read_dir(project_dir)? {
+        for entry in fs::read_dir(&project_dir)? {
             let entry = entry?;
             let path = entry.path();
             if !path.is_file() || !is_claude_session_file(&path) {
@@ -1233,6 +1409,8 @@ fn scan_gemini() -> Result<Vec<AppSession>, Box<dyn Error>> {
     if !tmp_dir.exists() {
         return Ok(Vec::new());
     }
+    // Sessions only — the project LIST comes from `scan_project_folders`, which
+    // enumerates the `~/.gemini/tmp/<id>/` dirs (with `.project_root`) directly.
     let mut sessions = Vec::new();
     for entry in fs::read_dir(tmp_dir)? {
         let entry = entry?;
@@ -1259,6 +1437,14 @@ fn scan_gemini() -> Result<Vec<AppSession>, Box<dyn Error>> {
     let mut sessions = latest_by_id.into_values().collect::<Vec<_>>();
     sessions.sort_by(|a, b| a.started_at.cmp(&b.started_at));
     Ok(sessions)
+}
+
+/// The project path recorded in `~/.gemini/tmp/<id>/.project_root`, if any.
+fn gemini_project_root(dir: &Path) -> Option<String> {
+    fs::read_to_string(dir.join(".project_root"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn scan_opencode() -> Result<Vec<AppSession>, Box<dyn Error>> {
@@ -2069,6 +2255,508 @@ fn resolve_dashed_path(base: &Path, segments: &[&str]) -> std::path::PathBuf {
     current
 }
 
+// ---------------------------------------------------------------------------
+// Project migration (Claude) — re-home a renamed project's sessions + memory
+// ---------------------------------------------------------------------------
+
+/// Counts + path info returned to the UI after a migration. `old_dir` /
+/// `new_dir` are the source/destination slug dirs (absolute) and `new_project`
+/// is the destination project path — the frontend uses them to re-point the
+/// moved records' `project` + `path` in memory, instead of a full re-scan.
+#[derive(Serialize)]
+pub struct ClaudeMigrationResult {
+    pub sessions: usize,
+    pub memory_files: usize,
+    pub old_dir: String,
+    pub new_dir: String,
+    pub new_project: String,
+}
+
+/// `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`).
+fn claude_projects_root() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+        return Some(Path::new(&dir).join("projects"));
+    }
+    dirs::home_dir().map(|h| h.join(".claude").join("projects"))
+}
+
+/// A frontend-supplied id / relative name is safe to `join` under a bounded
+/// dir: non-empty and every component is `Normal` (no `..`, no absolute, no
+/// drive/root). This is what lets delete/migrate build paths from
+/// `project + id/rel` — the frontend never passes a full filesystem path, so
+/// the only thing to validate is this short name. (`a/b` is allowed for nested
+/// memory; `..`, `/etc`, `a/../b` are rejected.)
+fn is_safe_rel(rel: &str) -> bool {
+    let mut any = false;
+    for c in Path::new(rel).components() {
+        if !matches!(c, std::path::Component::Normal(_)) {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// The `~/.gemini/tmp/<id>/` dir(s) whose `.project_root` equals `project`.
+fn gemini_project_dirs(tmp: &Path, project: &str) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(entries) = fs::read_dir(tmp) {
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if dir.is_dir() && gemini_project_root(&dir).as_deref() == Some(project) {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs
+}
+
+/// Claude's project-dir slug: every non-alphanumeric char → `-`
+/// (claude-code `sessionStoragePortable.ts:311` `sanitizePath`). Paths whose
+/// slug exceeds `MAX_SANITIZED_LENGTH` (200) get a hash suffix we don't
+/// replicate — reject them rather than risk writing into the wrong dir.
+fn sanitize_claude_path(path: &str) -> Result<String, String> {
+    let slug: String = path
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    if slug.len() > 200 {
+        return Err("path too long to migrate (slug > 200 chars)".into());
+    }
+    Ok(slug)
+}
+
+/// Read-only check: is `path` registered in Claude's `~/.claude.json` `projects`
+/// map? Claude's `--resume` only surfaces a project's sessions once that project
+/// is registered (opening Claude in the dir once does it). A migration moves the
+/// session files into the new slug dir but can't register the project — and
+/// Termory deliberately NEVER writes `~/.claude.json` (it's Claude's live config,
+/// rewritten by any running claude, so a concurrent write would clash). So we
+/// only READ it here, to warn the user when the moved sessions won't show yet.
+pub fn claude_project_registered(path: &str) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let Ok(raw) = fs::read_to_string(home.join(".claude.json")) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let Some(projects) = json.get("projects").and_then(|p| p.as_object()) else {
+        return false;
+    };
+    // The `~/.claude.json` key is the project's realpath (what Claude stored).
+    // The path from the folder picker may not be canonical, so match either the
+    // canonicalized form (\\?\ prefix stripped, as on Windows) or the raw input.
+    let canon = fs::canonicalize(path).ok().map(|p| {
+        let s = p.to_string_lossy().to_string();
+        s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+    });
+    canon.as_deref().is_some_and(|c| projects.contains_key(c)) || projects.contains_key(path)
+}
+
+/// Rewrite the top-level `cwd` field of each JSONL line to `new_cwd`,
+/// preserving every other field + key order (serde `preserve_order`).
+/// Lines that aren't a JSON object with a `cwd` pass through untouched.
+fn rewrite_jsonl_cwd(content: &str, new_cwd: &str) -> String {
+    content
+        .split('\n')
+        .map(|line| {
+            if line.is_empty() {
+                return String::new();
+            }
+            match serde_json::from_str::<Value>(line) {
+                Ok(Value::Object(mut map)) if map.contains_key("cwd") => {
+                    map.insert("cwd".to_string(), Value::String(new_cwd.to_string()));
+                    serde_json::to_string(&Value::Object(map)).unwrap_or_else(|_| line.to_string())
+                }
+                _ => line.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Recursively copy a Claude project subtree, rewriting the `cwd` in every
+/// `*.jsonl` to `new_cwd` and copying all other files (subagent transcripts,
+/// `tool-results/`, memory `.md`, …) verbatim. Skips the regenerable
+/// `sessions-index.json` cache (Claude rebuilds it by scanning the dir) and
+/// `.DS_Store`. Merge semantics: an existing destination file is left
+/// untouched, so re-running never clobbers newer data.
+fn copy_tree_rewrite_cwd(src: &Path, dst: &Path, new_cwd: &str) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+    for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name();
+        let lossy = name.to_string_lossy();
+        if lossy == "sessions-index.json" || lossy == ".DS_Store" {
+            continue;
+        }
+        let path = entry.path();
+        let dest = dst.join(&name);
+        if path.is_dir() {
+            copy_tree_rewrite_cwd(&path, &dest, new_cwd)?;
+        } else if dest.exists() {
+            continue;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            fs::write(&dest, rewrite_jsonl_cwd(&content, new_cwd)).map_err(|e| e.to_string())?;
+        } else {
+            fs::copy(&path, &dest).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Count regular files in a directory tree (0 if it doesn't exist).
+fn count_files_recursive(dir: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut n = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            n += count_files_recursive(&path);
+        } else {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Migrate a Claude project's sessions + memory from `old_path` to `new_path`
+/// after the folder was renamed. Claude keys both by a slug of the project
+/// path, so the renamed folder gets a fresh (empty) slug dir and the old
+/// records are stranded; this copies them into the new slug dir and rewrites
+/// each session's `cwd` so the CLI lists/resumes them from the new path.
+///
+/// COPY by default (the old dir stays — a built-in backup). `delete_old`
+/// removes the source dir only after a successful copy.
+pub fn migrate_claude_project(
+    old_path: &str,
+    new_path: &str,
+    delete_old: bool,
+) -> Result<ClaudeMigrationResult, String> {
+    let projects = claude_projects_root().ok_or("cannot locate ~/.claude/projects")?;
+    migrate_claude_project_in(&projects, old_path, new_path, delete_old)
+}
+
+/// Inner migration against an explicit `projects` root (so tests don't have to
+/// mutate the process-global `CLAUDE_CONFIG_DIR`).
+fn migrate_claude_project_in(
+    projects: &Path,
+    old_path: &str,
+    new_path: &str,
+    delete_old: bool,
+) -> Result<ClaudeMigrationResult, String> {
+    // Old dir already exists under the old path's slug (the renamed folder is
+    // gone from disk, so we sanitize the recorded path directly).
+    let old_dir = projects.join(sanitize_claude_path(old_path)?);
+    if !old_dir.is_dir() {
+        return Err(format!(
+            "no Claude history found for {old_path} ({})",
+            old_dir.display()
+        ));
+    }
+    let (new_dir, new_canon) = resolve_new_claude_dir(projects, new_path)?;
+    if old_dir == new_dir {
+        return Err("source and destination are the same project".into());
+    }
+    fs::create_dir_all(&new_dir).map_err(|e| e.to_string())?;
+
+    // Counts for the toast: top-level sessions + every memory file in the
+    // source (the companion <id>/ dirs ride along but aren't counted — they're
+    // part of their session).
+    let sessions = fs::read_dir(&old_dir)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
+        .count();
+    let memory_files = count_files_recursive(&old_dir.join("memory"));
+
+    // Copy the entire slug dir — sessions, their <id>/ companion dirs
+    // (subagents / tool-results), and memory/ — rewriting cwd in every .jsonl.
+    copy_tree_rewrite_cwd(&old_dir, &new_dir, &new_canon)?;
+
+    let old_dir_str = old_dir.to_string_lossy().to_string();
+    // Only after a clean copy, optionally drop the old dir.
+    if delete_old {
+        fs::remove_dir_all(&old_dir).map_err(|e| e.to_string())?;
+    }
+
+    Ok(ClaudeMigrationResult {
+        sessions,
+        memory_files,
+        old_dir: old_dir_str,
+        new_dir: new_dir.to_string_lossy().to_string(),
+        new_project: new_canon,
+    })
+}
+
+/// New project dir + its canonical path, shared by every migrate variant: the
+/// slug of `realpath(new_path)` (matches what Claude computes when launched
+/// there). The new folder must exist.
+fn resolve_new_claude_dir(projects: &Path, new_path: &str) -> Result<(PathBuf, String), String> {
+    let canon =
+        fs::canonicalize(new_path).map_err(|e| format!("new path not found ({new_path}): {e}"))?;
+    let canon = canon.to_string_lossy();
+    // Windows `fs::canonicalize` yields a `\\?\` verbatim prefix; Claude/Node
+    // realpath does not, so strip it to match the slug the CLI computes
+    // (no-op off Windows — the prefix never appears there).
+    let new_canon = canon.strip_prefix(r"\\?\").unwrap_or(&canon).to_string();
+    let new_dir = projects.join(sanitize_claude_path(&new_canon)?);
+    Ok((new_dir, new_canon))
+}
+
+/// Migrate a single Claude session JSONL into the new path's slug dir,
+/// rewriting its `cwd`. Memory is project-level, so single-session migration
+/// doesn't touch it. Copy by default; `delete_old` removes the source file.
+pub fn migrate_claude_session(
+    project: &str,
+    rel: &str,
+    new_path: &str,
+    delete_old: bool,
+) -> Result<ClaudeMigrationResult, String> {
+    let projects = claude_projects_root().ok_or("cannot locate ~/.claude/projects")?;
+    migrate_claude_session_in(&projects, project, rel, new_path, delete_old)
+}
+
+fn migrate_claude_session_in(
+    projects: &Path,
+    project: &str,
+    rel: &str,
+    new_path: &str,
+    delete_old: bool,
+) -> Result<ClaudeMigrationResult, String> {
+    if !is_safe_rel(rel) {
+        return Err("invalid session path".into());
+    }
+    let old_dir = projects.join(sanitize_claude_path(project)?);
+    let src = old_dir.join(rel);
+    if !src.is_file() {
+        return Err(format!("session not found ({rel})"));
+    }
+    let (new_dir, new_canon) = resolve_new_claude_dir(projects, new_path)?;
+    let dest = new_dir.join(rel);
+    if dest == src {
+        return Err("source and destination are the same".into());
+    }
+    if dest.exists() {
+        return Err("a session with this id already exists at the destination".into());
+    }
+    fs::create_dir_all(&new_dir).map_err(|e| e.to_string())?;
+    let content = fs::read_to_string(&src).map_err(|e| e.to_string())?;
+    fs::write(&dest, rewrite_jsonl_cwd(&content, &new_canon)).map_err(|e| e.to_string())?;
+
+    // Bring the session's companion dir (<id>/ — subagent transcripts +
+    // tool-results) along, if present, rewriting cwd in any .jsonl inside. It's
+    // the session path without the `.jsonl` extension.
+    let companion = src.with_extension("");
+    if companion != src && companion.is_dir() {
+        copy_tree_rewrite_cwd(&companion, &dest.with_extension(""), &new_canon)?;
+    }
+
+    if delete_old {
+        fs::remove_file(&src).map_err(|e| e.to_string())?;
+        if companion != src && companion.is_dir() {
+            fs::remove_dir_all(&companion).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(ClaudeMigrationResult {
+        sessions: 1,
+        memory_files: 0,
+        old_dir: old_dir.to_string_lossy().to_string(),
+        new_dir: new_dir.to_string_lossy().to_string(),
+        new_project: new_canon,
+    })
+}
+
+/// Migrate a single Claude auto-memory `.md` (under
+/// `~/.claude/projects/<slug>/memory/…`) into the new path's slug dir,
+/// preserving its relative path under `memory/`. Copy by default. Rejects
+/// files that aren't auto-memory (e.g. a project-folder CLAUDE.md, which
+/// already moved with the renamed folder).
+pub fn migrate_claude_memory(
+    project: &str,
+    rel: &str,
+    new_path: &str,
+    delete_old: bool,
+) -> Result<ClaudeMigrationResult, String> {
+    let projects = claude_projects_root().ok_or("cannot locate ~/.claude/projects")?;
+    migrate_claude_memory_in(&projects, project, rel, new_path, delete_old)
+}
+
+fn migrate_claude_memory_in(
+    projects: &Path,
+    project: &str,
+    rel: &str,
+    new_path: &str,
+    delete_old: bool,
+) -> Result<ClaudeMigrationResult, String> {
+    if !is_safe_rel(rel) {
+        return Err("invalid memory path".into());
+    }
+    let old_dir = projects.join(sanitize_claude_path(project)?);
+    let src = old_dir.join(rel);
+    if !src.is_file() {
+        return Err(format!("memory file not found ({rel})"));
+    }
+    let (new_dir, new_canon) = resolve_new_claude_dir(projects, new_path)?;
+    let dest = new_dir.join(rel);
+    if dest == src {
+        return Err("source and destination are the same".into());
+    }
+    if dest.exists() {
+        return Err("this memory file already exists at the destination".into());
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::copy(&src, &dest).map_err(|e| e.to_string())?;
+    if delete_old {
+        fs::remove_file(&src).map_err(|e| e.to_string())?;
+    }
+    Ok(ClaudeMigrationResult {
+        sessions: 0,
+        memory_files: 1,
+        old_dir: old_dir.to_string_lossy().to_string(),
+        new_dir: new_dir.to_string_lossy().to_string(),
+        new_project: new_canon,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Project deletion (Claude) — permanently remove a project / session / memory
+// ---------------------------------------------------------------------------
+
+/// Permanently delete a whole Claude project (its slug dir: all sessions,
+/// companion dirs, and memory).
+pub fn delete_claude_project(project: &str) -> Result<(), String> {
+    let projects = claude_projects_root().ok_or("cannot locate ~/.claude/projects")?;
+    delete_claude_project_in(&projects, project)
+}
+
+fn delete_claude_project_in(projects: &Path, project: &str) -> Result<(), String> {
+    let dir = projects.join(sanitize_claude_path(project)?);
+    if !dir.is_dir() {
+        return Err(format!("no Claude history found for {project}"));
+    }
+    fs::remove_dir_all(&dir).map_err(|e| e.to_string())
+}
+
+/// Permanently delete one Claude session — `<project-slug>/<rel>` (rel =
+/// `<id>.jsonl`) + its companion `<id>/` dir. The backend builds the path from
+/// `project` (→ slug dir) + `rel` (the file's path within that dir, which the
+/// frontend already has); bounded by `sanitize_claude_path` + `is_safe_rel`.
+pub fn delete_claude_session(project: &str, rel: &str) -> Result<(), String> {
+    let projects = claude_projects_root().ok_or("cannot locate ~/.claude/projects")?;
+    delete_claude_session_in(&projects, project, rel)
+}
+
+fn delete_claude_session_in(projects: &Path, project: &str, rel: &str) -> Result<(), String> {
+    if !is_safe_rel(rel) {
+        return Err("invalid session path".into());
+    }
+    let dir = projects.join(sanitize_claude_path(project)?);
+    let file = dir.join(rel);
+    if !file.is_file() {
+        return Err(format!("session not found ({rel})"));
+    }
+    fs::remove_file(&file).map_err(|e| e.to_string())?;
+    // Companion `<id>/` dir (subagents / tool-results) — same path without the
+    // `.jsonl` extension.
+    let companion = file.with_extension("");
+    if companion != file && companion.is_dir() {
+        fs::remove_dir_all(&companion).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Permanently delete one Claude auto-memory — `<project-slug>/<rel>`
+/// (rel = `memory/<…>`).
+pub fn delete_claude_memory(project: &str, rel: &str) -> Result<(), String> {
+    let projects = claude_projects_root().ok_or("cannot locate ~/.claude/projects")?;
+    delete_claude_memory_in(&projects, project, rel)
+}
+
+fn delete_claude_memory_in(projects: &Path, project: &str, rel: &str) -> Result<(), String> {
+    if !is_safe_rel(rel) {
+        return Err("invalid memory path".into());
+    }
+    let file = projects.join(sanitize_claude_path(project)?).join(rel);
+    if !file.is_file() {
+        return Err(format!("memory file not found ({rel})"));
+    }
+    fs::remove_file(&file).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Gemini deletion — chats / memory under ~/.gemini/tmp/<id>/. The project's
+// tmp dir is found by `.project_root` match; the chat filename / memory rel
+// (which the frontend already has) is joined under it — no full path, no scan.
+// ---------------------------------------------------------------------------
+
+/// `~/.gemini/tmp` — Gemini's per-project temp root.
+fn gemini_tmp_root() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".gemini").join("tmp"))
+}
+
+/// Permanently delete one Gemini session — `<project-tmp-dir>/<rel>` (rel =
+/// `chats/<file>`). The frontend already has the chat filename, so `rel` is
+/// joined under the project's tmp dir — no scan / sessionId matching.
+pub fn delete_gemini_session(project: &str, rel: &str) -> Result<(), String> {
+    let tmp = gemini_tmp_root().ok_or("cannot locate ~/.gemini/tmp")?;
+    delete_gemini_record_in(&tmp, project, rel)
+}
+
+/// Permanently delete one Gemini auto-memory — `<project-tmp-dir>/<rel>`
+/// (rel = `memory/<…>`).
+pub fn delete_gemini_memory(project: &str, rel: &str) -> Result<(), String> {
+    let tmp = gemini_tmp_root().ok_or("cannot locate ~/.gemini/tmp")?;
+    delete_gemini_record_in(&tmp, project, rel)
+}
+
+/// Remove `<project-tmp-dir>/<rel>` for every tmp dir whose `.project_root`
+/// matches `project`. Shared by the Gemini session + memory deletes (both are
+/// just "join a project-dir-relative path and remove").
+fn delete_gemini_record_in(tmp: &Path, project: &str, rel: &str) -> Result<(), String> {
+    if !is_safe_rel(rel) {
+        return Err("invalid record path".into());
+    }
+    let mut removed = false;
+    for dir in gemini_project_dirs(tmp, project) {
+        let file = dir.join(rel);
+        if file.is_file() {
+            fs::remove_file(&file).map_err(|e| e.to_string())?;
+            removed = true;
+        }
+    }
+    if !removed {
+        return Err(format!("Gemini record not found ({rel})"));
+    }
+    Ok(())
+}
+
+/// Permanently delete a Gemini project — every `~/.gemini/tmp/<id>/` dir whose
+/// `.project_root` matches `project`.
+pub fn delete_gemini_project(project: &str) -> Result<(), String> {
+    let tmp = gemini_tmp_root().ok_or("cannot locate ~/.gemini/tmp")?;
+    delete_gemini_project_in(&tmp, project)
+}
+
+fn delete_gemini_project_in(tmp: &Path, project: &str) -> Result<(), String> {
+    let dirs = gemini_project_dirs(tmp, project);
+    if dirs.is_empty() {
+        return Err(format!("no Gemini project dir found for {project}"));
+    }
+    for dir in dirs {
+        fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn memory_session_from_file(path: &Path, project: &str) -> Option<AppSession> {
     doc_session_from_file(path, project, "Memory")
 }
@@ -2094,8 +2782,14 @@ fn doc_session_from_file(path: &Path, project: &str, source: &str) -> Option<App
         .and_then(|s| s.to_str())
         .unwrap_or("memory")
         .to_string();
-    let title = name.clone().unwrap_or_else(|| file_name.clone());
-    let id = name.unwrap_or_else(|| file_name.clone());
+    let title = name.unwrap_or_else(|| file_name.clone());
+    // The id keys BOTH the backend load path-index `(source, id)` AND the
+    // frontend `sessionKey` — it MUST be unique per file. The filename /
+    // frontmatter `name` collide across projects (every project's `CLAUDE.md`
+    // shares the name "CLAUDE.md"), which made every same-named memory load the
+    // last-scanned file's content. Use the full path (unique, not displayed for
+    // memory/skill rows).
+    let id = path.to_string_lossy().to_string();
     let updated_at = file_time(path, true);
     let started_at = file_time(path, false);
     let preview = if !description.is_empty() {
@@ -11875,6 +12569,118 @@ mod tests {
     }
 
     #[test]
+    fn claude_project_folders_in_enumerates_every_slug_dir() {
+        // Projects come from the FOLDERS, independent of records: a dir with a
+        // session, a dir with only memory, and a fully-empty dir all show.
+        let tmp = TestDir::new("claude-proj-folders");
+        let projects = tmp.path().join("projects");
+        let with_session = projects.join("-Users-me-app");
+        fs::create_dir_all(&with_session).unwrap();
+        fs::write(
+            with_session.join("11111111-1111-1111-1111-111111111111.jsonl"),
+            "{\"cwd\":\"/Users/me/app\",\"type\":\"user\"}\n",
+        )
+        .unwrap();
+        let memory_only = projects.join("-Users-me-notes");
+        fs::create_dir_all(memory_only.join("memory")).unwrap();
+        fs::write(memory_only.join("memory").join("N.md"), "x").unwrap();
+        let empty = projects.join("-Users-me-empty");
+        fs::create_dir_all(&empty).unwrap();
+        // Not a project slug (no `-`) → skipped.
+        fs::create_dir_all(projects.join("bin")).unwrap();
+
+        let out = claude_project_folders_in(&projects);
+        let cwds: Vec<String> = out.iter().map(|p| p.project.clone()).collect();
+        // Session dir → cwd read from the session; the others fall back to the
+        // decoded slug. All three real slug dirs appear; `bin` does not.
+        assert!(cwds.contains(&"/Users/me/app".to_string())); // from session cwd
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|p| p.source == "Claude"));
+        assert!(!cwds.iter().any(|c| c == "bin" || c.is_empty()));
+    }
+
+    #[test]
+    fn gemini_project_folders_in_requires_project_root_marker() {
+        let tmp = TestDir::new("gemini-proj-folders");
+        let proj = tmp.path().join("hash-a");
+        fs::create_dir_all(&proj).unwrap();
+        fs::write(proj.join(".project_root"), "/Users/me/proj\n").unwrap();
+        // No `.project_root` → not a project (e.g. the bundled `bin/`).
+        fs::create_dir_all(tmp.path().join("bin")).unwrap();
+
+        let out = gemini_project_folders_in(tmp.path());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].source, "Gemini");
+        assert_eq!(out[0].project, "/Users/me/proj");
+    }
+
+    #[test]
+    fn add_record_projects_fills_in_record_derived_clis() {
+        let mk = |source: &str, project: &str| AppSession {
+            id: "x".to_string(),
+            source: source.to_string(),
+            project: project.to_string(),
+            ..Default::default()
+        };
+        // Claude already enumerated from a folder; Codex/OpenCode + Memory feed in.
+        let mut projects = vec![Project {
+            source: "Claude".to_string(),
+            project: "/a".to_string(),
+        }];
+        let records = vec![
+            mk("Claude", "/a"),   // already present → no dup
+            mk("Codex", "/a"),    // distinct source → added
+            mk("Codex", "/a"),    // dup → ignored
+            mk("OpenCode", "/b"), // added
+            mk("Memory", "/c"),   // excluded (not session-type)
+            mk("Codex", ""),      // empty cwd → skipped
+        ];
+        add_record_projects(&mut projects, &records);
+        let keys: Vec<(String, String)> = projects
+            .iter()
+            .map(|p| (p.source.clone(), p.project.clone()))
+            .collect();
+        assert_eq!(keys.len(), 3);
+        assert!(keys.contains(&("Claude".into(), "/a".into())));
+        assert!(keys.contains(&("Codex".into(), "/a".into())));
+        assert!(keys.contains(&("OpenCode".into(), "/b".into())));
+    }
+
+    #[test]
+    fn opencode_empty_projects_in_returns_session_less_rows() {
+        let dir = TestDir::new("opencode-empty-proj");
+        let db = dir.path().join("opencode.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "create table project (id text primary key, worktree text not null);
+             create table session (
+                id text primary key, project_id text not null,
+                parent_id text, time_archived integer
+             );",
+        )
+        .unwrap();
+        conn.execute("insert into project values ('A', '/work/has')", [])
+            .unwrap();
+        conn.execute("insert into project values ('B', '/work/empty')", [])
+            .unwrap();
+        conn.execute("insert into project values ('C', '/work/archived')", [])
+            .unwrap();
+        // A has a live top-level session; C has only an archived one; B has none.
+        conn.execute("insert into session values ('s1', 'A', null, null)", [])
+            .unwrap();
+        conn.execute("insert into session values ('s2', 'C', null, 123)", [])
+            .unwrap();
+        drop(conn);
+
+        let projects = opencode_empty_projects_in(&db).unwrap();
+        let worktrees: Vec<String> = projects.iter().map(|p| p.project.clone()).collect();
+        assert!(worktrees.contains(&"/work/empty".to_string())); // no sessions → shown
+        assert!(worktrees.contains(&"/work/archived".to_string())); // only archived → shown
+        assert!(!worktrees.contains(&"/work/has".to_string())); // has a live session → not "empty"
+        assert!(projects.iter().all(|p| p.source == "OpenCode"));
+    }
+
+    #[test]
     fn opencode_skips_synthetic_text_parts() {
         // packages/opencode/src/cli/cmd/tui/util/transcript.ts formatPart
         // gates text rendering on `!part.synthetic` — synthetic text parts
@@ -12547,6 +13353,389 @@ mod tests {
         // No session JSONL → None (caller falls back to slug decode).
         let empty = TestDir::new("claude-cwd-empty");
         assert_eq!(claude_cwd_from_project_dir(empty.path()), None);
+    }
+
+    #[test]
+    fn scan_claude_projects_returns_sessions_only_no_placeholders() {
+        // The project LIST now comes from `claude_project_folders_in` (folder
+        // enumeration), so `scan_claude_projects` returns ONLY real session
+        // records — never an empty-project placeholder (id == "").
+        let tmp = TestDir::new("claude-empty-scan");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("-Users-test-empty")).unwrap();
+        fs::create_dir_all(root.join("-Users-test-memonly").join("memory")).unwrap();
+        fs::write(
+            root.join("-Users-test-memonly").join("memory").join("M.md"),
+            "note",
+        )
+        .unwrap();
+
+        let sessions = scan_claude_projects(root).unwrap();
+        assert!(
+            sessions.iter().all(|s| !s.id.is_empty()),
+            "no placeholder entries"
+        );
+    }
+
+    #[test]
+    fn gemini_project_root_reads_marker() {
+        let tmp = TestDir::new("gemini-proj-root");
+        let dir = tmp.path().join("hash");
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(gemini_project_root(&dir), None); // no .project_root
+        fs::write(dir.join(".project_root"), "/Users/me/proj\n").unwrap();
+        assert_eq!(gemini_project_root(&dir).as_deref(), Some("/Users/me/proj"));
+    }
+
+    #[test]
+    fn is_safe_rel_rejects_traversal_and_absolutes() {
+        assert!(is_safe_rel("abc-123"));
+        assert!(is_safe_rel("sub/NOTE.md"));
+        assert!(!is_safe_rel("")); // empty
+        assert!(!is_safe_rel("..")); // parent
+        assert!(!is_safe_rel("a/../b")); // traversal mid-path
+        assert!(!is_safe_rel("/etc/passwd")); // absolute
+    }
+
+    #[test]
+    fn delete_gemini_session_in_removes_by_project_and_filename() {
+        let tmp = TestDir::new("gemini-del-sess");
+        let dir = tmp.path().join("hash");
+        fs::create_dir_all(dir.join("chats")).unwrap();
+        fs::write(dir.join(".project_root"), "/Users/me/proj").unwrap();
+        let f = dir.join("chats").join("session-x.json");
+        fs::write(&f, "{}").unwrap();
+
+        // Located by project + the chat filename the frontend already has —
+        // no scan, no sessionId matching.
+        delete_gemini_record_in(tmp.path(), "/Users/me/proj", "chats/session-x.json").unwrap();
+        assert!(!f.exists());
+
+        // Unsafe filename (..) rejected; non-matching project errors.
+        assert!(delete_gemini_record_in(tmp.path(), "/Users/me/proj", "../x").is_err());
+        assert!(
+            delete_gemini_record_in(tmp.path(), "/Users/me/nope", "chats/session-x.json").is_err()
+        );
+    }
+
+    #[test]
+    fn delete_gemini_memory_in_removes_by_project_and_rel() {
+        let tmp = TestDir::new("gemini-del-mem");
+        let dir = tmp.path().join("hash");
+        fs::create_dir_all(dir.join("memory")).unwrap();
+        fs::write(dir.join(".project_root"), "/Users/me/proj").unwrap();
+        fs::write(dir.join("memory").join("NOTE.md"), "x").unwrap();
+
+        delete_gemini_record_in(tmp.path(), "/Users/me/proj", "memory/NOTE.md").unwrap();
+        assert!(!dir.join("memory").join("NOTE.md").exists());
+
+        // Unsafe rel (..) is rejected; non-matching project errors.
+        assert!(delete_gemini_record_in(tmp.path(), "/Users/me/proj", "../x").is_err());
+        assert!(delete_gemini_record_in(tmp.path(), "/Users/me/nope", "memory/NOTE.md").is_err());
+    }
+
+    #[test]
+    fn delete_gemini_project_in_removes_dir_matching_project_root() {
+        let tmp = TestDir::new("gemini-del-proj");
+        // Two project dirs, only one matches the target project root.
+        let target = tmp.path().join("hash-a");
+        fs::create_dir_all(target.join("chats")).unwrap();
+        fs::write(target.join(".project_root"), "/Users/me/target\n").unwrap();
+        let other = tmp.path().join("hash-b");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join(".project_root"), "/Users/me/other").unwrap();
+
+        delete_gemini_project_in(tmp.path(), "/Users/me/target").unwrap();
+        assert!(!target.exists());
+        assert!(other.exists()); // unrelated project untouched
+
+        // No matching project → error.
+        assert!(delete_gemini_project_in(tmp.path(), "/Users/me/nope").is_err());
+    }
+
+    #[test]
+    fn migrate_claude_project_copies_sessions_memory_and_rewrites_cwd() {
+        let tmp = TestDir::new("migrate");
+        let projects = tmp.path().join("projects");
+        // Old project: the renamed folder is gone from disk, only the slug dir
+        // (with sessions + memory) survives.
+        let old_path = "/Users/test/oldproj";
+        let old_dir = projects.join(sanitize_claude_path(old_path).unwrap());
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::write(
+            old_dir.join("aaa.jsonl"),
+            format!(
+                "{{\"type\":\"user\",\"cwd\":\"{old_path}\",\"x\":1}}\n{{\"summary\":\"s\"}}\n"
+            ),
+        )
+        .unwrap();
+        fs::create_dir_all(old_dir.join("memory")).unwrap();
+        fs::write(old_dir.join("memory").join("NOTE.md"), "hello").unwrap();
+        // Companion dir <id>/subagents/ (a subagent transcript) + the
+        // regenerable index cache that should be skipped.
+        fs::create_dir_all(old_dir.join("aaa").join("subagents")).unwrap();
+        fs::write(
+            old_dir.join("aaa").join("subagents").join("agent-x.jsonl"),
+            format!("{{\"cwd\":\"{old_path}\",\"sub\":1}}\n"),
+        )
+        .unwrap();
+        fs::write(old_dir.join("sessions-index.json"), "{\"v\":1}").unwrap();
+
+        // New path must exist on disk (the function canonicalizes it).
+        let new_path_dir = tmp.path().join("newproj");
+        fs::create_dir_all(&new_path_dir).unwrap();
+        let new_path = new_path_dir.to_string_lossy().to_string();
+
+        let res = migrate_claude_project_in(&projects, old_path, &new_path, false).unwrap();
+        assert_eq!(res.sessions, 1);
+        assert_eq!(res.memory_files, 1);
+
+        // Destination = slug of the canonicalized new path.
+        let new_canon = fs::canonicalize(&new_path)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let new_dir = projects.join(sanitize_claude_path(&new_canon).unwrap());
+        let migrated = fs::read_to_string(new_dir.join("aaa.jsonl")).unwrap();
+        // cwd rewritten to the new path; sibling fields + non-cwd lines intact.
+        assert!(migrated.contains(&format!("\"cwd\":\"{new_canon}\"")));
+        assert!(migrated.contains("\"x\":1"));
+        assert!(migrated.contains("\"summary\":\"s\""));
+        assert!(!migrated.contains(old_path));
+        assert_eq!(
+            fs::read_to_string(new_dir.join("memory").join("NOTE.md")).unwrap(),
+            "hello"
+        );
+        // Companion subagent transcript came along, with cwd rewritten.
+        let sub = fs::read_to_string(new_dir.join("aaa").join("subagents").join("agent-x.jsonl"))
+            .unwrap();
+        assert!(sub.contains(&format!("\"cwd\":\"{new_canon}\"")));
+        assert!(sub.contains("\"sub\":1"));
+        // The regenerable index cache is NOT copied (Claude rebuilds it).
+        assert!(!new_dir.join("sessions-index.json").exists());
+        // Copy, not move: the old dir is left intact (built-in backup).
+        assert!(old_dir.join("aaa.jsonl").exists());
+    }
+
+    #[test]
+    fn migrate_claude_session_in_copies_one_session_and_rewrites_cwd() {
+        let tmp = TestDir::new("migrate-sess");
+        let projects = tmp.path().join("projects");
+        let old_path = "/Users/test/oldproj";
+        let old_dir = projects.join(sanitize_claude_path(old_path).unwrap());
+        fs::create_dir_all(&old_dir).unwrap();
+        let src = old_dir.join("bbb.jsonl");
+        fs::write(&src, format!("{{\"cwd\":\"{old_path}\",\"k\":2}}\n")).unwrap();
+        // Companion dir bbb/subagents/ rides along with the single session.
+        fs::create_dir_all(old_dir.join("bbb").join("subagents")).unwrap();
+        fs::write(
+            old_dir.join("bbb").join("subagents").join("agent-y.jsonl"),
+            format!("{{\"cwd\":\"{old_path}\",\"s\":9}}\n"),
+        )
+        .unwrap();
+        let new_path_dir = tmp.path().join("newproj");
+        fs::create_dir_all(&new_path_dir).unwrap();
+        let new_path = new_path_dir.to_string_lossy().to_string();
+
+        let res =
+            migrate_claude_session_in(&projects, old_path, "bbb.jsonl", &new_path, false).unwrap();
+        assert_eq!((res.sessions, res.memory_files), (1, 0));
+        let new_canon = fs::canonicalize(&new_path)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let new_dir = projects.join(sanitize_claude_path(&new_canon).unwrap());
+        let migrated = fs::read_to_string(new_dir.join("bbb.jsonl")).unwrap();
+        assert!(migrated.contains(&format!("\"cwd\":\"{new_canon}\"")));
+        assert!(migrated.contains("\"k\":2"));
+        // Companion subagent transcript came along, cwd rewritten.
+        let sub = fs::read_to_string(new_dir.join("bbb").join("subagents").join("agent-y.jsonl"))
+            .unwrap();
+        assert!(sub.contains(&format!("\"cwd\":\"{new_canon}\"")));
+        assert!(sub.contains("\"s\":9"));
+        assert!(src.exists()); // copy, kept
+    }
+
+    #[test]
+    fn migrate_claude_memory_in_copies_md_preserving_subpath_and_rejects_stray() {
+        let tmp = TestDir::new("migrate-mem");
+        let projects = tmp.path().join("projects");
+        let old_dir = projects.join(sanitize_claude_path("/Users/test/oldproj").unwrap());
+        let src = old_dir.join("memory").join("sub").join("NOTE.md");
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        fs::write(&src, "remember").unwrap();
+        let new_path_dir = tmp.path().join("newproj");
+        fs::create_dir_all(&new_path_dir).unwrap();
+        let new_path = new_path_dir.to_string_lossy().to_string();
+
+        let res = migrate_claude_memory_in(
+            &projects,
+            "/Users/test/oldproj",
+            "memory/sub/NOTE.md",
+            &new_path,
+            false,
+        )
+        .unwrap();
+        assert_eq!((res.sessions, res.memory_files), (0, 1));
+        let new_canon = fs::canonicalize(&new_path)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let new_dir = projects.join(sanitize_claude_path(&new_canon).unwrap());
+        assert_eq!(
+            fs::read_to_string(new_dir.join("memory").join("sub").join("NOTE.md")).unwrap(),
+            "remember"
+        );
+        assert!(src.exists());
+
+        // An unsafe relative path (`..`) is rejected — can't escape memory/.
+        assert!(migrate_claude_memory_in(
+            &projects,
+            "/Users/test/oldproj",
+            "../x",
+            &new_path,
+            false
+        )
+        .is_err());
+    }
+
+    // End-to-end on a realistic project that mirrors the copilot.is layout:
+    // several sessions, a companion <id>/ dir with subagents/ + tool-results/,
+    // a nested memory subtree, plus the regenerable index + .DS_Store. Verifies
+    // MOVE mode (delete_old) yields a complete new dir AND removes the old one.
+    #[test]
+    fn migrate_claude_project_move_mode_is_complete_and_removes_old() {
+        let tmp = TestDir::new("migrate-e2e");
+        let projects = tmp.path().join("projects");
+        let old_path = "/Users/test/copilot.is";
+        let old_dir = projects.join(sanitize_claude_path(old_path).unwrap());
+        fs::create_dir_all(&old_dir).unwrap();
+
+        // 3 sessions, each line carrying the old cwd.
+        for id in ["s1", "s2", "s3"] {
+            fs::write(
+                old_dir.join(format!("{id}.jsonl")),
+                format!("{{\"type\":\"user\",\"cwd\":\"{old_path}\",\"id\":\"{id}\"}}\n"),
+            )
+            .unwrap();
+        }
+        // Companion dir for s1: a subagent transcript (cwd) + a raw tool result.
+        fs::create_dir_all(old_dir.join("s1").join("subagents")).unwrap();
+        fs::write(
+            old_dir.join("s1").join("subagents").join("agent-a.jsonl"),
+            format!("{{\"cwd\":\"{old_path}\",\"agent\":1}}\n"),
+        )
+        .unwrap();
+        fs::create_dir_all(old_dir.join("s1").join("tool-results")).unwrap();
+        fs::write(
+            old_dir.join("s1").join("tool-results").join("r.txt"),
+            "raw tool output",
+        )
+        .unwrap();
+        // Nested memory subtree + regenerable/junk files that must be skipped.
+        fs::create_dir_all(old_dir.join("memory").join("sub")).unwrap();
+        fs::write(old_dir.join("memory").join("MEMORY.md"), "m1").unwrap();
+        fs::write(old_dir.join("memory").join("sub").join("NOTE.md"), "m2").unwrap();
+        fs::write(old_dir.join("sessions-index.json"), "{\"v\":1}").unwrap();
+        fs::write(old_dir.join(".DS_Store"), "junk").unwrap();
+
+        let new_path_dir = tmp.path().join("chats.is");
+        fs::create_dir_all(&new_path_dir).unwrap();
+        let new_path = new_path_dir.to_string_lossy().to_string();
+
+        // MOVE mode.
+        let res = migrate_claude_project_in(&projects, old_path, &new_path, true).unwrap();
+        assert_eq!((res.sessions, res.memory_files), (3, 2));
+
+        let new_canon = fs::canonicalize(&new_path)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let new_dir = projects.join(sanitize_claude_path(&new_canon).unwrap());
+
+        // All 3 sessions present, cwd rewritten.
+        for id in ["s1", "s2", "s3"] {
+            let body = fs::read_to_string(new_dir.join(format!("{id}.jsonl"))).unwrap();
+            assert!(
+                body.contains(&format!("\"cwd\":\"{new_canon}\"")),
+                "{id} cwd"
+            );
+            assert!(!body.contains(old_path), "{id} still has old cwd");
+        }
+        // Companion subagent transcript (cwd rewritten) + raw tool result (verbatim).
+        let agent =
+            fs::read_to_string(new_dir.join("s1").join("subagents").join("agent-a.jsonl")).unwrap();
+        assert!(agent.contains(&format!("\"cwd\":\"{new_canon}\"")));
+        assert!(agent.contains("\"agent\":1"));
+        assert_eq!(
+            fs::read_to_string(new_dir.join("s1").join("tool-results").join("r.txt")).unwrap(),
+            "raw tool output"
+        );
+        // Nested memory copied; index + .DS_Store skipped.
+        assert_eq!(
+            fs::read_to_string(new_dir.join("memory").join("MEMORY.md")).unwrap(),
+            "m1"
+        );
+        assert_eq!(
+            fs::read_to_string(new_dir.join("memory").join("sub").join("NOTE.md")).unwrap(),
+            "m2"
+        );
+        assert!(!new_dir.join("sessions-index.json").exists());
+        assert!(!new_dir.join(".DS_Store").exists());
+
+        // MOVE mode removed the old slug dir entirely (no duplicate UUIDs left).
+        assert!(!old_dir.exists());
+    }
+
+    #[test]
+    fn delete_claude_project_in_removes_the_slug_dir() {
+        let tmp = TestDir::new("del-proj");
+        let projects = tmp.path().join("projects");
+        let dir = projects.join(sanitize_claude_path("/Users/test/p").unwrap());
+        fs::create_dir_all(dir.join("memory")).unwrap();
+        fs::write(dir.join("s.jsonl"), "{}\n").unwrap();
+        fs::write(dir.join("memory").join("M.md"), "x").unwrap();
+
+        delete_claude_project_in(&projects, "/Users/test/p").unwrap();
+        assert!(!dir.exists());
+        // A project with no history → error (nothing to delete).
+        assert!(delete_claude_project_in(&projects, "/Users/test/none").is_err());
+    }
+
+    #[test]
+    fn delete_claude_session_in_removes_jsonl_and_companion_and_guards_path() {
+        let tmp = TestDir::new("del-sess");
+        let projects = tmp.path().join("projects");
+        let dir = projects.join(sanitize_claude_path("/Users/test/p").unwrap());
+        fs::create_dir_all(dir.join("s1").join("subagents")).unwrap();
+        let jsonl = dir.join("s1.jsonl");
+        fs::write(&jsonl, "{}\n").unwrap();
+        fs::write(dir.join("s1").join("subagents").join("a.jsonl"), "{}\n").unwrap();
+
+        delete_claude_session_in(&projects, "/Users/test/p", "s1.jsonl").unwrap();
+        assert!(!jsonl.exists());
+        assert!(!dir.join("s1").exists()); // companion dir gone too
+
+        // Safety: an id with traversal is refused (and the file left alone).
+        fs::write(&jsonl, "{}\n").unwrap();
+        assert!(delete_claude_session_in(&projects, "/Users/test/p", "../evil").is_err());
+        assert!(jsonl.exists());
+    }
+
+    #[test]
+    fn delete_claude_memory_in_removes_md_and_rejects_non_auto_memory() {
+        let tmp = TestDir::new("del-mem");
+        let projects = tmp.path().join("projects");
+        let dir = projects.join(sanitize_claude_path("/Users/test/p").unwrap());
+        let md = dir.join("memory").join("N.md");
+        fs::create_dir_all(md.parent().unwrap()).unwrap();
+        fs::write(&md, "x").unwrap();
+
+        delete_claude_memory_in(&projects, "/Users/test/p", "memory/N.md").unwrap();
+        assert!(!md.exists());
+
+        // An unsafe relative path (`..`) is refused.
+        assert!(delete_claude_memory_in(&projects, "/Users/test/p", "../../etc/x").is_err());
     }
 
     #[test]

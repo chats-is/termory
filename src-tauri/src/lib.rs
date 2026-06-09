@@ -22,31 +22,32 @@ use providers::{
     set_opencode_default, test_provider, ActiveState, CliApp, GatewayCapabilities, ModelListResult,
     Provider, TestResult,
 };
-use sessions::{get_session, scan_sessions, search_sessions, AppSession, SearchHit, SessionDetail};
+use sessions::{get_session, scan_sessions, search_sessions, SearchHit, SessionDetail};
 use tauri::Manager;
 
 #[tauri::command]
 async fn scan_all_sessions(
     app: tauri::AppHandle,
     watcher: tauri::State<'_, watcher::WatcherHandle>,
-) -> Result<Vec<AppSession>, String> {
+) -> Result<sessions::ScanResult, String> {
     let handle = watcher.inner().clone();
-    let sessions = tauri::async_runtime::spawn_blocking(move || {
-        let sessions = scan_sessions().map_err(|err| err.to_string())?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let result = scan_sessions().map_err(|err| err.to_string())?;
         // Tell the watcher about the project cwds we just discovered so
         // it can dynamically watch them (catching per-project
         // CLAUDE.md / AGENTS.md / .claude/skills/ edits without
         // recursively watching every cwd the user might be in).
-        let cwds =
-            watcher::dynamic_paths_from_sessions(sessions.iter().map(|s| s.project.as_str()));
+        let cwds = watcher::dynamic_paths_from_sessions(
+            result.projects.iter().map(|p| p.project.as_str()),
+        );
         handle.reconfigure_dynamic(cwds);
-        Ok::<_, String>(sessions)
+        Ok::<_, String>(result)
     })
     .await
     .map_err(|err| err.to_string())??;
     // Refresh the tray's "recent sessions" list from this scan.
-    tray::refresh_recent(&app, &sessions);
-    Ok(sessions)
+    tray::refresh_recent(&app, &result.records);
+    Ok(result)
 }
 
 /// Open one record by `(source, id)`. The Rust side looks up the
@@ -109,6 +110,112 @@ fn resume_session_in_terminal(
     project: Option<String>,
 ) -> Result<(), String> {
     terminal::resume_session(&source, &id, project.as_deref())
+}
+
+/// Migrate a renamed Claude project's sessions + memory into the new path's
+/// slug dir so the CLI lists/resumes them again. Copies by default (the old
+/// dir stays as a backup); `delete_old` drops the source only after a clean
+/// copy. Driven by the Records right-click "migrate" action.
+#[tauri::command]
+async fn migrate_claude_project(
+    old_path: String,
+    new_path: String,
+    delete_old: bool,
+) -> Result<sessions::ClaudeMigrationResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        sessions::migrate_claude_project(&old_path, &new_path, delete_old)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Migrate one Claude session into the new path's slug dir, located by
+/// project + the record's path relative to its slug dir (no filesystem path).
+#[tauri::command]
+async fn migrate_claude_session(
+    project: String,
+    rel: String,
+    new_path: String,
+    delete_old: bool,
+) -> Result<sessions::ClaudeMigrationResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        sessions::migrate_claude_session(&project, &rel, &new_path, delete_old)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Migrate one Claude auto-memory into the new path's slug dir, located by
+/// project + the record's path relative to its slug dir.
+#[tauri::command]
+async fn migrate_claude_memory(
+    project: String,
+    rel: String,
+    new_path: String,
+    delete_old: bool,
+) -> Result<sessions::ClaudeMigrationResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        sessions::migrate_claude_memory(&project, &rel, &new_path, delete_old)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Permanently delete a whole Claude project (slug dir).
+#[tauri::command]
+async fn delete_claude_project(project: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::delete_claude_project(&project))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Permanently delete one Claude session (by project + slug-relative path).
+#[tauri::command]
+async fn delete_claude_session(project: String, rel: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::delete_claude_session(&project, &rel))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Permanently delete one Claude auto-memory (by project + memory-relative path).
+#[tauri::command]
+async fn delete_claude_memory(project: String, rel: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::delete_claude_memory(&project, &rel))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Permanently delete a Gemini project (its `~/.gemini/tmp/<id>/` dir).
+#[tauri::command]
+async fn delete_gemini_project(project: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::delete_gemini_project(&project))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Permanently delete one Gemini session (by project + tmp-dir-relative path).
+#[tauri::command]
+async fn delete_gemini_session(project: String, rel: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::delete_gemini_session(&project, &rel))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Permanently delete one Gemini auto-memory (by project + memory-relative path).
+#[tauri::command]
+async fn delete_gemini_memory(project: String, rel: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::delete_gemini_memory(&project, &rel))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Read-only: is `path` registered in Claude's `~/.claude.json`? After a Claude
+/// migration the frontend uses this to warn that the moved sessions won't show
+/// in `claude --resume` until the user opens Claude in the new dir once. Termory
+/// never writes that file.
+#[tauri::command]
+async fn claude_project_registered(path: String) -> Result<bool, String> {
+    Ok(sessions::claude_project_registered(&path))
 }
 
 /// Spawn each installed CLI with `--version` and return the parsed
@@ -403,6 +510,16 @@ pub fn run() {
             detect_clis,
             detect_terminals,
             resume_session_in_terminal,
+            migrate_claude_project,
+            migrate_claude_session,
+            migrate_claude_memory,
+            delete_claude_project,
+            delete_claude_session,
+            delete_claude_memory,
+            delete_gemini_project,
+            delete_gemini_session,
+            delete_gemini_memory,
+            claude_project_registered,
             detect_cli_versions_cmd,
             provider_active_state,
             provider_active_states,

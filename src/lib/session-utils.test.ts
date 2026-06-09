@@ -8,6 +8,7 @@ import {
   memoryToolsOf,
   projectDisplayName,
   readRouteFromHash,
+  recordRel,
   resumeCommandFor,
   roleClass,
   sessionKey,
@@ -137,6 +138,32 @@ describe("projectDisplayName", () => {
   });
   it("ignores trailing slashes", () => {
     expect(projectDisplayName("/Users/john/termory/")).toBe("termory");
+  });
+});
+
+describe("recordRel", () => {
+  it("returns a Claude session path relative to its slug dir", () => {
+    expect(recordRel("/Users/me/.claude/projects/-Users-me-app/abc.jsonl")).toBe(
+      "abc.jsonl"
+    );
+  });
+  it("returns a Claude memory path under memory/", () => {
+    expect(
+      recordRel("/Users/me/.claude/projects/-Users-me-app/memory/sub/N.md")
+    ).toBe("memory/sub/N.md");
+  });
+  it("returns a Gemini session path under chats/", () => {
+    expect(
+      recordRel("/Users/me/.gemini/tmp/abc123/chats/session-2026-01.json")
+    ).toBe("chats/session-2026-01.json");
+  });
+  it("returns a Gemini memory path under memory/", () => {
+    expect(recordRel("/Users/me/.gemini/tmp/abc123/memory/N.md")).toBe(
+      "memory/N.md"
+    );
+  });
+  it("falls back to the basename when no data-root marker is present", () => {
+    expect(recordRel("/somewhere/else/file.md")).toBe("file.md");
   });
 });
 

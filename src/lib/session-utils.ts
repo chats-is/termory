@@ -75,6 +75,24 @@ export function basename(path: string): string {
   return parts.length > 0 ? parts[parts.length - 1] : path;
 }
 
+/**
+ * A record file's path relative to its project dir — the single identifier
+ * delete/migrate pass so the backend can rebuild the path under the bounded
+ * project dir without ever receiving a full filesystem path. Detect the CLI's
+ * data-root marker from the path, then drop it AND the project-dir segment:
+ *   `…/projects/<slug>/<rel>`        → `<rel>` (e.g. `<id>.jsonl`, `memory/x.md`)
+ *   `…/.gemini/tmp/<hash>/<rel>`     → `<rel>` (e.g. `chats/s.json`, `memory/x.md`)
+ * Falls back to the basename if no marker is found.
+ */
+export function recordRel(path: string): string {
+  const marker = path.includes("/.gemini/tmp/") ? "/.gemini/tmp/" : "/projects/";
+  const i = path.indexOf(marker);
+  if (i < 0) return basename(path);
+  const after = path.slice(i + marker.length); // "<dir>/<rel>"
+  const slash = after.indexOf("/");
+  return slash < 0 ? after : after.slice(slash + 1);
+}
+
 // Per-platform "resume this session" shell command. Returns `null`
 // for sources whose CLI doesn't expose a direct resume-by-id flag
 // (Gemini's `/resume` is in-TUI only; OpenCode's `--session` depends

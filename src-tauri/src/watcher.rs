@@ -224,22 +224,23 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
             }
 
             match scan_sessions() {
-                Ok(sessions) => {
+                Ok(result) => {
                     // Reconfigure dynamic watches based on the project
                     // cwds discovered in this scan. Sessions that have
                     // been opened in new projects pick up coverage;
                     // disappeared projects get unwatched.
-                    let new_cwds =
-                        dynamic_paths_from_sessions(sessions.iter().map(|s| s.project.as_str()));
+                    let new_cwds = dynamic_paths_from_sessions(
+                        result.projects.iter().map(|p| p.project.as_str()),
+                    );
                     let handle = WatcherHandle {
                         inner: inner_for_thread.clone(),
                     };
                     handle.reconfigure_dynamic(new_cwds);
 
                     // Keep the tray's "recent sessions" list current.
-                    crate::tray::refresh_recent(&app_handle, &sessions);
+                    crate::tray::refresh_recent(&app_handle, &result.records);
 
-                    if let Err(err) = app_handle.emit(SOURCES_CHANGED_EVENT, sessions) {
+                    if let Err(err) = app_handle.emit(SOURCES_CHANGED_EVENT, result) {
                         log::warn!("watcher sources-changed emit failed: {err}");
                     }
                 }

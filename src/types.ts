@@ -51,6 +51,23 @@ export type AppSession = {
   daily_tokens?: DailyTokenBreakdown[];
 };
 
+/**
+ * A first-class project (a working directory a CLI keeps records for). Shown
+ * in the sidebar as long as it exists, with or without records. `project` is
+ * the cwd string records carry in their own `project` field — the join key.
+ * An empty project = one in the list that no record points at.
+ */
+export type Project = {
+  source: string;
+  project: string;
+};
+
+/** What `scan_all_sessions` (and the watcher event) returns. */
+export type ScanResult = {
+  projects: Project[];
+  records: AppSession[];
+};
+
 export type SessionMessage = {
   role: string;
   text: string;

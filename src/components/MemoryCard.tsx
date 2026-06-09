@@ -49,7 +49,7 @@ export const MemoryCard = React.forwardRef<
       onClick={onClick}
       {...rest}
       className={cn(
-        "w-full text-left rounded-lg px-2 py-2 transition-colors flex flex-col gap-1 select-none",
+        "w-full text-left rounded-lg px-2 py-2 flex flex-col gap-1 select-none",
         isActive
           ? "bg-primary text-primary-foreground [&_*]:text-primary-foreground"
           : "hover:bg-accent/60 data-[state=open]:bg-accent/60",

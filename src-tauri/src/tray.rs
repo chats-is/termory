@@ -132,6 +132,8 @@ fn select_recent(sessions: &[AppSession]) -> Vec<RecentSession> {
     let mut picked: Vec<&AppSession> = sessions
         .iter()
         .filter(|s| !matches!(s.source.as_str(), "Memory" | "Skill"))
+        // Drop empty-project placeholders (id == "") — they're sidebar-only.
+        .filter(|s| !s.id.is_empty())
         // Drop "sessions" that are really just a CLI slash command
         // (`/model`, `/clear`, …) — they're system commands, not chats.
         .filter(|s| !is_slash_command(label_text(&s.title, &s.snippet)))
