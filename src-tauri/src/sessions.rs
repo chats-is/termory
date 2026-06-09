@@ -2337,7 +2337,11 @@ pub fn claude_project_registered(path: &str) -> bool {
     let Some(home) = dirs::home_dir() else {
         return false;
     };
-    let Ok(raw) = fs::read_to_string(home.join(".claude.json")) else {
+    claude_project_registered_in(&home.join(".claude.json"), path)
+}
+
+fn claude_project_registered_in(claude_json: &Path, path: &str) -> bool {
+    let Ok(raw) = fs::read_to_string(claude_json) else {
         return false;
     };
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
@@ -12678,6 +12682,48 @@ mod tests {
         assert!(worktrees.contains(&"/work/archived".to_string())); // only archived → shown
         assert!(!worktrees.contains(&"/work/has".to_string())); // has a live session → not "empty"
         assert!(projects.iter().all(|p| p.source == "OpenCode"));
+    }
+
+    #[test]
+    fn doc_session_id_is_full_path_not_filename() {
+        // Regression: memory/skill id was the filename/`name`, so every project's
+        // `CLAUDE.md` shared the id "CLAUDE.md" → the (source, id) load index
+        // collided and same-named files all loaded the last-scanned content.
+        // The id must be the full path (unique); title stays the filename.
+        let dir = TestDir::new("doc-id");
+        let a = dir.path().join("proj-a").join("CLAUDE.md");
+        let b = dir.path().join("proj-b").join("CLAUDE.md");
+        fs::create_dir_all(a.parent().unwrap()).unwrap();
+        fs::create_dir_all(b.parent().unwrap()).unwrap();
+        fs::write(&a, "alpha").unwrap();
+        fs::write(&b, "beta").unwrap();
+        let sa = doc_session_from_file(&a, "/proj-a", "Memory").unwrap();
+        let sb = doc_session_from_file(&b, "/proj-b", "Memory").unwrap();
+        assert_eq!(sa.id, a.to_string_lossy());
+        assert_eq!(sb.id, b.to_string_lossy());
+        assert_ne!(sa.id, sb.id); // same filename, distinct ids
+        assert_eq!(sa.title, "CLAUDE.md"); // title still the filename for display
+    }
+
+    #[test]
+    fn claude_project_registered_in_matches_projects_map() {
+        let dir = TestDir::new("claude-reg");
+        let cfg = dir.path().join(".claude.json");
+        fs::write(
+            &cfg,
+            r#"{"projects":{"/Users/me/app":{},"/Users/me/other":{}}}"#,
+        )
+        .unwrap();
+        assert!(claude_project_registered_in(&cfg, "/Users/me/app"));
+        assert!(!claude_project_registered_in(&cfg, "/Users/me/nope"));
+        // Missing file / no projects key → false, never a panic.
+        assert!(!claude_project_registered_in(
+            &dir.path().join("absent.json"),
+            "/x"
+        ));
+        let empty = dir.path().join("empty.json");
+        fs::write(&empty, "{}").unwrap();
+        assert!(!claude_project_registered_in(&empty, "/Users/me/app"));
     }
 
     #[test]
