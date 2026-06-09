@@ -63,12 +63,15 @@ export async function runClaudeMigration(
       registered = true; // probe failed → don't block the migration
     }
   }
-  const confirmed = await ask(
-    registered
-      ? t("menu.migrateConfirm", { to: picked })
-      : t("menu.migrateConfirmUnregistered", { to: picked }),
-    { title: t("menu.migrate"), kind: registered ? "info" : "warning" }
-  );
+  const baseMsg = registered
+    ? t("menu.migrateConfirm", { to: picked })
+    : t("menu.migrateConfirmUnregistered", { to: picked });
+  const confirmed = await ask(`${baseMsg}\n\n${t("menu.exitCliHint")}`, {
+    title: t("menu.migrate"),
+    kind: "warning",
+    okLabel: t("menu.migrate"),
+    cancelLabel: t("common.cancel")
+  });
   if (!confirmed) return;
   try {
     const res = await invoke<MigrateResult>(command, {
@@ -117,8 +120,13 @@ export async function runRecordDelete(
       ? "menu.deleteSessionConfirm"
       : "menu.deleteMemoryConfirm";
   const confirmed = await ask(
-    `${t(confirmKey, { name })}\n\n${t("menu.deleteCliHint")}`,
-    { title: t("menu.delete"), kind: "warning" }
+    `${t(confirmKey, { name })}\n\n${t("menu.exitCliHint")}`,
+    {
+      title: t("menu.delete"),
+      kind: "warning",
+      okLabel: t("menu.delete"),
+      cancelLabel: t("common.cancel")
+    }
   );
   if (!confirmed) return;
   try {

@@ -103,6 +103,7 @@ export const zhHant: Record<MessageKey, string> = {
   "records.nothingToViewDesc": "Termory 找到本機歷史後,會話、記憶和技能會顯示在這裡。",
   "records.selectRecord": "選擇一筆記錄",
   "common.all": "全部",
+  "common.cancel": "取消",
   "favorites.add": "加入收藏",
 
   "menu.revealInFinder": "在 Finder 中顯示",
@@ -131,7 +132,7 @@ export const zhHant: Record<MessageKey, string> = {
   "menu.deleteProjectConfirm": "刪除該專案保存的全部工作階段 + 記憶?\n\n只刪除儲存的歷史記錄,不會刪除你的專案資料夾本身。無法復原。",
   "menu.deleteSessionConfirm": "刪除這條已保存的工作階段記錄?無法復原。",
   "menu.deleteMemoryConfirm": "刪除這個記憶檔案?無法復原。",
-  "menu.deleteCliHint": "建議先退出對應的 CLI 再刪除。",
+  "menu.exitCliHint": "⚠️ 操作前請先退出正在執行的命令列工具。",
   "menu.deleteSuccess": "已刪除:{name}",
   "menu.deleteError": "刪除失敗:{error}",
 

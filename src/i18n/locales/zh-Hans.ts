@@ -103,6 +103,7 @@ export const zhHans: Record<MessageKey, string> = {
   "records.nothingToViewDesc": "Termory 找到本地历史后,会话、记忆和技能会显示在这里。",
   "records.selectRecord": "选择一条记录",
   "common.all": "全部",
+  "common.cancel": "取消",
   "favorites.add": "加入收藏",
 
   "menu.revealInFinder": "在 Finder 中显示",
@@ -131,7 +132,7 @@ export const zhHans: Record<MessageKey, string> = {
   "menu.deleteProjectConfirm": "删除该项目保存的全部会话 + 记忆?\n\n只删除存储的历史记录,不会删除你的项目文件夹本身。不可撤销。",
   "menu.deleteSessionConfirm": "删除这条已保存的会话记录?不可撤销。",
   "menu.deleteMemoryConfirm": "删除这个记忆文件?不可撤销。",
-  "menu.deleteCliHint": "建议先退出对应的 CLI 再删除。",
+  "menu.exitCliHint": "⚠️ 操作前请先退出正在运行的命令行工具。",
   "menu.deleteSuccess": "已删除:{name}",
   "menu.deleteError": "删除失败:{error}",
 

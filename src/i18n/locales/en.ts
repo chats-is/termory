@@ -111,6 +111,7 @@ export const en = {
   "records.nothingToViewDesc": "Once Termory finds local history, sessions, memories, and skills will show up here.",
   "records.selectRecord": "Select a record",
   "common.all": "All",
+  "common.cancel": "Cancel",
   "favorites.add": "Add to favorites",
 
   // Context menu
@@ -140,7 +141,7 @@ export const en = {
   "menu.deleteProjectConfirm": "Delete all saved sessions + memory for this project?\n\nOnly the stored history is removed — your project folder is NOT deleted. Can't be undone.",
   "menu.deleteSessionConfirm": "Delete this saved session record? Can't be undone.",
   "menu.deleteMemoryConfirm": "Delete this memory file? Can't be undone.",
-  "menu.deleteCliHint": "Quit the CLI first, then delete.",
+  "menu.exitCliHint": "⚠️ Quit the running CLI for this project first.",
   "menu.deleteSuccess": "Deleted: {name}",
   "menu.deleteError": "Delete failed: {error}",
 
