@@ -64,6 +64,20 @@ struct RecentSession {
 /// the `scan_all_sessions` IPC) — the tray never scans on its own.
 static RECENT: Mutex<Vec<RecentSession>> = Mutex::new(Vec::new());
 
+/// Cached official-account quota shown on a CLI's first-level row
+/// (5-hour + weekly windows only — the per-model weekly windows stay
+/// app-only). One entry per quota-capable CLI (`quota::SUPPORTED`).
+/// Refreshed by `refresh_quota` from the tray's click-triggered fetch
+/// AND from every `fetch_subscription_quota` IPC, so a manual refresh
+/// in the Providers page updates the tray too.
+#[derive(Clone, PartialEq)]
+struct TrayQuota {
+    five_hour: Option<f64>,
+    seven_day: Option<f64>,
+}
+
+static QUOTA: Mutex<Vec<(CliApp, TrayQuota)>> = Mutex::new(Vec::new());
+
 /// Localized labels for the menu's static rows (Open / Official / Exit). The
 /// frontend pushes the translated strings via the `set_tray_labels` IPC when the
 /// app language loads or changes; until then English is used. CLI and provider
@@ -73,6 +87,8 @@ struct TrayLabels {
     open: String,
     official: String,
     exit: String,
+    five_hour: String,
+    weekly: String,
 }
 
 impl Default for TrayLabels {
@@ -81,6 +97,8 @@ impl Default for TrayLabels {
             open: "Open".to_string(),
             official: "Official".to_string(),
             exit: "Exit".to_string(),
+            five_hour: "5h".to_string(),
+            weekly: "Weekly".to_string(),
         }
     }
 }
@@ -97,12 +115,14 @@ fn tray_labels() -> TrayLabels {
 
 /// Store the localized static labels (called from the `set_tray_labels` IPC).
 /// The caller rebuilds the menu so the new labels take effect.
-pub fn set_labels(open: String, official: String, exit: String) {
+pub fn set_labels(open: String, official: String, exit: String, five_hour: String, weekly: String) {
     if let Ok(mut g) = TRAY_LABELS.lock() {
         *g = Some(TrayLabels {
             open,
             official,
             exit,
+            five_hour,
+            weekly,
         });
     }
 }
@@ -140,8 +160,80 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| {
             handle_menu_event(app, event.id.as_ref());
         })
+        // A click on the tray icon is also "the menu is opening" —
+        // kick off a (rate-limited) quota refresh so the Claude info
+        // row stays current without any background polling. The fetch
+        // lands after the menu is already on screen, so the updated
+        // numbers show from the NEXT open; with the 120s floor that's
+        // at most one open behind.
+        .on_tray_icon_event(|tray, event| {
+            if matches!(event, tauri::tray::TrayIconEvent::Click { .. }) {
+                trigger_quota_refresh(tray.app_handle());
+            }
+        })
         .build(app)?;
     Ok(())
+}
+
+/// Minimum spacing between quota fetches per CLI — same window as the
+/// Providers page's auto-refresh cache (QUOTA_STALE_MS).
+const QUOTA_TRAY_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+/// Retry floor after a FAILED fetch — much shorter, so a transient
+/// network error doesn't mute the tray row for the full window
+/// (frontend mirror: QUOTA_ERROR_RETRY_MS in ProvidersPage.tsx).
+const QUOTA_TRAY_ERROR_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Per-CLI marker: when the last quota fetch COMPLETED + whether it
+/// succeeded (failures earn the shorter retry floor). Updated by
+/// `refresh_quota` for EVERY completed fetch — tray-triggered or the
+/// Providers page's IPC — so the two paths share one rate limit and
+/// can't double-fetch within each other's windows.
+static QUOTA_LAST_FETCH: Mutex<Vec<(CliApp, std::time::Instant, bool)>> = Mutex::new(Vec::new());
+
+fn set_quota_marker(cli: CliApp, ok: bool) {
+    if let Ok(mut guard) = QUOTA_LAST_FETCH.lock() {
+        let now = std::time::Instant::now();
+        match guard.iter_mut().find(|(c, _, _)| *c == cli) {
+            Some(entry) => {
+                entry.1 = now;
+                entry.2 = ok;
+            }
+            None => guard.push((cli, now, ok)),
+        }
+    }
+}
+
+/// Async, rate-limited quota fetch + tray update for every CLI in
+/// `quota::SUPPORTED`. Used by the menu-open (tray click) hook and the
+/// one-shot warm-up at startup.
+pub fn trigger_quota_refresh(app: &AppHandle) {
+    for &cli in crate::quota::SUPPORTED {
+        {
+            let Ok(guard) = QUOTA_LAST_FETCH.lock() else {
+                continue;
+            };
+            let now = std::time::Instant::now();
+            if let Some((_, prev, ok)) = guard.iter().find(|(c, _, _)| *c == cli) {
+                let floor = if *ok {
+                    QUOTA_TRAY_MIN_INTERVAL
+                } else {
+                    QUOTA_TRAY_ERROR_RETRY
+                };
+                if now.duration_since(*prev) < floor {
+                    continue;
+                }
+            }
+        }
+        // Mark pre-flight as failed-shape so an in-flight / errored
+        // attempt only blocks the short window; the completed fetch
+        // overwrites this via refresh_quota's marker update.
+        set_quota_marker(cli, false);
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let quota = crate::quota::fetch_quota(cli).await;
+            refresh_quota(&handle, &quota);
+        });
+    }
 }
 
 /// Rebuild the tray menu so checkmarks reflect the current active
@@ -166,6 +258,79 @@ pub fn refresh_recent(app: &AppHandle, sessions: &[AppSession]) {
     }
     if let Err(err) = rebuild_menu(app) {
         log::error!("tray recent rebuild failed: {err}");
+    }
+}
+
+/// Record a completed quota fetch (any source) and rebuild the menu
+/// when the displayed numbers changed. Failed fetches only refresh the
+/// rate-limit marker — the menu keeps the last good numbers instead of
+/// flickering empty.
+pub fn refresh_quota(app: &AppHandle, quota: &crate::quota::SubscriptionQuota) {
+    let Some(cli) = CliApp::parse(&quota.app) else {
+        return;
+    };
+    if !crate::quota::supports_quota(cli) {
+        return;
+    }
+    // Shared rate limit: an IPC fetch from the Providers page counts
+    // exactly like a tray-triggered one.
+    set_quota_marker(cli, quota.success);
+    if !quota.success {
+        return;
+    }
+    let tier = |name: &str| {
+        quota
+            .tiers
+            .iter()
+            .find(|t| t.name == name)
+            .map(|t| t.utilization)
+    };
+    let next = TrayQuota {
+        five_hour: tier("five_hour"),
+        seven_day: tier("seven_day"),
+    };
+    match QUOTA.lock() {
+        Ok(mut guard) => match guard.iter_mut().find(|(c, _)| *c == cli) {
+            Some((_, cur)) if *cur == next => return, // unchanged → no rebuild
+            Some((_, cur)) => *cur = next,
+            None => guard.push((cli, next)),
+        },
+        _ => return,
+    }
+    if let Err(err) = rebuild_menu(app) {
+        log::error!("tray quota rebuild failed: {err}");
+    }
+}
+
+/// Pressure glyph per window — thresholds from quota.rs (shared with
+/// the in-app ring via the quota-utils.ts mirror): <75% green,
+/// ≥75% amber, ≥90% red. Emoji because macOS menu text can't be
+/// colored — these are the only color carrier a menu title allows.
+fn quota_glyph(utilization: f64) -> &'static str {
+    if utilization >= crate::quota::CRIT_PCT {
+        "🔴"
+    } else if utilization >= crate::quota::WARN_PCT {
+        "🟡"
+    } else {
+        "🟢"
+    }
+}
+
+/// "🟢 12% 5h · 🟡 78% Weekly" — appended to the Claude Code
+/// first-level row title (percent right after the pressure glyph).
+/// None when neither window is known.
+fn quota_label(q: &TrayQuota, labels: &TrayLabels) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(v) = q.five_hour {
+        parts.push(format!("{} {:.0}% {}", quota_glyph(v), v, labels.five_hour));
+    }
+    if let Some(v) = q.seven_day {
+        parts.push(format!("{} {:.0}% {}", quota_glyph(v), v, labels.weekly));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
     }
 }
 
@@ -291,7 +456,23 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             .and_then(|id| providers_for_app.iter().find(|p| p.id == id))
             .map(|p| p.name.as_str())
             .unwrap_or(labels.official.as_str());
-        let title = format!("{} · {}", cli_label(cli), active_name);
+        let mut title = format!("{} · {}", cli_label(cli), active_name);
+        // Quota-capable CLI with Official active: append the
+        // official-account quota inline, e.g.
+        // "Claude Code · Official · 🟢 12% 5h · 🟡 78% Weekly".
+        // Suppressed while a custom provider is active — the quota
+        // belongs to the official login, and gluing it onto a custom
+        // provider's name would read as that provider's usage.
+        if crate::quota::supports_quota(cli) && active_id.is_none() {
+            if let Some(label) = QUOTA
+                .lock()
+                .ok()
+                .and_then(|g| g.iter().find(|(c, _)| *c == cli).map(|(_, q)| q.clone()))
+                .and_then(|q| quota_label(&q, &labels))
+            {
+                title = format!("{title} · {label}");
+            }
+        }
         let mut sub = SubmenuBuilder::new(app, title);
 
         let official = CheckMenuItemBuilder::with_id(
@@ -444,6 +625,42 @@ fn cli_key(cli: CliApp) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quota_label_formats_and_skips_missing_windows() {
+        let labels = TrayLabels::default();
+        let both = TrayQuota {
+            five_hour: Some(12.4),
+            seven_day: Some(78.0),
+        };
+        assert_eq!(
+            quota_label(&both, &labels).as_deref(),
+            Some("🟢 12% 5h · 🟡 78% Weekly")
+        );
+        let five_only = TrayQuota {
+            five_hour: Some(99.6),
+            seven_day: None,
+        };
+        assert_eq!(
+            quota_label(&five_only, &labels).as_deref(),
+            Some("🔴 100% 5h")
+        );
+        let none = TrayQuota {
+            five_hour: None,
+            seven_day: None,
+        };
+        assert_eq!(quota_label(&none, &labels), None);
+    }
+
+    #[test]
+    fn quota_glyph_thresholds_match_the_app_ring() {
+        assert_eq!(quota_glyph(0.0), "🟢");
+        assert_eq!(quota_glyph(74.9), "🟢");
+        assert_eq!(quota_glyph(75.0), "🟡");
+        assert_eq!(quota_glyph(89.9), "🟡");
+        assert_eq!(quota_glyph(90.0), "🔴");
+        assert_eq!(quota_glyph(100.0), "🔴");
+    }
 
     #[test]
     fn recent_label_fallbacks_and_truncation() {

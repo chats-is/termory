@@ -28,6 +28,13 @@ function makeYearDateFormatter(locale?: string) {
     day: "numeric"
   });
 }
+function makeWeekdayTimeFormatter(locale?: string) {
+  return new Intl.DateTimeFormat(locale, {
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit"
+  });
+}
 
 // The app's formatting locale (drives BOTH dates and `formatCompact` numbers).
 // `undefined` = the OS locale; the i18n provider calls `setFormatLocale` so
@@ -37,6 +44,7 @@ let currentLocale: string | undefined;
 let dateFormatter = makeDateTimeFormatter(currentLocale);
 let shortDateFormatter = makeShortDateFormatter(currentLocale);
 let yearDateFormatter = makeYearDateFormatter(currentLocale);
+let weekdayTimeFormatter = makeWeekdayTimeFormatter(currentLocale);
 
 /** Set the app formatting locale (a BCP-47 tag — "en" / "zh-Hans" / "zh-Hant").
  * Rebuilds the date formatters only on change (Intl construction is expensive)
@@ -47,6 +55,14 @@ export function setFormatLocale(locale: string | undefined): void {
   dateFormatter = makeDateTimeFormatter(locale);
   shortDateFormatter = makeShortDateFormatter(locale);
   yearDateFormatter = makeYearDateFormatter(locale);
+  weekdayTimeFormatter = makeWeekdayTimeFormatter(locale);
+}
+
+/** "Fri 12:00 AM" — weekday + time, used for quota reset times more
+ * than a day out. en-US inserts "Fri, 12:00 AM"; the comma is dropped
+ * to match Claude's own /usage display. */
+export function formatWeekdayTime(date: Date): string {
+  return weekdayTimeFormatter.format(date).replace(", ", " ");
 }
 
 /** The app's formatting locale, for ad-hoc `toLocale*` calls outside this module

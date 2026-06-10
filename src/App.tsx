@@ -152,7 +152,10 @@ export function App() {
     void invoke("set_tray_labels", {
       open: t("tray.open"),
       official: t("tray.official"),
-      exit: t("tray.exit")
+      exit: t("tray.exit"),
+      // Claude quota info row inside the Claude Code submenu.
+      fiveHour: t("providers.quotaFiveHourShort"),
+      weekly: t("providers.quotaSevenDayShort")
     }).catch(() => {});
   }, [t]);
   const [sessions, setSessions] = React.useState<AppSession[]>([]);

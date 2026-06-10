@@ -242,6 +242,46 @@ export type Gateway = {
   favicon?: string;
 };
 
+// ── Official-account subscription quota (backend quota.rs) ──
+
+/** State of the CLI's on-disk OAuth credential (backend `CredentialStatus`). */
+export type CredentialStatus =
+  | "valid"
+  | "expired"
+  | "not_found"
+  | "parse_error";
+
+/** One rate-limit window. `name` is the API's window id (`five_hour`,
+ * `seven_day`, `seven_day_opus`, `seven_day_sonnet`, …) — unknown ids
+ * pass through verbatim. `utilization` is the used percentage 0–100. */
+export type QuotaTier = {
+  name: string;
+  utilization: number;
+  resetsAt?: string;
+};
+
+/** Pay-as-you-go overflow usage (Claude "extra usage"). */
+export type ExtraUsage = {
+  isEnabled: boolean;
+  monthlyLimit?: number;
+  usedCredits?: number;
+  utilization?: number;
+  currency?: string;
+};
+
+/** Result of `fetch_subscription_quota` for one CLI. Credential and
+ * network problems land in `credentialStatus` / `error` with
+ * `success: false` — the IPC itself only rejects on an unknown app. */
+export type SubscriptionQuota = {
+  app: CliApp;
+  credentialStatus: CredentialStatus;
+  success: boolean;
+  tiers: QuotaTier[];
+  extraUsage?: ExtraUsage;
+  error?: string;
+  queriedAt?: number;
+};
+
 export type ActiveKind = "official" | "custom" | "unmanaged";
 
 export type LiveSnapshot = {

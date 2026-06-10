@@ -18,7 +18,14 @@ import {
   providerFromBinding,
   resolveActiveProviderId
 } from "@/lib/provider-utils";
-import type { ActiveState, CliApp, Provider, Gateway, TestResult } from "@/types";
+import type {
+  ActiveState,
+  CliApp,
+  Provider,
+  Gateway,
+  SubscriptionQuota,
+  TestResult
+} from "@/types";
 import { BrandIcon } from "@/components/BrandIcon";
 import { EmptyState } from "@/components/EmptyState";
 import { useT } from "@/i18n";
@@ -76,6 +83,44 @@ let cachedVersionsLoading = true;
 // trigger a re-fetch (visible flash there is correct: the user
 // actually changed something).
 let versionsEverResolved = false;
+
+// CLIs whose Official card shows the subscription quota (5-hour /
+// weekly rate-limit windows). MIRROR of the backend list
+// `quota::SUPPORTED` in src-tauri/src/quota.rs (which drives the tray)
+// — when a CLI's fetch_quota arm lands, add it in BOTH places.
+const QUOTA_SUPPORTED: ReadonlySet<CliApp> = new Set(["claude"]);
+// Quota results survive route remounts (like cachedVersions). An entry
+// older than QUOTA_STALE_MS is silently re-fetched on the next entry
+// to the tab. Manual Refresh bypasses the stale window but is still
+// rate-limited by QUOTA_MIN_INTERVAL_MS (the button shows disabled
+// during the cooldown) so it can't hammer the official endpoint.
+let cachedQuotas: Partial<Record<CliApp, SubscriptionQuota>> = {};
+const QUOTA_STALE_MS = 10 * 60_000;
+const QUOTA_MIN_INTERVAL_MS = 120_000;
+// A FAILED fetch caches for much less so a transient network error
+// doesn't mute the quota display for the full stale window. Applies
+// to the auto path, the manual cooldown, and the tray (Rust mirror:
+// QUOTA_TRAY_ERROR_RETRY in tray.rs).
+const QUOTA_ERROR_RETRY_MS = 60_000;
+
+/** Per-result refresh floor: full cooldown after a success, the short
+ * error-retry window after a failure (or no result yet). */
+function quotaMinIntervalMs(q?: SubscriptionQuota): number {
+  return q?.success ? QUOTA_MIN_INTERVAL_MS : QUOTA_ERROR_RETRY_MS;
+}
+
+/** Manual-refresh failure toast, split over two lines: the part before
+ * the first ": " (e.g. "HTTP 429 Too Many Requests") as the title, the
+ * rest (the API's message) as the description. Errors without that
+ * shape show as a single line. */
+function quotaErrorToast(error: string) {
+  const idx = error.indexOf(": ");
+  if (idx > 0) {
+    toast.error(error.slice(0, idx), { description: error.slice(idx + 2) });
+  } else {
+    toast.error(error);
+  }
+}
 
 export function ProvidersPage({
   providers,
@@ -154,6 +199,73 @@ export function ProvidersPage({
   const [testing, setTesting] = React.useState<string | null>(null);
   const [settingDefault, setSettingDefault] = React.useState<string | null>(null);
   const [rechecking, setRechecking] = React.useState(false);
+
+  // Official-account quota (5h / weekly windows), per CLI. Seeded from
+  // the module cache so a route remount shows the last result without
+  // a skeleton flash; refreshed when stale or on manual Refresh.
+  const [quotas, setQuotas] = React.useState<
+    Partial<Record<CliApp, SubscriptionQuota>>
+  >(cachedQuotas);
+  const [quotaLoading, setQuotaLoading] = React.useState<CliApp | null>(null);
+  const quotaLoadingRef = React.useRef<CliApp | null>(null);
+
+  // `manual: true` = the user clicked Refresh — a failure surfaces as
+  // a toast with the backend's raw error. Background fetches (tab
+  // entry, stale re-fetch) fail silently and just keep the old data.
+  const refreshQuota = React.useCallback(async (target: CliApp, manual = false) => {
+    if (!QUOTA_SUPPORTED.has(target)) return;
+    if (quotaLoadingRef.current === target) return; // fetch in flight
+    // Rate limit: never query the official endpoint more often than
+    // the per-result floor (shorter after a failure), regardless of
+    // which path called us.
+    const lastResult = cachedQuotas[target];
+    if (
+      lastResult?.queriedAt &&
+      Date.now() - lastResult.queriedAt < quotaMinIntervalMs(lastResult)
+    ) {
+      return;
+    }
+    quotaLoadingRef.current = target;
+    setQuotaLoading(target);
+    try {
+      const result = await invoke<SubscriptionQuota>(
+        "fetch_subscription_quota",
+        { app: target }
+      );
+      setQuotas((cur) => {
+        const next = { ...cur, [target]: result };
+        cachedQuotas = next;
+        return next;
+      });
+      if (manual && !result.success && result.error) {
+        quotaErrorToast(result.error);
+      }
+    } catch (err) {
+      // unknown-app guard only — leave the previous result on screen
+      if (manual) toast.error(String(err));
+    } finally {
+      quotaLoadingRef.current = null;
+      setQuotaLoading(null);
+    }
+  }, []);
+
+  // Manual-refresh cooldown for the CURRENT tab's quota (shorter
+  // window after a failed fetch). Derived from `queriedAt`; the
+  // timeout re-renders once the cooldown lapses so the Refresh button
+  // re-enables without user interaction.
+  const quotaEntry = quotas[app];
+  const quotaQueriedAt = quotaEntry?.queriedAt;
+  const quotaCooldownMs = quotaMinIntervalMs(quotaEntry);
+  const [, quotaTick] = React.useReducer((n: number) => n + 1, 0);
+  React.useEffect(() => {
+    if (!quotaQueriedAt) return;
+    const remain = quotaCooldownMs - (Date.now() - quotaQueriedAt);
+    if (remain <= 0) return;
+    const id = setTimeout(quotaTick, remain + 50);
+    return () => clearTimeout(id);
+  }, [quotaQueriedAt, quotaCooldownMs]);
+  const quotaInCooldown =
+    !!quotaQueriedAt && Date.now() - quotaQueriedAt < quotaCooldownMs;
 
   const refreshInstalled = React.useCallback(async () => {
     try {
@@ -285,6 +397,23 @@ export function ProvidersPage({
   React.useEffect(() => {
     void refreshActive();
   }, [refreshActive, view, app]);
+
+  // Fetch the official quota when entering a supported CLI's tab.
+  // Cached results younger than QUOTA_STALE_MS render as-is (no
+  // network hit on every tab flip); the card's Refresh button calls
+  // `refreshQuota` directly for an unconditional re-fetch.
+  React.useEffect(() => {
+    if (view !== "providers" || !QUOTA_SUPPORTED.has(app)) return;
+    if (!installed[app]) return;
+    const cached = cachedQuotas[app];
+    // Successful results cache for the full stale window; failures
+    // only for the short error-retry window.
+    const staleMs = cached?.success ? QUOTA_STALE_MS : QUOTA_ERROR_RETRY_MS;
+    if (cached?.queriedAt && Date.now() - cached.queriedAt < staleMs) {
+      return;
+    }
+    void refreshQuota(app);
+  }, [view, app, installed, refreshQuota]);
 
   React.useEffect(() => {
     void refreshInstalled();
@@ -772,6 +901,14 @@ export function ProvidersPage({
                 settingDefault={settingDefault === "__official__"}
                 version={versions[app]}
                 versionLoading={versionsLoading}
+                quota={QUOTA_SUPPORTED.has(app) ? quotas[app] ?? null : undefined}
+                quotaLoading={quotaLoading === app}
+                quotaCooldown={quotaInCooldown}
+                onRefreshQuota={
+                  QUOTA_SUPPORTED.has(app)
+                    ? () => void refreshQuota(app, true)
+                    : undefined
+                }
                 onSetDefault={() => void setOfficialAsDefault()}
               />
             )}

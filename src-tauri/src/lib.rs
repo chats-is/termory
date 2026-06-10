@@ -1,5 +1,6 @@
 mod config;
 mod providers;
+mod quota;
 mod sessions;
 mod terminal;
 mod tray;
@@ -227,8 +228,10 @@ async fn set_tray_labels(
     open: String,
     official: String,
     exit: String,
+    five_hour: String,
+    weekly: String,
 ) -> Result<(), String> {
-    tray::set_labels(open, official, exit);
+    tray::set_labels(open, official, exit, five_hour, weekly);
     let _ = tray::rebuild_menu(&app);
     Ok(())
 }
@@ -379,6 +382,24 @@ async fn test_provider_api(provider: Provider) -> Result<TestResult, String> {
 #[tauri::command]
 async fn fetch_provider_models(provider: Provider) -> Result<ModelListResult, String> {
     Ok(fetch_models(&provider).await)
+}
+
+/// Official-account subscription quota (5-hour / weekly rate-limit
+/// windows) for one CLI, read from its existing OAuth login. Claude
+/// implemented; other apps report `not_found`. Never returns Err —
+/// credential / network problems surface inside the result so the
+/// frontend can render a per-state message instead of a raw toast.
+#[tauri::command]
+async fn fetch_subscription_quota(
+    handle: tauri::AppHandle,
+    app: String,
+) -> Result<quota::SubscriptionQuota, String> {
+    let cli = CliApp::parse(&app).ok_or_else(|| format!("unknown app: {app}"))?;
+    let result = quota::fetch_quota(cli).await;
+    // Keep the tray's quota row in sync with what the Providers page
+    // just fetched (no extra network hit).
+    tray::refresh_quota(&handle, &result);
+    Ok(result)
 }
 
 /// Best-effort fetch of a `data:image/...;base64,...` favicon for the
@@ -544,6 +565,7 @@ pub fn run() {
             delete_provider,
             set_opencode_default_provider,
             test_provider_api,
+            fetch_subscription_quota,
             fetch_provider_models,
             fetch_provider_favicon,
             detect_gateway_apis,
@@ -594,6 +616,12 @@ pub fn run() {
             if let Err(err) = tray::install(app.handle()) {
                 log::error!("tray install failed: {err}");
             }
+            // One-shot warm-up of the tray's Claude quota row (5h /
+            // Weekly) so the FIRST menu open already shows numbers.
+            // After this there is NO polling — the row refreshes on
+            // tray click (menu open, rate-limited in trigger_quota_refresh)
+            // and whenever the Providers page fetches via IPC.
+            tray::trigger_quota_refresh(app.handle());
             Ok(())
         })
         .build(tauri::generate_context!())

@@ -1344,9 +1344,7 @@ fn scan_claude() -> Result<Vec<AppSession>, Box<dyn Error>> {
     let Some(home) = dirs::home_dir() else {
         return Ok(Vec::new());
     };
-    let root = std::env::var("CLAUDE_CONFIG_DIR")
-        .map(|dir| Path::new(&dir).join("projects"))
-        .unwrap_or_else(|_| home.join(".claude").join("projects"));
+    let root = claude_config_root(&home).join("projects");
     scan_claude_projects(&root)
 }
 
@@ -1534,9 +1532,7 @@ fn scan_global_instructions() -> Vec<AppSession> {
         return sessions;
     };
 
-    let claude_root = std::env::var("CLAUDE_CONFIG_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| home.join(".claude"));
+    let claude_root = claude_config_root(&home);
     // OpenCode officially falls back to ~/.claude/CLAUDE.md and project
     // CLAUDE.md when no AGENTS.md is found, per https://opencode.ai/docs/rules/
     push_tagged_instruction_file(
@@ -1682,9 +1678,7 @@ fn scan_claude_rules(project_cwds: &HashSet<String>) -> Vec<AppSession> {
         return sessions;
     };
 
-    let claude_root = std::env::var("CLAUDE_CONFIG_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| home.join(".claude"));
+    let claude_root = claude_config_root(&home);
 
     let global_dir = claude_root.join("rules");
     if global_dir.is_dir() {
@@ -1721,9 +1715,7 @@ fn scan_claude_memory() -> Result<Vec<AppSession>, Box<dyn Error>> {
     let Some(home) = dirs::home_dir() else {
         return Ok(Vec::new());
     };
-    let root = std::env::var("CLAUDE_CONFIG_DIR")
-        .map(|dir| Path::new(&dir).join("projects"))
-        .unwrap_or_else(|_| home.join(".claude").join("projects"));
+    let root = claude_config_root(&home).join("projects");
     if !root.exists() {
         return Ok(Vec::new());
     }
@@ -1874,9 +1866,7 @@ fn scan_claude_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
     // (https://opencode.ai/docs/skills/)
     let tag = "claude,opencode";
 
-    let claude_root = std::env::var("CLAUDE_CONFIG_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| home.join(".claude"));
+    let claude_root = claude_config_root(&home);
     let global_dir = claude_root.join("skills");
     if global_dir.is_dir() {
         push_doc_files_recursive(
@@ -2270,6 +2260,16 @@ pub struct ClaudeMigrationResult {
     pub old_dir: String,
     pub new_dir: String,
     pub new_project: String,
+}
+
+/// Claude Code's config root — `$CLAUDE_CONFIG_DIR` when set, else
+/// `<home>/.claude`. Single source for the scanners in this file and
+/// for quota.rs's credential lookup.
+pub(crate) fn claude_config_root(home: &Path) -> PathBuf {
+    match std::env::var("CLAUDE_CONFIG_DIR") {
+        Ok(dir) => PathBuf::from(dir),
+        Err(_) => home.join(".claude"),
+    }
 }
 
 /// `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`).
@@ -2973,9 +2973,7 @@ fn derive_memory_project_label(path: &Path) -> String {
         return String::new();
     };
 
-    let claude_root = std::env::var("CLAUDE_CONFIG_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| home.join(".claude"));
+    let claude_root = claude_config_root(&home);
 
     // Claude global skills: <claude_root>/skills/<name>/...
     if path.starts_with(claude_root.join("skills")) {
