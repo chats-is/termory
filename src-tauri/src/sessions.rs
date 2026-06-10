@@ -3691,7 +3691,10 @@ fn parse_gemini_session_file(
         .as_deref()
         .map(strip_unsafe_characters)
         .and_then(|title| official_title_from_text(&title))
-        .or_else(|| conversation.first_user_message.clone());
+        // Cap ONLY the first-user-message fallback (a session_context-derived
+        // title can be very long); `snippet_line` collapses whitespace and trims
+        // to 120 chars + …. The summary path is left untouched.
+        .or_else(|| conversation.first_user_message.as_deref().map(snippet_line));
     let mut detail = detail_from_messages(
         "Gemini",
         path,
@@ -4104,13 +4107,15 @@ fn gemini_extract_first_user_message(messages: &[Value]) -> Option<String> {
             message
                 .get("content")
                 .and_then(gemini_content_text_raw)
-                .map(|content| gemini_clean_message(&content))
+                // Strip Gemini's injected `<session_context>` wrapper, keep the inner text.
+                .map(|content| {
+                    gemini_clean_message(
+                        &extract_xml_tag_value(&content, "session_context").unwrap_or(content),
+                    )
+                })
         })
         .find(|content| {
-            !content.starts_with('/')
-                && !content.starts_with('?')
-                && !content.trim().is_empty()
-                && !gemini_is_injected_context(content)
+            !content.starts_with('/') && !content.starts_with('?') && !content.trim().is_empty()
         });
     if first_meaningful.is_some() {
         return first_meaningful;
@@ -4124,7 +4129,7 @@ fn gemini_extract_first_user_message(messages: &[Value]) -> Option<String> {
                 .and_then(gemini_content_text_raw)
                 .map(|content| gemini_clean_message(&content))
         })
-        .find(|content| !content.trim().is_empty() && !gemini_is_injected_context(content))
+        .find(|content| !content.trim().is_empty())
         .or_else(|| Some("Empty conversation".to_string()))
 }
 
@@ -12762,25 +12767,25 @@ mod tests {
     }
 
     #[test]
-    fn gemini_title_skips_injected_session_context() {
-        // A session whose only user message is Gemini's injected
-        // <session_context> must NOT use it as the title → falls back to the
-        // "Empty conversation" placeholder.
+    fn gemini_extract_first_user_message_strips_session_context_tag() {
+        // session_context title → same content, just the <session_context>
+        // wrapper filtered out (NOT skipped, NOT "Empty conversation").
         let only_context = vec![serde_json::json!({
             "type": "user",
             "content": [{"text": "<session_context>\nThis is the Gemini CLI.\nWorkspace: /x\n</session_context>"}]
         })];
+        let title = gemini_extract_first_user_message(&only_context).unwrap();
+        assert!(!title.contains("<session_context>"), "got: {title}");
+        assert!(title.contains("This is the Gemini CLI"), "got: {title}");
+        // Guard against the reverted behavior: it must NOT skip to a placeholder.
+        assert_ne!(title, "Empty conversation");
+        // A normal prompt passes through untouched.
+        let prompt = vec![serde_json::json!({
+            "type": "user",
+            "content": [{"text": "How do I sort a list?"}]
+        })];
         assert_eq!(
-            gemini_extract_first_user_message(&only_context).as_deref(),
-            Some("Empty conversation")
-        );
-        // A real prompt after the context → that becomes the title.
-        let with_prompt = vec![
-            serde_json::json!({"type":"user","content":[{"text":"<session_context>\nsetup\n</session_context>"}]}),
-            serde_json::json!({"type":"user","content":[{"text":"How do I sort a list?"}]}),
-        ];
-        assert_eq!(
-            gemini_extract_first_user_message(&with_prompt).as_deref(),
+            gemini_extract_first_user_message(&prompt).as_deref(),
             Some("How do I sort a list?")
         );
     }

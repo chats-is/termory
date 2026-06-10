@@ -1248,7 +1248,7 @@ export function App() {
                 {selected && (
                   <>
                     <header className="flex flex-col gap-2 p-3">
-                      <h2 className="text-lg font-semibold leading-snug">
+                      <h2 className="text-lg font-semibold leading-snug line-clamp-2">
                         {selected.title || "(untitled)"}
                       </h2>
 
