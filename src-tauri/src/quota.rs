@@ -1613,4 +1613,76 @@ mod tests {
             None
         );
     }
+
+    /// The scaffold's four credential-status branches, exercised with
+    /// stub queries (no network).
+    #[test]
+    fn quota_for_credential_scaffold_branches() {
+        fn ok(app: &'static str) -> SubscriptionQuota {
+            SubscriptionQuota::success(app, vec![], None)
+        }
+        fn fail(app: &'static str) -> SubscriptionQuota {
+            SubscriptionQuota::error(app, CredentialStatus::Valid, "boom".into())
+        }
+        // NotFound short-circuits — the query must not run.
+        let r = tauri::async_runtime::block_on(quota_for_credential(
+            "claude",
+            None,
+            CredentialStatus::NotFound,
+            None,
+            |_t| async { panic!("query must not run for NotFound") },
+        ));
+        assert!(!r.success);
+        assert_eq!(r.credential_status, CredentialStatus::NotFound);
+
+        // ParseError carries the parser's message through.
+        let r = tauri::async_runtime::block_on(quota_for_credential(
+            "claude",
+            None,
+            CredentialStatus::ParseError,
+            Some("bad json".into()),
+            |_t| async { panic!("query must not run for ParseError") },
+        ));
+        assert_eq!(r.credential_status, CredentialStatus::ParseError);
+        assert_eq!(r.error.as_deref(), Some("bad json"));
+
+        // Expired still TRIES the query; a success wins outright.
+        let r = tauri::async_runtime::block_on(quota_for_credential(
+            "claude",
+            Some("stale-tok".into()),
+            CredentialStatus::Expired,
+            Some("token expired".into()),
+            |t| async move {
+                assert_eq!(t, "stale-tok");
+                ok("claude")
+            },
+        ));
+        assert!(r.success);
+
+        // Expired + query rejected → Expired error with the ORIGINAL
+        // parser message (not the query's).
+        let r = tauri::async_runtime::block_on(quota_for_credential(
+            "claude",
+            Some("stale-tok".into()),
+            CredentialStatus::Expired,
+            Some("token expired".into()),
+            |_t| async { fail("claude") },
+        ));
+        assert!(!r.success);
+        assert_eq!(r.credential_status, CredentialStatus::Expired);
+        assert_eq!(r.error.as_deref(), Some("token expired"));
+
+        // Valid queries directly.
+        let r = tauri::async_runtime::block_on(quota_for_credential(
+            "claude",
+            Some("tok".into()),
+            CredentialStatus::Valid,
+            None,
+            |t| async move {
+                assert_eq!(t, "tok");
+                ok("claude")
+            },
+        ));
+        assert!(r.success);
+    }
 }
