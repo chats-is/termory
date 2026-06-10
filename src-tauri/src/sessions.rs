@@ -4087,6 +4087,15 @@ fn load_gemini_json_conversation(
     })
 }
 
+/// Gemini injects an environment-context message as the FIRST `user` record of
+/// every session — a `<session_context>…</session_context>` wrapper built by
+/// `environmentContext.ts` (date / OS / workspace / directory tree). It is not a
+/// real user prompt, so it must NOT become the session title. The official CLI
+/// special-cases the same prefix (`toGraph.ts: text.startsWith('<session_context>')`).
+fn gemini_is_injected_context(content: &str) -> bool {
+    content.trim_start().starts_with("<session_context>")
+}
+
 fn gemini_extract_first_user_message(messages: &[Value]) -> Option<String> {
     let first_meaningful = messages
         .iter()
@@ -4098,7 +4107,10 @@ fn gemini_extract_first_user_message(messages: &[Value]) -> Option<String> {
                 .map(|content| gemini_clean_message(&content))
         })
         .find(|content| {
-            !content.starts_with('/') && !content.starts_with('?') && !content.trim().is_empty()
+            !content.starts_with('/')
+                && !content.starts_with('?')
+                && !content.trim().is_empty()
+                && !gemini_is_injected_context(content)
         });
     if first_meaningful.is_some() {
         return first_meaningful;
@@ -4112,7 +4124,7 @@ fn gemini_extract_first_user_message(messages: &[Value]) -> Option<String> {
                 .and_then(gemini_content_text_raw)
                 .map(|content| gemini_clean_message(&content))
         })
-        .find(|content| !content.trim().is_empty())
+        .find(|content| !content.trim().is_empty() && !gemini_is_injected_context(content))
         .or_else(|| Some("Empty conversation".to_string()))
 }
 
@@ -4236,6 +4248,38 @@ fn gemini_thought_messages_from_value(value: &Value) -> Vec<SessionMessage> {
     out
 }
 
+/// Fence only the directory-tree block(s) inside Gemini's session_context so the
+/// tree (`├─└│` box chars + indentation) keeps its layout, while the surrounding
+/// `- **…**` markdown still renders. A tree block = a contiguous run of lines
+/// containing box-drawing chars, plus the root-path line just before it.
+fn gemini_fence_tree_blocks(text: &str) -> String {
+    let is_tree = |l: &str| l.contains('├') || l.contains('│') || l.contains('└');
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if is_tree(lines[i]) {
+            let mut block: Vec<String> = Vec::new();
+            // Pull the preceding non-blank line (the tree's root path) into the
+            // fence so the header stays attached to the tree.
+            if out.last().map(|l| !l.trim().is_empty()).unwrap_or(false) {
+                block.push(out.pop().unwrap());
+            }
+            while i < lines.len() && is_tree(lines[i]) {
+                block.push(lines[i].to_string());
+                i += 1;
+            }
+            out.push("````".to_string());
+            out.extend(block);
+            out.push("````".to_string());
+        } else {
+            out.push(lines[i].to_string());
+            i += 1;
+        }
+    }
+    out.join("\n")
+}
+
 fn gemini_message_from_value(value: &Value) -> Option<SessionMessage> {
     let raw_type = value.get("type").and_then(value_to_string)?;
     let role = match raw_type.as_str() {
@@ -4250,6 +4294,39 @@ fn gemini_message_from_value(value: &Value) -> Option<SessionMessage> {
         .or_else(|| value.get("content").and_then(gemini_content_text_raw))?;
     if raw_text.trim().is_empty() {
         return None;
+    }
+    // Gemini injects a `<session_context>…</session_context>` environment block
+    // (date / OS / workspace / directory tree) as the first `user` record. The
+    // official TUI hides it; Termory surfaces it — but UNWRAPPED, as a system
+    // notice, mirroring the Codex `<environment_context>` handling
+    // (`codex_user_message_event`). Unwrapping also keeps the inner content from
+    // being swallowed by the markdown renderer's raw-HTML-block rule.
+    if role == "user" && gemini_is_injected_context(&raw_text) {
+        let inner =
+            extract_xml_tag_value(&raw_text, "session_context").unwrap_or_else(|| raw_text.clone());
+        let inner = inner.trim();
+        // Fence ONLY the directory-tree block(s) so the tree keeps its layout
+        // while the surrounding `- **…**` markdown still renders.
+        let body = if inner.is_empty() {
+            "*[Gemini session_context]*".to_string()
+        } else {
+            format!(
+                "*[Gemini session_context]*\n\n{}",
+                gemini_fence_tree_blocks(inner)
+            )
+        };
+        let timestamp = value
+            .get("timestamp")
+            .and_then(value_to_string)
+            .and_then(normalize_time);
+        return Some(SessionMessage {
+            role: "system".to_string(),
+            text: body,
+            timestamp,
+            kind: kind::TEXT.to_string(),
+            tool_use_id: None,
+            exit_code: None,
+        });
     }
     // System notices (info / error / warning) get a leading TUI icon +
     // italic body so they're visually distinct from regular assistant /
@@ -12682,6 +12759,57 @@ mod tests {
         assert!(worktrees.contains(&"/work/archived".to_string())); // only archived → shown
         assert!(!worktrees.contains(&"/work/has".to_string())); // has a live session → not "empty"
         assert!(projects.iter().all(|p| p.source == "OpenCode"));
+    }
+
+    #[test]
+    fn gemini_title_skips_injected_session_context() {
+        // A session whose only user message is Gemini's injected
+        // <session_context> must NOT use it as the title → falls back to the
+        // "Empty conversation" placeholder.
+        let only_context = vec![serde_json::json!({
+            "type": "user",
+            "content": [{"text": "<session_context>\nThis is the Gemini CLI.\nWorkspace: /x\n</session_context>"}]
+        })];
+        assert_eq!(
+            gemini_extract_first_user_message(&only_context).as_deref(),
+            Some("Empty conversation")
+        );
+        // A real prompt after the context → that becomes the title.
+        let with_prompt = vec![
+            serde_json::json!({"type":"user","content":[{"text":"<session_context>\nsetup\n</session_context>"}]}),
+            serde_json::json!({"type":"user","content":[{"text":"How do I sort a list?"}]}),
+        ];
+        assert_eq!(
+            gemini_extract_first_user_message(&with_prompt).as_deref(),
+            Some("How do I sort a list?")
+        );
+    }
+
+    #[test]
+    fn gemini_session_context_unwraps_and_fences_only_the_tree() {
+        let value = serde_json::json!({
+            "type": "user",
+            "content": [{"text": "<session_context>\n- **Directory Structure:**\n\n/proj/\n├───a.txt\n└───b.txt\n</session_context>"}]
+        });
+        let msg = gemini_message_from_value(&value).unwrap();
+        assert_eq!(msg.role, "system");
+        assert!(msg.text.starts_with("*[Gemini session_context]*"));
+        // The `- **…**` markdown line stays markdown (NOT fenced).
+        assert!(msg.text.contains("- **Directory Structure:**"));
+        // The tree block (root path + box-drawing lines) IS fenced so its
+        // layout survives the markdown renderer.
+        assert!(msg
+            .text
+            .contains("````\n/proj/\n├───a.txt\n└───b.txt\n````"));
+        // Wrapper unwrapped → no raw <session_context> tag left.
+        assert!(!msg.text.contains("<session_context>"));
+    }
+
+    #[test]
+    fn gemini_fence_tree_blocks_leaves_non_tree_text_untouched() {
+        // No box-drawing chars → returned verbatim (no fence added).
+        let plain = "- **Workspace Directories:**\n  - /a\nSome prose.";
+        assert_eq!(gemini_fence_tree_blocks(plain), plain);
     }
 
     #[test]
