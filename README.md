@@ -15,8 +15,10 @@
 Termory brings **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode** together in one window. Browse every past session, memory file, and skill from all your tools, keep the messages worth saving, search across everything at once, and resume any session right back in your terminal. When you want a different model or platform, switch any CLI to another API provider in a click — no config files, no copy-pasting keys. It runs natively on macOS, Linux, and Windows, and your history never leaves your machine.
 
 <div align="center">
+  <img src="docs/screenshots/gateways.png" alt="Termory — one AI gateway bound to every CLI" width="49%">
   <img src="docs/screenshots/providers.png" alt="Termory — switch any CLI between API providers" width="49%">
   <img src="docs/screenshots/stats.png" alt="Termory — usage stats across every tool" width="49%">
+  <img src="docs/screenshots/add-provider.png" alt="Termory — add a provider or gateway in seconds" width="49%">
 </div>
 
 ## Features
