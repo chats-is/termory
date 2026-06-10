@@ -11,7 +11,8 @@ import {
   ACTIVE_STATE_REFRESH_EVENT,
   CLI_APPS,
   CLI_APP_LABEL,
-  CLI_APP_SOURCE_BADGE
+  CLI_APP_SOURCE_BADGE,
+  QUOTA_CHANGED_EVENT
 } from "@/constants";
 import {
   blankProvider,
@@ -88,7 +89,7 @@ let versionsEverResolved = false;
 // weekly rate-limit windows). MIRROR of the backend list
 // `quota::SUPPORTED` in src-tauri/src/quota.rs (which drives the tray)
 // — when a CLI's fetch_quota arm lands, add it in BOTH places.
-const QUOTA_SUPPORTED: ReadonlySet<CliApp> = new Set(["claude"]);
+const QUOTA_SUPPORTED: ReadonlySet<CliApp> = new Set(["claude", "codex"]);
 // Quota results survive route remounts (like cachedVersions). An entry
 // older than QUOTA_STALE_MS is silently re-fetched on the next entry
 // to the tab. Manual Refresh bypasses the stale window but is still
@@ -247,6 +248,36 @@ export function ProvidersPage({
       quotaLoadingRef.current = null;
       setQuotaLoading(null);
     }
+  }, []);
+
+  // Backend-initiated quota results (tray click, watcher
+  // credential-change — e.g. the user just ran `claude login`) arrive
+  // as events; store them so the page reflects a login/logout without
+  // its own request. IPC-initiated fetches echo here too (same data).
+  React.useEffect(() => {
+    const unlisten = listen<SubscriptionQuota>(QUOTA_CHANGED_EVENT, (event) => {
+      const result = event.payload;
+      if (!result?.app) return;
+      setQuotas((cur) => {
+        // Out-of-order guard: with concurrent fetches (page + tray),
+        // a slower fetch's payload can arrive after a newer result —
+        // never roll the entry back to an older snapshot.
+        const prev = cur[result.app];
+        if (
+          prev?.queriedAt &&
+          result.queriedAt &&
+          result.queriedAt < prev.queriedAt
+        ) {
+          return cur;
+        }
+        const next = { ...cur, [result.app]: result };
+        cachedQuotas = next;
+        return next;
+      });
+    });
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
   }, []);
 
   // Manual-refresh cooldown for the CURRENT tab's quota (shorter

@@ -215,6 +215,22 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
                 }
             }
 
+            // Credential routing: a change to a CLI's OAuth credential
+            // file means a login / logout / token refresh just happened
+            // — force-refresh that CLI's quota (bypasses the normal
+            // rate limits; tray + Providers page update via
+            // QUOTA_CHANGED_EVENT). Keychain-backed credentials (macOS
+            // Claude / Codex variants) produce no file event — the
+            // 60s not_found retry remains the fallback there.
+            {
+                let mut credential_clis: Vec<crate::providers::CliApp> =
+                    events.iter().flat_map(event_credential_clis).collect();
+                credential_clis.dedup();
+                for cli in credential_clis {
+                    crate::tray::force_quota_refresh(&app_handle, cli);
+                }
+            }
+
             // If every event in the burst touched only noise files
             // (SQLite WAL/SHM, OS metadata), there's nothing to re-scan
             // for. Skip without rescanning — otherwise we'd churn on
@@ -276,6 +292,32 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
 /// and OS metadata noise (`.DS_Store`). If only filtered files
 /// changed, the data we'd surface is identical to last scan, so a
 /// re-scan would be pure cost.
+/// CLIs whose OAuth credential file this event touched:
+/// `.credentials.json` (anywhere under the watched Claude dir) →
+/// Claude; `auth.json` directly inside a `.codex` dir → Codex (the
+/// parent check excludes OpenCode's unrelated
+/// `~/.local/share/opencode/auth.json`).
+fn event_credential_clis(event: &notify::Event) -> Vec<crate::providers::CliApp> {
+    use crate::providers::CliApp;
+    let mut out = Vec::new();
+    for path in &event.paths {
+        match path.file_name().and_then(|n| n.to_str()) {
+            Some(".credentials.json") => out.push(CliApp::Claude),
+            Some("auth.json")
+                if path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    == Some(".codex") =>
+            {
+                out.push(CliApp::Codex)
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 fn event_has_relevant_path(event: &notify::Event) -> bool {
     event.paths.iter().any(|path| {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -471,5 +513,29 @@ mod tests {
         assert!(result.contains(&PathBuf::from("/abs/one")));
         assert!(result.contains(&PathBuf::from("/abs/two")));
         assert!(!result.contains(&PathBuf::from("relative/path")));
+    }
+
+    #[test]
+    fn event_credential_clis_matches_claude_and_codex_files_only() {
+        use crate::providers::CliApp;
+        fn ev(paths: &[&str]) -> notify::Event {
+            let mut e = notify::Event::default();
+            e.paths = paths.iter().map(PathBuf::from).collect();
+            e
+        }
+        assert_eq!(
+            event_credential_clis(&ev(&["/Users/x/.claude/.credentials.json"])),
+            vec![CliApp::Claude]
+        );
+        assert_eq!(
+            event_credential_clis(&ev(&["/Users/x/.codex/auth.json"])),
+            vec![CliApp::Codex]
+        );
+        // OpenCode's unrelated auth.json must NOT match (parent isn't `.codex`).
+        assert!(
+            event_credential_clis(&ev(&["/Users/x/.local/share/opencode/auth.json"])).is_empty()
+        );
+        // Ordinary session files don't match.
+        assert!(event_credential_clis(&ev(&["/Users/x/.claude/projects/p/s.jsonl"])).is_empty());
     }
 }

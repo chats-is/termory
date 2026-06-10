@@ -47,6 +47,12 @@ use tauri::{
 
 const TRAY_ID: &str = "termory-main";
 
+/// Emitted with a `SubscriptionQuota` payload after every completed
+/// quota fetch (any trigger), so the Providers page stays in sync with
+/// backend-initiated fetches. Frontend mirror: QUOTA_CHANGED_EVENT in
+/// src/constants.ts.
+pub const QUOTA_CHANGED_EVENT: &str = "termory:quota-changed";
+
 /// How many recent session titles to surface under "Open".
 const RECENT_LIMIT: usize = 5;
 
@@ -64,16 +70,20 @@ struct RecentSession {
 /// the `scan_all_sessions` IPC) — the tray never scans on its own.
 static RECENT: Mutex<Vec<RecentSession>> = Mutex::new(Vec::new());
 
-/// Cached official-account quota shown on a CLI's first-level row
-/// (5-hour + weekly windows only — the per-model weekly windows stay
-/// app-only). One entry per quota-capable CLI (`quota::SUPPORTED`).
-/// Refreshed by `refresh_quota` from the tray's click-triggered fetch
-/// AND from every `fetch_subscription_quota` IPC, so a manual refresh
-/// in the Providers page updates the tray too.
+/// Claude's per-model weekly windows stay app-only — the menu row
+/// shows the main session + weekly windows (user decision).
+const TRAY_HIDDEN_TIERS: &[&str] = &["seven_day_opus", "seven_day_sonnet"];
+
+/// Cached official-account quota shown on a CLI's first-level row.
+/// One entry per quota-capable CLI (`quota::SUPPORTED`). Refreshed by
+/// `refresh_quota` from the tray's click-triggered fetch AND from
+/// every `fetch_subscription_quota` IPC, so a manual refresh in the
+/// Providers page updates the tray too.
 #[derive(Clone, PartialEq)]
 struct TrayQuota {
-    five_hour: Option<f64>,
-    seven_day: Option<f64>,
+    /// `(window id, used %)` — already filtered to displayable
+    /// windows (TRAY_HIDDEN_TIERS dropped), API order preserved.
+    tiers: Vec<(String, f64)>,
 }
 
 static QUOTA: Mutex<Vec<(CliApp, TrayQuota)>> = Mutex::new(Vec::new());
@@ -89,6 +99,7 @@ struct TrayLabels {
     exit: String,
     five_hour: String,
     weekly: String,
+    monthly: String,
 }
 
 impl Default for TrayLabels {
@@ -99,6 +110,7 @@ impl Default for TrayLabels {
             exit: "Exit".to_string(),
             five_hour: "5h".to_string(),
             weekly: "Weekly".to_string(),
+            monthly: "Monthly".to_string(),
         }
     }
 }
@@ -115,7 +127,14 @@ fn tray_labels() -> TrayLabels {
 
 /// Store the localized static labels (called from the `set_tray_labels` IPC).
 /// The caller rebuilds the menu so the new labels take effect.
-pub fn set_labels(open: String, official: String, exit: String, five_hour: String, weekly: String) {
+pub fn set_labels(
+    open: String,
+    official: String,
+    exit: String,
+    five_hour: String,
+    weekly: String,
+    monthly: String,
+) {
     if let Ok(mut g) = TRAY_LABELS.lock() {
         *g = Some(TrayLabels {
             open,
@@ -123,6 +142,7 @@ pub fn set_labels(open: String, official: String, exit: String, five_hour: Strin
             exit,
             five_hour,
             weekly,
+            monthly,
         });
     }
 }
@@ -161,11 +181,12 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             handle_menu_event(app, event.id.as_ref());
         })
         // A click on the tray icon is also "the menu is opening" —
-        // kick off a (rate-limited) quota refresh so the Claude info
-        // row stays current without any background polling. The fetch
+        // kick off a (rate-limited) quota refresh so the quota info
+        // rows stay current without any background polling. The fetch
         // lands after the menu is already on screen, so the updated
-        // numbers show from the NEXT open; with the 120s floor that's
-        // at most one open behind.
+        // numbers show from the NEXT open (floors: 10 min after a
+        // success, 60s after a failure — QUOTA_TRAY_MIN_INTERVAL /
+        // QUOTA_TRAY_ERROR_RETRY).
         .on_tray_icon_event(|tray, event| {
             if matches!(event, tauri::tray::TrayIconEvent::Click { .. }) {
                 trigger_quota_refresh(tray.app_handle());
@@ -203,6 +224,18 @@ fn set_quota_marker(cli: CliApp, ok: bool) {
     }
 }
 
+fn spawn_quota_fetch(app: &AppHandle, cli: CliApp) {
+    // Mark pre-flight as failed-shape so an in-flight / errored
+    // attempt only blocks the short window; the completed fetch
+    // overwrites this via refresh_quota's marker update.
+    set_quota_marker(cli, false);
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let quota = crate::quota::fetch_quota(cli).await;
+        refresh_quota(&handle, &quota);
+    });
+}
+
 /// Async, rate-limited quota fetch + tray update for every CLI in
 /// `quota::SUPPORTED`. Used by the menu-open (tray click) hook and the
 /// one-shot warm-up at startup.
@@ -224,16 +257,35 @@ pub fn trigger_quota_refresh(app: &AppHandle) {
                 }
             }
         }
-        // Mark pre-flight as failed-shape so an in-flight / errored
-        // attempt only blocks the short window; the completed fetch
-        // overwrites this via refresh_quota's marker update.
-        set_quota_marker(cli, false);
-        let handle = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let quota = crate::quota::fetch_quota(cli).await;
-            refresh_quota(&handle, &quota);
-        });
+        spawn_quota_fetch(app, cli);
     }
+}
+
+/// Floor for credential-change-driven refreshes — just burst dedup
+/// (Codex rewrites auth.json on every token refresh), NOT a cache
+/// window: a login/logout means the cached state is wrong by
+/// definition, so the normal floors don't apply.
+const QUOTA_FORCE_FLOOR: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A CLI's credential file just changed (login / logout / token
+/// refresh) — re-fetch its quota now, bypassing the regular rate
+/// limits. Called from the filesystem watcher.
+pub fn force_quota_refresh(app: &AppHandle, cli: CliApp) {
+    if !crate::quota::supports_quota(cli) {
+        return;
+    }
+    {
+        let Ok(guard) = QUOTA_LAST_FETCH.lock() else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        if let Some((_, prev, _)) = guard.iter().find(|(c, _, _)| *c == cli) {
+            if now.duration_since(*prev) < QUOTA_FORCE_FLOOR {
+                return;
+            }
+        }
+    }
+    spawn_quota_fetch(app, cli);
 }
 
 /// Rebuild the tray menu so checkmarks reflect the current active
@@ -275,19 +327,42 @@ pub fn refresh_quota(app: &AppHandle, quota: &crate::quota::SubscriptionQuota) {
     // Shared rate limit: an IPC fetch from the Providers page counts
     // exactly like a tray-triggered one.
     set_quota_marker(cli, quota.success);
+    // Push every completed result to the frontend so an open Providers
+    // page reflects backend-initiated fetches (tray click, watcher
+    // credential-change) without its own request. Harmless echo for
+    // IPC-initiated fetches — same data the page already received.
+    {
+        use tauri::Emitter;
+        let _ = app.emit(QUOTA_CHANGED_EVENT, quota);
+    }
     if !quota.success {
+        // Logged out (`not_found`) is a definitive state, not a
+        // transient failure — drop the stale numbers from the menu.
+        // Other failures keep the last good data (no flickering).
+        if quota.credential_status == crate::quota::CredentialStatus::NotFound {
+            let removed = QUOTA
+                .lock()
+                .map(|mut guard| {
+                    let before = guard.len();
+                    guard.retain(|(c, _)| *c != cli);
+                    guard.len() != before
+                })
+                .unwrap_or(false);
+            if removed {
+                if let Err(err) = rebuild_menu(app) {
+                    log::error!("tray quota rebuild failed: {err}");
+                }
+            }
+        }
         return;
     }
-    let tier = |name: &str| {
-        quota
+    let next = TrayQuota {
+        tiers: quota
             .tiers
             .iter()
-            .find(|t| t.name == name)
-            .map(|t| t.utilization)
-    };
-    let next = TrayQuota {
-        five_hour: tier("five_hour"),
-        seven_day: tier("seven_day"),
+            .filter(|t| !TRAY_HIDDEN_TIERS.contains(&t.name.as_str()))
+            .map(|t| (t.name.clone(), t.utilization))
+            .collect(),
     };
     match QUOTA.lock() {
         Ok(mut guard) => match guard.iter_mut().find(|(c, _)| *c == cli) {
@@ -316,22 +391,53 @@ fn quota_glyph(utilization: f64) -> &'static str {
     }
 }
 
-/// "🟢 12% 5h · 🟡 78% Weekly" — appended to the Claude Code
-/// first-level row title (percent right after the pressure glyph).
-/// None when neither window is known.
+/// Short menu label for a window id: the localized labels for the
+/// standard windows, "{n}h" / "{n}d" for generated `{n}_hour` /
+/// `{n}_day` ids (Codex non-standard window lengths, e.g. the free
+/// plan's 30-day window — mirrors `tierLabels` in
+/// ProviderOfficialCard.tsx), raw id otherwise.
+fn tray_tier_label(name: &str, labels: &TrayLabels) -> String {
+    match name {
+        "five_hour" => labels.five_hour.clone(),
+        "seven_day" => labels.weekly.clone(),
+        "30_day" => labels.monthly.clone(),
+        other => {
+            if let Some(n) = other.strip_suffix("_hour") {
+                if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
+                    return format!("{n}h");
+                }
+            }
+            if let Some(n) = other.strip_suffix("_day") {
+                if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
+                    return format!("{n}d");
+                }
+            }
+            other.to_string()
+        }
+    }
+}
+
+/// "🟢 12% 5h · 🟡 78% Weekly" (or "🟢 9% 30d" on a Codex free plan)
+/// — appended to the CLI's first-level row title (percent right after
+/// the pressure glyph). None when no window is known.
 fn quota_label(q: &TrayQuota, labels: &TrayLabels) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(v) = q.five_hour {
-        parts.push(format!("{} {:.0}% {}", quota_glyph(v), v, labels.five_hour));
+    if q.tiers.is_empty() {
+        return None;
     }
-    if let Some(v) = q.seven_day {
-        parts.push(format!("{} {:.0}% {}", quota_glyph(v), v, labels.weekly));
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" · "))
-    }
+    Some(
+        q.tiers
+            .iter()
+            .map(|(name, used)| {
+                format!(
+                    "{} {:.0}% {}",
+                    quota_glyph(*used),
+                    used,
+                    tray_tier_label(name, labels)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" · "),
+    )
 }
 
 /// The (pure) selection: drop Memory/Skill, newest first, cap at
@@ -627,29 +733,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quota_label_formats_and_skips_missing_windows() {
+    fn quota_label_formats_known_generated_and_missing_windows() {
         let labels = TrayLabels::default();
         let both = TrayQuota {
-            five_hour: Some(12.4),
-            seven_day: Some(78.0),
+            tiers: vec![("five_hour".into(), 12.4), ("seven_day".into(), 78.0)],
         };
         assert_eq!(
             quota_label(&both, &labels).as_deref(),
             Some("🟢 12% 5h · 🟡 78% Weekly")
         );
-        let five_only = TrayQuota {
-            five_hour: Some(99.6),
-            seven_day: None,
+        // Codex free plan: a single generated 30-day window → "30d".
+        let monthly = TrayQuota {
+            tiers: vec![("30_day".into(), 9.0)],
         };
         assert_eq!(
-            quota_label(&five_only, &labels).as_deref(),
-            Some("🔴 100% 5h")
+            quota_label(&monthly, &labels).as_deref(),
+            Some("🟢 9% Monthly")
         );
-        let none = TrayQuota {
-            five_hour: None,
-            seven_day: None,
+        // Truly unknown ids pass through raw.
+        let odd = TrayQuota {
+            tiers: vec![("mystery_window".into(), 99.6)],
         };
+        assert_eq!(
+            quota_label(&odd, &labels).as_deref(),
+            Some("🔴 100% mystery_window")
+        );
+        let none = TrayQuota { tiers: vec![] };
         assert_eq!(quota_label(&none, &labels), None);
+    }
+
+    #[test]
+    fn tray_tier_label_humanizes_generated_ids() {
+        let labels = TrayLabels::default();
+        assert_eq!(tray_tier_label("five_hour", &labels), "5h");
+        assert_eq!(tray_tier_label("seven_day", &labels), "Weekly");
+        assert_eq!(tray_tier_label("3_hour", &labels), "3h");
+        assert_eq!(tray_tier_label("30_day", &labels), "Monthly");
+        assert_eq!(tray_tier_label("14_day", &labels), "14d");
+        assert_eq!(tray_tier_label("_day", &labels), "_day"); // no digits → raw
+        assert_eq!(tray_tier_label("weekly_limit", &labels), "weekly_limit");
     }
 
     #[test]

@@ -48,7 +48,12 @@ function makeQuota(overrides: Partial<SubscriptionQuota> = {}): SubscriptionQuot
       },
       { name: "seven_day", utilization: 41 },
       { name: "seven_day_sonnet", utilization: 0 },
-      { name: "thirty_day", utilization: 9 }
+      // Codex free plan's 30-day window — labeled "Monthly".
+      { name: "30_day", utilization: 9 },
+      // Generated id with no dedicated label — humanized to "14d".
+      { name: "14_day", utilization: 3 },
+      // Truly unknown id — passes through raw.
+      { name: "mystery_window", utilization: 7 }
     ],
     queriedAt: Date.now(),
     ...overrides
@@ -74,8 +79,13 @@ describe("ProviderOfficialCard — quota section", () => {
     expect(screen.getByText("Weekly")).toBeInTheDocument();
     expect(screen.getByText("12%")).toBeInTheDocument();
     expect(screen.getByText("41%")).toBeInTheDocument();
-    // Unknown window id surfaces verbatim instead of being dropped.
-    expect(screen.getByText("thirty_day")).toBeInTheDocument();
+    // The Codex 30-day window gets its proper label…
+    expect(screen.getByText("Monthly")).toBeInTheDocument();
+    expect(screen.queryByText("30_day")).toBeNull();
+    // …other generated `{n}_day` ids are humanized…
+    expect(screen.getByText("14d")).toBeInTheDocument();
+    // …while truly unknown ids surface verbatim instead of being dropped.
+    expect(screen.getByText("mystery_window")).toBeInTheDocument();
   });
 
   it("shows the reset time under the label, and the full detail in the tooltip", async () => {

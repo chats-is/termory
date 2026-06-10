@@ -77,6 +77,12 @@ export const OPENCODE_DEFAULT_NPM = "@ai-sdk/openai-compatible";
 
 export const ACTIVE_STATE_REFRESH_EVENT = "termory:providers-refresh";
 
+// Backend pushes a `SubscriptionQuota` payload after every completed
+// quota fetch (tray click, watcher credential-change, IPC), so the
+// Providers page stays in sync without its own request. Rust mirror:
+// QUOTA_CHANGED_EVENT in src-tauri/src/tray.rs.
+export const QUOTA_CHANGED_EVENT = "termory:quota-changed";
+
 // Install instructions surfaced in the Providers page InstallGuide when
 // the corresponding CLI binary is missing from PATH. Commands are
 // pulled from each tool's official README (.audit-sources/<tool>/).

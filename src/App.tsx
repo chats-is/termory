@@ -153,9 +153,10 @@ export function App() {
       open: t("tray.open"),
       official: t("tray.official"),
       exit: t("tray.exit"),
-      // Claude quota info row inside the Claude Code submenu.
+      // Quota window labels on the CLI rows (5h / Weekly / Monthly).
       fiveHour: t("providers.quotaFiveHourShort"),
-      weekly: t("providers.quotaSevenDayShort")
+      weekly: t("providers.quotaSevenDayShort"),
+      monthly: t("providers.quotaMonthlyShort")
     }).catch(() => {});
   }, [t]);
   const [sessions, setSessions] = React.useState<AppSession[]>([]);

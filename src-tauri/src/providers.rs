@@ -1108,7 +1108,7 @@ fn codex_dir() -> Result<PathBuf, Box<dyn Error>> {
     Ok(home()?.join(".codex"))
 }
 
-fn codex_auth_path() -> Result<PathBuf, Box<dyn Error>> {
+pub(crate) fn codex_auth_path() -> Result<PathBuf, Box<dyn Error>> {
     Ok(codex_dir()?.join("auth.json"))
 }
 

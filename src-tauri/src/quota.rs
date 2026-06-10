@@ -3,8 +3,8 @@
 //! endpoint for the rate-limit windows (5-hour session, 7-day weekly,
 //! per-model weekly, …).
 //!
-//! Claude Code is implemented; the entry point is keyed by `CliApp`
-//! so Codex / Gemini can be added later behind the same IPC shape.
+//! Claude Code and Codex are implemented; the entry point is keyed
+//! by `CliApp` so Gemini can be added later behind the same IPC shape.
 //!
 //! Reference: cc-switch `src-tauri/src/services/subscription.rs`
 //! (credential sources + endpoint + response shape, cross-checked).
@@ -19,7 +19,7 @@ use crate::providers::CliApp;
 /// consumer (tray submenu, tray refresh trigger) keys off. Add the
 /// CLI here when its `fetch_quota` arm lands. Frontend mirror:
 /// `QUOTA_SUPPORTED` in ProvidersPage.tsx.
-pub const SUPPORTED: &[CliApp] = &[CliApp::Claude];
+pub const SUPPORTED: &[CliApp] = &[CliApp::Claude, CliApp::Codex];
 
 pub fn supports_quota(app: CliApp) -> bool {
     SUPPORTED.contains(&app)
@@ -339,12 +339,15 @@ fn http_error_message(status: reqwest::StatusCode, body: &str) -> String {
 }
 
 /// The API's error `message` out of a response body; None when the
-/// body is empty / has no usable text.
+/// body is empty / has no usable text. Accepts the Anthropic envelope
+/// (`error.message`), a top-level `message`, and the ChatGPT backend's
+/// `detail` field.
 fn api_error_detail(body: &str) -> Option<String> {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
         if let Some(msg) = v
             .pointer("/error/message")
             .or_else(|| v.get("message"))
+            .or_else(|| v.get("detail"))
             .and_then(|m| m.as_str())
         {
             let msg = msg.trim();
@@ -440,6 +443,287 @@ async fn query_claude_quota(access_token: &str) -> SubscriptionQuota {
 }
 
 // ===================================================================
+// Codex credentials
+// ===================================================================
+
+/// Parsed Codex credential: token + ChatGPT account id (sent as the
+/// `ChatGPT-Account-Id` header — codex-rs backend-client/src/client.rs:214)
+/// + status + diagnostic message.
+type CodexCredential = (
+    Option<String>,
+    Option<String>,
+    CredentialStatus,
+    Option<String>,
+);
+
+/// Read the Codex OAuth credential. Source priority mirrors cc-switch
+/// (`subscription.rs:459-467`):
+///  1. macOS Keychain, service "Codex Auth"
+///  2. `~/.codex/auth.json`
+/// Only `auth_mode == "chatgpt"` (OAuth) carries subscription usage —
+/// API-key mode has no rate-limit windows to show.
+fn read_codex_credentials() -> CodexCredential {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(found) = read_codex_credentials_from_keychain() {
+            return found;
+        }
+    }
+    read_codex_credentials_from_file()
+}
+
+#[cfg(target_os = "macos")]
+fn read_codex_credentials_from_keychain() -> Option<CodexCredential> {
+    let output = std::process::Command::new("security")
+        .args(["find-generic-password", "-s", "Codex Auth", "-w"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None; // no Keychain entry — fall back to the file
+    }
+    let json = String::from_utf8(output.stdout).ok()?;
+    let json = json.trim();
+    if json.is_empty() {
+        return None;
+    }
+    Some(parse_codex_credentials(json))
+}
+
+fn read_codex_credentials_from_file() -> CodexCredential {
+    let Ok(path) = crate::providers::codex_auth_path() else {
+        return (None, None, CredentialStatus::NotFound, None);
+    };
+    if !path.exists() {
+        return (None, None, CredentialStatus::NotFound, None);
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(content) => parse_codex_credentials(&content),
+        Err(err) => (
+            None,
+            None,
+            CredentialStatus::ParseError,
+            Some(format!("Failed to read Codex auth file: {err}")),
+        ),
+    }
+}
+
+/// Parse the auth.json document (shared by Keychain and file):
+/// `{"auth_mode": "chatgpt", "tokens": {"access_token": ..., "account_id": ...},
+///   "last_refresh": "..."}` — shape per codex-rs `codex_login::AuthDotJson`.
+fn parse_codex_credentials(content: &str) -> CodexCredential {
+    let parsed: serde_json::Value = match serde_json::from_str(content) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                None,
+                None,
+                CredentialStatus::ParseError,
+                Some(format!("Failed to parse Codex auth JSON: {err}")),
+            );
+        }
+    };
+
+    if parsed.get("auth_mode").and_then(|v| v.as_str()) != Some("chatgpt") {
+        // API-key login (or no login) — no subscription usage to query.
+        return (
+            None,
+            None,
+            CredentialStatus::NotFound,
+            Some("Codex not using OAuth mode".to_string()),
+        );
+    }
+
+    let Some(tokens) = parsed.get("tokens") else {
+        return (
+            None,
+            None,
+            CredentialStatus::ParseError,
+            Some("No tokens in Codex auth".to_string()),
+        );
+    };
+    let access_token = match tokens.get("access_token").and_then(|v| v.as_str()) {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => {
+            return (
+                None,
+                None,
+                CredentialStatus::ParseError,
+                Some("access_token is empty or missing".to_string()),
+            );
+        }
+    };
+    let account_id = tokens
+        .get("account_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    // Codex CLI auto-refreshes tokens older than ~8 days; a stale
+    // last_refresh usually means the access token no longer works.
+    if let Some(last_refresh) = parsed.get("last_refresh").and_then(|v| v.as_str()) {
+        if is_codex_token_stale(last_refresh) {
+            return (
+                Some(access_token),
+                account_id,
+                CredentialStatus::Expired,
+                Some("Codex token may be stale (>8 days since last refresh)".to_string()),
+            );
+        }
+    }
+
+    (
+        Some(access_token),
+        account_id,
+        CredentialStatus::Valid,
+        None,
+    )
+}
+
+/// Stale when `last_refresh` (RFC 3339) is more than 8 days old —
+/// the window after which Codex CLI itself forces a token refresh.
+fn is_codex_token_stale(last_refresh: &str) -> bool {
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    match chrono::DateTime::parse_from_rfc3339(last_refresh) {
+        Ok(dt) => now_secs.saturating_sub(dt.timestamp() as u64) > 8 * 24 * 3600,
+        Err(_) => false, // unparseable → don't assume stale
+    }
+}
+
+// ===================================================================
+// Codex usage API
+// ===================================================================
+
+/// Tier name for a rate-limit window length, aligned with Claude's
+/// naming so the frontend labels / tray glyphs apply unchanged:
+/// 18000s → `five_hour`, 604800s → `seven_day`; other lengths become
+/// `{n}_hour` / `{n}_day` and pass through with their raw name.
+fn window_seconds_to_tier_name(secs: i64) -> String {
+    match secs {
+        18_000 => "five_hour".to_string(),
+        604_800 => "seven_day".to_string(),
+        s => {
+            let hours = s / 3600;
+            if hours >= 24 {
+                format!("{}_day", hours / 24)
+            } else {
+                format!("{hours}_hour")
+            }
+        }
+    }
+}
+
+fn unix_ts_to_iso(ts: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp(ts, 0).map(|dt| dt.to_rfc3339())
+}
+
+/// Parse the `GET /wham/usage` response. Shape per codex-rs
+/// `RateLimitStatusPayload` (codex-backend-openapi-models): top-level
+/// `rate_limit.{primary_window,secondary_window}`, each a
+/// `RateLimitWindowSnapshot { used_percent, limit_window_seconds,
+/// reset_at }` (rate_limit_window_snapshot.rs:14-23). Primary is the
+/// 5-hour session window, secondary the weekly one.
+fn parse_codex_usage(body: &serde_json::Value) -> Vec<QuotaTier> {
+    let mut tiers = Vec::new();
+    for key in ["primary_window", "secondary_window"] {
+        let Some(window) = body.pointer(&format!("/rate_limit/{key}")) else {
+            continue;
+        };
+        let Some(used) = window.get("used_percent").and_then(|v| v.as_f64()) else {
+            continue;
+        };
+        tiers.push(QuotaTier {
+            name: window
+                .get("limit_window_seconds")
+                .and_then(|v| v.as_i64())
+                .map(window_seconds_to_tier_name)
+                .unwrap_or_else(|| "unknown".to_string()),
+            utilization: used,
+            resets_at: window
+                .get("reset_at")
+                .and_then(|v| v.as_i64())
+                .and_then(unix_ts_to_iso),
+        });
+    }
+    tiers
+}
+
+/// Query the ChatGPT backend usage endpoint with the Codex OAuth
+/// token. Endpoint per codex-rs `backend-client/src/client.rs:296`
+/// (`{base}/wham/usage`, ChatGptApi path style); the
+/// `ChatGPT-Account-Id` header per client.rs:214.
+async fn query_codex_quota(access_token: &str, account_id: Option<&str>) -> SubscriptionQuota {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(err) => {
+            return SubscriptionQuota::error(
+                "codex",
+                CredentialStatus::Valid,
+                format!("HTTP client init failed: {err}"),
+            );
+        }
+    };
+
+    let mut req = client
+        .get("https://chatgpt.com/backend-api/wham/usage")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("User-Agent", "codex-cli")
+        .header("Accept", "application/json");
+    if let Some(id) = account_id {
+        req = req.header("ChatGPT-Account-Id", id);
+    }
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(err) => {
+            return SubscriptionQuota::error(
+                "codex",
+                CredentialStatus::Valid,
+                format!("Network error: {err}"),
+            );
+        }
+    };
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let cred = if status == reqwest::StatusCode::UNAUTHORIZED
+            || status == reqwest::StatusCode::FORBIDDEN
+        {
+            CredentialStatus::Expired
+        } else {
+            CredentialStatus::Valid
+        };
+        return SubscriptionQuota::error("codex", cred, http_error_message(status, &body));
+    }
+
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(err) => {
+            return SubscriptionQuota::error(
+                "codex",
+                CredentialStatus::Valid,
+                format!("Failed to parse API response: {err}"),
+            );
+        }
+    };
+
+    SubscriptionQuota {
+        app: "codex".to_string(),
+        credential_status: CredentialStatus::Valid,
+        success: true,
+        tiers: parse_codex_usage(&body),
+        extra_usage: None,
+        error: None,
+        queried_at: Some(now_millis()),
+    }
+}
+
+// ===================================================================
 // Entry point
 // ===================================================================
 
@@ -478,7 +762,38 @@ pub async fn fetch_quota(app: CliApp) -> SubscriptionQuota {
                 }
             }
         }
-        // bin_name doubles as the frontend CliApp key ("codex", …).
+        CliApp::Codex => {
+            let (token, account_id, status, message) = read_codex_credentials();
+            match status {
+                CredentialStatus::NotFound => SubscriptionQuota::not_found("codex"),
+                CredentialStatus::ParseError => SubscriptionQuota::error(
+                    "codex",
+                    CredentialStatus::ParseError,
+                    message.unwrap_or_else(|| "Failed to parse credentials".to_string()),
+                ),
+                CredentialStatus::Expired => {
+                    // The 8-day staleness heuristic can be wrong —
+                    // still try the API; only report Expired when it
+                    // actually rejects the token.
+                    if let Some(token) = token {
+                        let result = query_codex_quota(&token, account_id.as_deref()).await;
+                        if result.success {
+                            return result;
+                        }
+                    }
+                    SubscriptionQuota::error(
+                        "codex",
+                        CredentialStatus::Expired,
+                        message.unwrap_or_else(|| "Codex OAuth token may be stale".to_string()),
+                    )
+                }
+                CredentialStatus::Valid => {
+                    let token = token.expect("token present when status is Valid");
+                    query_codex_quota(&token, account_id.as_deref()).await
+                }
+            }
+        }
+        // bin_name doubles as the frontend CliApp key ("gemini", …).
         _ => SubscriptionQuota::not_found(app.bin_name()),
     }
 }
@@ -635,6 +950,121 @@ mod tests {
         assert_eq!(extra.monthly_limit, Some(100.0));
         assert_eq!(extra.used_credits, Some(12.34));
         assert_eq!(extra.currency.as_deref(), Some("USD"));
+    }
+
+    #[test]
+    fn parse_codex_credentials_chatgpt_mode_yields_token_and_account() {
+        let content = json!({
+            "auth_mode": "chatgpt",
+            "tokens": { "access_token": "eyJtok", "account_id": "acc-1" },
+            "last_refresh": chrono::Utc::now().to_rfc3339()
+        })
+        .to_string();
+        let (token, account, status, message) = parse_codex_credentials(&content);
+        assert_eq!(token.as_deref(), Some("eyJtok"));
+        assert_eq!(account.as_deref(), Some("acc-1"));
+        assert_eq!(status, CredentialStatus::Valid);
+        assert!(message.is_none());
+    }
+
+    #[test]
+    fn parse_codex_credentials_apikey_mode_is_not_found() {
+        // API-key login has no subscription windows — treated like
+        // "no OAuth login" so the UI shows nothing.
+        let content = json!({
+            "auth_mode": "apikey",
+            "OPENAI_API_KEY": "sk-..."
+        })
+        .to_string();
+        let (token, _, status, _) = parse_codex_credentials(&content);
+        assert!(token.is_none());
+        assert_eq!(status, CredentialStatus::NotFound);
+    }
+
+    #[test]
+    fn parse_codex_credentials_stale_refresh_keeps_token() {
+        let content = json!({
+            "auth_mode": "chatgpt",
+            "tokens": { "access_token": "tok", "account_id": "acc" },
+            "last_refresh": "2020-01-01T00:00:00Z" // way past 8 days
+        })
+        .to_string();
+        let (token, account, status, _) = parse_codex_credentials(&content);
+        assert_eq!(token.as_deref(), Some("tok"));
+        assert_eq!(account.as_deref(), Some("acc"));
+        assert_eq!(status, CredentialStatus::Expired);
+    }
+
+    #[test]
+    fn window_seconds_map_to_claude_compatible_tier_names() {
+        assert_eq!(window_seconds_to_tier_name(18_000), "five_hour");
+        assert_eq!(window_seconds_to_tier_name(604_800), "seven_day");
+        assert_eq!(window_seconds_to_tier_name(3 * 3600), "3_hour");
+        assert_eq!(window_seconds_to_tier_name(30 * 24 * 3600), "30_day");
+    }
+
+    #[test]
+    fn parse_codex_usage_maps_primary_and_secondary_windows() {
+        // Shape per codex-rs RateLimitStatusPayload / RateLimitWindowSnapshot.
+        let body = json!({
+            "plan_type": "pro",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 42.0,
+                    "limit_window_seconds": 18_000,
+                    "reset_after_seconds": 120,
+                    "reset_at": 1_780_000_000_i64
+                },
+                "secondary_window": {
+                    "used_percent": 84,
+                    "limit_window_seconds": 604_800,
+                    "reset_after_seconds": 0,
+                    "reset_at": 1_780_600_000_i64
+                }
+            }
+        });
+        let tiers = parse_codex_usage(&body);
+        assert_eq!(tiers.len(), 2);
+        assert_eq!(tiers[0].name, "five_hour");
+        assert_eq!(tiers[0].utilization, 42.0);
+        assert_eq!(
+            tiers[0].resets_at.as_deref(),
+            unix_ts_to_iso(1_780_000_000).as_deref()
+        );
+        assert_eq!(tiers[1].name, "seven_day");
+        assert_eq!(tiers[1].utilization, 84.0);
+    }
+
+    #[test]
+    fn parse_codex_usage_skips_missing_windows() {
+        let body = json!({
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 10.0,
+                    "limit_window_seconds": 18_000
+                }
+            }
+        });
+        let tiers = parse_codex_usage(&body);
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].name, "five_hour");
+        assert!(tiers[0].resets_at.is_none());
+
+        assert!(parse_codex_usage(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn api_error_detail_reads_chatgpt_detail_field() {
+        // ChatGPT backend errors use {"detail": "..."} instead of the
+        // Anthropic envelope.
+        let status = reqwest::StatusCode::UNAUTHORIZED;
+        assert_eq!(
+            http_error_message(
+                status,
+                r#"{"detail": "Could not parse your authentication token"}"#
+            ),
+            "HTTP 401 Unauthorized: Could not parse your authentication token"
+        );
     }
 
     #[test]

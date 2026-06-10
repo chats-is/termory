@@ -16,8 +16,10 @@ import { useT, type MessageKey } from "@/i18n";
 import type { CliApp, SubscriptionQuota } from "@/types";
 
 /** Known rate-limit window ids → short inline label + full tooltip
- * label. Unknown ids (a new window type the API starts returning)
- * fall back to the raw id so they still surface. */
+ * label. Generated ids from non-standard window lengths (Codex maps
+ * them to `{n}_hour` / `{n}_day` — quota.rs window_seconds_to_tier_name)
+ * are humanized by `tierLabels`; anything else falls back to the raw
+ * id so a brand-new window type still surfaces. */
 const TIER_LABELS: Record<string, { short: MessageKey; full: MessageKey }> = {
   five_hour: {
     short: "providers.quotaFiveHourShort",
@@ -34,6 +36,12 @@ const TIER_LABELS: Record<string, { short: MessageKey; full: MessageKey }> = {
   seven_day_sonnet: {
     short: "providers.quotaSevenDaySonnetShort",
     full: "providers.quotaSevenDaySonnet"
+  },
+  // Codex free plan's 30-day window (generated id, promoted to a
+  // proper label — "30d" read poorly).
+  "30_day": {
+    short: "providers.quotaMonthlyShort",
+    full: "providers.quotaMonthly"
   }
 };
 
@@ -64,6 +72,32 @@ function formatReset(iso: string, t: Translate): string | null {
 /** The model-specific weekly windows show "You haven't used X yet"
  * instead of a reset time while untouched — same as Claude's /usage. */
 const NOT_USED_TIERS = new Set(["seven_day_opus", "seven_day_sonnet"]);
+
+/** Display labels for a window id: known ids via TIER_LABELS,
+ * generated `{n}_hour` / `{n}_day` ids humanized ("30_day" → short
+ * "30d", full "30-day" / "30 天"), anything else raw. */
+function tierLabels(
+  name: string,
+  t: Translate
+): { short: string; full: string } {
+  const known = TIER_LABELS[name];
+  if (known) return { short: t(known.short), full: t(known.full) };
+  const hours = /^(\d+)_hour$/.exec(name);
+  if (hours) {
+    return {
+      short: `${hours[1]}h`,
+      full: t("providers.quotaHourWindow", { n: hours[1] })
+    };
+  }
+  const days = /^(\d+)_day$/.exec(name);
+  if (days) {
+    return {
+      short: `${days[1]}d`,
+      full: t("providers.quotaDayWindow", { n: days[1] })
+    };
+  }
+  return { short: name, full: name };
+}
 
 /** Ring color steps with pressure so a nearly-exhausted window reads
  * at a glance (thresholds shared with the tray glyph via quota-utils):
@@ -128,17 +162,16 @@ function QuotaTierItem({
   resetsAt?: string;
 }) {
   const t = useT();
-  const labels = TIER_LABELS[name];
-  const shortLabel = labels ? t(labels.short) : name;
+  const labels = tierLabels(name, t);
   // Second line under the label: "You haven't used X yet" for an
   // untouched model window, else the reset-time copy.
   const subline =
     utilization <= 0 && NOT_USED_TIERS.has(name)
-      ? t("providers.quotaNotUsedYet", { model: shortLabel })
+      ? t("providers.quotaNotUsedYet", { model: labels.short })
       : resetsAt
         ? formatReset(resetsAt, t)
         : null;
-  const detail = [labels ? t(labels.full) : name, `${Math.round(utilization)}%`, subline]
+  const detail = [labels.full, `${Math.round(utilization)}%`, subline]
     .filter(Boolean)
     .join(" · ");
   return (
@@ -148,7 +181,7 @@ function QuotaTierItem({
           <QuotaRing utilization={utilization} />
           <span className="flex flex-col gap-1 min-w-0">
             <span className="max-w-32 truncate text-foreground">
-              {shortLabel}
+              {labels.short}
             </span>
             {subline && (
               <span className="whitespace-nowrap text-[10px] text-muted-foreground/70">

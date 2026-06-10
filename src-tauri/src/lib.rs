@@ -230,8 +230,9 @@ async fn set_tray_labels(
     exit: String,
     five_hour: String,
     weekly: String,
+    monthly: String,
 ) -> Result<(), String> {
-    tray::set_labels(open, official, exit, five_hour, weekly);
+    tray::set_labels(open, official, exit, five_hour, weekly, monthly);
     let _ = tray::rebuild_menu(&app);
     Ok(())
 }
