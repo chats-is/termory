@@ -555,8 +555,14 @@ type CodexCredential = (
 /// (`subscription.rs:459-467`):
 ///  1. macOS Keychain, service "Codex Auth"
 ///  2. `~/.codex/auth.json`
-/// Only `auth_mode == "chatgpt"` (OAuth) carries subscription usage —
-/// API-key mode has no rate-limit windows to show.
+/// Gated on the presence of OAuth `tokens` — that's what "ChatGPT
+/// account is logged in" means (same semantic as Claude's credential
+/// file). The `auth_mode` field is deliberately NOT consulted: it only
+/// selects what the CLI uses for requests, and a Termory round-trip
+/// (activate custom provider → back to Official) leaves `tokens` with
+/// NO `auth_mode` key — which Codex itself resolves to ChatGPT mode
+/// (`login/src/auth/manager.rs:980-988` `resolved_mode`). A pure
+/// API-key login has no `tokens` → `not_found`.
 fn read_codex_credentials() -> CodexCredential {
     #[cfg(target_os = "macos")]
     {
@@ -603,7 +609,7 @@ fn read_codex_credentials_from_file() -> CodexCredential {
 }
 
 /// Parse the auth.json document (shared by Keychain and file):
-/// `{"auth_mode": "chatgpt", "tokens": {"access_token": ..., "account_id": ...},
+/// `{"auth_mode"?: ..., "tokens": {"access_token": ..., "account_id": ...},
 ///   "last_refresh": "..."}` — shape per codex-rs `codex_login::AuthDotJson`.
 fn parse_codex_credentials(content: &str) -> CodexCredential {
     let parsed: serde_json::Value = match serde_json::from_str(content) {
@@ -618,22 +624,15 @@ fn parse_codex_credentials(content: &str) -> CodexCredential {
         }
     };
 
-    if parsed.get("auth_mode").and_then(|v| v.as_str()) != Some("chatgpt") {
-        // API-key login (or no login) — no subscription usage to query.
+    // No `tokens` = no ChatGPT login (pure API-key login or logged
+    // out) — nothing to query. See read_codex_credentials' doc for
+    // why `auth_mode` is deliberately ignored here.
+    let Some(tokens) = parsed.get("tokens").filter(|t| !t.is_null()) else {
         return (
             None,
             None,
             CredentialStatus::NotFound,
-            Some("Codex not using OAuth mode".to_string()),
-        );
-    }
-
-    let Some(tokens) = parsed.get("tokens") else {
-        return (
-            None,
-            None,
-            CredentialStatus::ParseError,
-            Some("No tokens in Codex auth".to_string()),
+            Some("Codex has no ChatGPT login".to_string()),
         );
     };
     let access_token = match tokens.get("access_token").and_then(|v| v.as_str()) {
@@ -1322,9 +1321,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_codex_credentials_apikey_mode_is_not_found() {
-        // API-key login has no subscription windows — treated like
-        // "no OAuth login" so the UI shows nothing.
+    fn parse_codex_credentials_apikey_without_tokens_is_not_found() {
+        // Pure API-key login (no ChatGPT tokens) has no subscription
+        // windows — treated like "no OAuth login" so the UI shows
+        // nothing.
         let content = json!({
             "auth_mode": "apikey",
             "OPENAI_API_KEY": "sk-..."
@@ -1333,6 +1333,41 @@ mod tests {
         let (token, _, status, _) = parse_codex_credentials(&content);
         assert!(token.is_none());
         assert_eq!(status, CredentialStatus::NotFound);
+    }
+
+    #[test]
+    fn parse_codex_credentials_tokens_without_auth_mode_is_valid() {
+        // The Termory round-trip shape: activate custom provider →
+        // back to Official removes auth_mode + OPENAI_API_KEY but
+        // keeps tokens. Codex itself resolves this to ChatGPT mode
+        // (resolved_mode, manager.rs:980-988) — the quota must show.
+        let content = json!({
+            "tokens": { "access_token": "tok", "account_id": "acc" },
+            "last_refresh": chrono::Utc::now().to_rfc3339()
+        })
+        .to_string();
+        let (token, account, status, _) = parse_codex_credentials(&content);
+        assert_eq!(token.as_deref(), Some("tok"));
+        assert_eq!(account.as_deref(), Some("acc"));
+        assert_eq!(status, CredentialStatus::Valid);
+    }
+
+    #[test]
+    fn parse_codex_credentials_apikey_with_tokens_still_reads_the_account() {
+        // A custom provider is ACTIVE (Termory wrote auth_mode=apikey)
+        // but the ChatGPT account is still logged in (tokens merged,
+        // not overwritten) — the official-account quota stays
+        // readable, same semantic as Claude's credential file.
+        let content = json!({
+            "auth_mode": "apikey",
+            "OPENAI_API_KEY": "sk-...",
+            "tokens": { "access_token": "tok", "account_id": "acc" },
+            "last_refresh": chrono::Utc::now().to_rfc3339()
+        })
+        .to_string();
+        let (token, _, status, _) = parse_codex_credentials(&content);
+        assert_eq!(token.as_deref(), Some("tok"));
+        assert_eq!(status, CredentialStatus::Valid);
     }
 
     #[test]
