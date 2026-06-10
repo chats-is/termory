@@ -3,8 +3,9 @@
 //! endpoint for the rate-limit windows (5-hour session, 7-day weekly,
 //! per-model weekly, …).
 //!
-//! Claude Code and Codex are implemented; the entry point is keyed
-//! by `CliApp` so Gemini can be added later behind the same IPC shape.
+//! Claude Code, Codex, and Gemini CLI are implemented; OpenCode has
+//! no official subscription quota. The entry point is keyed by
+//! `CliApp` behind one IPC shape.
 //!
 //! Reference: cc-switch `src-tauri/src/services/subscription.rs`
 //! (credential sources + endpoint + response shape, cross-checked).
@@ -19,10 +20,39 @@ use crate::providers::CliApp;
 /// consumer (tray submenu, tray refresh trigger) keys off. Add the
 /// CLI here when its `fetch_quota` arm lands. Frontend mirror:
 /// `QUOTA_SUPPORTED` in ProvidersPage.tsx.
-pub const SUPPORTED: &[CliApp] = &[CliApp::Claude, CliApp::Codex];
+pub const SUPPORTED: &[CliApp] = &[CliApp::Claude, CliApp::Codex, CliApp::Gemini];
 
 pub fn supports_quota(app: CliApp) -> bool {
     SUPPORTED.contains(&app)
+}
+
+/// Emitted with a `SubscriptionQuota` payload after every completed
+/// quota fetch (any trigger), so the Providers page stays in sync with
+/// backend-initiated fetches. Lives here (quota state, not tray UI);
+/// the emit happens in tray::refresh_quota, the central result sink.
+/// Frontend mirror: QUOTA_CHANGED_EVENT in src/constants.ts.
+pub const QUOTA_CHANGED_EVENT: &str = "termory:quota-changed";
+
+/// Which CLI a credential-file path belongs to — the single list the
+/// filesystem watcher matches to force a quota refresh on login /
+/// logout (the readers below own the same paths). Keychain-backed
+/// credentials produce no file event; the 60s not_found retry is the
+/// fallback there.
+pub fn credential_cli_for_path(path: &std::path::Path) -> Option<CliApp> {
+    let parent_is = |dir: &str| {
+        path.parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            == Some(dir)
+    };
+    match path.file_name().and_then(|n| n.to_str())? {
+        ".credentials.json" => Some(CliApp::Claude),
+        // The parent check excludes OpenCode's unrelated
+        // ~/.local/share/opencode/auth.json.
+        "auth.json" if parent_is(".codex") => Some(CliApp::Codex),
+        "oauth_creds.json" if parent_is(".gemini") => Some(CliApp::Gemini),
+        _ => None,
+    }
 }
 
 /// Pressure thresholds (used %) for the tray glyph color. Frontend
@@ -101,6 +131,18 @@ impl SubscriptionQuota {
             success: false,
             tiers: vec![],
             extra_usage: None,
+            error: None,
+            queried_at: Some(now_millis()),
+        }
+    }
+
+    fn success(app: &str, tiers: Vec<QuotaTier>, extra_usage: Option<ExtraUsage>) -> Self {
+        Self {
+            app: app.to_string(),
+            credential_status: CredentialStatus::Valid,
+            success: true,
+            tiers,
+            extra_usage,
             error: None,
             queried_at: Some(now_millis()),
         }
@@ -367,25 +409,115 @@ fn api_error_detail(body: &str) -> Option<String> {
     Some(out)
 }
 
+// ===================================================================
+// Shared query plumbing
+// ===================================================================
+
+fn network_error(app_key: &str, err: impl std::fmt::Display) -> SubscriptionQuota {
+    SubscriptionQuota::error(
+        app_key,
+        CredentialStatus::Valid,
+        format!("Network error: {err}"),
+    )
+}
+
+/// The 10s-timeout client every quota query uses.
+fn quota_http_client(app_key: &str) -> Result<reqwest::Client, SubscriptionQuota> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| {
+            SubscriptionQuota::error(
+                app_key,
+                CredentialStatus::Valid,
+                format!("HTTP client init failed: {err}"),
+            )
+        })
+}
+
+/// Shared response handling: non-2xx → error result (401/403 marks the
+/// credential Expired; message via `http_error_message` so the card
+/// shows the API's own error text), 2xx → parsed JSON body.
+async fn read_json_or_error(
+    app_key: &str,
+    resp: reqwest::Response,
+) -> Result<serde_json::Value, SubscriptionQuota> {
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let cred = if status == reqwest::StatusCode::UNAUTHORIZED
+            || status == reqwest::StatusCode::FORBIDDEN
+        {
+            CredentialStatus::Expired
+        } else {
+            CredentialStatus::Valid
+        };
+        return Err(SubscriptionQuota::error(
+            app_key,
+            cred,
+            http_error_message(status, &body),
+        ));
+    }
+    resp.json().await.map_err(|err| {
+        SubscriptionQuota::error(
+            app_key,
+            CredentialStatus::Valid,
+            format!("Failed to parse API response: {err}"),
+        )
+    })
+}
+
+/// Shared credential-status scaffold for every CLI's fetch arm:
+/// NotFound / ParseError short-circuit; Expired still TRIES the query
+/// (local staleness heuristics can be wrong) and only reports Expired
+/// when the API also rejects; Valid queries directly.
+async fn quota_for_credential<Q, Fut>(
+    app_key: &'static str,
+    token: Option<String>,
+    status: CredentialStatus,
+    message: Option<String>,
+    query: Q,
+) -> SubscriptionQuota
+where
+    Q: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = SubscriptionQuota>,
+{
+    match status {
+        CredentialStatus::NotFound => SubscriptionQuota::not_found(app_key),
+        CredentialStatus::ParseError => SubscriptionQuota::error(
+            app_key,
+            CredentialStatus::ParseError,
+            message.unwrap_or_else(|| "Failed to parse credentials".to_string()),
+        ),
+        CredentialStatus::Expired => {
+            if let Some(token) = token {
+                let result = query(token).await;
+                if result.success {
+                    return result;
+                }
+            }
+            SubscriptionQuota::error(
+                app_key,
+                CredentialStatus::Expired,
+                message.unwrap_or_else(|| "OAuth token has expired".to_string()),
+            )
+        }
+        CredentialStatus::Valid => {
+            let token = token.expect("token present when status is Valid");
+            query(token).await
+        }
+    }
+}
+
 /// Query the official usage endpoint with the OAuth access token.
 /// Endpoint + `anthropic-beta` header per cc-switch
 /// `subscription.rs:321-323` (the same call Claude Code's `/usage`
 /// command makes).
 async fn query_claude_quota(access_token: &str) -> SubscriptionQuota {
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-    {
+    let client = match quota_http_client("claude") {
         Ok(c) => c,
-        Err(err) => {
-            return SubscriptionQuota::error(
-                "claude",
-                CredentialStatus::Valid,
-                format!("HTTP client init failed: {err}"),
-            );
-        }
+        Err(e) => return e,
     };
-
     let resp = match client
         .get("https://api.anthropic.com/api/oauth/usage")
         .header("Authorization", format!("Bearer {access_token}"))
@@ -395,51 +527,14 @@ async fn query_claude_quota(access_token: &str) -> SubscriptionQuota {
         .await
     {
         Ok(r) => r,
-        Err(err) => {
-            return SubscriptionQuota::error(
-                "claude",
-                CredentialStatus::Valid,
-                format!("Network error: {err}"),
-            );
-        }
+        Err(err) => return network_error("claude", err),
     };
-
-    let status = resp.status();
-    if !status.is_success() {
-        // Surface the API's own error `message` (not the raw JSON
-        // envelope) next to the status — that's what the card shows.
-        let body = resp.text().await.unwrap_or_default();
-        let cred = if status == reqwest::StatusCode::UNAUTHORIZED
-            || status == reqwest::StatusCode::FORBIDDEN
-        {
-            CredentialStatus::Expired
-        } else {
-            CredentialStatus::Valid
-        };
-        return SubscriptionQuota::error("claude", cred, http_error_message(status, &body));
-    }
-
-    let body: serde_json::Value = match resp.json().await {
+    let body = match read_json_or_error("claude", resp).await {
         Ok(v) => v,
-        Err(err) => {
-            return SubscriptionQuota::error(
-                "claude",
-                CredentialStatus::Valid,
-                format!("Failed to parse API response: {err}"),
-            );
-        }
+        Err(e) => return e,
     };
-
     let (tiers, extra_usage) = parse_claude_usage(&body);
-    SubscriptionQuota {
-        app: "claude".to_string(),
-        credential_status: CredentialStatus::Valid,
-        success: true,
-        tiers,
-        extra_usage,
-        error: None,
-        queried_at: Some(now_millis()),
-    }
+    SubscriptionQuota::success("claude", tiers, extra_usage)
 }
 
 // ===================================================================
@@ -654,20 +749,10 @@ fn parse_codex_usage(body: &serde_json::Value) -> Vec<QuotaTier> {
 /// (`{base}/wham/usage`, ChatGptApi path style); the
 /// `ChatGPT-Account-Id` header per client.rs:214.
 async fn query_codex_quota(access_token: &str, account_id: Option<&str>) -> SubscriptionQuota {
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-    {
+    let client = match quota_http_client("codex") {
         Ok(c) => c,
-        Err(err) => {
-            return SubscriptionQuota::error(
-                "codex",
-                CredentialStatus::Valid,
-                format!("HTTP client init failed: {err}"),
-            );
-        }
+        Err(e) => return e,
     };
-
     let mut req = client
         .get("https://chatgpt.com/backend-api/wham/usage")
         .header("Authorization", format!("Bearer {access_token}"))
@@ -676,125 +761,394 @@ async fn query_codex_quota(access_token: &str, account_id: Option<&str>) -> Subs
     if let Some(id) = account_id {
         req = req.header("ChatGPT-Account-Id", id);
     }
-
     let resp = match req.send().await {
         Ok(r) => r,
-        Err(err) => {
-            return SubscriptionQuota::error(
-                "codex",
-                CredentialStatus::Valid,
-                format!("Network error: {err}"),
-            );
-        }
+        Err(err) => return network_error("codex", err),
     };
+    let body = match read_json_or_error("codex", resp).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    SubscriptionQuota::success("codex", parse_codex_usage(&body), None)
+}
 
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        let cred = if status == reqwest::StatusCode::UNAUTHORIZED
-            || status == reqwest::StatusCode::FORBIDDEN
-        {
-            CredentialStatus::Expired
-        } else {
-            CredentialStatus::Valid
-        };
-        return SubscriptionQuota::error("codex", cred, http_error_message(status, &body));
+// ===================================================================
+// Gemini credentials
+// ===================================================================
+
+/// Parsed Gemini credential: access token + refresh token + status +
+/// diagnostic message. Google access tokens last ~1h, so Expired is
+/// common — the refresh token (which doesn't expire unless revoked)
+/// mints a fresh one at query time.
+type GeminiCredential = (
+    Option<String>,
+    Option<String>,
+    CredentialStatus,
+    Option<String>,
+);
+
+/// `~/.gemini/oauth_creds.json` — gemini-cli `storage.ts:22`
+/// (OAUTH_FILE under the global gemini dir).
+fn gemini_oauth_creds_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".gemini").join("oauth_creds.json"))
+}
+
+/// Read the Gemini CLI OAuth credential. Source priority mirrors
+/// gemini-cli itself (`oauth-credential-storage.ts:16-17` — Keychain
+/// service "gemini-cli-oauth", account "main-account"; file fallback):
+///  1. macOS Keychain (keytar JSON)
+///  2. `~/.gemini/oauth_creds.json` (legacy flat format)
+fn read_gemini_credentials() -> GeminiCredential {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(found) = read_gemini_credentials_from_keychain() {
+            return found;
+        }
     }
+    read_gemini_credentials_from_file()
+}
 
-    let body: serde_json::Value = match resp.json().await {
+#[cfg(target_os = "macos")]
+fn read_gemini_credentials_from_keychain() -> Option<GeminiCredential> {
+    let output = std::process::Command::new("security")
+        .args([
+            "find-generic-password",
+            "-s",
+            "gemini-cli-oauth",
+            "-a",
+            "main-account",
+            "-w",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None; // no Keychain entry — fall back to the file
+    }
+    let json = String::from_utf8(output.stdout).ok()?;
+    let json = json.trim();
+    if json.is_empty() {
+        return None;
+    }
+    Some(parse_gemini_keychain_json(json))
+}
+
+fn read_gemini_credentials_from_file() -> GeminiCredential {
+    let Some(path) = gemini_oauth_creds_path() else {
+        return (None, None, CredentialStatus::NotFound, None);
+    };
+    if !path.exists() {
+        return (None, None, CredentialStatus::NotFound, None);
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(content) => parse_gemini_file_json(&content),
+        Err(err) => (
+            None,
+            None,
+            CredentialStatus::ParseError,
+            Some(format!("Failed to read Gemini credentials: {err}")),
+        ),
+    }
+}
+
+/// Keychain (keytar) document:
+/// `{"token": {"accessToken": ..., "refreshToken": ..., "expiresAt": <ms>}, "updatedAt": ...}`.
+/// A flat document (no `token` wrapper) falls through to the file parser.
+#[cfg(any(target_os = "macos", test))]
+fn parse_gemini_keychain_json(content: &str) -> GeminiCredential {
+    let parsed: serde_json::Value = match serde_json::from_str(content) {
         Ok(v) => v,
         Err(err) => {
-            return SubscriptionQuota::error(
-                "codex",
-                CredentialStatus::Valid,
-                format!("Failed to parse API response: {err}"),
+            return (
+                None,
+                None,
+                CredentialStatus::ParseError,
+                Some(format!("Failed to parse Gemini keychain JSON: {err}")),
             );
         }
     };
+    let Some(token) = parsed.get("token") else {
+        return parse_gemini_file_json(content);
+    };
+    let access = token
+        .get("accessToken")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let refresh = token
+        .get("refreshToken")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let expires_ms = token.get("expiresAt").and_then(|v| v.as_i64());
+    finish_gemini_credential(access, refresh, expires_ms)
+}
 
-    SubscriptionQuota {
-        app: "codex".to_string(),
-        credential_status: CredentialStatus::Valid,
-        success: true,
-        tiers: parse_codex_usage(&body),
-        extra_usage: None,
-        error: None,
-        queried_at: Some(now_millis()),
+/// File (oauth_creds.json) document:
+/// `{"access_token": ..., "refresh_token": ..., "expiry_date": <ms>}`.
+fn parse_gemini_file_json(content: &str) -> GeminiCredential {
+    let parsed: serde_json::Value = match serde_json::from_str(content) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                None,
+                None,
+                CredentialStatus::ParseError,
+                Some(format!("Failed to parse Gemini credentials: {err}")),
+            );
+        }
+    };
+    let access = parsed
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let refresh = parsed
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let expires_ms = parsed.get("expiry_date").and_then(|v| v.as_i64());
+    finish_gemini_credential(access, refresh, expires_ms)
+}
+
+/// Shared tail of both Gemini parsers: empty token → ParseError (the
+/// refresh token is still returned for the mint-a-fresh-one path);
+/// millisecond expiry in the past → Expired, keeping the token.
+fn finish_gemini_credential(
+    access: Option<String>,
+    refresh: Option<String>,
+    expires_ms: Option<i64>,
+) -> GeminiCredential {
+    let access = match access {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            return (
+                None,
+                refresh,
+                CredentialStatus::ParseError,
+                Some("access token is empty or missing".to_string()),
+            );
+        }
+    };
+    if let Some(ms) = expires_ms {
+        if ms < now_millis() {
+            return (
+                Some(access),
+                refresh,
+                CredentialStatus::Expired,
+                Some("Gemini access token has expired".to_string()),
+            );
+        }
     }
+    (Some(access), refresh, CredentialStatus::Valid, None)
+}
+
+// ===================================================================
+// Gemini usage API
+// ===================================================================
+
+/// Gemini CLI's public installed-app OAuth client (`oauth2.ts:76-85`
+/// — the comment there documents the "secret" as non-secret for
+/// installed applications).
+const GEMINI_OAUTH_CLIENT_ID: &str =
+    "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
+const GEMINI_OAUTH_CLIENT_SECRET: &str = "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";
+
+/// Mint a fresh ~1h access token from the refresh token (standard
+/// Google token endpoint). The result is used in-memory only —
+/// Termory never writes credentials back.
+async fn refresh_gemini_token(refresh_token: &str) -> Option<String> {
+    let client = quota_http_client("gemini").ok()?;
+    let resp = client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&[
+            ("client_id", GEMINI_OAUTH_CLIENT_ID),
+            ("client_secret", GEMINI_OAUTH_CLIENT_SECRET),
+            ("refresh_token", refresh_token),
+            ("grant_type", "refresh_token"),
+        ])
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    body.get("access_token")?.as_str().map(String::from)
+}
+
+/// Bucket → display class. Gemini quotas are per-MODEL buckets, not
+/// time windows (`types.ts:255-262` BucketInfo.modelId); group them as
+/// Pro / Flash / Flash-Lite (cc-switch `classify_gemini_model`).
+fn classify_gemini_model(model_id: &str) -> &str {
+    if model_id.contains("flash-lite") {
+        "gemini_flash_lite"
+    } else if model_id.contains("flash") {
+        "gemini_flash"
+    } else if model_id.contains("pro") {
+        "gemini_pro"
+    } else {
+        model_id
+    }
+}
+
+/// `cloudaicompanionProject` arrives as a plain string or an object
+/// with `id` / `projectId` depending on tier.
+fn extract_project_id(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Object(obj) => obj
+            .get("id")
+            .or_else(|| obj.get("projectId"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        _ => None,
+    }
+}
+
+/// Parse retrieveUserQuota's `buckets[]` (`types.ts:255-265`
+/// BucketInfo { remainingFraction, resetTime, modelId }) into tiers:
+/// one per model class, keeping the class's LOWEST remaining fraction
+/// (the binding limit), converted to used %. Pro → Flash → Flash-Lite
+/// order.
+fn parse_gemini_quota(body: &serde_json::Value) -> Vec<QuotaTier> {
+    // (class, lowest remaining fraction, its reset time)
+    let mut classes: Vec<(String, f64, Option<String>)> = Vec::new();
+    if let Some(buckets) = body.get("buckets").and_then(|b| b.as_array()) {
+        for bucket in buckets {
+            let model = bucket
+                .get("modelId")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown");
+            let name = classify_gemini_model(model).to_string();
+            let remaining = bucket
+                .get("remainingFraction")
+                .and_then(|f| f.as_f64())
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0);
+            let reset = bucket
+                .get("resetTime")
+                .and_then(|r| r.as_str())
+                .map(String::from);
+            match classes.iter_mut().find(|(n, _, _)| *n == name) {
+                Some(entry) => {
+                    if remaining < entry.1 {
+                        entry.1 = remaining;
+                        if reset.is_some() {
+                            entry.2 = reset;
+                        }
+                    }
+                }
+                None => classes.push((name, remaining, reset)),
+            }
+        }
+    }
+    let order = |n: &str| match n {
+        "gemini_pro" => 0,
+        "gemini_flash" => 1,
+        "gemini_flash_lite" => 2,
+        _ => 3,
+    };
+    classes.sort_by_key(|(n, _, _)| order(n));
+    classes
+        .into_iter()
+        .map(|(name, remaining, reset)| QuotaTier {
+            name,
+            utilization: (1.0 - remaining) * 100.0,
+            resets_at: reset,
+        })
+        .collect()
+}
+
+/// Query the Code Assist quota. Two POSTs (gemini-cli
+/// `server.ts:263/363`): `v1internal:loadCodeAssist` for the
+/// cloudaicompanion project id, then `v1internal:retrieveUserQuota`
+/// for the per-model buckets.
+async fn query_gemini_quota(access_token: &str) -> SubscriptionQuota {
+    let client = match quota_http_client("gemini") {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let resp = match client
+        .post("https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .json(&serde_json::json!({
+            "metadata": { "ideType": "GEMINI_CLI", "pluginType": "GEMINI" }
+        }))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(err) => return network_error("gemini", err),
+    };
+    let load_body = match read_json_or_error("gemini", resp).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let project = load_body
+        .get("cloudaicompanionProject")
+        .and_then(extract_project_id);
+
+    let mut quota_req = serde_json::json!({});
+    if let Some(ref pid) = project {
+        quota_req["project"] = serde_json::Value::String(pid.clone());
+    }
+    let resp = match client
+        .post("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .json(&quota_req)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(err) => return network_error("gemini", err),
+    };
+    let body = match read_json_or_error("gemini", resp).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    SubscriptionQuota::success("gemini", parse_gemini_quota(&body), None)
 }
 
 // ===================================================================
 // Entry point
 // ===================================================================
 
-/// Fetch the official-account quota for one CLI. Claude only for now;
-/// the others report `not_found` so the frontend shows nothing.
+/// Fetch the official-account quota for one CLI (see `SUPPORTED`).
 pub async fn fetch_quota(app: CliApp) -> SubscriptionQuota {
     match app {
         CliApp::Claude => {
             let (token, status, message) = read_claude_credentials();
-            match status {
-                CredentialStatus::NotFound => SubscriptionQuota::not_found("claude"),
-                CredentialStatus::ParseError => SubscriptionQuota::error(
-                    "claude",
-                    CredentialStatus::ParseError,
-                    message.unwrap_or_else(|| "Failed to parse credentials".to_string()),
-                ),
-                CredentialStatus::Expired => {
-                    // The file timestamp can lag a Keychain refresh —
-                    // still try the API; only report Expired when it
-                    // actually rejects the token.
-                    if let Some(token) = token {
-                        let result = query_claude_quota(&token).await;
-                        if result.success {
-                            return result;
-                        }
-                    }
-                    SubscriptionQuota::error(
-                        "claude",
-                        CredentialStatus::Expired,
-                        message.unwrap_or_else(|| "OAuth token has expired".to_string()),
-                    )
-                }
-                CredentialStatus::Valid => {
-                    let token = token.expect("token present when status is Valid");
-                    query_claude_quota(&token).await
-                }
-            }
+            quota_for_credential("claude", token, status, message, |t| async move {
+                query_claude_quota(&t).await
+            })
+            .await
         }
         CliApp::Codex => {
             let (token, account_id, status, message) = read_codex_credentials();
-            match status {
-                CredentialStatus::NotFound => SubscriptionQuota::not_found("codex"),
-                CredentialStatus::ParseError => SubscriptionQuota::error(
-                    "codex",
-                    CredentialStatus::ParseError,
-                    message.unwrap_or_else(|| "Failed to parse credentials".to_string()),
-                ),
-                CredentialStatus::Expired => {
-                    // The 8-day staleness heuristic can be wrong —
-                    // still try the API; only report Expired when it
-                    // actually rejects the token.
-                    if let Some(token) = token {
-                        let result = query_codex_quota(&token, account_id.as_deref()).await;
-                        if result.success {
-                            return result;
-                        }
+            quota_for_credential("codex", token, status, message, move |t| async move {
+                query_codex_quota(&t, account_id.as_deref()).await
+            })
+            .await
+        }
+        CliApp::Gemini => {
+            let (mut token, refresh_token, mut status, message) = read_gemini_credentials();
+            // Google access tokens last ~1h — when stale, mint a fresh
+            // one from the refresh token before the shared scaffold
+            // runs (used in-memory only; Termory never writes
+            // credentials).
+            if status == CredentialStatus::Expired {
+                if let Some(rt) = refresh_token.as_deref() {
+                    if let Some(fresh) = refresh_gemini_token(rt).await {
+                        token = Some(fresh);
+                        status = CredentialStatus::Valid;
                     }
-                    SubscriptionQuota::error(
-                        "codex",
-                        CredentialStatus::Expired,
-                        message.unwrap_or_else(|| "Codex OAuth token may be stale".to_string()),
-                    )
-                }
-                CredentialStatus::Valid => {
-                    let token = token.expect("token present when status is Valid");
-                    query_codex_quota(&token, account_id.as_deref()).await
                 }
             }
+            quota_for_credential("gemini", token, status, message, |t| async move {
+                query_gemini_quota(&t).await
+            })
+            .await
         }
-        // bin_name doubles as the frontend CliApp key ("gemini", …).
-        _ => SubscriptionQuota::not_found(app.bin_name()),
+        // OpenCode has no official subscription quota. bin_name
+        // doubles as the frontend CliApp key.
+        CliApp::Opencode => SubscriptionQuota::not_found(app.bin_name()),
     }
 }
 
@@ -1117,5 +1471,146 @@ mod tests {
         assert_eq!(v["credentialStatus"], "valid");
         assert_eq!(v["tiers"][0]["resetsAt"], "2026-06-10T12:00:00Z");
         assert_eq!(v["queriedAt"], 1);
+    }
+
+    #[test]
+    fn parse_gemini_file_json_valid_and_expired() {
+        let valid = json!({
+            "access_token": "ya29.tok",
+            "refresh_token": "1//refresh",
+            "expiry_date": far_future_ms()
+        })
+        .to_string();
+        let (token, refresh, status, _) = parse_gemini_file_json(&valid);
+        assert_eq!(token.as_deref(), Some("ya29.tok"));
+        assert_eq!(refresh.as_deref(), Some("1//refresh"));
+        assert_eq!(status, CredentialStatus::Valid);
+
+        // Expired keeps BOTH tokens — fetch_quota refreshes with the
+        // refresh token, else still tries the stale access token.
+        let expired = json!({
+            "access_token": "ya29.old",
+            "refresh_token": "1//refresh",
+            "expiry_date": 1_700_000_000_000_i64
+        })
+        .to_string();
+        let (token, refresh, status, _) = parse_gemini_file_json(&expired);
+        assert_eq!(token.as_deref(), Some("ya29.old"));
+        assert_eq!(refresh.as_deref(), Some("1//refresh"));
+        assert_eq!(status, CredentialStatus::Expired);
+
+        // Missing access token → ParseError, refresh still surfaced.
+        let no_token = json!({ "refresh_token": "1//r" }).to_string();
+        let (token, refresh, status, _) = parse_gemini_file_json(&no_token);
+        assert!(token.is_none());
+        assert_eq!(refresh.as_deref(), Some("1//r"));
+        assert_eq!(status, CredentialStatus::ParseError);
+    }
+
+    #[test]
+    fn parse_gemini_keychain_json_nested_and_flat() {
+        // keytar document (nested under `token`, camelCase, ms expiry).
+        let nested = json!({
+            "token": {
+                "accessToken": "ya29.kc",
+                "refreshToken": "1//kc",
+                "expiresAt": far_future_ms()
+            },
+            "updatedAt": 1
+        })
+        .to_string();
+        let (token, refresh, status, _) = parse_gemini_keychain_json(&nested);
+        assert_eq!(token.as_deref(), Some("ya29.kc"));
+        assert_eq!(refresh.as_deref(), Some("1//kc"));
+        assert_eq!(status, CredentialStatus::Valid);
+
+        // A flat document falls through to the file-format parser.
+        let flat = json!({
+            "access_token": "ya29.flat",
+            "refresh_token": "1//flat",
+            "expiry_date": far_future_ms()
+        })
+        .to_string();
+        let (token, _, status, _) = parse_gemini_keychain_json(&flat);
+        assert_eq!(token.as_deref(), Some("ya29.flat"));
+        assert_eq!(status, CredentialStatus::Valid);
+    }
+
+    #[test]
+    fn classify_gemini_model_groups_by_class() {
+        assert_eq!(classify_gemini_model("gemini-2.5-pro"), "gemini_pro");
+        assert_eq!(classify_gemini_model("gemini-2.5-flash"), "gemini_flash");
+        assert_eq!(
+            classify_gemini_model("gemini-2.5-flash-lite"),
+            "gemini_flash_lite"
+        );
+        // Unknown model ids pass through raw.
+        assert_eq!(classify_gemini_model("imagen-3"), "imagen-3");
+    }
+
+    #[test]
+    fn parse_gemini_quota_keeps_lowest_remaining_per_class_and_sorts() {
+        let body = json!({
+            "buckets": [
+                { "modelId": "gemini-2.5-flash", "remainingFraction": 0.9,
+                  "resetTime": "2026-06-12T00:00:00Z" },
+                { "modelId": "gemini-2.5-pro", "remainingFraction": 0.4,
+                  "resetTime": "2026-06-12T00:00:00Z" },
+                // Second pro bucket with LESS remaining — it wins.
+                { "modelId": "gemini-2.5-pro-preview", "remainingFraction": 0.25,
+                  "resetTime": "2026-06-13T00:00:00Z" }
+            ]
+        });
+        let tiers = parse_gemini_quota(&body);
+        let names: Vec<&str> = tiers.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["gemini_pro", "gemini_flash"]);
+        assert_eq!(tiers[0].utilization, 75.0); // 1 - 0.25
+        assert_eq!(tiers[0].resets_at.as_deref(), Some("2026-06-13T00:00:00Z"));
+        assert_eq!(tiers[1].utilization.round(), 10.0); // 1 - 0.9, fp-rounded
+
+        assert!(parse_gemini_quota(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn extract_project_id_handles_string_and_object() {
+        assert_eq!(
+            extract_project_id(&json!("proj-1")).as_deref(),
+            Some("proj-1")
+        );
+        assert_eq!(
+            extract_project_id(&json!({"id": "proj-2"})).as_deref(),
+            Some("proj-2")
+        );
+        assert_eq!(
+            extract_project_id(&json!({"projectId": "proj-3"})).as_deref(),
+            Some("proj-3")
+        );
+        assert!(extract_project_id(&json!(42)).is_none());
+    }
+
+    #[test]
+    fn credential_cli_for_path_maps_all_three_clis() {
+        use std::path::Path;
+        assert_eq!(
+            credential_cli_for_path(Path::new("/u/x/.claude/.credentials.json")),
+            Some(CliApp::Claude)
+        );
+        assert_eq!(
+            credential_cli_for_path(Path::new("/u/x/.codex/auth.json")),
+            Some(CliApp::Codex)
+        );
+        assert_eq!(
+            credential_cli_for_path(Path::new("/u/x/.gemini/oauth_creds.json")),
+            Some(CliApp::Gemini)
+        );
+        // OpenCode's unrelated auth.json must NOT match.
+        assert_eq!(
+            credential_cli_for_path(Path::new("/u/x/.local/share/opencode/auth.json")),
+            None
+        );
+        assert_eq!(
+            credential_cli_for_path(Path::new("/u/x/.claude/projects/p/s.jsonl")),
+            None
+        );
     }
 }

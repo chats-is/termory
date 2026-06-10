@@ -89,7 +89,11 @@ let versionsEverResolved = false;
 // weekly rate-limit windows). MIRROR of the backend list
 // `quota::SUPPORTED` in src-tauri/src/quota.rs (which drives the tray)
 // — when a CLI's fetch_quota arm lands, add it in BOTH places.
-const QUOTA_SUPPORTED: ReadonlySet<CliApp> = new Set(["claude", "codex"]);
+const QUOTA_SUPPORTED: ReadonlySet<CliApp> = new Set([
+  "claude",
+  "codex",
+  "gemini"
+]);
 // Quota results survive route remounts (like cachedVersions). An entry
 // older than QUOTA_STALE_MS is silently re-fetched on the next entry
 // to the tab. Manual Refresh bypasses the stale window but is still

@@ -42,6 +42,21 @@ const TIER_LABELS: Record<string, { short: MessageKey; full: MessageKey }> = {
   "30_day": {
     short: "providers.quotaMonthlyShort",
     full: "providers.quotaMonthly"
+  },
+  // Gemini buckets are per-MODEL classes, not time windows
+  // (quota.rs classify_gemini_model). Brand names — the zh dicts
+  // keep the same English values by convention.
+  gemini_pro: {
+    short: "providers.quotaGeminiProShort",
+    full: "providers.quotaGeminiPro"
+  },
+  gemini_flash: {
+    short: "providers.quotaGeminiFlashShort",
+    full: "providers.quotaGeminiFlash"
+  },
+  gemini_flash_lite: {
+    short: "providers.quotaGeminiFlashLiteShort",
+    full: "providers.quotaGeminiFlashLite"
   }
 };
 

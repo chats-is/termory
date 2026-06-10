@@ -292,30 +292,16 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
 /// and OS metadata noise (`.DS_Store`). If only filtered files
 /// changed, the data we'd surface is identical to last scan, so a
 /// re-scan would be pure cost.
-/// CLIs whose OAuth credential file this event touched:
-/// `.credentials.json` (anywhere under the watched Claude dir) →
-/// Claude; `auth.json` directly inside a `.codex` dir → Codex (the
-/// parent check excludes OpenCode's unrelated
-/// `~/.local/share/opencode/auth.json`).
+/// CLIs whose OAuth credential file this event touched. The
+/// path→CLI mapping is owned by quota.rs (`credential_cli_for_path`,
+/// next to the credential readers) so the watcher can't drift from
+/// the actual credential locations.
 fn event_credential_clis(event: &notify::Event) -> Vec<crate::providers::CliApp> {
-    use crate::providers::CliApp;
-    let mut out = Vec::new();
-    for path in &event.paths {
-        match path.file_name().and_then(|n| n.to_str()) {
-            Some(".credentials.json") => out.push(CliApp::Claude),
-            Some("auth.json")
-                if path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .and_then(|n| n.to_str())
-                    == Some(".codex") =>
-            {
-                out.push(CliApp::Codex)
-            }
-            _ => {}
-        }
-    }
-    out
+    event
+        .paths
+        .iter()
+        .filter_map(|p| crate::quota::credential_cli_for_path(p))
+        .collect()
 }
 
 fn event_has_relevant_path(event: &notify::Event) -> bool {
@@ -516,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn event_credential_clis_matches_claude_and_codex_files_only() {
+    fn event_credential_clis_matches_quota_cli_credential_files_only() {
         use crate::providers::CliApp;
         fn ev(paths: &[&str]) -> notify::Event {
             let mut e = notify::Event::default();
@@ -530,6 +516,10 @@ mod tests {
         assert_eq!(
             event_credential_clis(&ev(&["/Users/x/.codex/auth.json"])),
             vec![CliApp::Codex]
+        );
+        assert_eq!(
+            event_credential_clis(&ev(&["/Users/x/.gemini/oauth_creds.json"])),
+            vec![CliApp::Gemini]
         );
         // OpenCode's unrelated auth.json must NOT match (parent isn't `.codex`).
         assert!(

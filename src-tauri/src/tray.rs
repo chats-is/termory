@@ -47,12 +47,6 @@ use tauri::{
 
 const TRAY_ID: &str = "termory-main";
 
-/// Emitted with a `SubscriptionQuota` payload after every completed
-/// quota fetch (any trigger), so the Providers page stays in sync with
-/// backend-initiated fetches. Frontend mirror: QUOTA_CHANGED_EVENT in
-/// src/constants.ts.
-pub const QUOTA_CHANGED_EVENT: &str = "termory:quota-changed";
-
 /// How many recent session titles to surface under "Open".
 const RECENT_LIMIT: usize = 5;
 
@@ -333,7 +327,7 @@ pub fn refresh_quota(app: &AppHandle, quota: &crate::quota::SubscriptionQuota) {
     // IPC-initiated fetches — same data the page already received.
     {
         use tauri::Emitter;
-        let _ = app.emit(QUOTA_CHANGED_EVENT, quota);
+        let _ = app.emit(crate::quota::QUOTA_CHANGED_EVENT, quota);
     }
     if !quota.success {
         // Logged out (`not_found`) is a definitive state, not a
@@ -401,6 +395,11 @@ fn tray_tier_label(name: &str, labels: &TrayLabels) -> String {
         "five_hour" => labels.five_hour.clone(),
         "seven_day" => labels.weekly.clone(),
         "30_day" => labels.monthly.clone(),
+        // Gemini buckets are per-MODEL classes, not time windows —
+        // brand names, untranslated by convention.
+        "gemini_pro" => "Pro".to_string(),
+        "gemini_flash" => "Flash".to_string(),
+        "gemini_flash_lite" => "Flash Lite".to_string(),
         other => {
             if let Some(n) = other.strip_suffix("_hour") {
                 if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
@@ -770,6 +769,8 @@ mod tests {
         assert_eq!(tray_tier_label("3_hour", &labels), "3h");
         assert_eq!(tray_tier_label("30_day", &labels), "Monthly");
         assert_eq!(tray_tier_label("14_day", &labels), "14d");
+        assert_eq!(tray_tier_label("gemini_pro", &labels), "Pro");
+        assert_eq!(tray_tier_label("gemini_flash_lite", &labels), "Flash Lite");
         assert_eq!(tray_tier_label("_day", &labels), "_day"); // no digits → raw
         assert_eq!(tray_tier_label("weekly_limit", &labels), "weekly_limit");
     }
