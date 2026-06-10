@@ -436,7 +436,9 @@ export function GatewaysPage({
                             <div className="flex items-center gap-1.5 shrink-0">
                               <Tooltip>
                                 <TooltipTrigger asChild>
-                                  <button
+                                  <Button
+                                    variant="ghost"
+                                    size="icon-sm"
                                     type="button"
                                     onClick={() =>
                                       void toggleBindingEnabled(gateway, b)
@@ -447,7 +449,6 @@ export function GatewaysPage({
                                         ? t("providers.removeFromOpencode")
                                         : t("providers.addToOpencode")
                                     }
-                                    className="inline-flex items-center justify-center size-8 rounded-md hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:pointer-events-none transition-colors"
                                   >
                                     {busy === b.id ? (
                                       <Loader2 className="size-4 animate-spin" />
@@ -456,7 +457,7 @@ export function GatewaysPage({
                                     ) : (
                                       <CircleOff className="size-4 text-red-600" />
                                     )}
-                                  </button>
+                                  </Button>
                                 </TooltipTrigger>
                                 <TooltipContent side="bottom">
                                   {configured

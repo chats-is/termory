@@ -1,6 +1,7 @@
 import React from "react";
-import { Loader2, Search } from "lucide-react";
+import { Loader2, Search, Trash2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { useSearchHits } from "@/hooks/useSearchHits";
 import { formatFullNumber } from "@/lib/format";
 import { sessionKey } from "@/lib/session-utils";
@@ -87,23 +88,17 @@ export function SearchPage({
             <p className="text-xs">{t("search.indexed", { n: formatFullNumber(sessions.length) })}</p>
             {recentSearches.length > 0 && (
               <div className="w-full max-w-md mt-4 flex flex-col gap-2 items-center">
-                <div className="flex items-center gap-3 text-xs">
-                  <span>{t("search.recent")}</span>
-                  <button
-                    type="button"
-                    onClick={onClearRecent}
-                    className="text-muted-foreground hover:text-foreground"
-                  >
-                    {t("search.clear")}
-                  </button>
-                </div>
+                <Button variant="ghost" size="sm" onClick={onClearRecent}>
+                  <Trash2 />
+                  {t("search.clear")}
+                </Button>
                 <div className="flex flex-wrap justify-center gap-1.5">
                   {recentSearches.map((entry) => (
                     <button
                       key={entry}
                       type="button"
                       onClick={() => setQuery(entry)}
-                      className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-1 text-xs hover:bg-accent"
+                      className="inline-flex items-center gap-1 rounded-full bg-muted px-3 py-1 text-[10px] hover:bg-accent"
                     >
                       {entry}
                     </button>

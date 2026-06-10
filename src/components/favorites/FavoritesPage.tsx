@@ -96,6 +96,12 @@ export function FavoritesPage({
                 messageId={fav.id}
                 source={fav.source}
                 project={fav.source_session_project}
+                hideSessionOps
+                sourceMissing={
+                  !sessionIndex.has(
+                    `${fav.source}::${fav.source_session_id}`
+                  )
+                }
               >
               <button
                 type="button"
@@ -169,7 +175,7 @@ export function FavoritesPage({
               )}
             </div>
             <div className="inline-flex items-center gap-2 shrink-0">
-              {selectedSession ? (
+              {selectedSession && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button
@@ -188,10 +194,6 @@ export function FavoritesPage({
                   </TooltipTrigger>
                   <TooltipContent>{t("favorites.openOriginal")}</TooltipContent>
                 </Tooltip>
-              ) : (
-                <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                  {t("favorites.archived")}
-                </span>
               )}
               <Tooltip>
                 <TooltipTrigger asChild>

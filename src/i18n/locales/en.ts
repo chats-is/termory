@@ -30,7 +30,6 @@ export const en = {
   "search.press": "Press",
   "search.summon": "to summon search from anywhere.",
   "search.indexed": "{n} records indexed.",
-  "search.recent": "Recent",
   "search.clear": "Clear",
   "search.noMatch": 'No matches for "{query}"',
 
@@ -40,7 +39,6 @@ export const en = {
     "Click the star next to any message in Records to save it here. The full message content is snapshotted, so favorites survive even if the original session is later deleted.",
   "favorites.openOriginal": "Open original session",
   "favorites.remove": "Remove from favorites",
-  "favorites.archived": "archived",
 
   // Common
   "common.copy": "Copy",
@@ -55,6 +53,9 @@ export const en = {
   "footer.syncedJustNow": "Synced just now",
   "footer.synced": "Synced {ago}",
   "footer.status": "Freshness status",
+  "tray.open": "Open",
+  "tray.official": "Official",
+  "tray.exit": "Exit",
 
   // Stats
   "stats.dailyTokens": "Daily tokens",
@@ -280,7 +281,7 @@ export const en = {
   // Terminal
   "settings.terminal": "Terminal",
   "settings.terminal.desc":
-    "Which terminal opens when you resume a recent session from the menu-bar tray. Only terminals found on this machine are listed.",
+    "Which terminal opens when you resume a session. Only terminals found on this machine are listed.",
   "settings.terminal.saveError": "Couldn't save terminal: {error}",
 
   // Storage
@@ -301,7 +302,7 @@ export const en = {
   "settings.shortcuts": "Keyboard shortcuts",
   "settings.shortcuts.searchPalette": "Open search palette",
   "settings.shortcuts.searchPaletteAlias": "Open search palette (alias)",
-  "settings.shortcuts.switchRoute": "Switch rail route",
+  "settings.shortcuts.switchRoute": "Switch sidebar tab",
   "settings.shortcuts.closePalette": "Close palette / dropdown",
 
   // About

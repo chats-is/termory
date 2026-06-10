@@ -26,7 +26,6 @@ export const zhHant: Record<MessageKey, string> = {
   "search.press": "按",
   "search.summon": "可隨時喚起搜尋。",
   "search.indexed": "已索引 {n} 筆記錄。",
-  "search.recent": "最近",
   "search.clear": "清除",
   "search.noMatch": "沒有符合「{query}」的結果",
 
@@ -35,7 +34,6 @@ export const zhHant: Record<MessageKey, string> = {
     "在「記錄」裡點任意訊息旁的星標即可收藏到這裡。收藏會快照完整訊息內容,即使原會話之後被刪除也仍可檢視。",
   "favorites.openOriginal": "開啟原始會話",
   "favorites.remove": "取消收藏",
-  "favorites.archived": "已封存",
 
   "common.copy": "複製",
   "time.justNow": "剛剛",
@@ -49,9 +47,12 @@ export const zhHant: Record<MessageKey, string> = {
   "footer.syncedJustNow": "剛剛同步",
   "footer.synced": "{ago}同步",
   "footer.status": "同步狀態",
+  "tray.open": "開啟",
+  "tray.official": "官方",
+  "tray.exit": "退出",
 
   "stats.dailyTokens": "每日 Tokens",
-  "stats.dailyActivities": "每日活動",
+  "stats.dailyActivities": "每日活躍度",
   "stats.kpi.sessions": "會話",
   "stats.kpi.messages": "訊息",
   "stats.kpi.tokens": "Tokens",
@@ -266,7 +267,7 @@ export const zhHant: Record<MessageKey, string> = {
 
   "settings.terminal": "終端機",
   "settings.terminal.desc":
-    "從選單列托盤恢復最近會話時開啟哪個終端機。只列出本機已安裝的終端機。",
+    "恢復會話時用哪個終端機開啟。只列出本機已安裝的終端機。",
   "settings.terminal.saveError": "儲存終端機失敗:{error}",
 
   "settings.storage": "儲存",
@@ -284,7 +285,7 @@ export const zhHant: Record<MessageKey, string> = {
   "settings.shortcuts": "鍵盤快速鍵",
   "settings.shortcuts.searchPalette": "開啟搜尋面板",
   "settings.shortcuts.searchPaletteAlias": "開啟搜尋面板(別名)",
-  "settings.shortcuts.switchRoute": "切換導覽路由",
+  "settings.shortcuts.switchRoute": "切換側欄",
   "settings.shortcuts.closePalette": "關閉面板 / 下拉",
 
   "settings.about": "關於",

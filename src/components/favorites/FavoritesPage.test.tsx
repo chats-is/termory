@@ -222,7 +222,7 @@ describe("FavoritesPage — Open original / archived", () => {
     expect(onOpenSource).toHaveBeenCalledWith(live, 7);
   });
 
-  it("renders the 'archived' label when the source session is missing from scans", () => {
+  it("shows no Open original button (and no label) when the source session is missing", () => {
     const fav = mkFavorite({ source_session_id: "deleted-session" });
     render(
       <FavoritesPage
@@ -232,7 +232,7 @@ describe("FavoritesPage — Open original / archived", () => {
         onRemove={() => {}}
       />
     );
-    expect(screen.getByText(/archived/i)).toBeInTheDocument();
+    expect(screen.queryByText(/archived/i)).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /open original session/i })
     ).not.toBeInTheDocument();

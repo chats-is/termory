@@ -1,10 +1,36 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  formatCompact,
   formatDate,
   formatFullNumber,
   formatRelativeDate,
-  formatTimeAgo
+  formatTimeAgo,
+  setFormatLocale
 } from "./format";
+
+describe("setFormatLocale", () => {
+  afterEach(() => setFormatLocale(undefined)); // reset to OS locale for other tests
+
+  it("formats dates in the app's selected language, not the OS locale", () => {
+    const d = "2026-06-10T08:00:00Z"; // mid-June → month stable across TZs
+    setFormatLocale("en");
+    expect(formatDate(d)).toMatch(/Jun/);
+    setFormatLocale("zh-Hans");
+    expect(formatDate(d)).toMatch(/月/);
+  });
+
+  it("compacts large numbers with 万/亿 in Chinese, K/M/B otherwise", () => {
+    setFormatLocale("en");
+    expect(formatCompact(21_500_000_000)).toBe("21.5B");
+    expect(formatCompact(1_200_000)).toBe("1.2M");
+    setFormatLocale("zh-Hans");
+    expect(formatCompact(21_500_000_000)).toBe("215亿");
+    expect(formatCompact(1_200_000)).toBe("120万");
+    expect(formatCompact(5_000)).toBe("5000");
+    setFormatLocale("zh-Hant");
+    expect(formatCompact(120_000)).toBe("12万");
+  });
+});
 
 describe("formatDate", () => {
   it("returns 'Unknown time' for null / undefined / empty", () => {

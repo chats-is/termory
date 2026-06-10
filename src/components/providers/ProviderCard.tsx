@@ -169,12 +169,13 @@ export function ProviderCard({
             {onToggleEnabled && (
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
                     type="button"
                     onClick={onToggleEnabled}
                     disabled={toggling || !activatable}
                     aria-label={isConfigured ? t("providers.disable") : t("providers.enable")}
-                    className="inline-flex items-center justify-center size-8 rounded-md hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:pointer-events-none transition-colors"
                   >
                     {toggling ? (
                       <Loader2 className="size-4 animate-spin" />
@@ -183,7 +184,7 @@ export function ProviderCard({
                     ) : (
                       <CircleOff className="size-4 text-red-600" />
                     )}
-                  </button>
+                  </Button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom">
                   {!activatable
@@ -196,29 +197,31 @@ export function ProviderCard({
             )}
             <Tooltip>
               <TooltipTrigger asChild>
-                <button
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
                   type="button"
                   onClick={onTest}
                   disabled={testing}
                   aria-label={t("providers.test")}
-                  className="inline-flex items-center justify-center size-8 rounded-md hover:bg-accent hover:text-accent-foreground disabled:opacity-50 disabled:pointer-events-none transition-colors"
                 >
                   {testing ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" />}
-                </button>
+                </Button>
               </TooltipTrigger>
               <TooltipContent side="bottom">{t("providers.test")}</TooltipContent>
             </Tooltip>
             {onEdit && (
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
                     type="button"
                     onClick={onEdit}
                     aria-label={t("providers.edit")}
-                    className="inline-flex items-center justify-center size-8 rounded-md hover:bg-accent hover:text-accent-foreground transition-colors"
                   >
                     <Pencil className="size-4" />
-                  </button>
+                  </Button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom">{t("providers.edit")}</TooltipContent>
               </Tooltip>
@@ -226,14 +229,16 @@ export function ProviderCard({
             {onDelete && (
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <button
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
                     type="button"
                     onClick={onDelete}
                     aria-label={t("providers.delete")}
-                    className="inline-flex items-center justify-center size-8 rounded-md text-destructive hover:text-destructive hover:bg-destructive/10 transition-colors"
+                    className="text-destructive hover:text-destructive hover:bg-destructive/10"
                   >
                     <Trash2 className="size-4" />
-                  </button>
+                  </Button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom">{t("providers.delete")}</TooltipContent>
               </Tooltip>

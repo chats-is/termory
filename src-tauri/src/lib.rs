@@ -218,6 +218,21 @@ async fn claude_project_registered(path: String) -> Result<bool, String> {
     Ok(sessions::claude_project_registered(&path))
 }
 
+/// Push the app-language strings for the tray's static rows (Open / Official /
+/// Exit) and rebuild the menu. The frontend calls this on language load/change
+/// so the menu bar follows the app language (CLI / provider names stay as-is).
+#[tauri::command]
+async fn set_tray_labels(
+    app: tauri::AppHandle,
+    open: String,
+    official: String,
+    exit: String,
+) -> Result<(), String> {
+    tray::set_labels(open, official, exit);
+    let _ = tray::rebuild_menu(&app);
+    Ok(())
+}
+
 /// Spawn each installed CLI with `--version` and return the parsed
 /// version. Heavier than [`detect_clis`] (4 subprocesses), so the
 /// frontend calls this only on page mount / Recheck.
@@ -520,6 +535,7 @@ pub fn run() {
             delete_gemini_session,
             delete_gemini_memory,
             claude_project_registered,
+            set_tray_labels,
             detect_cli_versions_cmd,
             provider_active_state,
             provider_active_states,

@@ -10,23 +10,51 @@ import type { MessageKey } from "@/i18n";
  * passed they render the localized `time.*` strings. */
 type Translate = (key: MessageKey, params?: Record<string, string | number>) => string;
 
-const dateFormatter = new Intl.DateTimeFormat(undefined, {
-  month: "short",
-  day: "numeric",
-  hour: "2-digit",
-  minute: "2-digit"
-});
+function makeDateTimeFormatter(locale?: string) {
+  return new Intl.DateTimeFormat(locale, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+function makeShortDateFormatter(locale?: string) {
+  return new Intl.DateTimeFormat(locale, { month: "short", day: "numeric" });
+}
+function makeYearDateFormatter(locale?: string) {
+  return new Intl.DateTimeFormat(locale, {
+    year: "numeric",
+    month: "short",
+    day: "numeric"
+  });
+}
 
-const shortDateFormatter = new Intl.DateTimeFormat(undefined, {
-  month: "short",
-  day: "numeric"
-});
+// The app's formatting locale (drives BOTH dates and `formatCompact` numbers).
+// `undefined` = the OS locale; the i18n provider calls `setFormatLocale` so
+// formatting follows the app's selected language (English was otherwise showing
+// dates/units in the OS's Chinese format).
+let currentLocale: string | undefined;
+let dateFormatter = makeDateTimeFormatter(currentLocale);
+let shortDateFormatter = makeShortDateFormatter(currentLocale);
+let yearDateFormatter = makeYearDateFormatter(currentLocale);
 
-const yearDateFormatter = new Intl.DateTimeFormat(undefined, {
-  year: "numeric",
-  month: "short",
-  day: "numeric"
-});
+/** Set the app formatting locale (a BCP-47 tag — "en" / "zh-Hans" / "zh-Hant").
+ * Rebuilds the date formatters only on change (Intl construction is expensive)
+ * and is read by `formatCompact` for 万/亿 vs K/M/B. */
+export function setFormatLocale(locale: string | undefined): void {
+  if (locale === currentLocale) return;
+  currentLocale = locale;
+  dateFormatter = makeDateTimeFormatter(locale);
+  shortDateFormatter = makeShortDateFormatter(locale);
+  yearDateFormatter = makeYearDateFormatter(locale);
+}
+
+/** The app's formatting locale, for ad-hoc `toLocale*` calls outside this module
+ * (FreshnessFooter tooltip, stats hover labels) so they also follow the app
+ * language instead of the OS locale. `undefined` = OS locale. */
+export function getFormatLocale(): string | undefined {
+  return currentLocale;
+}
 
 const numberFormatter = new Intl.NumberFormat();
 
@@ -103,6 +131,9 @@ export function formatFullNumber(value: number): string {
  * decimals.
  */
 export function formatCompact(value: number): string {
+  // Chinese reads large numbers grouped by 万 (10^4) / 亿 (10^8), not K/M/B —
+  // follow the app language (set via `setFormatLocale`).
+  if (currentLocale?.startsWith("zh")) return formatCompactZh(value);
   if (value < 1_000) return String(value);
   if (value < 100_000) {
     const k = value / 1_000;
@@ -113,6 +144,16 @@ export function formatCompact(value: number): string {
     return `${stripTrailingZero(m.toFixed(m < 1 ? 2 : 1))}M`;
   }
   return `${stripTrailingZero((value / 1_000_000_000).toFixed(1))}B`;
+}
+
+/** Compact format with Chinese magnitude units: `< 1万` raw, then `万` (10^4),
+ * then `亿` (10^8). e.g. 5000 → "5000", 1.2M → "120万", 21.5B → "215亿". */
+function formatCompactZh(value: number): string {
+  if (value < 10_000) return String(value);
+  if (value < 100_000_000) {
+    return `${stripTrailingZero((value / 10_000).toFixed(1))}万`;
+  }
+  return `${stripTrailingZero((value / 100_000_000).toFixed(1))}亿`;
 }
 
 /**

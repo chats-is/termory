@@ -80,18 +80,20 @@ export function InstallGuide({
             <code className="flex-1 text-left text-xs font-mono break-all">
               {method.command}
             </code>
-            <button
+            <Button
+              variant="ghost"
+              size="icon-sm"
               type="button"
               onClick={() => void copy()}
               aria-label={t("install.copyCommand")}
-              className="inline-flex items-center justify-center size-7 rounded hover:bg-accent hover:text-accent-foreground transition-colors"
+              className="size-7"
             >
               {copied ? (
                 <Check className="size-3.5 text-green-600" />
               ) : (
                 <Copy className="size-3.5" />
               )}
-            </button>
+            </Button>
           </div>
         </div>
 

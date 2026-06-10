@@ -1,7 +1,7 @@
 import React from "react";
 import { AlertTriangle, Check, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { formatTimeAgo } from "@/lib/format";
+import { formatTimeAgo, getFormatLocale } from "@/lib/format";
 import { useT } from "@/i18n";
 
 export function FreshnessFooter({
@@ -66,7 +66,7 @@ export function FreshnessFooter({
     state = "idle";
     icon = <Check size={12} strokeWidth={2.25} />;
     label = t("footer.synced", { ago: formatTimeAgo(lastSyncedAt, t) });
-    tooltip = new Date(lastSyncedAt).toLocaleString();
+    tooltip = new Date(lastSyncedAt).toLocaleString(getFormatLocale());
   }
 
   const stateClass = {

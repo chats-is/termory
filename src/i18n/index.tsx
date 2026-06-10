@@ -1,5 +1,6 @@
 import React from "react";
 import { getConfig, setConfig } from "@/config";
+import { setFormatLocale } from "@/lib/format";
 import { en } from "./locales/en";
 import { zhHans } from "./locales/zh-Hans";
 import { zhHant } from "./locales/zh-Hant";
@@ -75,6 +76,12 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
       })
       .catch(() => {});
   }, []);
+
+  // Keep the date formatters on the app's language (not the OS locale). Done in
+  // the render body — not an effect — so it's set BEFORE children format dates
+  // in this same pass (an effect would lag one render). `setFormatLocale`
+  // early-returns when unchanged, so this is cheap on every render.
+  setFormatLocale(locale);
 
   React.useEffect(() => {
     document.documentElement.lang = locale;

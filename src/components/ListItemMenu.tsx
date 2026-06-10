@@ -31,6 +31,8 @@ export function ListItemMenu({
   project,
   onLocalDelete,
   onLocalMigrate,
+  hideSessionOps,
+  sourceMissing,
   children
 }: {
   path: string;
@@ -46,6 +48,13 @@ export function ListItemMenu({
   onLocalDelete?: () => void;
   /** Re-point this row after a successful migrate (local, no re-scan). */
   onLocalMigrate?: (res: MigrateResult) => void;
+  /** Hide the session-management actions (resume-in-terminal, migrate, delete).
+   *  Set on the Favorites list — those act on the SOURCE session, not the saved
+   *  snapshot, so they don't belong there (delete would remove the real session). */
+  hideSessionOps?: boolean;
+  /** The source file/session is gone (deleted favorite). Hide the actions that
+   *  need it on disk — Reveal in Finder + the resume command. */
+  sourceMissing?: boolean;
   children: React.ReactNode;
 }) {
   const t = useT();
@@ -91,15 +100,21 @@ export function ListItemMenu({
     <ContextMenu>
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
       <ContextMenuContent className="w-52">
-        <ContextMenuItem onSelect={() => void revealItemInDir(path)}>
-          {t("menu.revealInFinder")}
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        {resumeCmd && (
+        {!sourceMissing && (
           <>
-            <ContextMenuItem onSelect={resumeInTerminal}>
-              {t("menu.resumeInTerminal")}
+            <ContextMenuItem onSelect={() => void revealItemInDir(path)}>
+              {t("menu.revealInFinder")}
             </ContextMenuItem>
+            <ContextMenuSeparator />
+          </>
+        )}
+        {resumeCmd && !sourceMissing && (
+          <>
+            {!hideSessionOps && (
+              <ContextMenuItem onSelect={resumeInTerminal}>
+                {t("menu.resumeInTerminal")}
+              </ContextMenuItem>
+            )}
             <ContextMenuItem onSelect={() => copy(resumeCmd)}>
               {t("menu.copyResumeCommand")}
             </ContextMenuItem>
@@ -121,7 +136,7 @@ export function ListItemMenu({
             {t("menu.copyMessageId")}
           </ContextMenuItem>
         )}
-        {isClaudeSession && (
+        {!hideSessionOps && isClaudeSession && (
           <>
             <ContextMenuSeparator />
             <ContextMenuItem
@@ -183,7 +198,7 @@ export function ListItemMenu({
             </ContextMenuItem>
           </>
         )}
-        {isGeminiSession && (
+        {!hideSessionOps && isGeminiSession && (
           <>
             <ContextMenuSeparator />
             <ContextMenuItem

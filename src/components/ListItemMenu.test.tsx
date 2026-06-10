@@ -256,3 +256,52 @@ describe("ListItemMenu — Delete (single session / memory)", () => {
     expect(invokeMock).not.toHaveBeenCalled();
   });
 });
+
+describe("ListItemMenu — hideSessionOps (Favorites)", () => {
+  it("hides resume-in-terminal / migrate / delete, keeps the copy actions", async () => {
+    render(
+      <ListItemMenu
+        path="/p/s.jsonl"
+        id="sess-1"
+        source="Claude"
+        project="/proj"
+        hideSessionOps
+      >
+        <button>favrow</button>
+      </ListItemMenu>
+    );
+    fireEvent.contextMenu(screen.getByText("favrow"));
+    await screen.findByText("Copy resume command"); // menu is open
+    expect(screen.queryByText("Resume in terminal")).toBeNull();
+    expect(screen.queryByText("Migrate session…")).toBeNull();
+    expect(screen.queryByText("Delete session…")).toBeNull();
+    // Copy / reveal stay available.
+    expect(screen.getByText("Copy path")).toBeTruthy();
+    expect(screen.getByText("Copy resume command")).toBeTruthy();
+  });
+});
+
+describe("ListItemMenu — sourceMissing (deleted favorite)", () => {
+  it("hides Reveal in Finder and Copy resume command when the source is gone", async () => {
+    render(
+      <ListItemMenu
+        path="/p/s.jsonl"
+        id="sess-1"
+        messageId="fav-1"
+        source="Claude"
+        project="/proj"
+        hideSessionOps
+        sourceMissing
+      >
+        <button>delrow</button>
+      </ListItemMenu>
+    );
+    fireEvent.contextMenu(screen.getByText("delrow"));
+    await screen.findByText("Copy path"); // menu is open
+    expect(screen.queryByText("Reveal in Finder")).toBeNull();
+    expect(screen.queryByText("Copy resume command")).toBeNull();
+    expect(screen.queryByText("Resume in terminal")).toBeNull();
+    // Snapshot copy actions stay.
+    expect(screen.getByText("Copy message ID")).toBeTruthy();
+  });
+});

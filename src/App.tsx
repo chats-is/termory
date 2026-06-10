@@ -145,6 +145,16 @@ export function App() {
   }, []);
 
   const t = useT();
+  // Keep the macOS tray's static rows (Open / Official / Exit) on the app
+  // language — re-pushed whenever `t` (the locale) changes. Backend stores the
+  // strings + rebuilds the menu; no-ops where there's no tray.
+  React.useEffect(() => {
+    void invoke("set_tray_labels", {
+      open: t("tray.open"),
+      official: t("tray.official"),
+      exit: t("tray.exit")
+    }).catch(() => {});
+  }, [t]);
   const [sessions, setSessions] = React.useState<AppSession[]>([]);
   // First-class projects (folders/entities), independent of records. The
   // sidebar renders from this; deleting a record never removes a project here.

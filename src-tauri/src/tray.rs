@@ -64,6 +64,49 @@ struct RecentSession {
 /// the `scan_all_sessions` IPC) — the tray never scans on its own.
 static RECENT: Mutex<Vec<RecentSession>> = Mutex::new(Vec::new());
 
+/// Localized labels for the menu's static rows (Open / Official / Exit). The
+/// frontend pushes the translated strings via the `set_tray_labels` IPC when the
+/// app language loads or changes; until then English is used. CLI and provider
+/// names are brand / user data and stay untranslated.
+#[derive(Clone)]
+struct TrayLabels {
+    open: String,
+    official: String,
+    exit: String,
+}
+
+impl Default for TrayLabels {
+    fn default() -> Self {
+        Self {
+            open: "Open".to_string(),
+            official: "Official".to_string(),
+            exit: "Exit".to_string(),
+        }
+    }
+}
+
+static TRAY_LABELS: Mutex<Option<TrayLabels>> = Mutex::new(None);
+
+fn tray_labels() -> TrayLabels {
+    TRAY_LABELS
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_default()
+}
+
+/// Store the localized static labels (called from the `set_tray_labels` IPC).
+/// The caller rebuilds the menu so the new labels take effect.
+pub fn set_labels(open: String, official: String, exit: String) {
+    if let Ok(mut g) = TRAY_LABELS.lock() {
+        *g = Some(TrayLabels {
+            open,
+            official,
+            exit,
+        });
+    }
+}
+
 /// Menu-bar glyph: the three-card terminal "chip" from the app icon,
 /// pure black on transparent so macOS renders it as a template image
 /// and themes it for light / dark menu bars. Embedded so it ships in
@@ -197,10 +240,11 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
 
+    let labels = tray_labels();
     let mut menu = MenuBuilder::new(app);
 
     // "Open" sits at the very top of the menu.
-    let open = MenuItemBuilder::with_id("tray:open", "Open").build(app)?;
+    let open = MenuItemBuilder::with_id("tray:open", &labels.open).build(app)?;
     menu = menu.item(&open).item(&PredefinedMenuItem::separator(app)?);
 
     // Recent sessions (newest first) — each opens in Records on click.
@@ -246,14 +290,16 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             .as_deref()
             .and_then(|id| providers_for_app.iter().find(|p| p.id == id))
             .map(|p| p.name.as_str())
-            .unwrap_or("Official");
+            .unwrap_or(labels.official.as_str());
         let title = format!("{} · {}", cli_label(cli), active_name);
         let mut sub = SubmenuBuilder::new(app, title);
 
-        let official =
-            CheckMenuItemBuilder::with_id(format!("tray:{}:official", cli_key(cli)), "Official")
-                .checked(active_id.is_none())
-                .build(app)?;
+        let official = CheckMenuItemBuilder::with_id(
+            format!("tray:{}:official", cli_key(cli)),
+            &labels.official,
+        )
+        .checked(active_id.is_none())
+        .build(app)?;
         sub = sub.item(&official);
 
         if !providers_for_app.is_empty() {
@@ -279,7 +325,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let sep = PredefinedMenuItem::separator(app)?;
     // Plain MenuItem (not PredefinedMenuItem::quit) so macOS doesn't
     // attach the native quit-item icon — keeps the menu icon-free.
-    let quit = MenuItemBuilder::with_id("tray:quit", "Exit").build(app)?;
+    let quit = MenuItemBuilder::with_id("tray:quit", &labels.exit).build(app)?;
     menu = menu.item(&sep).item(&quit);
 
     menu.build()

@@ -26,7 +26,6 @@ export const zhHans: Record<MessageKey, string> = {
   "search.press": "按",
   "search.summon": "可随时唤起搜索。",
   "search.indexed": "已索引 {n} 条记录。",
-  "search.recent": "最近",
   "search.clear": "清除",
   "search.noMatch": "没有匹配「{query}」的结果",
 
@@ -35,7 +34,6 @@ export const zhHans: Record<MessageKey, string> = {
     "在「记录」里点任意消息旁的星标即可收藏到这里。收藏会快照完整消息内容,即使原会话之后被删除也仍可查看。",
   "favorites.openOriginal": "打开原始会话",
   "favorites.remove": "取消收藏",
-  "favorites.archived": "已归档",
 
   "common.copy": "复制",
   "time.justNow": "刚刚",
@@ -49,9 +47,12 @@ export const zhHans: Record<MessageKey, string> = {
   "footer.syncedJustNow": "刚刚同步",
   "footer.synced": "{ago}同步",
   "footer.status": "同步状态",
+  "tray.open": "打开",
+  "tray.official": "官方",
+  "tray.exit": "退出",
 
   "stats.dailyTokens": "每日 Tokens",
-  "stats.dailyActivities": "每日活动",
+  "stats.dailyActivities": "每日活跃度",
   "stats.kpi.sessions": "会话",
   "stats.kpi.messages": "消息",
   "stats.kpi.tokens": "Tokens",
@@ -266,7 +267,7 @@ export const zhHans: Record<MessageKey, string> = {
 
   "settings.terminal": "终端",
   "settings.terminal.desc":
-    "从菜单栏托盘恢复最近会话时打开哪个终端。只列出本机已安装的终端。",
+    "恢复会话时用哪个终端打开。只列出本机已安装的终端。",
   "settings.terminal.saveError": "保存终端失败:{error}",
 
   "settings.storage": "存储",
@@ -284,7 +285,7 @@ export const zhHans: Record<MessageKey, string> = {
   "settings.shortcuts": "键盘快捷键",
   "settings.shortcuts.searchPalette": "打开搜索面板",
   "settings.shortcuts.searchPaletteAlias": "打开搜索面板(别名)",
-  "settings.shortcuts.switchRoute": "切换导航路由",
+  "settings.shortcuts.switchRoute": "切换侧栏",
   "settings.shortcuts.closePalette": "关闭面板 / 下拉",
 
   "settings.about": "关于",

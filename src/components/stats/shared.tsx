@@ -1,6 +1,6 @@
 // Constants and small atoms shared between Stats sub-components.
 
-import { formatCompact } from "@/lib/format";
+import { formatCompact, getFormatLocale } from "@/lib/format";
 import { useT } from "@/i18n";
 
 /** Series colors — used in both the DailyTokensChart lines/tooltip
@@ -91,7 +91,7 @@ export function formatDateShort(date: unknown): string {
 export function formatDateLong(date: string): string {
   const parsed = new Date(`${date}T00:00:00`);
   if (Number.isNaN(parsed.getTime())) return date;
-  return parsed.toLocaleDateString(undefined, {
+  return parsed.toLocaleDateString(getFormatLocale(), {
     weekday: "short",
     month: "short",
     day: "numeric"
