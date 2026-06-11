@@ -1038,15 +1038,20 @@ fn classify_gemini_model(model_id: &str) -> &str {
     }
 }
 
-/// Account tier from loadCodeAssist's `currentTier`
-/// (`GeminiUserTier { id?: "free-tier"|…, name?, … }`, types.ts:93-95).
-/// The `name` is the FULL marketing string ("Gemini Code Assist in
-/// Google One AI Pro" — what the official CLI's `Tier:` row prints
-/// verbatim, StatsDisplay.tsx:319), far too long for a badge — so a
-/// plan keyword is extracted from it ("Pro"); fall back to the id
+/// Account tier from the loadCodeAssist response. Mirrors the
+/// official CLI exactly (`setup.ts:221`): **`paidTier` wins over
+/// `currentTier`** — a Google One AI Pro account reports
+/// `currentTier: standard-tier` but carries the real plan in
+/// `paidTier.name`. The `name` is the FULL marketing string
+/// ("Gemini Code Assist in Google One AI Pro" — what the official
+/// CLI's `Tier:` row prints verbatim), far too long for a badge — so
+/// a plan keyword is extracted from it ("Pro"); fall back to the id
 /// ("standard-tier" → "Standard"), then to the tidied name.
 fn gemini_plan(load_body: &serde_json::Value) -> Option<String> {
-    let tier = load_body.get("currentTier")?;
+    let tier = load_body
+        .get("paidTier")
+        .filter(|t| t.is_object())
+        .or_else(|| load_body.get("currentTier"))?;
     let name = tier.get("name").and_then(|v| v.as_str());
     if let Some(short) = name.and_then(gemini_tier_keyword) {
         return Some(short);
@@ -1849,10 +1854,12 @@ mod tests {
 
     #[test]
     fn gemini_plan_extracts_keyword_from_marketing_name() {
-        // Google One AI Pro — the official CLI prints the whole
-        // marketing name; the badge wants just "Pro".
+        // Google One AI Pro — currentTier reports standard-tier, the
+        // real plan rides in paidTier (official precedence,
+        // setup.ts:221). The badge wants just "Pro".
         let body = json!({
-            "currentTier": {
+            "currentTier": { "id": "standard-tier" },
+            "paidTier": {
                 "id": "g1-pro-tier",
                 "name": "Gemini Code Assist in Google One AI Pro"
             }
