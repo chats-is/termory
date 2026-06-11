@@ -647,9 +647,15 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
 
     let recent = RECENT.lock().map(|g| g.clone()).unwrap_or_default();
     if !recent.sessions.is_empty() {
-        for (idx, r) in recent.sessions.iter().enumerate() {
+        for r in recent.sessions.iter() {
+            // Content-addressed id (source + session id, neither
+            // contains ':') — index-based ids went stale when the
+            // watcher rebuilt RECENT while the menu was open, resuming
+            // the WRONG session. A click now looks the session up by
+            // identity; worst case after a rebuild is a silent no-op.
             let item =
-                MenuItemBuilder::with_id(format!("tray:session:{idx}"), &r.label).build(app)?;
+                MenuItemBuilder::with_id(format!("tray:session:{}:{}", r.source, r.id), &r.label)
+                    .build(app)?;
             menu = menu.item(&item);
         }
         menu = menu.item(&PredefinedMenuItem::separator(app)?);
@@ -662,7 +668,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     // history. Skipped only when no CLI is installed at all.
     if !installed_clis.is_empty() {
         let mut sub = SubmenuBuilder::new(app, &labels.new_session);
-        for (pidx, target) in recent.targets.iter().enumerate() {
+        for target in recent.targets.iter() {
             let mut project_sub = SubmenuBuilder::new(app, &target.label);
             // CLIs last used in THIS project first (most likely
             // choice on top), then the rest; installed only.
@@ -678,8 +684,11 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
                 }
             }
             for cli in clis {
+                // The full project path rides in the id (after the
+                // ':'-free cli key) so the click is decoupled from
+                // RECENT entirely — no stale-index hazard.
                 let item = MenuItemBuilder::with_id(
-                    format!("tray:new:{pidx}:{}", cli_key(cli)),
+                    format!("tray:new:{}:{}", cli_key(cli), target.project),
                     cli_label(cli),
                 )
                 .build(app)?;
@@ -818,17 +827,19 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
     }
     // A recent-session row → open a fresh OS terminal in that session's
     // project and resume it in its CLI (`claude --resume <id>` etc.).
-    // Fire-and-forget from the tray (no toast surface); errors logged.
-    if let Some(idx) = id
-        .strip_prefix("tray:session:")
-        .and_then(|n| n.parse::<usize>().ok())
-    {
-        if let Some(r) = RECENT
-            .lock()
-            .ok()
-            .and_then(|g| g.sessions.get(idx).cloned())
-        {
-            let _ = crate::terminal::resume_session(&r.source, &r.id, Some(&r.project));
+    // Looked up by (source, session id) — see build_menu on why not by
+    // index. Fire-and-forget from the tray; errors logged.
+    if let Some(rest) = id.strip_prefix("tray:session:") {
+        let mut parts = rest.splitn(2, ':');
+        if let (Some(source), Some(sid)) = (parts.next(), parts.next()) {
+            if let Some(r) = RECENT.lock().ok().and_then(|g| {
+                g.sessions
+                    .iter()
+                    .find(|r| r.source == source && r.id == sid)
+                    .cloned()
+            }) {
+                let _ = crate::terminal::resume_session(&r.source, &r.id, Some(&r.project));
+            }
         }
         return;
     }
@@ -845,22 +856,16 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         });
         return;
     }
-    // A "New session" row (`tray:new:{project}:{cli}`) → open the
-    // chosen terminal in that project's cwd and launch that CLI fresh.
+    // A "New session" row (`tray:new:{cli}:{project path}`) → open the
+    // chosen terminal in that dir and launch that CLI fresh. The path
+    // is carried in the id verbatim (it may itself contain ':'), so
+    // the click is independent of RECENT's current state. NOTE: the
+    // `tray:newpick:` check above must stay FIRST — it shares this
+    // prefix.
     if let Some(rest) = id.strip_prefix("tray:new:") {
         let mut parts = rest.splitn(2, ':');
-        let (Some(pidx), Some(cli)) = (
-            parts.next().and_then(|n| n.parse::<usize>().ok()),
-            parts.next().and_then(CliApp::parse),
-        ) else {
-            return;
-        };
-        if let Some(target) = RECENT
-            .lock()
-            .ok()
-            .and_then(|g| g.targets.get(pidx).cloned())
-        {
-            let _ = crate::terminal::new_session(cli_source(cli), Some(&target.project));
+        if let (Some(cli), Some(project)) = (parts.next().and_then(CliApp::parse), parts.next()) {
+            let _ = crate::terminal::new_session(cli_source(cli), Some(project));
         }
         return;
     }
