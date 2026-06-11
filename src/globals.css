@@ -53,8 +53,9 @@
    * counter-intuitive — `mark.svg` is the DARK variant (intended
    * for use on LIGHT pages so it stands out), `mark-light.svg` is
    * the LIGHT variant (for use on DARK pages). So Termory's light
-   * theme uses mark.svg's values; the .dark block below flips to
-   * mark-light.svg's. */
+   * theme uses mark.svg's values; the .dark block below dims
+   * mark-light.svg's. (A monochrome currentColor treatment was tried
+   * and rejected — it loses the mark's filled-square identity.) */
   --brand-opencode-bg: #131010;
   --brand-opencode-screen: #5A5858;
   --brand-opencode-frame: #FFFFFF;
@@ -110,11 +111,12 @@
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
 
-  /* Pure white from mark-light.svg was too jarring against the
-   * near-black page in dark mode — bring it down to a mid-gray that
-   * still reads as "light variant" but isn't a glowing square. */
-  --brand-opencode-bg: #A1A1AA;
-  --brand-opencode-screen: #71717A;
+  /* Light variant for dark pages, dimmed a notch from the official
+   * mark-light.svg (#FDFCFC) — full near-white glowed against the
+   * near-black page, while the earlier mid-gray (#A1A1AA) was too
+   * murky. zinc-200 splits the difference (user-tuned). */
+  --brand-opencode-bg: #D4D4D8;
+  --brand-opencode-screen: #8E8E96;
   --brand-opencode-frame: #18181B;
 
   --sidebar: oklch(0.195 0.006 250);
