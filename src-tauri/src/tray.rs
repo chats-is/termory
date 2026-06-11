@@ -123,6 +123,7 @@ struct TrayLabels {
     weekly: String,
     monthly: String,
     new_session: String,
+    choose_folder: String,
 }
 
 impl Default for TrayLabels {
@@ -135,6 +136,7 @@ impl Default for TrayLabels {
             weekly: "Weekly".to_string(),
             monthly: "Monthly".to_string(),
             new_session: "New Session".to_string(),
+            choose_folder: "Choose Folder…".to_string(),
         }
     }
 }
@@ -160,6 +162,7 @@ pub fn set_labels(
     weekly: String,
     monthly: String,
     new_session: String,
+    choose_folder: String,
 ) {
     if let Ok(mut g) = TRAY_LABELS.lock() {
         *g = Some(TrayLabels {
@@ -170,6 +173,7 @@ pub fn set_labels(
             weekly,
             monthly,
             new_session,
+            choose_folder,
         });
     }
 }
@@ -636,13 +640,29 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     // the "New session" groups below and the per-CLI provider submenus.
     let installed = detect_installed_clis();
 
+    let installed_clis: Vec<CliApp> = CliApp::all()
+        .into_iter()
+        .filter(|c| installed.get(c).copied().unwrap_or(false))
+        .collect();
+
     let recent = RECENT.lock().map(|g| g.clone()).unwrap_or_default();
-    if !recent.targets.is_empty() {
+    if !recent.sessions.is_empty() {
+        for (idx, r) in recent.sessions.iter().enumerate() {
+            let item =
+                MenuItemBuilder::with_id(format!("tray:session:{idx}"), &r.label).build(app)?;
+            menu = menu.item(&item);
+        }
+        menu = menu.item(&PredefinedMenuItem::separator(app)?);
+    }
+
+    // "New Session": recent project dirs as nested submenus (project
+    // ▸ CLI; flat header+rows grew too long) plus a "Choose Folder…"
+    // tail (▸ CLI → native dir picker) so a session can start in a
+    // BRAND-NEW directory — and the submenu still exists with zero
+    // history. Skipped only when no CLI is installed at all.
+    if !installed_clis.is_empty() {
         let mut sub = SubmenuBuilder::new(app, &labels.new_session);
         for (pidx, target) in recent.targets.iter().enumerate() {
-            // Nested per-project submenu (project ▸ CLI) keeps every
-            // level short — a flat header+rows layout grew to ~25 rows
-            // with 5 projects × 4 CLIs.
             let mut project_sub = SubmenuBuilder::new(app, &target.label);
             // CLIs last used in THIS project first (most likely
             // choice on top), then the rest; installed only.
@@ -650,11 +670,11 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
                 .cli_recency
                 .iter()
                 .copied()
-                .filter(|c| installed.get(c).copied().unwrap_or(false))
+                .filter(|c| installed_clis.contains(c))
                 .collect();
-            for cli in CliApp::all() {
-                if installed.get(&cli).copied().unwrap_or(false) && !clis.contains(&cli) {
-                    clis.push(cli);
+            for cli in &installed_clis {
+                if !clis.contains(cli) {
+                    clis.push(*cli);
                 }
             }
             for cli in clis {
@@ -667,17 +687,22 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             }
             sub = sub.item(&project_sub.build()?);
         }
-        menu = menu.item(&sub.build()?);
-    }
-    menu = menu.item(&PredefinedMenuItem::separator(app)?);
-
-    if !recent.sessions.is_empty() {
-        for (idx, r) in recent.sessions.iter().enumerate() {
-            let item =
-                MenuItemBuilder::with_id(format!("tray:session:{idx}"), &r.label).build(app)?;
-            menu = menu.item(&item);
+        if !recent.targets.is_empty() {
+            sub = sub.item(&PredefinedMenuItem::separator(app)?);
         }
-        menu = menu.item(&PredefinedMenuItem::separator(app)?);
+        let mut pick_sub = SubmenuBuilder::new(app, &labels.choose_folder);
+        for cli in &installed_clis {
+            let item = MenuItemBuilder::with_id(
+                format!("tray:newpick:{}", cli_key(*cli)),
+                cli_label(*cli),
+            )
+            .build(app)?;
+            pick_sub = pick_sub.item(&item);
+        }
+        sub = sub.item(&pick_sub.build()?);
+        menu = menu
+            .item(&sub.build()?)
+            .item(&PredefinedMenuItem::separator(app)?);
     }
 
     // Read the gateway bindings ONCE, then group per CLI in the loop.
@@ -805,6 +830,19 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         {
             let _ = crate::terminal::resume_session(&r.source, &r.id, Some(&r.project));
         }
+        return;
+    }
+    // "Choose Folder…" (`tray:newpick:{cli}`) → native directory
+    // picker, then launch that CLI fresh in the picked dir. The picker
+    // callback is async — fire-and-forget, errors logged.
+    if let Some(cli) = id.strip_prefix("tray:newpick:").and_then(CliApp::parse) {
+        use tauri_plugin_dialog::DialogExt;
+        app.dialog().file().pick_folder(move |folder| {
+            let Some(dir) = folder.and_then(|f| f.into_path().ok()) else {
+                return; // cancelled
+            };
+            let _ = crate::terminal::new_session(cli_source(cli), Some(&dir.to_string_lossy()));
+        });
         return;
     }
     // A "New session" row (`tray:new:{project}:{cli}`) → open the

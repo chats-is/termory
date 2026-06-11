@@ -157,8 +157,9 @@ export function App() {
       fiveHour: t("providers.quotaFiveHourShort"),
       weekly: t("providers.quotaSevenDayShort"),
       monthly: t("providers.quotaMonthlyShort"),
-      // Per-project submenu entry that launches the CLI fresh.
-      newSession: t("tray.newSession")
+      // "New Session" submenu title + its "Choose Folder…" tail.
+      newSession: t("tray.newSession"),
+      chooseFolder: t("tray.chooseFolder")
     }).catch(() => {});
   }, [t]);
   const [sessions, setSessions] = React.useState<AppSession[]>([]);

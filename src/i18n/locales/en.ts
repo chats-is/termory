@@ -57,6 +57,7 @@ export const en = {
   "tray.official": "Official",
   "tray.exit": "Exit",
   "tray.newSession": "New Session",
+  "tray.chooseFolder": "Choose Folder…",
 
   // Stats
   "stats.dailyTokens": "Daily tokens",

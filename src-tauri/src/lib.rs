@@ -233,6 +233,7 @@ async fn set_tray_labels(
     weekly: String,
     monthly: String,
     new_session: String,
+    choose_folder: String,
 ) -> Result<(), String> {
     tray::set_labels(
         open,
@@ -242,6 +243,7 @@ async fn set_tray_labels(
         weekly,
         monthly,
         new_session,
+        choose_folder,
     );
     let _ = tray::rebuild_menu(&app);
     Ok(())
