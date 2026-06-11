@@ -130,7 +130,7 @@ impl Default for TrayLabels {
             five_hour: "5h".to_string(),
             weekly: "Weekly".to_string(),
             monthly: "Monthly".to_string(),
-            new_session: "New session".to_string(),
+            new_session: "New Session".to_string(),
         }
     }
 }
