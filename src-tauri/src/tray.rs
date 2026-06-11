@@ -110,6 +110,47 @@ struct TrayQuota {
 
 static QUOTA: Mutex<Vec<(CliApp, TrayQuota)>> = Mutex::new(Vec::new());
 
+/// Handles to the per-CLI first-level submenus, refreshed on every
+/// build_menu. A quota change updates the row TITLE in place
+/// (`Submenu::set_text` dispatches to the main thread) — a full
+/// rebuild (`set_menu`) CLOSES an open menu on macOS, which users hit
+/// every time the click-triggered quota fetch landed while the menu
+/// was still up.
+struct CliRow {
+    cli: CliApp,
+    submenu: tauri::menu::Submenu<Wry>,
+    /// The part before the quota suffix, e.g. "Claude Code · Official".
+    base_title: String,
+    /// Whether this row carries the quota suffix (CLI supported AND
+    /// Official active).
+    shows_quota: bool,
+}
+
+static CLI_ROWS: Mutex<Vec<CliRow>> = Mutex::new(Vec::new());
+
+/// Compose a CLI row title from its base + (when shown) the cached
+/// plan/quota suffix: "Claude Code · Official (Max) · 🟢 12% 5h · …".
+fn cli_row_title(base: &str, shows_quota: bool, cli: CliApp, labels: &TrayLabels) -> String {
+    if !shows_quota {
+        return base.to_string();
+    }
+    let Some(q) = QUOTA
+        .lock()
+        .ok()
+        .and_then(|g| g.iter().find(|(c, _)| *c == cli).map(|(_, q)| q.clone()))
+    else {
+        return base.to_string();
+    };
+    let mut title = base.to_string();
+    if let Some(plan) = &q.plan {
+        title = format!("{title} ({plan})");
+    }
+    if let Some(label) = quota_label(&q, labels) {
+        title = format!("{title} · {label}");
+    }
+    title
+}
+
 /// Localized labels for the menu's static rows (Open / Official / Exit). The
 /// frontend pushes the translated strings via the `set_tray_labels` IPC when the
 /// app language loads or changes; until then English is used. CLI and provider
@@ -380,9 +421,7 @@ pub fn refresh_quota(app: &AppHandle, quota: &crate::quota::SubscriptionQuota) {
                 })
                 .unwrap_or(false);
             if removed {
-                if let Err(err) = rebuild_menu(app) {
-                    log::error!("tray quota rebuild failed: {err}");
-                }
+                update_cli_row_title(app, cli);
             }
         }
         return;
@@ -398,14 +437,40 @@ pub fn refresh_quota(app: &AppHandle, quota: &crate::quota::SubscriptionQuota) {
     };
     match QUOTA.lock() {
         Ok(mut guard) => match guard.iter_mut().find(|(c, _)| *c == cli) {
-            Some((_, cur)) if *cur == next => return, // unchanged → no rebuild
+            Some((_, cur)) if *cur == next => return, // unchanged → no update
             Some((_, cur)) => *cur = next,
             None => guard.push((cli, next)),
         },
         _ => return,
     }
-    if let Err(err) = rebuild_menu(app) {
-        log::error!("tray quota rebuild failed: {err}");
+    update_cli_row_title(app, cli);
+}
+
+/// Reflect a quota change in the CLI's first-level row title IN PLACE.
+/// A full `rebuild_menu` (`set_menu`) closes an open menu on macOS —
+/// and the quota fetch is triggered by OPENING the menu, so it used to
+/// slam the menu shut in the user's face whenever the numbers changed.
+/// `Submenu::set_text` updates the visible title without dismissing.
+/// Falls back to a full rebuild when no row handle exists (menu not
+/// built yet / CLI not installed).
+fn update_cli_row_title(app: &AppHandle, cli: CliApp) {
+    let updated = CLI_ROWS
+        .lock()
+        .ok()
+        .map(|rows| {
+            if let Some(row) = rows.iter().find(|r| r.cli == cli) {
+                let labels = tray_labels();
+                let title = cli_row_title(&row.base_title, row.shows_quota, cli, &labels);
+                row.submenu.set_text(title).is_ok()
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false);
+    if !updated {
+        if let Err(err) = rebuild_menu(app) {
+            log::error!("tray quota rebuild failed: {err}");
+        }
     }
 }
 
@@ -718,6 +783,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     // (Uninstalled CLIs get no provider submenu — nothing to switch.)
     let gateways = gateway_providers();
 
+    let mut cli_rows: Vec<CliRow> = Vec::new();
     for cli in CliApp::all() {
         if !installed.get(&cli).copied().unwrap_or(false) {
             continue;
@@ -744,28 +810,14 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             .and_then(|id| providers_for_app.iter().find(|p| p.id == id))
             .map(|p| p.name.as_str())
             .unwrap_or(labels.official.as_str());
-        let mut title = format!("{} · {}", cli_label(cli), active_name);
-        // Quota-capable CLI with Official active: append the
-        // official-account quota inline, e.g.
-        // "Claude Code · Official · 🟢 12% 5h · 🟡 78% Weekly".
-        // Suppressed while a custom provider is active — the quota
-        // belongs to the official login, and gluing it onto a custom
-        // provider's name would read as that provider's usage.
-        if crate::quota::supports_quota(cli) && active_id.is_none() {
-            if let Some(q) = QUOTA
-                .lock()
-                .ok()
-                .and_then(|g| g.iter().find(|(c, _)| *c == cli).map(|(_, q)| q.clone()))
-            {
-                // "Claude Code · Official (Max) · 🟢 12% 5h · …"
-                if let Some(plan) = &q.plan {
-                    title = format!("{title} ({plan})");
-                }
-                if let Some(label) = quota_label(&q, &labels) {
-                    title = format!("{title} · {label}");
-                }
-            }
-        }
+        // Quota-capable CLI with Official active: the title carries
+        // the official-account plan + quota suffix. Suppressed while a
+        // custom provider is active — the quota belongs to the
+        // official login, and gluing it onto a custom provider's name
+        // would read as that provider's usage.
+        let base_title = format!("{} · {}", cli_label(cli), active_name);
+        let shows_quota = crate::quota::supports_quota(cli) && active_id.is_none();
+        let title = cli_row_title(&base_title, shows_quota, cli, &labels);
         let mut sub = SubmenuBuilder::new(app, title);
 
         let official = CheckMenuItemBuilder::with_id(
@@ -794,6 +846,15 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
 
         let sub = sub.build()?;
         menu = menu.item(&sub);
+        cli_rows.push(CliRow {
+            cli,
+            submenu: sub,
+            base_title,
+            shows_quota,
+        });
+    }
+    if let Ok(mut rows) = CLI_ROWS.lock() {
+        *rows = cli_rows;
     }
 
     let sep = PredefinedMenuItem::separator(app)?;
