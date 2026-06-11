@@ -1039,15 +1039,38 @@ fn classify_gemini_model(model_id: &str) -> &str {
 }
 
 /// Account tier from loadCodeAssist's `currentTier`
-/// (`GeminiUserTier { id?: "free-tier"|…, name?, … }`, types.ts:93-95):
-/// prefer the display `name`, else the id with its "-tier" suffix
-/// stripped.
+/// (`GeminiUserTier { id?: "free-tier"|…, name?, … }`, types.ts:93-95).
+/// The `name` is the FULL marketing string ("Gemini Code Assist in
+/// Google One AI Pro" — what the official CLI's `Tier:` row prints
+/// verbatim, StatsDisplay.tsx:319), far too long for a badge — so a
+/// plan keyword is extracted from it ("Pro"); fall back to the id
+/// ("standard-tier" → "Standard"), then to the tidied name.
 fn gemini_plan(load_body: &serde_json::Value) -> Option<String> {
     let tier = load_body.get("currentTier")?;
-    tier.get("name")
+    let name = tier.get("name").and_then(|v| v.as_str());
+    if let Some(short) = name.and_then(gemini_tier_keyword) {
+        return Some(short);
+    }
+    tier.get("id")
         .and_then(|v| v.as_str())
-        .or_else(|| tier.get("id").and_then(|v| v.as_str()))
         .and_then(display_plan)
+        .or_else(|| name.and_then(display_plan))
+}
+
+/// Whole-word plan keyword inside a Gemini tier marketing name.
+/// Order matters only for documentation — the words are mutually
+/// exclusive in real tier names.
+fn gemini_tier_keyword(name: &str) -> Option<String> {
+    let lower = name.to_lowercase();
+    for keyword in ["ultra", "pro", "enterprise", "standard", "legacy", "free"] {
+        if lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| word == keyword)
+        {
+            return display_plan(keyword);
+        }
+    }
+    None
 }
 
 /// `cloudaicompanionProject` arrives as a plain string or an object
@@ -1825,14 +1848,28 @@ mod tests {
     }
 
     #[test]
-    fn gemini_plan_prefers_tier_name_over_id() {
+    fn gemini_plan_extracts_keyword_from_marketing_name() {
+        // Google One AI Pro — the official CLI prints the whole
+        // marketing name; the badge wants just "Pro".
+        let body = json!({
+            "currentTier": {
+                "id": "g1-pro-tier",
+                "name": "Gemini Code Assist in Google One AI Pro"
+            }
+        });
+        assert_eq!(gemini_plan(&body).as_deref(), Some("Pro"));
         let body = json!({
             "currentTier": { "id": "free-tier", "name": "Free", "isDefault": true }
         });
         assert_eq!(gemini_plan(&body).as_deref(), Some("Free"));
-        // No name → id with the "-tier" suffix stripped.
+        // No keyword in the name → fall back to the id, "-tier" stripped.
         let body = json!({ "currentTier": { "id": "standard-tier" } });
         assert_eq!(gemini_plan(&body).as_deref(), Some("Standard"));
+        // "Ultra" wins over an unrelated id.
+        let body = json!({
+            "currentTier": { "id": "whatever", "name": "Google One AI Ultra" }
+        });
+        assert_eq!(gemini_plan(&body).as_deref(), Some("Ultra"));
         assert!(gemini_plan(&json!({})).is_none());
     }
 }
