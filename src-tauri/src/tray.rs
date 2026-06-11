@@ -38,7 +38,7 @@ use crate::sessions::AppSession;
 use std::sync::Mutex;
 use tauri::{
     menu::{
-        CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem,
+        CheckMenuItemBuilder, IsMenuItem, Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem,
         SubmenuBuilder,
     },
     tray::TrayIconBuilder,
@@ -127,6 +127,17 @@ struct CliRow {
 }
 
 static CLI_ROWS: Mutex<Vec<CliRow>> = Mutex::new(Vec::new());
+
+/// The dynamic "recent" region (session rows + separators + the "New
+/// Session" submenu) starts at this fixed index — right after the
+/// always-present "Open" row and its separator.
+const REGION_START: usize = 2;
+
+/// Root menu handle + the dynamic region's current item count, so
+/// `refresh_recent` can splice the region IN PLACE (`remove_at` +
+/// `insert_items`) — a full `set_menu` rebuild CLOSES an open menu on
+/// macOS, while in-place splicing updates it live.
+static RECENT_REGION: Mutex<Option<(Menu<Wry>, usize)>> = Mutex::new(None);
 
 /// Compose a CLI row title from its base + (when shown) the cached
 /// plan/quota suffix: "Claude Code · Official (Max) · 🟢 12% 5h · …".
@@ -362,7 +373,23 @@ pub fn force_quota_refresh(app: &AppHandle, cli: CliApp) {
 
 /// Rebuild the tray menu so checkmarks reflect the current active
 /// state. Called after any IPC command that mutates provider state.
+/// Queue a full menu rebuild on the MAIN thread. ALL menu mutations
+/// (this, the recent-region splice, the quota title updates) run as
+/// queued main-thread tasks, so they are inherently serialized — two
+/// concurrent refreshers can't interleave their remove/insert ops or
+/// write a stale menu handle back into RECENT_REGION. (A mutex would
+/// risk deadlock instead: a worker holding it while its menu ops wait
+/// for the main thread, while the main thread waits for the mutex.)
 pub fn rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        if let Err(err) = do_rebuild_menu(&handle) {
+            log::error!("tray menu rebuild failed: {err}");
+        }
+    })
+}
+
+fn do_rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         let menu = build_menu(app)?;
         tray.set_menu(Some(menu))?;
@@ -376,13 +403,65 @@ pub fn rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
 /// so active CLI use doesn't churn the menu on every file event.
 pub fn refresh_recent(app: &AppHandle, sessions: &[AppSession]) {
     let recent = select_recent_state(sessions);
-    match RECENT.lock() {
-        Ok(mut guard) if *guard != recent => *guard = recent,
-        _ => return, // unchanged (or poisoned) → no rebuild
+    // The whole compare→store→splice sequence runs as ONE queued
+    // main-thread task: concurrent refreshers (watcher thread + the
+    // scan_all_sessions IPC) serialize in queue order, so the RECENT
+    // cache and the visible menu can't diverge (a caller-side store
+    // with a later queue slot could otherwise leave the menu showing
+    // an older state than the cache until the next change).
+    //
+    // The splice itself updates the dynamic region IN PLACE — a full
+    // set_menu rebuild CLOSES an open menu on macOS, and this refresh
+    // fires constantly (watcher) while the user may be looking at the
+    // menu.
+    // Filesystem PATH probing stays on the CALLER's thread (watcher /
+    // async runtime) so the queued main-thread task is lean.
+    let installed = detect_installed_clis();
+    let installed_clis: Vec<CliApp> = CliApp::all()
+        .into_iter()
+        .filter(|c| installed.get(c).copied().unwrap_or(false))
+        .collect();
+    let handle = app.clone();
+    let queued = app.run_on_main_thread(move || {
+        match RECENT.lock() {
+            Ok(mut guard) if *guard != recent => *guard = recent.clone(),
+            _ => return, // unchanged (or poisoned) → no update
+        }
+        if !update_recent_region(&handle, &installed_clis, &recent) {
+            if let Err(err) = do_rebuild_menu(&handle) {
+                log::error!("tray recent rebuild failed: {err}");
+            }
+        }
+    });
+    if let Err(err) = queued {
+        log::error!("tray recent update queue failed: {err}");
     }
-    if let Err(err) = rebuild_menu(app) {
-        log::error!("tray recent rebuild failed: {err}");
+}
+
+/// Replace the dynamic region's items in the existing root menu.
+/// Returns false when the splice isn't possible (menu not built yet /
+/// any menu-API failure) — the caller falls back to a full rebuild.
+fn update_recent_region(app: &AppHandle, installed_clis: &[CliApp], recent: &RecentState) -> bool {
+    let Some((menu, old_len)) = RECENT_REGION.lock().ok().and_then(|g| g.clone()) else {
+        return false;
+    };
+    let labels = tray_labels();
+    let Ok(region) = build_recent_region(app, &labels, installed_clis, recent) else {
+        return false;
+    };
+    for _ in 0..old_len {
+        if menu.remove_at(REGION_START).is_err() {
+            return false; // partial state → caller's full rebuild repairs
+        }
     }
+    let refs: Vec<&dyn IsMenuItem<Wry>> = region.iter().map(|b| b.as_ref()).collect();
+    if menu.insert_items(&refs, REGION_START).is_err() {
+        return false;
+    }
+    if let Ok(mut g) = RECENT_REGION.lock() {
+        *g = Some((menu, region.len()));
+    }
+    true
 }
 
 /// Record a completed quota fetch (any source) and rebuild the menu
@@ -454,23 +533,31 @@ pub fn refresh_quota(app: &AppHandle, quota: &crate::quota::SubscriptionQuota) {
 /// Falls back to a full rebuild when no row handle exists (menu not
 /// built yet / CLI not installed).
 fn update_cli_row_title(app: &AppHandle, cli: CliApp) {
-    let updated = CLI_ROWS
-        .lock()
-        .ok()
-        .map(|rows| {
-            if let Some(row) = rows.iter().find(|r| r.cli == cli) {
-                let labels = tray_labels();
-                let title = cli_row_title(&row.base_title, row.shows_quota, cli, &labels);
-                row.submenu.set_text(title).is_ok()
-            } else {
-                false
+    // Queued on the main thread like every other menu mutation (see
+    // rebuild_menu) so it serializes with rebuilds/splices.
+    let handle = app.clone();
+    let queued = app.run_on_main_thread(move || {
+        let updated = CLI_ROWS
+            .lock()
+            .ok()
+            .map(|rows| {
+                if let Some(row) = rows.iter().find(|r| r.cli == cli) {
+                    let labels = tray_labels();
+                    let title = cli_row_title(&row.base_title, row.shows_quota, cli, &labels);
+                    row.submenu.set_text(title).is_ok()
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
+        if !updated {
+            if let Err(err) = do_rebuild_menu(&handle) {
+                log::error!("tray quota rebuild failed: {err}");
             }
-        })
-        .unwrap_or(false);
-    if !updated {
-        if let Err(err) = rebuild_menu(app) {
-            log::error!("tray quota rebuild failed: {err}");
         }
+    });
+    if let Err(err) = queued {
+        log::error!("tray quota update queue failed: {err}");
     }
 }
 
@@ -683,6 +770,86 @@ fn recent_label(title: &str, snippet: &str) -> String {
     out
 }
 
+/// Build the dynamic "recent" region — recent-session rows (+ their
+/// separator) and the "New Session" submenu (+ its separator) — as
+/// free-standing items. Used by build_menu for the initial layout AND
+/// by refresh_recent's in-place splice.
+fn build_recent_region(
+    app: &AppHandle,
+    labels: &TrayLabels,
+    installed_clis: &[CliApp],
+    recent: &RecentState,
+) -> tauri::Result<Vec<Box<dyn IsMenuItem<Wry>>>> {
+    let mut region: Vec<Box<dyn IsMenuItem<Wry>>> = Vec::new();
+
+    if !recent.sessions.is_empty() {
+        for r in recent.sessions.iter() {
+            // Content-addressed id (source + session id, neither
+            // contains ':') — a click looks the session up by identity,
+            // so a refresh between display and click can't resume the
+            // WRONG session; worst case is a silent no-op.
+            let item =
+                MenuItemBuilder::with_id(format!("tray:session:{}:{}", r.source, r.id), &r.label)
+                    .build(app)?;
+            region.push(Box::new(item));
+        }
+        region.push(Box::new(PredefinedMenuItem::separator(app)?));
+    }
+
+    // "New Session": recent project dirs as nested submenus (project
+    // ▸ CLI; flat header+rows grew too long) plus a "Choose Folder…"
+    // tail (▸ CLI → native dir picker) so a session can start in a
+    // BRAND-NEW directory — and the submenu still exists with zero
+    // history. Skipped only when no CLI is installed at all.
+    if !installed_clis.is_empty() {
+        let mut sub = SubmenuBuilder::new(app, &labels.new_session);
+        for target in recent.targets.iter() {
+            let mut project_sub = SubmenuBuilder::new(app, &target.label);
+            // CLIs last used in THIS project first (most likely
+            // choice on top), then the rest; installed only.
+            let mut clis: Vec<CliApp> = target
+                .cli_recency
+                .iter()
+                .copied()
+                .filter(|c| installed_clis.contains(c))
+                .collect();
+            for cli in installed_clis {
+                if !clis.contains(cli) {
+                    clis.push(*cli);
+                }
+            }
+            for cli in clis {
+                // The full project path rides in the id (after the
+                // ':'-free cli key) so the click is decoupled from
+                // RECENT entirely — no stale-index hazard.
+                let item = MenuItemBuilder::with_id(
+                    format!("tray:new:{}:{}", cli_key(cli), target.project),
+                    cli_label(cli),
+                )
+                .build(app)?;
+                project_sub = project_sub.item(&item);
+            }
+            sub = sub.item(&project_sub.build()?);
+        }
+        if !recent.targets.is_empty() {
+            sub = sub.item(&PredefinedMenuItem::separator(app)?);
+        }
+        let mut pick_sub = SubmenuBuilder::new(app, &labels.choose_folder);
+        for cli in installed_clis {
+            let item = MenuItemBuilder::with_id(
+                format!("tray:newpick:{}", cli_key(*cli)),
+                cli_label(*cli),
+            )
+            .build(app)?;
+            pick_sub = pick_sub.item(&item);
+        }
+        sub = sub.item(&pick_sub.build()?);
+        region.push(Box::new(sub.build()?));
+        region.push(Box::new(PredefinedMenuItem::separator(app)?));
+    }
+    Ok(region)
+}
+
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let providers: Vec<Provider> = config::read_providers()
         .ok()
@@ -711,72 +878,10 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         .collect();
 
     let recent = RECENT.lock().map(|g| g.clone()).unwrap_or_default();
-    if !recent.sessions.is_empty() {
-        for r in recent.sessions.iter() {
-            // Content-addressed id (source + session id, neither
-            // contains ':') — index-based ids went stale when the
-            // watcher rebuilt RECENT while the menu was open, resuming
-            // the WRONG session. A click now looks the session up by
-            // identity; worst case after a rebuild is a silent no-op.
-            let item =
-                MenuItemBuilder::with_id(format!("tray:session:{}:{}", r.source, r.id), &r.label)
-                    .build(app)?;
-            menu = menu.item(&item);
-        }
-        menu = menu.item(&PredefinedMenuItem::separator(app)?);
-    }
-
-    // "New Session": recent project dirs as nested submenus (project
-    // ▸ CLI; flat header+rows grew too long) plus a "Choose Folder…"
-    // tail (▸ CLI → native dir picker) so a session can start in a
-    // BRAND-NEW directory — and the submenu still exists with zero
-    // history. Skipped only when no CLI is installed at all.
-    if !installed_clis.is_empty() {
-        let mut sub = SubmenuBuilder::new(app, &labels.new_session);
-        for target in recent.targets.iter() {
-            let mut project_sub = SubmenuBuilder::new(app, &target.label);
-            // CLIs last used in THIS project first (most likely
-            // choice on top), then the rest; installed only.
-            let mut clis: Vec<CliApp> = target
-                .cli_recency
-                .iter()
-                .copied()
-                .filter(|c| installed_clis.contains(c))
-                .collect();
-            for cli in &installed_clis {
-                if !clis.contains(cli) {
-                    clis.push(*cli);
-                }
-            }
-            for cli in clis {
-                // The full project path rides in the id (after the
-                // ':'-free cli key) so the click is decoupled from
-                // RECENT entirely — no stale-index hazard.
-                let item = MenuItemBuilder::with_id(
-                    format!("tray:new:{}:{}", cli_key(cli), target.project),
-                    cli_label(cli),
-                )
-                .build(app)?;
-                project_sub = project_sub.item(&item);
-            }
-            sub = sub.item(&project_sub.build()?);
-        }
-        if !recent.targets.is_empty() {
-            sub = sub.item(&PredefinedMenuItem::separator(app)?);
-        }
-        let mut pick_sub = SubmenuBuilder::new(app, &labels.choose_folder);
-        for cli in &installed_clis {
-            let item = MenuItemBuilder::with_id(
-                format!("tray:newpick:{}", cli_key(*cli)),
-                cli_label(*cli),
-            )
-            .build(app)?;
-            pick_sub = pick_sub.item(&item);
-        }
-        sub = sub.item(&pick_sub.build()?);
-        menu = menu
-            .item(&sub.build()?)
-            .item(&PredefinedMenuItem::separator(app)?);
+    let region = build_recent_region(app, &labels, &installed_clis, &recent)?;
+    let region_len = region.len();
+    for item in &region {
+        menu = menu.item(item.as_ref());
     }
 
     // Read the gateway bindings ONCE, then group per CLI in the loop.
@@ -863,7 +968,13 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let quit = MenuItemBuilder::with_id("tray:quit", &labels.exit).build(app)?;
     menu = menu.item(&sep).item(&quit);
 
-    menu.build()
+    let menu = menu.build()?;
+    // Record the root handle + region length so refresh_recent can
+    // splice in place.
+    if let Ok(mut g) = RECENT_REGION.lock() {
+        *g = Some((menu.clone(), region_len));
+    }
+    Ok(menu)
 }
 
 pub(crate) fn show_main_window(app: &AppHandle) {
