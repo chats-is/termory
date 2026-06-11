@@ -105,7 +105,18 @@ jobs:
 
       # releaseId points every matrix job at the single draft created
       # above, so tauri-action only uploads (no per-job release creation).
+      #
+      # `continue-on-error` + the conditional retry below implement a
+      # one-shot retry for the macOS DMG-bundling flake: bundle_dmg.sh
+      # drives Finder via AppleScript and detaches with hdiutil, both
+      # of which intermittently fail on shared macOS runners (osascript
+      # timeout / "Resource busy" race). A rerun of the same commit
+      # always clears it (v0.2.17 confirmed). The retry is macOS-only —
+      # other platforms don't flake, so their failures are real and
+      # surface via the final guard step.
       - name: Build & upload
+        id: build
+        continue-on-error: true
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -119,6 +130,29 @@ jobs:
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
+
+      # Same step again (GitHub Actions has no YAML anchors and `uses:`
+      # steps can't be wrapped in a retry action) — keep env/with in
+      # sync with the step above. The Rust target dir from the first
+      # attempt is still on the runner, so the retry mostly redoes the
+      # bundling, not the compile.
+      - name: Build & upload (macOS flake retry)
+        if: steps.build.outcome == 'failure' && runner.os == 'macOS'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          args: ${{ matrix.args }}
+
+      # Re-raise non-macOS failures swallowed by continue-on-error (the
+      # macOS path either succeeded on retry or already failed the job
+      # through the retry step itself).
+      - name: Fail on non-macOS build failure
+        if: steps.build.outcome == 'failure' && runner.os != 'macOS'
+        run: exit 1
 
   # Every platform build uploaded into the draft → flip it to published so
   # the release goes live and …/releases/latest/download/latest.json
