@@ -70,6 +70,10 @@ struct RecentSession {
 struct NewSessionProject {
     project: String,
     label: String,
+    /// CLIs seen in this project's history, most recent first — the
+    /// submenu lists these before the CLIs never used here, so the
+    /// most likely choice is the first row.
+    cli_recency: Vec<CliApp>,
 }
 
 /// Recent sessions + new-session targets shown under "Open", refreshed
@@ -505,17 +509,28 @@ fn select_recent_state(sessions: &[AppSession]) -> RecentState {
         if s.project.is_empty() {
             continue;
         }
-        // Dedup by cwd ACROSS CLIs — the group lists every installed
-        // CLI anyway, so which CLI the history came from is irrelevant.
-        if targets.iter().any(|t| t.project == s.project) {
-            continue;
-        }
-        targets.push(NewSessionProject {
-            project: s.project.clone(),
-            label: project_dir_label(&s.project),
-        });
-        if targets.len() >= NEW_SESSION_PROJECT_LIMIT {
-            break;
+        // Dedup by cwd ACROSS CLIs; keep scanning past the project cap
+        // so later (older) sessions still feed cli_recency for the
+        // projects already chosen.
+        let entry = targets.iter_mut().find(|t| t.project == s.project);
+        let entry = match entry {
+            Some(e) => e,
+            None => {
+                if targets.len() >= NEW_SESSION_PROJECT_LIMIT {
+                    continue;
+                }
+                targets.push(NewSessionProject {
+                    project: s.project.clone(),
+                    label: project_dir_label(&s.project),
+                    cli_recency: Vec::new(),
+                });
+                targets.last_mut().expect("just pushed")
+            }
+        };
+        if let Some(cli) = source_cli(&s.source) {
+            if !entry.cli_recency.contains(&cli) {
+                entry.cli_recency.push(cli);
+            }
         }
     }
 
@@ -536,6 +551,17 @@ fn project_dir_label(project: &str) -> String {
         "(unknown)".to_string()
     } else {
         name
+    }
+}
+
+/// Inverse of `cli_source`: parse an `AppSession.source` string.
+fn source_cli(source: &str) -> Option<CliApp> {
+    match source {
+        "Claude" => Some(CliApp::Claude),
+        "Codex" => Some(CliApp::Codex),
+        "Gemini" => Some(CliApp::Gemini),
+        "OpenCode" => Some(CliApp::Opencode),
+        _ => None,
     }
 }
 
@@ -618,10 +644,20 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             // level short — a flat header+rows layout grew to ~25 rows
             // with 5 projects × 4 CLIs.
             let mut project_sub = SubmenuBuilder::new(app, &target.label);
+            // CLIs last used in THIS project first (most likely
+            // choice on top), then the rest; installed only.
+            let mut clis: Vec<CliApp> = target
+                .cli_recency
+                .iter()
+                .copied()
+                .filter(|c| installed.get(c).copied().unwrap_or(false))
+                .collect();
             for cli in CliApp::all() {
-                if !installed.get(&cli).copied().unwrap_or(false) {
-                    continue;
+                if installed.get(&cli).copied().unwrap_or(false) && !clis.contains(&cli) {
+                    clis.push(cli);
                 }
+            }
+            for cli in clis {
                 let item = MenuItemBuilder::with_id(
                     format!("tray:new:{pidx}:{}", cli_key(cli)),
                     cli_label(cli),
@@ -990,6 +1026,14 @@ mod tests {
         let state = select_recent_state(&sessions);
         let labels: Vec<&str> = state.targets.iter().map(|t| t.label.as_str()).collect();
         assert_eq!(labels, ["termory", "chats"]);
+        // CLI recency per project, newest first: termory's latest
+        // session is Claude, then Gemini (the older Claude session
+        // doesn't duplicate the entry).
+        assert_eq!(
+            state.targets[0].cli_recency,
+            vec![CliApp::Claude, CliApp::Gemini]
+        );
+        assert_eq!(state.targets[1].cli_recency, vec![CliApp::Codex]);
     }
 
     #[test]
