@@ -614,14 +614,10 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     if !recent.targets.is_empty() {
         let mut sub = SubmenuBuilder::new(app, &labels.new_session);
         for (pidx, target) in recent.targets.iter().enumerate() {
-            if pidx > 0 {
-                sub = sub.item(&PredefinedMenuItem::separator(app)?);
-            }
-            // Group header: the project dir, display-only.
-            let header = MenuItemBuilder::with_id(format!("tray:newhdr:{pidx}"), &target.label)
-                .enabled(false)
-                .build(app)?;
-            sub = sub.item(&header);
+            // Nested per-project submenu (project ▸ CLI) keeps every
+            // level short — a flat header+rows layout grew to ~25 rows
+            // with 5 projects × 4 CLIs.
+            let mut project_sub = SubmenuBuilder::new(app, &target.label);
             for cli in CliApp::all() {
                 if !installed.get(&cli).copied().unwrap_or(false) {
                     continue;
@@ -631,8 +627,9 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
                     cli_label(cli),
                 )
                 .build(app)?;
-                sub = sub.item(&item);
+                project_sub = project_sub.item(&item);
             }
+            sub = sub.item(&project_sub.build()?);
         }
         menu = menu.item(&sub.build()?);
     }
