@@ -62,12 +62,12 @@ struct RecentSession {
     label: String,
 }
 
-/// One "New session" target: a recent project dir + the CLI to launch
-/// there. Label carries the CLI name ("termory · Claude Code") since
-/// the submenu mixes CLIs.
+/// One "New session" group: a recent project dir. The submenu shows
+/// its basename as a (disabled) group header with one row per
+/// INSTALLED CLI underneath — any CLI can be launched fresh in any
+/// recent project, not just the (cwd, CLI) pairs seen in history.
 #[derive(Clone, PartialEq)]
-struct NewSessionTarget {
-    source: String,
+struct NewSessionProject {
     project: String,
     label: String,
 }
@@ -78,7 +78,7 @@ struct NewSessionTarget {
 #[derive(Clone, PartialEq, Default)]
 struct RecentState {
     sessions: Vec<RecentSession>,
-    targets: Vec<NewSessionTarget>,
+    targets: Vec<NewSessionProject>,
 }
 
 static RECENT: Mutex<RecentState> = Mutex::new(RecentState {
@@ -499,22 +499,20 @@ fn select_recent_state(sessions: &[AppSession]) -> RecentState {
         })
         .collect();
 
-    let mut targets: Vec<NewSessionTarget> = Vec::new();
+    let mut targets: Vec<NewSessionProject> = Vec::new();
     for s in &picked {
         // "New session" needs a cwd to land in.
         if s.project.is_empty() {
             continue;
         }
-        if targets
-            .iter()
-            .any(|t| t.source == s.source && t.project == s.project)
-        {
+        // Dedup by cwd ACROSS CLIs — the group lists every installed
+        // CLI anyway, so which CLI the history came from is irrelevant.
+        if targets.iter().any(|t| t.project == s.project) {
             continue;
         }
-        targets.push(NewSessionTarget {
-            source: s.source.clone(),
+        targets.push(NewSessionProject {
             project: s.project.clone(),
-            label: new_session_label(&s.project, &s.source),
+            label: project_dir_label(&s.project),
         });
         if targets.len() >= NEW_SESSION_PROJECT_LIMIT {
             break;
@@ -527,23 +525,29 @@ fn select_recent_state(sessions: &[AppSession]) -> RecentState {
     }
 }
 
-/// "New session" submenu label: the cwd's basename + the CLI to
-/// launch, e.g. "termory · Claude Code" (the submenu mixes CLIs, so
-/// the suffix disambiguates).
-fn new_session_label(project: &str, source: &str) -> String {
+/// "New session" group header: the cwd's basename ("termory").
+fn project_dir_label(project: &str) -> String {
     let name = std::path::Path::new(project)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(project);
-    let mut name: String = name.chars().take(32).collect();
+    let name: String = name.chars().take(32).collect();
     if name.is_empty() {
-        name = "(unknown)".to_string();
+        "(unknown)".to_string()
+    } else {
+        name
     }
-    let source_label = match source {
-        "Claude" => "Claude Code",
-        other => other,
-    };
-    format!("{name} · {source_label}")
+}
+
+/// `AppSession.source`-style string for a CliApp — what
+/// `terminal::new_session` / `resume_session` dispatch on.
+fn cli_source(cli: CliApp) -> &'static str {
+    match cli {
+        CliApp::Claude => "Claude",
+        CliApp::Codex => "Codex",
+        CliApp::Gemini => "Gemini",
+        CliApp::Opencode => "OpenCode",
+    }
 }
 
 /// The text a recent row shows before truncation: title, else snippet, else
@@ -601,13 +605,34 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let open = MenuItemBuilder::with_id("tray:open", &labels.open).build(app)?;
     menu = menu.item(&open).item(&PredefinedMenuItem::separator(app)?);
 
+    // Only surface CLIs actually installed on this machine — same probe the
+    // Providers page uses (`detect_clis`), so the two agree. Consumed by both
+    // the "New session" groups below and the per-CLI provider submenus.
+    let installed = detect_installed_clis();
+
     let recent = RECENT.lock().map(|g| g.clone()).unwrap_or_default();
     if !recent.targets.is_empty() {
         let mut sub = SubmenuBuilder::new(app, &labels.new_session);
-        for (idx, target) in recent.targets.iter().enumerate() {
-            let item =
-                MenuItemBuilder::with_id(format!("tray:new:{idx}"), &target.label).build(app)?;
-            sub = sub.item(&item);
+        for (pidx, target) in recent.targets.iter().enumerate() {
+            if pidx > 0 {
+                sub = sub.item(&PredefinedMenuItem::separator(app)?);
+            }
+            // Group header: the project dir, display-only.
+            let header = MenuItemBuilder::with_id(format!("tray:newhdr:{pidx}"), &target.label)
+                .enabled(false)
+                .build(app)?;
+            sub = sub.item(&header);
+            for cli in CliApp::all() {
+                if !installed.get(&cli).copied().unwrap_or(false) {
+                    continue;
+                }
+                let item = MenuItemBuilder::with_id(
+                    format!("tray:new:{pidx}:{}", cli_key(cli)),
+                    cli_label(cli),
+                )
+                .build(app)?;
+                sub = sub.item(&item);
+            }
         }
         menu = menu.item(&sub.build()?);
     }
@@ -622,11 +647,8 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         menu = menu.item(&PredefinedMenuItem::separator(app)?);
     }
 
-    // Only surface CLIs actually installed on this machine — same probe the
-    // Providers page uses (`detect_clis`), so the two agree. Uninstalled CLIs
-    // get no submenu (nothing to switch).
-    let installed = detect_installed_clis();
     // Read the gateway bindings ONCE, then group per CLI in the loop.
+    // (Uninstalled CLIs get no provider submenu — nothing to switch.)
     let gateways = gateway_providers();
 
     for cli in CliApp::all() {
@@ -752,14 +774,22 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         }
         return;
     }
-    // A "New session" target → open the chosen terminal in that
-    // project's cwd and launch the CLI fresh.
-    if let Some(idx) = id
-        .strip_prefix("tray:new:")
-        .and_then(|n| n.parse::<usize>().ok())
-    {
-        if let Some(target) = RECENT.lock().ok().and_then(|g| g.targets.get(idx).cloned()) {
-            let _ = crate::terminal::new_session(&target.source, Some(&target.project));
+    // A "New session" row (`tray:new:{project}:{cli}`) → open the
+    // chosen terminal in that project's cwd and launch that CLI fresh.
+    if let Some(rest) = id.strip_prefix("tray:new:") {
+        let mut parts = rest.splitn(2, ':');
+        let (Some(pidx), Some(cli)) = (
+            parts.next().and_then(|n| n.parse::<usize>().ok()),
+            parts.next().and_then(CliApp::parse),
+        ) else {
+            return;
+        };
+        if let Some(target) = RECENT
+            .lock()
+            .ok()
+            .and_then(|g| g.targets.get(pidx).cloned())
+        {
+            let _ = crate::terminal::new_session(cli_source(cli), Some(&target.project));
         }
         return;
     }
@@ -951,20 +981,18 @@ mod tests {
     }
 
     #[test]
-    fn select_recent_state_targets_dedup_by_source_and_cwd() {
+    fn select_recent_state_targets_dedup_by_cwd_across_clis() {
         let sessions = vec![
             sess_in("Claude", "/work/termory", "c-old", "2026-01-01T00:00:00Z"),
             sess_in("Codex", "/work/chats", "x1", "2026-06-01T00:00:00Z"),
             sess_in("Claude", "/work/termory", "c-new", "2026-07-01T00:00:00Z"),
-            // Same cwd, different CLI → its own target (launches gemini).
+            // Same cwd under another CLI merges into one group — the
+            // submenu lists every installed CLI per group anyway.
             sess_in("Gemini", "/work/termory", "g1", "2026-03-01T00:00:00Z"),
         ];
         let state = select_recent_state(&sessions);
         let labels: Vec<&str> = state.targets.iter().map(|t| t.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            ["termory · Claude Code", "chats · Codex", "termory · Gemini"]
-        );
+        assert_eq!(labels, ["termory", "chats"]);
     }
 
     #[test]
@@ -1005,21 +1033,21 @@ mod tests {
         let state = select_recent_state(&sessions);
         assert_eq!(state.sessions.len(), RECENT_LIMIT);
         assert_eq!(state.targets.len(), NEW_SESSION_PROJECT_LIMIT);
-        assert_eq!(state.targets[0].label, "p0 · Claude Code");
+        assert_eq!(state.targets[0].label, "p0");
     }
 
     #[test]
-    fn new_session_label_uses_basename_and_cli_name() {
-        assert_eq!(
-            new_session_label("/Users/x/work/termory", "Claude"),
-            "termory · Claude Code"
-        );
-        assert_eq!(
-            new_session_label("/work/chats", "OpenCode"),
-            "chats · OpenCode"
-        );
+    fn project_dir_label_uses_basename() {
+        assert_eq!(project_dir_label("/Users/x/work/termory"), "termory");
+        assert_eq!(project_dir_label("/work/chats"), "chats");
         // Pathological root cwd falls back to the raw path.
-        assert_eq!(new_session_label("/", "Codex"), "/ · Codex");
+        assert_eq!(project_dir_label("/"), "/");
+    }
+
+    #[test]
+    fn cli_source_matches_session_source_strings() {
+        assert_eq!(cli_source(CliApp::Claude), "Claude");
+        assert_eq!(cli_source(CliApp::Opencode), "OpenCode");
     }
 
     #[test]
