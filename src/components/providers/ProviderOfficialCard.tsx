@@ -334,6 +334,14 @@ export function ProviderOfficialCard({
         >
           <div className="flex items-center gap-2">
             <h3 className="text-lg font-medium">{t("providers.official")}</h3>
+            {quota?.plan && (
+              <Badge
+                variant="secondary"
+                className="text-[10px] tracking-wide px-1.5 py-0"
+              >
+                {quota.plan}
+              </Badge>
+            )}
             {isInUse && (
               <Badge className="uppercase text-[9px] tracking-wide px-1.5 py-0">
                 {t("providers.inUse")}

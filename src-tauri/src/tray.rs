@@ -78,6 +78,8 @@ struct TrayQuota {
     /// `(window id, used %)` — already filtered to displayable
     /// windows (TRAY_HIDDEN_TIERS dropped), API order preserved.
     tiers: Vec<(String, f64)>,
+    /// Subscription plan display name ("Max" / "Plus" / "Free" …).
+    plan: Option<String>,
 }
 
 static QUOTA: Mutex<Vec<(CliApp, TrayQuota)>> = Mutex::new(Vec::new());
@@ -357,6 +359,7 @@ pub fn refresh_quota(app: &AppHandle, quota: &crate::quota::SubscriptionQuota) {
             .filter(|t| !TRAY_HIDDEN_TIERS.contains(&t.name.as_str()))
             .map(|t| (t.name.clone(), t.utilization))
             .collect(),
+        plan: quota.plan.clone(),
     };
     match QUOTA.lock() {
         Ok(mut guard) => match guard.iter_mut().find(|(c, _)| *c == cli) {
@@ -569,13 +572,18 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         // belongs to the official login, and gluing it onto a custom
         // provider's name would read as that provider's usage.
         if crate::quota::supports_quota(cli) && active_id.is_none() {
-            if let Some(label) = QUOTA
+            if let Some(q) = QUOTA
                 .lock()
                 .ok()
                 .and_then(|g| g.iter().find(|(c, _)| *c == cli).map(|(_, q)| q.clone()))
-                .and_then(|q| quota_label(&q, &labels))
             {
-                title = format!("{title} · {label}");
+                // "Claude Code · Official (Max) · 🟢 12% 5h · …"
+                if let Some(plan) = &q.plan {
+                    title = format!("{title} ({plan})");
+                }
+                if let Some(label) = quota_label(&q, &labels) {
+                    title = format!("{title} · {label}");
+                }
             }
         }
         let mut sub = SubmenuBuilder::new(app, title);
@@ -736,6 +744,7 @@ mod tests {
         let labels = TrayLabels::default();
         let both = TrayQuota {
             tiers: vec![("five_hour".into(), 12.4), ("seven_day".into(), 78.0)],
+            plan: None,
         };
         assert_eq!(
             quota_label(&both, &labels).as_deref(),
@@ -744,6 +753,7 @@ mod tests {
         // Codex free plan: a single generated 30-day window → "30d".
         let monthly = TrayQuota {
             tiers: vec![("30_day".into(), 9.0)],
+            plan: None,
         };
         assert_eq!(
             quota_label(&monthly, &labels).as_deref(),
@@ -752,12 +762,16 @@ mod tests {
         // Truly unknown ids pass through raw.
         let odd = TrayQuota {
             tiers: vec![("mystery_window".into(), 99.6)],
+            plan: None,
         };
         assert_eq!(
             quota_label(&odd, &labels).as_deref(),
             Some("🔴 100% mystery_window")
         );
-        let none = TrayQuota { tiers: vec![] };
+        let none = TrayQuota {
+            tiers: vec![],
+            plan: None,
+        };
         assert_eq!(quota_label(&none, &labels), None);
     }
 

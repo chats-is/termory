@@ -277,6 +277,9 @@ export type SubscriptionQuota = {
   credentialStatus: CredentialStatus;
   success: boolean;
   tiers: QuotaTier[];
+  /** Subscription plan display name ("Max" / "Pro" / "Plus" / "Free" …) —
+   * brand-ish raw value, not translated. */
+  plan?: string;
   extraUsage?: ExtraUsage;
   error?: string;
   queriedAt?: number;

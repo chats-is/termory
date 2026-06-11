@@ -119,6 +119,28 @@ describe("ProviderOfficialCard — quota section", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows the subscription plan badge next to Official", () => {
+    render(
+      <ProviderOfficialCard
+        {...baseProps}
+        quota={makeQuota({ plan: "Max" })}
+        onRefreshQuota={vi.fn()}
+      />
+    );
+    expect(screen.getByText("Max")).toBeInTheDocument();
+  });
+
+  it("renders no plan badge when the quota carries none", () => {
+    render(
+      <ProviderOfficialCard
+        {...baseProps}
+        quota={makeQuota()}
+        onRefreshQuota={vi.fn()}
+      />
+    );
+    expect(screen.queryByText("Max")).toBeNull();
+  });
+
   it("clicking Refresh calls onRefreshQuota", async () => {
     const user = userEvent.setup();
     const onRefresh = vi.fn();

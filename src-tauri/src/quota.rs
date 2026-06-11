@@ -61,6 +61,17 @@ pub fn credential_cli_for_path(path: &std::path::Path) -> Option<CliApp> {
 pub const WARN_PCT: f64 = 75.0;
 pub const CRIT_PCT: f64 = 90.0;
 
+/// Tidy a raw plan identifier for display: strip Gemini's "-tier"
+/// suffix and uppercase the first letter ("free" → "Free", "max" →
+/// "Max", "standard-tier" → "Standard"). Unknown values pass through
+/// tidied; empty input yields None.
+fn display_plan(raw: &str) -> Option<String> {
+    let raw = raw.trim().trim_end_matches("-tier").trim();
+    let mut chars = raw.chars();
+    let first = chars.next()?;
+    Some(first.to_uppercase().collect::<String>() + chars.as_str())
+}
+
 // ===================================================================
 // Wire types (camelCase to the frontend)
 // ===================================================================
@@ -114,6 +125,11 @@ pub struct SubscriptionQuota {
     pub credential_status: CredentialStatus,
     pub success: bool,
     pub tiers: Vec<QuotaTier>,
+    /// Display name of the account's subscription plan ("Max", "Pro",
+    /// "Plus", "Free", …) — per-CLI source documented at each
+    /// extraction site. Brand-ish raw value, not translated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_usage: Option<ExtraUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -130,18 +146,25 @@ impl SubscriptionQuota {
             credential_status: CredentialStatus::NotFound,
             success: false,
             tiers: vec![],
+            plan: None,
             extra_usage: None,
             error: None,
             queried_at: Some(now_millis()),
         }
     }
 
-    fn success(app: &str, tiers: Vec<QuotaTier>, extra_usage: Option<ExtraUsage>) -> Self {
+    fn success(
+        app: &str,
+        tiers: Vec<QuotaTier>,
+        plan: Option<String>,
+        extra_usage: Option<ExtraUsage>,
+    ) -> Self {
         Self {
             app: app.to_string(),
             credential_status: CredentialStatus::Valid,
             success: true,
             tiers,
+            plan,
             extra_usage,
             error: None,
             queried_at: Some(now_millis()),
@@ -154,6 +177,7 @@ impl SubscriptionQuota {
             credential_status: status,
             success: false,
             tiers: vec![],
+            plan: None,
             extra_usage: None,
             error: Some(message),
             queried_at: Some(now_millis()),
@@ -166,8 +190,14 @@ impl SubscriptionQuota {
 // ===================================================================
 
 /// Parsed credential: token (may be present even when expired — the
-/// caller still tries it) + status + diagnostic message.
-type Credential = (Option<String>, CredentialStatus, Option<String>);
+/// caller still tries it) + subscription plan + status + diagnostic
+/// message.
+type Credential = (
+    Option<String>,
+    Option<String>,
+    CredentialStatus,
+    Option<String>,
+);
 
 /// Claude Code's config dir — `sessions::claude_config_root` (the
 /// scanners' single source: `CLAUDE_CONFIG_DIR`, else `~/.claude`).
@@ -213,14 +243,15 @@ fn read_claude_credentials_from_keychain() -> Option<Credential> {
 
 fn read_claude_credentials_from_file() -> Credential {
     let Some(path) = claude_config_dir().map(|d| d.join(".credentials.json")) else {
-        return (None, CredentialStatus::NotFound, None);
+        return (None, None, CredentialStatus::NotFound, None);
     };
     if !path.exists() {
-        return (None, CredentialStatus::NotFound, None);
+        return (None, None, CredentialStatus::NotFound, None);
     }
     match std::fs::read_to_string(&path) {
         Ok(content) => parse_claude_credentials(&content),
         Err(err) => (
+            None,
             None,
             CredentialStatus::ParseError,
             Some(format!("Failed to read credentials file: {err}")),
@@ -238,6 +269,7 @@ fn parse_claude_credentials(content: &str) -> Credential {
         Err(err) => {
             return (
                 None,
+                None,
                 CredentialStatus::ParseError,
                 Some(format!("Failed to parse credentials JSON: {err}")),
             );
@@ -250,16 +282,25 @@ fn parse_claude_credentials(content: &str) -> Credential {
     else {
         return (
             None,
+            None,
             CredentialStatus::ParseError,
             Some("No OAuth entry found in credentials".to_string()),
         );
     };
+
+    // Subscription plan, stored at login by Claude Code itself
+    // (auth.ts:1225 `subscriptionType` — "free" / "pro" / "max").
+    let plan = entry
+        .get("subscriptionType")
+        .and_then(|v| v.as_str())
+        .and_then(display_plan);
 
     let access_token = match entry.get("accessToken").and_then(|v| v.as_str()) {
         Some(t) if !t.is_empty() => t.to_string(),
         _ => {
             return (
                 None,
+                plan,
                 CredentialStatus::ParseError,
                 Some("accessToken is empty or missing".to_string()),
             );
@@ -270,13 +311,14 @@ fn parse_claude_credentials(content: &str) -> Credential {
         if is_token_expired(expires_at) {
             return (
                 Some(access_token),
+                plan,
                 CredentialStatus::Expired,
                 Some("OAuth token has expired".to_string()),
             );
         }
     }
 
-    (Some(access_token), CredentialStatus::Valid, None)
+    (Some(access_token), plan, CredentialStatus::Valid, None)
 }
 
 /// `expiresAt` appears as a Unix timestamp (seconds or millis) or an
@@ -513,7 +555,7 @@ where
 /// Endpoint + `anthropic-beta` header per cc-switch
 /// `subscription.rs:321-323` (the same call Claude Code's `/usage`
 /// command makes).
-async fn query_claude_quota(access_token: &str) -> SubscriptionQuota {
+async fn query_claude_quota(access_token: &str, plan: Option<String>) -> SubscriptionQuota {
     let client = match quota_http_client("claude") {
         Ok(c) => c,
         Err(e) => return e,
@@ -534,7 +576,7 @@ async fn query_claude_quota(access_token: &str) -> SubscriptionQuota {
         Err(e) => return e,
     };
     let (tiers, extra_usage) = parse_claude_usage(&body);
-    SubscriptionQuota::success("claude", tiers, extra_usage)
+    SubscriptionQuota::success("claude", tiers, plan, extra_usage)
 }
 
 // ===================================================================
@@ -743,6 +785,15 @@ fn parse_codex_usage(body: &serde_json::Value) -> Vec<QuotaTier> {
     tiers
 }
 
+/// Account plan from the usage response's `plan_type`
+/// (`RateLimitStatusPayload.plan_type` — KnownPlan: free / go / plus /
+/// pro / business / edu / enterprise, codex-rs protocol/src/account.rs).
+fn codex_plan(body: &serde_json::Value) -> Option<String> {
+    body.get("plan_type")
+        .and_then(|v| v.as_str())
+        .and_then(display_plan)
+}
+
 /// Query the ChatGPT backend usage endpoint with the Codex OAuth
 /// token. Endpoint per codex-rs `backend-client/src/client.rs:296`
 /// (`{base}/wham/usage`, ChatGptApi path style); the
@@ -768,7 +819,7 @@ async fn query_codex_quota(access_token: &str, account_id: Option<&str>) -> Subs
         Ok(v) => v,
         Err(e) => return e,
     };
-    SubscriptionQuota::success("codex", parse_codex_usage(&body), None)
+    SubscriptionQuota::success("codex", parse_codex_usage(&body), codex_plan(&body), None)
 }
 
 // ===================================================================
@@ -987,6 +1038,18 @@ fn classify_gemini_model(model_id: &str) -> &str {
     }
 }
 
+/// Account tier from loadCodeAssist's `currentTier`
+/// (`GeminiUserTier { id?: "free-tier"|…, name?, … }`, types.ts:93-95):
+/// prefer the display `name`, else the id with its "-tier" suffix
+/// stripped.
+fn gemini_plan(load_body: &serde_json::Value) -> Option<String> {
+    let tier = load_body.get("currentTier")?;
+    tier.get("name")
+        .and_then(|v| v.as_str())
+        .or_else(|| tier.get("id").and_then(|v| v.as_str()))
+        .and_then(display_plan)
+}
+
 /// `cloudaicompanionProject` arrives as a plain string or an object
 /// with `id` / `projectId` depending on tier.
 fn extract_project_id(value: &serde_json::Value) -> Option<String> {
@@ -1083,6 +1146,7 @@ async fn query_gemini_quota(access_token: &str) -> SubscriptionQuota {
     let project = load_body
         .get("cloudaicompanionProject")
         .and_then(extract_project_id);
+    let plan = gemini_plan(&load_body);
 
     let mut quota_req = serde_json::json!({});
     if let Some(ref pid) = project {
@@ -1102,7 +1166,7 @@ async fn query_gemini_quota(access_token: &str) -> SubscriptionQuota {
         Ok(v) => v,
         Err(e) => return e,
     };
-    SubscriptionQuota::success("gemini", parse_gemini_quota(&body), None)
+    SubscriptionQuota::success("gemini", parse_gemini_quota(&body), plan, None)
 }
 
 // ===================================================================
@@ -1113,9 +1177,9 @@ async fn query_gemini_quota(access_token: &str) -> SubscriptionQuota {
 pub async fn fetch_quota(app: CliApp) -> SubscriptionQuota {
     match app {
         CliApp::Claude => {
-            let (token, status, message) = read_claude_credentials();
-            quota_for_credential("claude", token, status, message, |t| async move {
-                query_claude_quota(&t).await
+            let (token, plan, status, message) = read_claude_credentials();
+            quota_for_credential("claude", token, status, message, move |t| async move {
+                query_claude_quota(&t, plan).await
             })
             .await
         }
@@ -1184,8 +1248,9 @@ mod tests {
             }
         })
         .to_string();
-        let (token, status, message) = parse_claude_credentials(&content);
+        let (token, plan, status, message) = parse_claude_credentials(&content);
         assert_eq!(token.as_deref(), Some("sk-ant-oat01-abc"));
+        assert!(plan.is_none()); // no subscriptionType in this fixture
         assert_eq!(status, CredentialStatus::Valid);
         assert!(message.is_none());
     }
@@ -1196,7 +1261,7 @@ mod tests {
             "claude.ai_oauth": { "accessToken": "tok" }
         })
         .to_string();
-        let (token, status, _) = parse_claude_credentials(&content);
+        let (token, _, status, _) = parse_claude_credentials(&content);
         assert_eq!(token.as_deref(), Some("tok"));
         assert_eq!(status, CredentialStatus::Valid);
     }
@@ -1212,14 +1277,14 @@ mod tests {
             }
         })
         .to_string();
-        let (token, status, _) = parse_claude_credentials(&content);
+        let (token, _, status, _) = parse_claude_credentials(&content);
         assert_eq!(token.as_deref(), Some("tok"));
         assert_eq!(status, CredentialStatus::Expired);
     }
 
     #[test]
     fn parse_claude_credentials_missing_entry_is_parse_error() {
-        let (token, status, _) = parse_claude_credentials("{}");
+        let (token, _, status, _) = parse_claude_credentials("{}");
         assert!(token.is_none());
         assert_eq!(status, CredentialStatus::ParseError);
     }
@@ -1227,7 +1292,7 @@ mod tests {
     #[test]
     fn parse_claude_credentials_empty_token_is_parse_error() {
         let content = json!({ "claudeAiOauth": { "accessToken": "" } }).to_string();
-        let (token, status, _) = parse_claude_credentials(&content);
+        let (token, _, status, _) = parse_claude_credentials(&content);
         assert!(token.is_none());
         assert_eq!(status, CredentialStatus::ParseError);
     }
@@ -1498,6 +1563,7 @@ mod tests {
                 utilization: 12.5,
                 resets_at: Some("2026-06-10T12:00:00Z".into()),
             }],
+            plan: Some("Max".into()),
             extra_usage: None,
             error: None,
             queried_at: Some(1),
@@ -1505,6 +1571,7 @@ mod tests {
         let v = serde_json::to_value(&quota).unwrap();
         assert_eq!(v["credentialStatus"], "valid");
         assert_eq!(v["tiers"][0]["resetsAt"], "2026-06-10T12:00:00Z");
+        assert_eq!(v["plan"], "Max");
         assert_eq!(v["queriedAt"], 1);
     }
 
@@ -1654,7 +1721,7 @@ mod tests {
     #[test]
     fn quota_for_credential_scaffold_branches() {
         fn ok(app: &'static str) -> SubscriptionQuota {
-            SubscriptionQuota::success(app, vec![], None)
+            SubscriptionQuota::success(app, vec![], None, None)
         }
         fn fail(app: &'static str) -> SubscriptionQuota {
             SubscriptionQuota::error(app, CredentialStatus::Valid, "boom".into())
@@ -1719,5 +1786,53 @@ mod tests {
             },
         ));
         assert!(r.success);
+    }
+
+    #[test]
+    fn display_plan_tidies_raw_identifiers() {
+        assert_eq!(display_plan("max").as_deref(), Some("Max"));
+        assert_eq!(display_plan("pro").as_deref(), Some("Pro"));
+        assert_eq!(display_plan("plus").as_deref(), Some("Plus"));
+        assert_eq!(display_plan("free-tier").as_deref(), Some("Free"));
+        assert_eq!(display_plan("standard-tier").as_deref(), Some("Standard"));
+        assert_eq!(display_plan("  enterprise ").as_deref(), Some("Enterprise"));
+        assert_eq!(display_plan(""), None);
+    }
+
+    #[test]
+    fn parse_claude_credentials_extracts_subscription_type() {
+        let content = json!({
+            "claudeAiOauth": {
+                "accessToken": "tok",
+                "subscriptionType": "max",
+                "expiresAt": far_future_ms()
+            }
+        })
+        .to_string();
+        let (token, plan, status, _) = parse_claude_credentials(&content);
+        assert_eq!(token.as_deref(), Some("tok"));
+        assert_eq!(plan.as_deref(), Some("Max"));
+        assert_eq!(status, CredentialStatus::Valid);
+    }
+
+    #[test]
+    fn codex_plan_reads_plan_type() {
+        assert_eq!(
+            codex_plan(&json!({"plan_type": "plus", "rate_limit": {}})).as_deref(),
+            Some("Plus")
+        );
+        assert!(codex_plan(&json!({})).is_none());
+    }
+
+    #[test]
+    fn gemini_plan_prefers_tier_name_over_id() {
+        let body = json!({
+            "currentTier": { "id": "free-tier", "name": "Free", "isDefault": true }
+        });
+        assert_eq!(gemini_plan(&body).as_deref(), Some("Free"));
+        // No name → id with the "-tier" suffix stripped.
+        let body = json!({ "currentTier": { "id": "standard-tier" } });
+        assert_eq!(gemini_plan(&body).as_deref(), Some("Standard"));
+        assert!(gemini_plan(&json!({})).is_none());
     }
 }
