@@ -593,23 +593,15 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let labels = tray_labels();
     let mut menu = MenuBuilder::new(app);
 
-    // "Open" sits at the very top of the menu.
+    // "Open" sits at the very top of the menu, the "New session"
+    // submenu (recent (cwd, CLI) targets — picking one opens the
+    // chosen terminal there and launches the CLI fresh) directly
+    // under it, then the recent sessions (newest first; single click
+    // resumes in a terminal).
     let open = MenuItemBuilder::with_id("tray:open", &labels.open).build(app)?;
-    menu = menu.item(&open).item(&PredefinedMenuItem::separator(app)?);
+    menu = menu.item(&open);
 
-    // Recent sessions (newest first) — single click resumes in a
-    // terminal. Below them, one "New session" submenu listing recent
-    // projects ("termory · Claude Code") — picking one opens the
-    // chosen terminal in that cwd and launches the CLI fresh.
     let recent = RECENT.lock().map(|g| g.clone()).unwrap_or_default();
-    if !recent.sessions.is_empty() {
-        for (idx, r) in recent.sessions.iter().enumerate() {
-            let item =
-                MenuItemBuilder::with_id(format!("tray:session:{idx}"), &r.label).build(app)?;
-            menu = menu.item(&item);
-        }
-        menu = menu.item(&PredefinedMenuItem::separator(app)?);
-    }
     if !recent.targets.is_empty() {
         let mut sub = SubmenuBuilder::new(app, &labels.new_session);
         for (idx, target) in recent.targets.iter().enumerate() {
@@ -617,9 +609,17 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
                 MenuItemBuilder::with_id(format!("tray:new:{idx}"), &target.label).build(app)?;
             sub = sub.item(&item);
         }
-        menu = menu
-            .item(&sub.build()?)
-            .item(&PredefinedMenuItem::separator(app)?);
+        menu = menu.item(&sub.build()?);
+    }
+    menu = menu.item(&PredefinedMenuItem::separator(app)?);
+
+    if !recent.sessions.is_empty() {
+        for (idx, r) in recent.sessions.iter().enumerate() {
+            let item =
+                MenuItemBuilder::with_id(format!("tray:session:{idx}"), &r.label).build(app)?;
+            menu = menu.item(&item);
+        }
+        menu = menu.item(&PredefinedMenuItem::separator(app)?);
     }
 
     // Only surface CLIs actually installed on this machine — same probe the
