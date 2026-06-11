@@ -223,6 +223,7 @@ async fn claude_project_registered(path: String) -> Result<bool, String> {
 /// Exit) and rebuild the menu. The frontend calls this on language load/change
 /// so the menu bar follows the app language (CLI / provider names stay as-is).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn set_tray_labels(
     app: tauri::AppHandle,
     open: String,
@@ -231,8 +232,17 @@ async fn set_tray_labels(
     five_hour: String,
     weekly: String,
     monthly: String,
+    new_session: String,
 ) -> Result<(), String> {
-    tray::set_labels(open, official, exit, five_hour, weekly, monthly);
+    tray::set_labels(
+        open,
+        official,
+        exit,
+        five_hour,
+        weekly,
+        monthly,
+        new_session,
+    );
     let _ = tray::rebuild_menu(&app);
     Ok(())
 }

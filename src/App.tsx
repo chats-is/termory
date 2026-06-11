@@ -156,7 +156,9 @@ export function App() {
       // Quota window labels on the CLI rows (5h / Weekly / Monthly).
       fiveHour: t("providers.quotaFiveHourShort"),
       weekly: t("providers.quotaSevenDayShort"),
-      monthly: t("providers.quotaMonthlyShort")
+      monthly: t("providers.quotaMonthlyShort"),
+      // Per-project submenu entry that launches the CLI fresh.
+      newSession: t("tray.newSession")
     }).catch(() => {});
   }, [t]);
   const [sessions, setSessions] = React.useState<AppSession[]>([]);

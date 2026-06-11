@@ -47,22 +47,32 @@ use tauri::{
 
 const TRAY_ID: &str = "termory-main";
 
-/// How many recent session titles to surface under "Open".
-const RECENT_LIMIT: usize = 5;
+/// How many recent projects to surface under "Open", and how many
+/// recent sessions each project's submenu lists.
+const RECENT_PROJECT_LIMIT: usize = 5;
+const RECENT_SESSION_LIMIT: usize = 5;
 
-/// One cached recent-session row. A click opens a terminal in `project` and
-/// resumes the session in its CLI (`source` + `id`); `label` is the menu text.
+/// One session row inside a project submenu. A click opens a terminal
+/// in the project's cwd and resumes the session in its CLI.
 #[derive(Clone, PartialEq)]
 struct RecentSession {
-    source: String,
-    project: String,
     id: String,
     label: String,
 }
 
-/// Recent sessions shown under "Open", refreshed from each scan (watcher +
+/// One recent-project row: a submenu holding "New session" (launch the
+/// CLI fresh in `project`) plus the project's recent sessions.
+#[derive(Clone, PartialEq)]
+struct RecentProject {
+    source: String,
+    project: String,
+    label: String,
+    sessions: Vec<RecentSession>,
+}
+
+/// Recent projects shown under "Open", refreshed from each scan (watcher +
 /// the `scan_all_sessions` IPC) — the tray never scans on its own.
-static RECENT: Mutex<Vec<RecentSession>> = Mutex::new(Vec::new());
+static RECENT: Mutex<Vec<RecentProject>> = Mutex::new(Vec::new());
 
 /// Claude's per-model weekly windows stay app-only — the menu row
 /// shows the main session + weekly windows (user decision).
@@ -96,6 +106,7 @@ struct TrayLabels {
     five_hour: String,
     weekly: String,
     monthly: String,
+    new_session: String,
 }
 
 impl Default for TrayLabels {
@@ -107,6 +118,7 @@ impl Default for TrayLabels {
             five_hour: "5h".to_string(),
             weekly: "Weekly".to_string(),
             monthly: "Monthly".to_string(),
+            new_session: "New session".to_string(),
         }
     }
 }
@@ -123,6 +135,7 @@ fn tray_labels() -> TrayLabels {
 
 /// Store the localized static labels (called from the `set_tray_labels` IPC).
 /// The caller rebuilds the menu so the new labels take effect.
+#[allow(clippy::too_many_arguments)]
 pub fn set_labels(
     open: String,
     official: String,
@@ -130,6 +143,7 @@ pub fn set_labels(
     five_hour: String,
     weekly: String,
     monthly: String,
+    new_session: String,
 ) {
     if let Ok(mut g) = TRAY_LABELS.lock() {
         *g = Some(TrayLabels {
@@ -139,6 +153,7 @@ pub fn set_labels(
             five_hour,
             weekly,
             monthly,
+            new_session,
         });
     }
 }
@@ -294,12 +309,12 @@ pub fn rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Recompute the recent-sessions cache from a fresh scan and rebuild the
-/// menu so the titles under "Open" stay current. Reuses the caller's scan
+/// Recompute the recent-projects cache from a fresh scan and rebuild the
+/// menu so the entries under "Open" stay current. Reuses the caller's scan
 /// (watcher / `scan_all_sessions`); skips the rebuild when nothing changed
 /// so active CLI use doesn't churn the menu on every file event.
 pub fn refresh_recent(app: &AppHandle, sessions: &[AppSession]) {
-    let recent = select_recent(sessions);
+    let recent = select_recent_projects(sessions);
     match RECENT.lock() {
         Ok(mut guard) if *guard != recent => *guard = recent,
         _ => return, // unchanged (or poisoned) → no rebuild
@@ -442,14 +457,18 @@ fn quota_label(q: &TrayQuota, labels: &TrayLabels) -> Option<String> {
     )
 }
 
-/// The (pure) selection: drop Memory/Skill, newest first, cap at
-/// `RECENT_LIMIT`, map to the cached row.
-fn select_recent(sessions: &[AppSession]) -> Vec<RecentSession> {
+/// The (pure) selection: drop Memory/Skill, slash-command "sessions",
+/// and records without an id or project cwd; sort newest first; group
+/// by `(source, project)` in recency order; cap at
+/// `RECENT_PROJECT_LIMIT` projects × `RECENT_SESSION_LIMIT` sessions.
+fn select_recent_projects(sessions: &[AppSession]) -> Vec<RecentProject> {
     let mut picked: Vec<&AppSession> = sessions
         .iter()
         .filter(|s| !matches!(s.source.as_str(), "Memory" | "Skill"))
         // Drop empty-project placeholders (id == "") — they're sidebar-only.
         .filter(|s| !s.id.is_empty())
+        // "New session" / resume both need a cwd to land in.
+        .filter(|s| !s.project.is_empty())
         // Drop "sessions" that are really just a CLI slash command
         // (`/model`, `/clear`, …) — they're system commands, not chats.
         .filter(|s| !is_slash_command(label_text(&s.title, &s.snippet)))
@@ -457,16 +476,53 @@ fn select_recent(sessions: &[AppSession]) -> Vec<RecentSession> {
     // Newest first. ISO-8601 `updated_at` sorts lexicographically =
     // chronologically; `None` sorts last under descending order.
     picked.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    picked
-        .into_iter()
-        .take(RECENT_LIMIT)
-        .map(|s| RecentSession {
-            source: s.source.clone(),
-            project: s.project.clone(),
-            id: s.id.clone(),
-            label: recent_label(&s.title, &s.snippet),
-        })
-        .collect()
+
+    let mut projects: Vec<RecentProject> = Vec::new();
+    for s in picked {
+        let entry = projects
+            .iter_mut()
+            .find(|p| p.source == s.source && p.project == s.project);
+        let entry = match entry {
+            Some(e) => e,
+            None => {
+                if projects.len() >= RECENT_PROJECT_LIMIT {
+                    continue; // project ranking is fixed; keep filling existing ones
+                }
+                projects.push(RecentProject {
+                    source: s.source.clone(),
+                    project: s.project.clone(),
+                    label: project_label(&s.project, &s.source),
+                    sessions: Vec::new(),
+                });
+                projects.last_mut().expect("just pushed")
+            }
+        };
+        if entry.sessions.len() < RECENT_SESSION_LIMIT {
+            entry.sessions.push(RecentSession {
+                id: s.id.clone(),
+                label: recent_label(&s.title, &s.snippet),
+            });
+        }
+    }
+    projects
+}
+
+/// Menu label for a recent project: the cwd's basename + the CLI name,
+/// e.g. "termory · Claude Code".
+fn project_label(project: &str, source: &str) -> String {
+    let name = std::path::Path::new(project)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(project);
+    let mut name: String = name.chars().take(32).collect();
+    if name.is_empty() {
+        name = "(unknown)".to_string();
+    }
+    let source_label = match source {
+        "Claude" => "Claude Code",
+        other => other,
+    };
+    format!("{name} · {source_label}")
 }
 
 /// The text a recent row shows before truncation: title, else snippet, else
@@ -520,13 +576,29 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let open = MenuItemBuilder::with_id("tray:open", &labels.open).build(app)?;
     menu = menu.item(&open).item(&PredefinedMenuItem::separator(app)?);
 
-    // Recent sessions (newest first) — each opens in Records on click.
+    // Recent projects (newest first) — each is a submenu holding
+    // "New session" (launch the CLI fresh in the project's cwd) plus
+    // that project's recent sessions (click = resume in terminal).
     let recent = RECENT.lock().map(|g| g.clone()).unwrap_or_default();
     if !recent.is_empty() {
-        for (idx, r) in recent.iter().enumerate() {
-            let item =
-                MenuItemBuilder::with_id(format!("tray:session:{idx}"), &r.label).build(app)?;
-            menu = menu.item(&item);
+        for (pidx, project) in recent.iter().enumerate() {
+            let mut sub = SubmenuBuilder::new(app, &project.label);
+            let new_item =
+                MenuItemBuilder::with_id(format!("tray:project:{pidx}:new"), &labels.new_session)
+                    .build(app)?;
+            sub = sub.item(&new_item);
+            if !project.sessions.is_empty() {
+                sub = sub.item(&PredefinedMenuItem::separator(app)?);
+                for (sidx, session) in project.sessions.iter().enumerate() {
+                    let item = MenuItemBuilder::with_id(
+                        format!("tray:project:{pidx}:session:{sidx}"),
+                        &session.label,
+                    )
+                    .build(app)?;
+                    sub = sub.item(&item);
+                }
+            }
+            menu = menu.item(&sub.build()?);
         }
         menu = menu.item(&PredefinedMenuItem::separator(app)?);
     }
@@ -645,15 +717,39 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         app.exit(0);
         return;
     }
-    // A recent-session row → open a fresh OS terminal in that session's
-    // project and resume it in its CLI (`claude --resume <id>` etc.).
-    if let Some(idx) = id
-        .strip_prefix("tray:session:")
-        .and_then(|n| n.parse::<usize>().ok())
-    {
-        if let Some(r) = RECENT.lock().ok().and_then(|g| g.get(idx).cloned()) {
-            // Fire-and-forget from the tray (no toast surface); errors logged.
-            let _ = crate::terminal::resume_session(&r.source, &r.id, Some(&r.project));
+    // A recent-project entry: `tray:project:{p}:new` launches the CLI
+    // fresh in the project's cwd; `tray:project:{p}:session:{s}` opens
+    // a terminal there and resumes that session. Fire-and-forget from
+    // the tray (no toast surface); errors logged inside terminal::*.
+    if let Some(rest) = id.strip_prefix("tray:project:") {
+        let mut parts = rest.splitn(3, ':');
+        let (Some(pidx), Some(kind)) = (
+            parts.next().and_then(|n| n.parse::<usize>().ok()),
+            parts.next(),
+        ) else {
+            return;
+        };
+        let Some(project) = RECENT.lock().ok().and_then(|g| g.get(pidx).cloned()) else {
+            return;
+        };
+        match kind {
+            "new" => {
+                let _ = crate::terminal::new_session(&project.source, Some(&project.project));
+            }
+            "session" => {
+                if let Some(session) = parts
+                    .next()
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .and_then(|sidx| project.sessions.get(sidx).cloned())
+                {
+                    let _ = crate::terminal::resume_session(
+                        &project.source,
+                        &session.id,
+                        Some(&project.project),
+                    );
+                }
+            }
+            _ => {}
         }
         return;
     }
@@ -822,18 +918,41 @@ mod tests {
         }
     }
 
+    fn sess_in(source: &str, project: &str, id: &str, updated: &str) -> AppSession {
+        AppSession {
+            project: project.into(),
+            ..sess(source, id, updated)
+        }
+    }
+
     #[test]
-    fn select_recent_drops_docs_and_sorts_newest_first() {
+    fn select_recent_projects_groups_by_source_and_cwd_newest_first() {
         let sessions = vec![
-            sess("Claude", "c1", "2026-01-01T00:00:00Z"),
-            sess("Codex", "x1", "2026-06-01T00:00:00Z"),
+            sess_in("Claude", "/work/termory", "c-old", "2026-01-01T00:00:00Z"),
+            sess_in("Codex", "/work/chats", "x1", "2026-06-01T00:00:00Z"),
+            sess_in("Claude", "/work/termory", "c-new", "2026-07-01T00:00:00Z"),
             sess("Memory", "m1", "2026-12-01T00:00:00Z"), // excluded
             sess("Skill", "s1", "2026-12-01T00:00:00Z"),  // excluded
-            sess("Gemini", "g1", "2026-03-01T00:00:00Z"),
+            // Same cwd, different CLI → its own project entry.
+            sess_in("Gemini", "/work/termory", "g1", "2026-03-01T00:00:00Z"),
         ];
-        let recent = select_recent(&sessions);
-        let ids: Vec<&str> = recent.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, ["x1", "g1", "c1"]);
+        let recent = select_recent_projects(&sessions);
+        let labels: Vec<&str> = recent.iter().map(|p| p.label.as_str()).collect();
+        // Ranked by each project's newest session.
+        assert_eq!(
+            labels,
+            ["termory · Claude Code", "chats · Codex", "termory · Gemini"]
+        );
+        // Sessions inside a project are newest-first.
+        let claude_ids: Vec<&str> = recent[0].sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(claude_ids, ["c-new", "c-old"]);
+    }
+
+    #[test]
+    fn select_recent_projects_drops_records_without_a_cwd() {
+        let mut no_cwd = sess("Claude", "c1", "2026-06-01T00:00:00Z");
+        no_cwd.project = "".into();
+        assert!(select_recent_projects(&[no_cwd]).is_empty());
     }
 
     #[test]
@@ -850,27 +969,47 @@ mod tests {
     }
 
     #[test]
-    fn select_recent_drops_slash_command_sessions() {
+    fn select_recent_projects_drops_slash_command_sessions() {
         let mut cmd = sess("Claude", "cmd1", "2026-12-01T00:00:00Z");
         cmd.title = "/clear".into(); // newest, but a bare command → dropped
         let mut chat = sess("Codex", "chat1", "2026-06-01T00:00:00Z");
         chat.title = "Fix the flaky test".into();
-        let recent = select_recent(&vec![cmd, chat]);
-        let ids: Vec<&str> = recent.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, ["chat1"]);
+        let recent = select_recent_projects(&vec![cmd, chat]);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].sessions[0].id, "chat1");
     }
 
     #[test]
-    fn select_recent_caps_at_limit() {
-        let sessions: Vec<AppSession> = (0..10)
-            .map(|i| {
-                sess(
+    fn select_recent_projects_caps_projects_and_sessions() {
+        let mut sessions: Vec<AppSession> = Vec::new();
+        // 7 projects × 7 sessions each, newest project first.
+        for p in 0..7 {
+            for i in 0..7 {
+                sessions.push(sess_in(
                     "Claude",
-                    &format!("c{i}"),
-                    &format!("2026-06-{:02}T00:00:00Z", i + 1),
-                )
-            })
-            .collect();
-        assert_eq!(select_recent(&sessions).len(), RECENT_LIMIT);
+                    &format!("/work/p{p}"),
+                    &format!("p{p}-s{i}"),
+                    // Earlier project index = newer timestamps.
+                    &format!("2026-0{}-{:02}T00:00:00Z", 7 - p, 28 - i),
+                ));
+            }
+        }
+        let recent = select_recent_projects(&sessions);
+        assert_eq!(recent.len(), RECENT_PROJECT_LIMIT);
+        assert!(recent
+            .iter()
+            .all(|p| p.sessions.len() == RECENT_SESSION_LIMIT));
+        assert_eq!(recent[0].label, "p0 · Claude Code");
+    }
+
+    #[test]
+    fn project_label_uses_basename_and_cli_name() {
+        assert_eq!(
+            project_label("/Users/x/work/termory", "Claude"),
+            "termory · Claude Code"
+        );
+        assert_eq!(project_label("/work/chats", "OpenCode"), "chats · OpenCode");
+        // Pathological root cwd falls back to the raw path.
+        assert_eq!(project_label("/", "Codex"), "/ · Codex");
     }
 }

@@ -77,24 +77,56 @@ fn session_launch_command(source: &str, id: &str) -> Option<String> {
     })
 }
 
-/// Resume a recorded session in the user's chosen terminal (Settings →
-/// Terminal, `terminal` config key; empty / "auto" → OS default): build the
-/// CLI resume command, then open a terminal `cd`-ed into the session's project
-/// dir (when it exists). Shared by the tray click + the `resume_session_in_terminal` IPC.
-pub fn resume_session(source: &str, id: &str, project: Option<&str>) -> Result<(), String> {
-    let Some(cmd) = session_launch_command(source, id) else {
-        return Err("this session can't be resumed by id".to_string());
-    };
-    let project = project.filter(|p| !p.is_empty() && std::path::Path::new(p).is_dir());
-    let choice = crate::config::read_config()
+/// The user's Settings → Terminal choice (`terminal` config key);
+/// empty / "auto" → the OS default terminal.
+fn configured_terminal() -> String {
+    crate::config::read_config()
         .ok()
         .and_then(|c| {
             c.get("terminal")
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
         })
-        .unwrap_or_default();
-    open(&choice, project, &cmd)
+        .unwrap_or_default()
+}
+
+/// Open `cmd` in the chosen terminal, `cd`-ed into `project` when that
+/// dir exists.
+fn open_in_project(project: Option<&str>, cmd: &str) -> Result<(), String> {
+    let project = project.filter(|p| !p.is_empty() && std::path::Path::new(p).is_dir());
+    open(&configured_terminal(), project, cmd)
+}
+
+/// Resume a recorded session in the user's chosen terminal: build the
+/// CLI resume command, then open a terminal `cd`-ed into the session's project
+/// dir (when it exists). Shared by the tray click + the `resume_session_in_terminal` IPC.
+pub fn resume_session(source: &str, id: &str, project: Option<&str>) -> Result<(), String> {
+    let Some(cmd) = session_launch_command(source, id) else {
+        return Err("this session can't be resumed by id".to_string());
+    };
+    open_in_project(project, &cmd)
+}
+
+/// The bare CLI invocation that starts a NEW session — just the binary
+/// name. `None` for unknown sources.
+fn new_session_command(source: &str) -> Option<&'static str> {
+    Some(match source {
+        "Claude" => "claude",
+        "Codex" => "codex",
+        "OpenCode" => "opencode",
+        "Gemini" => "gemini",
+        _ => return None,
+    })
+}
+
+/// Start a NEW session for `source` in the user's chosen terminal,
+/// `cd`-ed into the project dir. Driven by the tray's per-project
+/// "New session" entry.
+pub fn new_session(source: &str, project: Option<&str>) -> Result<(), String> {
+    let Some(cmd) = new_session_command(source) else {
+        return Err("unknown source".to_string());
+    };
+    open_in_project(project, cmd)
 }
 
 // ===================================================================
@@ -402,6 +434,15 @@ mod tests {
         );
         assert_eq!(session_launch_command("Memory", "x"), None);
         assert_eq!(session_launch_command("whatever", "x"), None);
+    }
+
+    #[test]
+    fn new_session_command_per_source() {
+        assert_eq!(new_session_command("Claude"), Some("claude"));
+        assert_eq!(new_session_command("Codex"), Some("codex"));
+        assert_eq!(new_session_command("OpenCode"), Some("opencode"));
+        assert_eq!(new_session_command("Gemini"), Some("gemini"));
+        assert_eq!(new_session_command("Memory"), None);
     }
 
     #[test]

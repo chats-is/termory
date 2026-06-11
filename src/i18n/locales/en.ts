@@ -56,6 +56,7 @@ export const en = {
   "tray.open": "Open",
   "tray.official": "Official",
   "tray.exit": "Exit",
+  "tray.newSession": "New session",
 
   // Stats
   "stats.dailyTokens": "Daily tokens",

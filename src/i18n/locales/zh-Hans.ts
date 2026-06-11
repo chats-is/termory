@@ -50,6 +50,7 @@ export const zhHans: Record<MessageKey, string> = {
   "tray.open": "打开",
   "tray.official": "官方",
   "tray.exit": "退出",
+  "tray.newSession": "新建会话",
 
   "stats.dailyTokens": "每日 Tokens",
   "stats.dailyActivities": "每日活跃度",
