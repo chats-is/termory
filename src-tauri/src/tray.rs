@@ -491,7 +491,7 @@ fn select_recent_projects(sessions: &[AppSession]) -> Vec<RecentProject> {
                 projects.push(RecentProject {
                     source: s.source.clone(),
                     project: s.project.clone(),
-                    label: project_label(&s.project, &s.source),
+                    label: project_label(&s.project),
                     sessions: Vec::new(),
                 });
                 projects.last_mut().expect("just pushed")
@@ -507,22 +507,20 @@ fn select_recent_projects(sessions: &[AppSession]) -> Vec<RecentProject> {
     projects
 }
 
-/// Menu label for a recent project: the cwd's basename + the CLI name,
-/// e.g. "termory · Claude Code".
-fn project_label(project: &str, source: &str) -> String {
+/// Menu label for a recent project: the cwd's basename ("termory").
+/// No CLI suffix (user decision) — the same dir under two CLIs shows
+/// as two same-named rows; the submenu contents disambiguate.
+fn project_label(project: &str) -> String {
     let name = std::path::Path::new(project)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(project);
-    let mut name: String = name.chars().take(32).collect();
+    let name: String = name.chars().take(32).collect();
     if name.is_empty() {
-        name = "(unknown)".to_string();
+        "(unknown)".to_string()
+    } else {
+        name
     }
-    let source_label = match source {
-        "Claude" => "Claude Code",
-        other => other,
-    };
-    format!("{name} · {source_label}")
 }
 
 /// The text a recent row shows before truncation: title, else snippet, else
@@ -938,11 +936,9 @@ mod tests {
         ];
         let recent = select_recent_projects(&sessions);
         let labels: Vec<&str> = recent.iter().map(|p| p.label.as_str()).collect();
-        // Ranked by each project's newest session.
-        assert_eq!(
-            labels,
-            ["termory · Claude Code", "chats · Codex", "termory · Gemini"]
-        );
+        // Ranked by each project's newest session. Same cwd under two
+        // CLIs → two same-named rows (no CLI suffix, user decision).
+        assert_eq!(labels, ["termory", "chats", "termory"]);
         // Sessions inside a project are newest-first.
         let claude_ids: Vec<&str> = recent[0].sessions.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(claude_ids, ["c-new", "c-old"]);
@@ -999,17 +995,14 @@ mod tests {
         assert!(recent
             .iter()
             .all(|p| p.sessions.len() == RECENT_SESSION_LIMIT));
-        assert_eq!(recent[0].label, "p0 · Claude Code");
+        assert_eq!(recent[0].label, "p0");
     }
 
     #[test]
-    fn project_label_uses_basename_and_cli_name() {
-        assert_eq!(
-            project_label("/Users/x/work/termory", "Claude"),
-            "termory · Claude Code"
-        );
-        assert_eq!(project_label("/work/chats", "OpenCode"), "chats · OpenCode");
+    fn project_label_uses_basename() {
+        assert_eq!(project_label("/Users/x/work/termory"), "termory");
+        assert_eq!(project_label("/work/chats"), "chats");
         // Pathological root cwd falls back to the raw path.
-        assert_eq!(project_label("/", "Codex"), "/ · Codex");
+        assert_eq!(project_label("/"), "/");
     }
 }
