@@ -292,6 +292,10 @@ export const zhHans: Record<MessageKey, string> = {
   "settings.language": "语言",
   "settings.language.desc": "应用界面使用的语言。",
 
+  "settings.startup": "启动",
+  "settings.startup.launchAtLogin": "开机自动启动",
+  "settings.startup.desc": "登录系统时自动启动 Termory（仅驻菜单栏，不弹出窗口）。",
+  "settings.startup.error": "无法更新开机启动设置：{error}",
   "settings.terminal": "终端",
   "settings.terminal.desc":
     "恢复会话时用哪个终端打开。只列出本机已安装的终端。",

@@ -5,6 +5,11 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { toast } from "sonner";
+import {
+  isEnabled as autostartIsEnabled,
+  enable as autostartEnable,
+  disable as autostartDisable
+} from "@tauri-apps/plugin-autostart";
 import { Folder, FolderOpen, Monitor, Moon, RefreshCw, Sun, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -106,6 +111,27 @@ export function SettingsPage({
     }
   };
 
+  // Launch-at-login toggle (tauri-plugin-autostart). State seeds from
+  // the OS-side truth on mount; toggling writes through immediately.
+  const [autostart, setAutostart] = React.useState(false);
+  React.useEffect(() => {
+    autostartIsEnabled()
+      .then(setAutostart)
+      .catch(() => {});
+  }, []);
+  const toggleAutostart = async (next: boolean) => {
+    try {
+      if (next) {
+        await autostartEnable();
+      } else {
+        await autostartDisable();
+      }
+      setAutostart(next);
+    } catch (err) {
+      toast.error(t("settings.startup.error", { error: String(err) }));
+    }
+  };
+
   const current = (mounted ? (theme as ThemeChoice) : "system") ?? "system";
 
   return (
@@ -151,6 +177,22 @@ export function SettingsPage({
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection title={t("settings.startup")}>
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-col gap-0.5 min-w-0">
+                <div className="text-sm">{t("settings.startup.launchAtLogin")}</div>
+                <div className="text-xs text-muted-foreground">
+                  {t("settings.startup.desc")}
+                </div>
+              </div>
+              <Switch
+                checked={autostart}
+                onCheckedChange={(v) => void toggleAutostart(v)}
+                aria-label={t("settings.startup.launchAtLogin")}
+              />
             </div>
           </SettingsSection>
 

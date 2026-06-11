@@ -292,6 +292,10 @@ export const zhHant: Record<MessageKey, string> = {
   "settings.language": "語言",
   "settings.language.desc": "應用程式介面使用的語言。",
 
+  "settings.startup": "啟動",
+  "settings.startup.launchAtLogin": "開機自動啟動",
+  "settings.startup.desc": "登入系統時自動啟動 Termory（僅駐選單列，不彈出視窗）。",
+  "settings.startup.error": "無法更新開機啟動設定：{error}",
   "settings.terminal": "終端機",
   "settings.terminal.desc":
     "恢復會話時用哪個終端機開啟。只列出本機已安裝的終端機。",

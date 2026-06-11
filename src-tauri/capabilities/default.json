@@ -2,13 +2,16 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default desktop permissions for the main window",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "opener:default",
     "updater:default",
     "process:default",
     "log:default",
-    "dialog:default"
+    "dialog:default",
+    "autostart:default"
   ]
 }

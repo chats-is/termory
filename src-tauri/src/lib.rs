@@ -546,9 +546,22 @@ pub fn run() {
         builder.build()
     };
 
-    tauri::Builder::default()
+    // `mut` is only needed for the macOS pre-run activation-policy
+    // call below.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut app = tauri::Builder::default()
         .plugin(log_plugin)
         .plugin(tauri_plugin_dialog::init())
+        // Launch-at-login (Settings → Startup). macOS uses a
+        // LaunchAgent plist; Windows the Run registry key; Linux an
+        // XDG autostart .desktop entry — all handled by the plugin.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            // The login item launches with this flag so setup() can
+            // start tray-only (window + Dock hidden); a manual open
+            // has no flag and shows the window as usual.
+            Some(vec!["--autostart"]),
+        ))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -597,18 +610,28 @@ pub fn run() {
             // reopen via the tray's "Open"). Real quit goes through the
             // tray's "Exit" → app.exit(0).
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
                 // No window on screen → hide the Dock icon too, so
                 // Termory lives only in the menu bar. The tray's "Open"
-                // brings the Dock icon back. set_dock_visibility is the
-                // purpose-built API (handles the macOS activation
-                // quirks that a raw activation-policy toggle does not).
-                #[cfg(target_os = "macos")]
-                let _ = window.app_handle().set_dock_visibility(false);
+                // brings both back (set_dock_visibility inside the
+                // helper is the purpose-built API — it handles the
+                // macOS activation quirks a raw activation-policy
+                // toggle does not).
+                tray::hide_main_window(window.app_handle());
                 api.prevent_close();
             }
         })
         .setup(|app| {
+            // The window is declared `visible: false` so a login-item
+            // launch never flashes it. Launched by the login item
+            // (--autostart, see the autostart plugin init): stay
+            // tray-only — same end state as closing the window; the
+            // tray's "Open" (or a Dock/Finder reopen) brings it back.
+            // A normal launch shows the window here instead.
+            if std::env::args().any(|a| a == "--autostart") {
+                tray::hide_main_window(app.handle());
+            } else {
+                tray::show_main_window(app.handle());
+            }
             // Background filesystem watcher: pushes a fresh
             // `Vec<AppSession>` to the frontend via
             // `termory:sources-changed` whenever a watched source
@@ -638,20 +661,33 @@ pub fn run() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            // macOS: re-launching the app from Finder / the Dock when it's
-            // already running (the window was closed → hidden in the menu
-            // bar, Dock icon gone) fires a Reopen event instead of a fresh
-            // launch. Without handling it the click does nothing and the app
-            // looks stuck. Re-show the window, same as the tray's "Open".
-            #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = event {
-                tray::show_main_window(app_handle);
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = (app_handle, event);
-            }
-        });
+        .expect("error while building tauri application");
+
+    // --autostart (login item): suppress the macOS Dock icon BEFORE
+    // the event loop starts. The setup()-time set_dock_visibility
+    // runs after NSApp already registered with the Dock, so the icon
+    // flashed briefly; ActivationPolicy::Accessory set pre-run keeps
+    // it from ever appearing. The tray's "Open" restores it later via
+    // set_dock_visibility(true) (the reliable restore API — see the
+    // window-event comment above).
+    #[cfg(target_os = "macos")]
+    if std::env::args().any(|a| a == "--autostart") {
+        app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    }
+
+    app.run(|app_handle, event| {
+        // macOS: re-launching the app from Finder / the Dock when it's
+        // already running (the window was closed → hidden in the menu
+        // bar, Dock icon gone) fires a Reopen event instead of a fresh
+        // launch. Without handling it the click does nothing and the app
+        // looks stuck. Re-show the window, same as the tray's "Open".
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { .. } = event {
+            tray::show_main_window(app_handle);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (app_handle, event);
+        }
+    });
 }

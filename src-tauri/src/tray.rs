@@ -977,6 +977,17 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     Ok(menu)
 }
 
+/// Hide the window + (macOS) the Dock icon — the tray-only end state
+/// used both when the user closes the window and on `--autostart`
+/// login launches. Inverse of `show_main_window`.
+pub(crate) fn hide_main_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+    }
+    #[cfg(target_os = "macos")]
+    let _ = app.set_dock_visibility(false);
+}
+
 pub(crate) fn show_main_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         // A window is going on screen → restore the Dock icon.

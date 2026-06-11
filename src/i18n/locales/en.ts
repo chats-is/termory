@@ -306,6 +306,10 @@ export const en = {
   "settings.language.desc": "The language used across the app.",
 
   // Terminal
+  "settings.startup": "Startup",
+  "settings.startup.launchAtLogin": "Launch at login",
+  "settings.startup.desc": "Start Termory automatically when you log in — tray only, no window.",
+  "settings.startup.error": "Couldn't update launch at login: {error}",
   "settings.terminal": "Terminal",
   "settings.terminal.desc":
     "Which terminal opens when you resume a session. Only terminals found on this machine are listed.",
