@@ -599,7 +599,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     // under it, then the recent sessions (newest first; single click
     // resumes in a terminal).
     let open = MenuItemBuilder::with_id("tray:open", &labels.open).build(app)?;
-    menu = menu.item(&open);
+    menu = menu.item(&open).item(&PredefinedMenuItem::separator(app)?);
 
     let recent = RECENT.lock().map(|g| g.clone()).unwrap_or_default();
     if !recent.targets.is_empty() {

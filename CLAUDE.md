@@ -649,6 +649,7 @@ A native system-tray icon (the macOS menu bar) for quick provider switching, sep
 
 ```
 Open
+─────────────────────
 New session             ▸  termory · Claude Code   ← up to 5 recent (cwd, CLI)
                            chats · Codex              pairs; pick one → terminal
                            termory · Gemini           opens there + CLI launches fresh
