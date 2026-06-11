@@ -402,7 +402,7 @@ fn tray_tier_label(name: &str, labels: &TrayLabels) -> String {
         // brand names, untranslated by convention.
         "gemini_pro" => "Pro".to_string(),
         "gemini_flash" => "Flash".to_string(),
-        "gemini_flash_lite" => "Flash Lite".to_string(),
+        "gemini_flash_lite" => "Lite".to_string(),
         other => {
             if let Some(n) = other.strip_suffix("_hour") {
                 if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
@@ -784,7 +784,7 @@ mod tests {
         assert_eq!(tray_tier_label("30_day", &labels), "Monthly");
         assert_eq!(tray_tier_label("14_day", &labels), "14d");
         assert_eq!(tray_tier_label("gemini_pro", &labels), "Pro");
-        assert_eq!(tray_tier_label("gemini_flash_lite", &labels), "Flash Lite");
+        assert_eq!(tray_tier_label("gemini_flash_lite", &labels), "Lite");
         assert_eq!(tray_tier_label("_day", &labels), "_day"); // no digits → raw
         assert_eq!(tray_tier_label("weekly_limit", &labels), "weekly_limit");
     }
