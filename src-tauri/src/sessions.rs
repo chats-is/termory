@@ -593,23 +593,47 @@ impl SearchCache {
 static SEARCH_CACHE: std::sync::LazyLock<std::sync::Mutex<SearchCache>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(SearchCache::new(200)));
 
-/// `(path, mtime) → (tokens, model)` cache used by scan-time token
-/// extraction for Codex / Claude. Scans iterate hundreds of session
-/// files; parsing each one only to recover token counts would balloon
-/// startup. Cache keys are absolute paths and mtimes, so any user-side
-/// edit (or watcher-driven file replacement) cleanly invalidates the
-/// entry — no manual eviction needed.
-#[derive(Clone)]
-struct ScanTokenCacheEntry {
-    mtime: std::time::SystemTime,
+/// Everything the LIST scan derives from reading a session file's full
+/// contents: token usage, model, per-day breakdown, AND the visible
+/// message count. Bundled so one streamed pass over the file produces
+/// all of it and the whole bundle is cached together by mtime.
+#[derive(Clone, Default)]
+struct ScanExtract {
     tokens: Option<TokenStats>,
     model: Option<String>,
     daily_tokens: Option<Vec<DailyTokenBreakdown>>,
+    message_count: usize,
 }
 
-static SCAN_TOKEN_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<PathBuf, ScanTokenCacheEntry>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+/// `(path, mtime) → ScanExtract` cache used by scan-time extraction for
+/// Codex / Claude. Scans iterate hundreds of session files (hundreds of
+/// MB of JSONL); re-parsing every file on every watcher-triggered
+/// re-scan would peg a core continuously while any CLI is in active
+/// use. Cache keys are absolute paths and mtimes, so any user-side
+/// edit (or watcher-driven file replacement) cleanly invalidates the
+/// entry — no manual eviction needed.
+struct ScanCacheEntry {
+    mtime: std::time::SystemTime,
+    extract: ScanExtract,
+}
+
+static SCAN_EXTRACT_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, ScanCacheEntry>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Read-buffer size for the streaming scan extractors. Session JSONLs
+/// run to 100+ MB; the BufReader default (8 KB) costs ~32x more read
+/// syscalls than this on the cache-miss path.
+const SCAN_READ_BUF_SIZE: usize = 256 * 1024;
+
+/// Drop cache entries whose file no longer exists. Without this,
+/// deleted sessions pin their parsed stats in memory for the lifetime
+/// of the app. Called once per scan — one `exists()` probe per cached
+/// path is noise next to the scan's own directory walks.
+fn evict_stale_scan_cache() {
+    if let Ok(mut cache) = SCAN_EXTRACT_CACHE.lock() {
+        cache.retain(|path, _| path.exists());
+    }
+}
 
 /// Convert an ISO-8601 timestamp (typically RFC 3339 UTC) into a
 /// `(YYYY-MM-DD, hour)` pair in the scanning machine's local timezone.
@@ -633,42 +657,30 @@ fn epoch_ms_to_local_date_hour(ms: i64) -> Option<(String, u8)> {
     Some((local.format("%Y-%m-%d").to_string(), local.hour() as u8))
 }
 
-type TokenExtraction = (
-    Option<TokenStats>,
-    Option<String>,
-    Option<Vec<DailyTokenBreakdown>>,
-);
-
-fn cached_token_extract<F>(path: &Path, extract: F) -> TokenExtraction
+fn cached_scan_extract<F>(path: &Path, extract: F) -> ScanExtract
 where
-    F: FnOnce(&Path) -> TokenExtraction,
+    F: FnOnce(&Path) -> ScanExtract,
 {
     let mtime = fs::metadata(path).and_then(|m| m.modified()).ok();
     if let Some(mtime) = mtime {
-        if let Ok(cache) = SCAN_TOKEN_CACHE.lock() {
+        if let Ok(cache) = SCAN_EXTRACT_CACHE.lock() {
             if let Some(entry) = cache.get(path) {
                 if entry.mtime == mtime {
-                    return (
-                        entry.tokens.clone(),
-                        entry.model.clone(),
-                        entry.daily_tokens.clone(),
-                    );
+                    return entry.extract.clone();
                 }
             }
         }
-        let (tokens, model, daily) = extract(path);
-        if let Ok(mut cache) = SCAN_TOKEN_CACHE.lock() {
+        let extracted = extract(path);
+        if let Ok(mut cache) = SCAN_EXTRACT_CACHE.lock() {
             cache.insert(
                 path.to_path_buf(),
-                ScanTokenCacheEntry {
+                ScanCacheEntry {
                     mtime,
-                    tokens: tokens.clone(),
-                    model: model.clone(),
-                    daily_tokens: daily.clone(),
+                    extract: extracted.clone(),
                 },
             );
         }
-        (tokens, model, daily)
+        extracted
     } else {
         extract(path)
     }
@@ -775,6 +787,7 @@ pub fn scan_sessions() -> Result<ScanResult, Box<dyn Error>> {
     add_record_projects(&mut projects, &records);
 
     refresh_session_path_index(&records);
+    evict_stale_scan_cache();
     Ok(ScanResult { projects, records })
 }
 
@@ -988,12 +1001,17 @@ pub fn get_session(source: &str, id: &str) -> Result<SessionDetail, Box<dyn Erro
 /// Mirrors the detail-time logic in `parse_codex_session` for (1)
 /// and (2); (3) is new and avoids the multi-day attribution bug
 /// where one long Codex thread shows all tokens on its last update.
-fn extract_codex_tokens_from_rollout(path: &Path) -> TokenExtraction {
-    let Ok(content) = fs::read_to_string(path) else {
-        return (None, None, None);
+fn codex_scan_extract(path: &Path) -> ScanExtract {
+    // Stream line-by-line instead of read_to_string — rollout files run
+    // tens of MB and the scan visits every one of them; holding whole
+    // files in memory inflates the peak footprint for no benefit.
+    let Ok(file) = fs::File::open(path) else {
+        return ScanExtract::default();
     };
+    let reader = std::io::BufReader::with_capacity(SCAN_READ_BUF_SIZE, file);
     let mut tokens: Option<TokenStats> = None;
     let mut model: Option<String> = None;
+    let mut message_count = 0usize;
     // [input, output, cached, reasoning, messages_count]
     let mut daily: BTreeMap<String, [u64; 5]> = BTreeMap::new();
     let mut daily_hours: BTreeMap<String, [u64; 24]> = BTreeMap::new();
@@ -1001,10 +1019,21 @@ fn extract_codex_tokens_from_rollout(path: &Path) -> TokenExtraction {
     // Previous cumulative usage we've seen (any null `info` event
     // resets, so a fresh delta starts from zero on the next one).
     let mut prev_cumulative: Option<[u64; 4]> = None;
-    for line in content.lines().filter(|line| !line.trim().is_empty()) {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
+    for line in reader.lines() {
+        let Ok(line) = line else {
+            break;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        // Visible message count, in the same pass — this used to be a
+        // separate uncached full-file parse per scan (the CPU hot spot).
+        if codex_message_from_value(&value).is_some() {
+            message_count += 1;
+        }
         if value.get("type").and_then(Value::as_str) == Some("session_meta") {
             if let Some(m) = value
                 .get("payload")
@@ -1118,7 +1147,12 @@ fn extract_codex_tokens_from_rollout(path: &Path) -> TokenExtraction {
                 .collect(),
         )
     };
-    (tokens, model, daily_out)
+    ScanExtract {
+        tokens,
+        model,
+        daily_tokens: daily_out,
+        message_count,
+    }
 }
 
 fn scan_codex() -> Result<Vec<AppSession>, Box<dyn Error>> {
@@ -1169,10 +1203,8 @@ fn scan_codex_state_db(path: &Path) -> Result<Vec<AppSession>, Box<dyn Error>> {
         let display_title = codex_display_title(&title)
             .or_else(|| codex_display_title(&first_user_message))
             .unwrap_or_default();
-        let message_count = estimate_codex_message_count(Path::new(&rollout_path));
         let snippet = snippet_line(&first_user_message);
-        let (tokens, model, daily_tokens) =
-            cached_token_extract(Path::new(&rollout_path), extract_codex_tokens_from_rollout);
+        let extract = cached_scan_extract(Path::new(&rollout_path), codex_scan_extract);
 
         Ok(AppSession {
             id: id.clone(),
@@ -1182,13 +1214,13 @@ fn scan_codex_state_db(path: &Path) -> Result<Vec<AppSession>, Box<dyn Error>> {
             path: rollout_path.clone(),
             started_at: normalize_time(created_at.to_string()),
             updated_at: normalize_time(updated_at.to_string()),
-            message_count,
+            message_count: extract.message_count,
             preview: String::new(),
             snippet,
             message_previews: Vec::new(),
-            tokens,
-            model,
-            daily_tokens,
+            tokens: extract.tokens,
+            model: extract.model,
+            daily_tokens: extract.daily_tokens,
         })
     })?;
 
@@ -1213,24 +1245,42 @@ fn scan_codex_state_db(path: &Path) -> Result<Vec<AppSession>, Box<dyn Error>> {
 /// Same per-message arithmetic as `collect_claude_metadata`'s token
 /// branch (input_tokens is summed-as-billed, not deduplicated — the
 /// session total matches Anthropic's invoice).
-fn extract_claude_tokens_from_jsonl(path: &Path) -> TokenExtraction {
-    let Ok(content) = fs::read_to_string(path) else {
-        return (None, None, None);
+fn claude_scan_extract(path: &Path) -> ScanExtract {
+    // Stream line-by-line instead of read_to_string — project JSONLs run
+    // to 100+ MB and the scan visits every one of them.
+    let Ok(file) = fs::File::open(path) else {
+        return ScanExtract::default();
     };
+    let reader = std::io::BufReader::with_capacity(SCAN_READ_BUF_SIZE, file);
     let mut input = 0u64;
     let mut output = 0u64;
     let mut cache_read = 0u64;
     let mut cache_creation = 0u64;
     let mut saw_any = false;
     let mut model: Option<String> = None;
+    let mut message_count = 0usize;
     // [input, output, cache_read, cache_creation, messages] per local date
     let mut daily: BTreeMap<String, [u64; 5]> = BTreeMap::new();
     let mut daily_hours: BTreeMap<String, [u64; 24]> = BTreeMap::new();
     let mut daily_hour_tokens: BTreeMap<String, [u64; 24]> = BTreeMap::new();
-    for line in content.lines().filter(|line| !line.trim().is_empty()) {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
+    for line in reader.lines() {
+        let Ok(line) = line else {
+            break;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        // Visible message count, in the same pass — this used to be a
+        // separate uncached full-file parse per scan (the CPU hot spot).
+        // Counted BEFORE the `message`-field skip below: system /
+        // attachment records have no `message` but still emit messages.
+        message_count += claude_message_from_value(&value)
+            .iter()
+            .filter(|message| message.kind == kind::TEXT)
+            .count();
         let date_hour = value
             .get("timestamp")
             .and_then(Value::as_str)
@@ -1337,7 +1387,12 @@ fn extract_claude_tokens_from_jsonl(path: &Path) -> TokenExtraction {
                 .collect(),
         )
     };
-    (tokens, model, daily_out)
+    ScanExtract {
+        tokens,
+        model,
+        daily_tokens: daily_out,
+        message_count,
+    }
 }
 
 fn scan_claude() -> Result<Vec<AppSession>, Box<dyn Error>> {
@@ -1369,13 +1424,24 @@ fn scan_claude_projects(root: &Path) -> Result<Vec<AppSession>, Box<dyn Error>> 
             if !path.is_file() || !is_claude_session_file(&path) {
                 continue;
             }
-            if let Ok(mut session) = parse_claude_lite_session(&path, None) {
-                let (tokens, model, daily_tokens) =
-                    cached_token_extract(&path, extract_claude_tokens_from_jsonl);
-                session.tokens = tokens;
-                session.model = model;
-                session.daily_tokens = daily_tokens;
-                sessions.push(session);
+            if let Ok(lite) = parse_claude_lite_session(&path, None) {
+                let extract = cached_scan_extract(&path, claude_scan_extract);
+                sessions.push(AppSession {
+                    id: lite.id,
+                    source: "Claude".to_string(),
+                    title: lite.title,
+                    project: lite.project,
+                    path: path.display().to_string(),
+                    started_at: lite.started_at,
+                    updated_at: lite.updated_at,
+                    message_count: extract.message_count,
+                    preview: String::new(),
+                    snippet: lite.snippet,
+                    message_previews: Vec::new(),
+                    tokens: extract.tokens,
+                    model: extract.model,
+                    daily_tokens: extract.daily_tokens,
+                });
             }
         }
     }
@@ -3126,10 +3192,25 @@ struct ClaudeLiteSessionFile {
     mtime: SystemTime,
 }
 
+/// The metadata `parse_claude_lite_session` actually derives from a
+/// session file's head/tail — deliberately NOT an `AppSession`, so the
+/// fields the lite parse cannot produce (message_count, tokens, …)
+/// must be supplied where the `AppSession` is assembled: the LIST scan
+/// takes them from the mtime-cached `claude_scan_extract`; the DETAIL
+/// path computes them from the full parse.
+struct ClaudeLiteSession {
+    id: String,
+    title: String,
+    project: String,
+    started_at: Option<String>,
+    updated_at: Option<String>,
+    snippet: String,
+}
+
 fn parse_claude_lite_session(
     path: &Path,
     project_path: Option<&str>,
-) -> Result<AppSession, Box<dyn Error>> {
+) -> Result<ClaudeLiteSession, Box<dyn Error>> {
     let session_id = path
         .file_stem()
         .and_then(|name| name.to_str())
@@ -3167,23 +3248,15 @@ fn parse_claude_lite_session(
             .unwrap_or(""),
     );
 
-    Ok(AppSession {
-        id: session_id.clone(),
-        source: "Claude".to_string(),
+    Ok(ClaudeLiteSession {
+        id: session_id,
         title: official_title_from_text(&strip_display_tags(&summary)).unwrap_or(summary),
         project,
-        path: path.display().to_string(),
         started_at: extract_json_string_field(&lite.head, "timestamp")
             .and_then(normalize_time)
             .or_else(|| file_time(path, false)),
         updated_at: Some(system_time_to_iso(lite.mtime)),
-        message_count: estimate_claude_message_count(path),
-        preview: String::new(),
         snippet,
-        message_previews: Vec::new(),
-        tokens: None,
-        model: None,
-        daily_tokens: None,
     })
 }
 
@@ -3246,18 +3319,6 @@ fn extract_claude_first_prompt_from_head(head: &str) -> Option<String> {
         }
     }
     command_fallback
-}
-
-fn estimate_claude_message_count(path: &Path) -> usize {
-    let Ok(content) = fs::read_to_string(path) else {
-        return 0;
-    };
-    content
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .flat_map(|value| claude_message_from_value(&value))
-        .filter(|message| message.kind == kind::TEXT)
-        .count()
 }
 
 fn parse_claude_session(path: &Path) -> Result<SessionDetail, Box<dyn Error>> {
@@ -9823,21 +9884,6 @@ fn looks_like_codex_metadata(text: &str) -> bool {
         || (text.len() > 40 && text.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
 }
 
-fn estimate_codex_message_count(path: &Path) -> usize {
-    let Ok(content) = fs::read_to_string(path) else {
-        return 0;
-    };
-    content
-        .lines()
-        .filter(|line| {
-            let Ok(value) = serde_json::from_str::<Value>(line) else {
-                return false;
-            };
-            codex_message_from_value(&value).is_some()
-        })
-        .count()
-}
-
 // `compact` collapses whitespace + truncates with an ellipsis. Used only
 // for session list title previews (where the platforms themselves
 // truncate at display time); message bodies are not truncated anywhere
@@ -10763,6 +10809,22 @@ mod tests {
             tool.text.contains("Error: InputValidationError"),
             "fence body should be `Error: ` + the message inline; got: {}",
             tool.text
+        );
+    }
+
+    #[test]
+    #[ignore = "manual diagnostic — times scan_sessions twice on the real HOME (cold vs warm cache)"]
+    fn scan_sessions_timing_cold_vs_warm() {
+        let t0 = std::time::Instant::now();
+        let first = scan_sessions().expect("scan should succeed");
+        let cold = t0.elapsed();
+        let t1 = std::time::Instant::now();
+        let second = scan_sessions().expect("scan should succeed");
+        let warm = t1.elapsed();
+        println!(
+            "cold: {cold:?} ({} records)  warm: {warm:?} ({} records)",
+            first.records.len(),
+            second.records.len()
         );
     }
 
@@ -14913,7 +14975,8 @@ mod tests {
             r#"{"timestamp":"2026-05-29T10:00:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20000,"cached_input_tokens":8000,"output_tokens":500,"reasoning_output_tokens":120,"total_tokens":28620}}}}"#,
         ];
         fs::write(&path, lines.join("\n")).unwrap();
-        let (tokens, model, daily) = extract_codex_tokens_from_rollout(&path);
+        let extract = codex_scan_extract(&path);
+        let (tokens, model, daily) = (extract.tokens, extract.model, extract.daily_tokens);
         let t = tokens.expect("scan-time extractor should find token_count event");
         assert_eq!(t.input, 20000);
         assert_eq!(t.output, 500);
@@ -14949,7 +15012,7 @@ mod tests {
             r#"{"timestamp":"2026-05-30T12:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"output_tokens":150,"cached_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":450}}}}"#,
         ];
         fs::write(&path, lines.join("\n")).unwrap();
-        let (_, _, daily) = extract_codex_tokens_from_rollout(&path);
+        let daily = codex_scan_extract(&path).daily_tokens;
         let daily = daily.expect("daily breakdown should be populated");
         assert_eq!(daily.len(), 2);
         // The two date keys may not be strictly "2026-05-28" / "30"
@@ -14981,7 +15044,8 @@ mod tests {
             r#"{"message":{"role":"assistant","model":"<synthetic>"}}"#,
         ];
         fs::write(&path, lines.join("\n")).unwrap();
-        let (tokens, model, _daily) = extract_claude_tokens_from_jsonl(&path);
+        let extract = claude_scan_extract(&path);
+        let (tokens, model) = (extract.tokens, extract.model);
         let t = tokens.expect("scan-time extractor should find usage blocks");
         assert_eq!(t.input, 300);
         assert_eq!(t.output, 125);
@@ -15005,7 +15069,8 @@ mod tests {
             r#"{"timestamp":"2026-05-30T12:00:00Z","message":{"role":"assistant","model":"claude-opus-4-7","usage":{"input_tokens":400,"output_tokens":100,"cache_read_input_tokens":50}}}"#,
         ];
         fs::write(&path, lines.join("\n")).unwrap();
-        let (tokens, _, daily) = extract_claude_tokens_from_jsonl(&path);
+        let extract = claude_scan_extract(&path);
+        let (tokens, daily) = (extract.tokens, extract.daily_tokens);
         let t = tokens.unwrap();
         // Aggregate matches the previous behavior — sum across all msgs.
         assert_eq!(t.input, 700);
@@ -15027,38 +15092,114 @@ mod tests {
     }
 
     #[test]
-    fn cached_token_extract_reuses_result_for_same_mtime() {
+    fn claude_scan_extract_counts_visible_messages() {
+        // The visible message count now comes from the same streamed
+        // pass as token extraction (it used to be a separate uncached
+        // full-file parse). Count = messages of kind TEXT, exactly as
+        // the detail path's `visible_message_count`.
+        let dir = TestDir::new("claude-scan-count");
+        let path = dir.path().join("session.jsonl");
+        let lines = [
+            r#"{"type":"user","sessionId":"s","cwd":"/w","timestamp":"2026-05-29T10:00:00Z","message":{"role":"user","content":"hello"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-05-29T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"hi there"}],"usage":{"input_tokens":10,"output_tokens":5}}}"#,
+            // tool_use is kind=tool, not TEXT — must not count.
+            r#"{"type":"assistant","timestamp":"2026-05-29T10:00:02Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
+        ];
+        fs::write(&path, lines.join("\n")).unwrap();
+        let extract = claude_scan_extract(&path);
+        assert_eq!(extract.message_count, 2);
+        let tokens = extract.tokens.expect("usage block should be picked up");
+        assert_eq!(tokens.input, 10);
+        assert_eq!(tokens.output, 5);
+    }
+
+    #[test]
+    fn codex_scan_extract_counts_visible_messages() {
+        // Same single-pass rule for Codex rollouts: count every record
+        // `codex_message_from_value` surfaces, alongside token totals.
+        let dir = TestDir::new("codex-scan-count");
+        let path = dir.path().join("rollout.jsonl");
+        let lines = [
+            r#"{"type":"session_meta","payload":{"id":"x","cwd":"/w","model":"gpt-5"}}"#,
+            r#"{"timestamp":"2026-05-29T10:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"hello"}}"#,
+            r#"{"timestamp":"2026-05-29T10:00:01Z","type":"event_msg","payload":{"type":"agent_message","message":"hi there"}}"#,
+            r#"{"timestamp":"2026-05-29T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":50,"cached_input_tokens":0,"reasoning_output_tokens":0,"total_tokens":150}}}}"#,
+        ];
+        fs::write(&path, lines.join("\n")).unwrap();
+        let extract = codex_scan_extract(&path);
+        assert_eq!(extract.message_count, 2);
+        let tokens = extract
+            .tokens
+            .expect("token_count event should be picked up");
+        assert_eq!(tokens.input, 100);
+    }
+
+    #[test]
+    fn cached_scan_extract_reuses_result_for_same_mtime() {
         // Verify the cache short-circuits the extractor: pass a closure
         // that increments a counter, call it twice with the same path,
-        // assert the counter is 1.
+        // assert the counter is 1 and the cached bundle (including
+        // message_count) round-trips intact.
         use std::sync::atomic::{AtomicUsize, Ordering};
         let dir = TestDir::new("scan-token-cache");
         let path = dir.path().join("session.jsonl");
         fs::write(&path, "irrelevant").unwrap();
         let calls = AtomicUsize::new(0);
-        let extract = |_: &Path| -> TokenExtraction {
+        let extract = |_: &Path| -> ScanExtract {
             calls.fetch_add(1, Ordering::SeqCst);
-            (
-                Some(TokenStats {
+            ScanExtract {
+                tokens: Some(TokenStats {
                     input: 1,
                     output: 1,
                     cached: 0,
                     reasoning: 0,
                     total: 2,
                 }),
-                None,
-                None,
-            )
+                model: None,
+                daily_tokens: None,
+                message_count: 7,
+            }
         };
         // First call: cache miss → extractor runs.
-        let _ = cached_token_extract(&path, extract);
+        let first = cached_scan_extract(&path, extract);
+        assert_eq!(first.message_count, 7);
         // Second call with the SAME mtime: cache hit → extractor must
         // NOT re-run. (Closure is move'd, so spin a fresh one that we
         // expect never to fire.)
-        let extract_should_skip = |_: &Path| -> TokenExtraction {
+        let extract_should_skip = |_: &Path| -> ScanExtract {
             panic!("cache hit should bypass extractor");
         };
-        let _ = cached_token_extract(&path, extract_should_skip);
+        let second = cached_scan_extract(&path, extract_should_skip);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(second.message_count, 7);
+    }
+
+    #[test]
+    fn evict_stale_scan_cache_drops_deleted_files_keeps_live_ones() {
+        // Seed the cache with one live file and one file that gets
+        // deleted; eviction must drop only the deleted one.
+        let dir = TestDir::new("scan-cache-evict");
+        let live = dir.path().join("live.jsonl");
+        let doomed = dir.path().join("doomed.jsonl");
+        fs::write(&live, "x").unwrap();
+        fs::write(&doomed, "x").unwrap();
+        let seed = |_: &Path| -> ScanExtract {
+            ScanExtract {
+                message_count: 1,
+                ..ScanExtract::default()
+            }
+        };
+        let _ = cached_scan_extract(&live, seed);
+        let _ = cached_scan_extract(&doomed, seed);
+        fs::remove_file(&doomed).unwrap();
+
+        evict_stale_scan_cache();
+
+        let cache = SCAN_EXTRACT_CACHE.lock().unwrap();
+        assert!(cache.contains_key(&live), "live file entry must survive");
+        assert!(
+            !cache.contains_key(&doomed),
+            "deleted file entry must be evicted"
+        );
     }
 }
