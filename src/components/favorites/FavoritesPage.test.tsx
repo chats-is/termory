@@ -9,7 +9,10 @@ import {
 } from "@testing-library/react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { FavoritesPage } from "./FavoritesPage";
+import { copyToClipboard } from "@/lib/clipboard";
 import type { AppSession, Favorite, SessionMessage } from "../../types";
+
+vi.mock("@/lib/clipboard", () => ({ copyToClipboard: vi.fn() }));
 
 /** FavoritesPage's detail-header action buttons are wrapped in shadcn
  * Tooltip; Radix throws without a TooltipProvider in the tree (main.tsx
@@ -283,5 +286,22 @@ describe("FavoritesPage — message rendering", () => {
     expect(heading.tagName).toBe("H2");
     const bold = within(detail).getByText(/detail-bold-marker/);
     expect(bold.tagName).toBe("STRONG");
+  });
+
+  it("copies the snapshot's message text via the per-message copy button", () => {
+    const fav = mkFavorite({
+      message: mkMessage({ text: "snapshot body to copy" })
+    });
+    render(
+      <FavoritesPage
+        favorites={[fav]}
+        sessions={[]}
+        onOpenSource={() => {}}
+        onRemove={() => {}}
+      />
+    );
+    const detail = document.querySelector("section") as HTMLElement;
+    fireEvent.click(within(detail).getByRole("button", { name: "Copy" }));
+    expect(copyToClipboard).toHaveBeenCalledWith("snapshot body to copy");
   });
 });

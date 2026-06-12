@@ -9,7 +9,10 @@ import {
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { MessageList } from "./MessageList";
 import { favoriteKey } from "../lib/favorites";
+import { copyToClipboard } from "@/lib/clipboard";
 import type { AppSession, SessionMessage } from "../types";
+
+vi.mock("@/lib/clipboard", () => ({ copyToClipboard: vi.fn() }));
 
 /** Star buttons are wrapped in shadcn Tooltip; Radix throws without a
  * TooltipProvider in the tree (main.tsx mounts one at the root). */
@@ -177,6 +180,43 @@ describe("MessageList — star button state + toggle", () => {
     fireEvent.click(star);
     expect(onToggle).toHaveBeenCalledTimes(1);
     // The outer onClick should NOT fire — stopPropagation is used.
+    expect(onArticleClick).not.toHaveBeenCalled();
+  });
+});
+
+describe("MessageList — per-message copy button", () => {
+  it("renders one copy button per message even without the favorites prop", () => {
+    render(
+      <MessageList messages={[mkMessage(), mkMessage({ role: "user" })]} />
+    );
+    expect(screen.getAllByRole("button", { name: "Copy" })).toHaveLength(2);
+  });
+
+  it("copies the clicked message's text and flips to the copied state", async () => {
+    const messages = [
+      mkMessage({ text: "first body" }),
+      mkMessage({ text: "second body" })
+    ];
+    render(<MessageList messages={messages} />);
+    const buttons = screen.getAllByRole("button", { name: "Copy" });
+    fireEvent.click(buttons[1]);
+    expect(copyToClipboard).toHaveBeenCalledWith("second body");
+    // After the (mocked) clipboard write resolves, the button shows
+    // the transient confirmation label.
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeTruthy();
+  });
+
+  it("stops click propagation so the surrounding row isn't activated", () => {
+    const onArticleClick = vi.fn();
+    const { container } = render(
+      <div onClick={onArticleClick}>
+        <MessageList messages={[mkMessage()]} />
+      </div>
+    );
+    const copy = container.querySelector(
+      "button[aria-label='Copy']"
+    ) as HTMLButtonElement;
+    fireEvent.click(copy);
     expect(onArticleClick).not.toHaveBeenCalled();
   });
 });

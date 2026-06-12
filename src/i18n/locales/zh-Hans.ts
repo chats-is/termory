@@ -36,6 +36,7 @@ export const zhHans: Record<MessageKey, string> = {
   "favorites.remove": "取消收藏",
 
   "common.copy": "复制",
+  "common.copied": "已复制",
   "time.justNow": "刚刚",
   "time.secondsAgo": "{n} 秒前",
   "time.minutesAgo": "{n} 分钟前",

@@ -4,6 +4,7 @@ import { BrandIcon } from "@/components/BrandIcon";
 import { EmptyState } from "@/components/EmptyState";
 import { ListItemMenu } from "@/components/ListItemMenu";
 import { MessageBody } from "@/components/MessageBody";
+import { MessageCopyButton } from "@/components/MessageCopyButton";
 import {
   Tooltip,
   TooltipContent,
@@ -224,6 +225,8 @@ export function FavoritesPage({
               <span className="text-xs font-medium text-muted-foreground lowercase tabular-nums">
                 {selected.message.role || "event"}
               </span>
+              <span className="flex-1" />
+              <MessageCopyButton text={selected.message.text} />
             </header>
             <MessageBody
               text={selected.message.text}

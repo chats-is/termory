@@ -2,6 +2,7 @@ import React from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Star } from "lucide-react";
 import { MessageBody } from "@/components/MessageBody";
+import { MessageCopyButton } from "@/components/MessageCopyButton";
 import {
   Tooltip,
   TooltipContent,
@@ -119,6 +120,7 @@ export function MessageList({
                   {message.role || "event"}
                 </span>
                 <span className="flex-1" />
+                <MessageCopyButton text={message.text} />
                 {favorites && (
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -132,7 +134,7 @@ export function MessageList({
                           isFavorited ? t("favorites.remove") : t("favorites.add")
                         }
                         className={cn(
-                          "p-1 -mr-1 rounded transition-colors",
+                          "p-1 rounded transition-colors",
                           isFavorited
                             ? "text-amber-500 hover:text-amber-600"
                             : "text-muted-foreground/40 hover:text-foreground"

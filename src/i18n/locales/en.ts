@@ -42,6 +42,7 @@ export const en = {
 
   // Common
   "common.copy": "Copy",
+  "common.copied": "Copied",
   "time.justNow": "just now",
   "time.secondsAgo": "{n}s ago",
   "time.minutesAgo": "{n}m ago",

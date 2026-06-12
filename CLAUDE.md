@@ -958,6 +958,7 @@ Termory uses **shadcn `Tooltip`** (Radix-backed, mounted via `TooltipProvider` a
 | Records detail "Open in Finder" | shadcn `Tooltip` |
 | `CopyMenu` trigger | shadcn `Tooltip` (suppressed while menu open via `open={menuOpen ? false : undefined}`) |
 | `MessageList` star button | shadcn `Tooltip` (dynamic label: Add / Remove from favorites) |
+| Per-message copy button (`MessageCopyButton` — every `MessageList` row + the Favorites detail message header; copies the message's raw markdown, 1.2s ✓ confirmation) | shadcn `Tooltip` (dynamic label: Copy / Copied) |
 | Favorites detail "Open original session" + "Remove favorite" | shadcn `Tooltip` |
 | Stats header compact-number chips (e.g. "1.2B tokens") | shadcn `Tooltip` showing `formatFullNumber(...)` |
 
