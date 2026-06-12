@@ -64,6 +64,10 @@ The in-app updater (**Settings → Check for updates**) reads the signed
 later**; earlier builds must be updated manually once.
 MD
 
+# Full commit list (not just a compare link) so the release page shows the
+# actual records: linked short hash + subject, newest first.
 if [ -n "$PREV" ]; then
-  printf '\n**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$REPO" "$PREV" "$TAG"
+  printf '\n### 📜 Full Changelog\n'
+  git log "$RANGE" --no-merges --pretty="- [\`%h\`](https://github.com/$REPO/commit/%H) %s"
+  printf '\n**Compare**: https://github.com/%s/compare/%s...%s\n' "$REPO" "$PREV" "$TAG"
 fi
