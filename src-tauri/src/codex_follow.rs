@@ -56,8 +56,6 @@ pub struct RecentCodexProject {
 pub struct FollowResult {
     /// How many thread rows were re-tagged.
     pub moved: u64,
-    /// Absolute path of the `state_5.sqlite` backup that was taken first.
-    pub backup_path: String,
 }
 
 fn home() -> Result<PathBuf, Box<dyn Error>> {
@@ -137,34 +135,17 @@ struct Candidate {
 }
 
 /// Make the selected projects' live sessions follow the provider switch so
-/// `codex resume` lists them under `target_provider_id`.
-///
-/// CRITICAL: the `threads` table is only a CACHE — Codex rebuilds each row's
-/// `model_provider` from the rollout JSONL's first-line `session_meta`
-/// (`state/src/extract.rs` `apply_session_meta_from_item`, upsert with no
-/// COALESCE guard at `runtime/threads.rs:754`) on startup backfill / resume
-/// reconcile. So editing the table alone is reverted the moment Codex runs.
-/// The authoritative source is the rollout file, so we rewrite its first-line
-/// `payload.model_provider` (durable) AND update the table row (immediate
-/// visibility, before the next backfill re-derives the same value).
+/// `codex resume` lists them under `target_provider_id`. See the module header
+/// for WHY both the rollout file and the table are rewritten.
 ///
 /// Safety: backs up the DB first, opens read-write with a busy timeout, and
 /// fails fast (without writing) when Codex holds the DB lock.
-///
-/// No per-session bookkeeping is kept: the official bucket is always `openai`
-/// and Termory's custom bucket is always `termory`, so the fold target is fully
-/// determined by switch direction. Reversal is the symmetric switch-back (fold
-/// to the other fixed target) — same model as Claude project migrate, which
-/// also keeps no journal.
 pub fn follow_projects(
     projects: &[String],
     target_provider_id: &str,
 ) -> Result<FollowResult, Box<dyn Error>> {
     if projects.is_empty() {
-        return Ok(FollowResult {
-            moved: 0,
-            backup_path: String::new(),
-        });
+        return Ok(FollowResult { moved: 0 });
     }
     if target_provider_id.is_empty() {
         return Err("target provider id is empty".into());
@@ -174,11 +155,11 @@ pub fn follow_projects(
         return Err("Codex state database not found".into());
     }
 
-    // 1. Back up the whole DB before touching it.
-    let backup_path = backup_db(&path)?;
-
-    // 2. Open RW with a short busy timeout so a running Codex surfaces as a
-    //    clean "locked" error instead of a panic or partial write.
+    // Open RW with a short busy timeout so a running Codex surfaces as a clean
+    // "locked" error instead of a panic or partial write. No DB backup is taken:
+    // the table is a self-healing cache (Codex rebuilds it from the authoritative
+    // rollout files), so snapshotting it protects nothing — reversal is the
+    // symmetric switch-back.
     let conn = Connection::open_with_flags(
         &path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
@@ -215,10 +196,7 @@ pub fn follow_projects(
         Ok(succeeded_ids.len() as u64)
     })();
     match result {
-        Ok(moved) => Ok(FollowResult {
-            moved,
-            backup_path: backup_path.to_string_lossy().to_string(),
-        }),
+        Ok(moved) => Ok(FollowResult { moved }),
         Err(err) => Err(map_locked(err)),
     }
 }
@@ -340,22 +318,6 @@ fn rewrite_rollout_provider(path: &Path, target: &str) -> Result<bool, Box<dyn E
         }
     }
     Ok(true)
-}
-
-/// Copy the `state_5.sqlite` main file to a timestamped backup next to it as a
-/// safety net before the table update. (A live WAL is not copied — the backup
-/// is best-effort; the durable record of what changed is the per-thread
-/// originals in `codex-follow.json`.) Returns the backup file path.
-fn backup_db(path: &Path) -> Result<PathBuf, Box<dyn Error>> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let mut name = path.file_name().ok_or("invalid db path")?.to_os_string();
-    name.push(format!(".termory-backup.{nanos}"));
-    let backup = path.with_file_name(name);
-    std::fs::copy(path, &backup)?;
-    Ok(backup)
 }
 
 /// Turn a rusqlite "database is locked / busy" error into a friendly message

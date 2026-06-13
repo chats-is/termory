@@ -23,7 +23,7 @@ export type RecentCodexProject = {
   providers: string[];
 };
 
-type FollowResult = { moved: number; backup_path: string };
+type FollowResult = { moved: number };
 
 export type CodexFollowTarget = {
   /** model_provider id the selected projects' sessions should follow to. */
@@ -50,8 +50,9 @@ function basename(path: string): string {
  * Switch-time picker: after Codex is switched to a new provider, let the user
  * choose which recent projects' sessions should "follow" the switch — i.e.
  * have their model_provider re-tagged so `codex resume` lists them under the
- * now-active provider. Projects that already have sessions only on the target
- * provider are shown but unchecked (nothing to move).
+ * now-active provider. The caller (`maybePromptThenActivate`) already filters
+ * to projects with at least one off-target session, so every listed project
+ * has something to move; all rows start unchecked.
  */
 export function CodexFollowDialog({
   target,
@@ -152,9 +153,6 @@ export function CodexFollowDialog({
             <ul className="flex flex-col gap-1">
               {projects.map((p) => {
                 const checked = selected.has(p.project);
-                const movable = p.providers.some(
-                  (id) => id !== target?.providerId
-                );
                 return (
                   <li key={p.project}>
                     <button
@@ -184,11 +182,9 @@ export function CodexFollowDialog({
                         </span>
                       </span>
                       <span className="shrink-0 text-xs text-muted-foreground">
-                        {movable
-                          ? t("providers.followCount", {
-                              count: String(p.session_count)
-                            })
-                          : t("providers.followAlready")}
+                        {t("providers.followCount", {
+                          count: String(p.session_count)
+                        })}
                       </span>
                     </button>
                   </li>

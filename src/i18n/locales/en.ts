@@ -157,7 +157,6 @@ export const en = {
     "Codex lists resume history per provider, so after activating {label} this project's earlier sessions won't show in codex resume. Pick which recent projects' sessions to keep so codex resume still finds them.",
   "providers.followEmpty": "No recent Codex projects.",
   "providers.followCount": "{count} sessions",
-  "providers.followAlready": "Already here",
   "providers.followSkip": "Skip",
   "providers.followApply": "Activate",
   "providers.followDone": "Kept {count} sessions.",

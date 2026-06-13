@@ -146,7 +146,6 @@ export const zhHans: Record<MessageKey, string> = {
     "Codex 的 resume 历史按供应商分桶，激活 {label} 后这个项目之前的会话不会出现在 codex resume 里。选择要保留哪些项目的会话，这样 codex resume 仍能找到它们。",
   "providers.followEmpty": "没有最近的 Codex 项目。",
   "providers.followCount": "{count} 个会话",
-  "providers.followAlready": "已在此处",
   "providers.followSkip": "跳过",
   "providers.followApply": "激活",
   "providers.followDone": "已保留 {count} 个会话。",
