@@ -32,6 +32,11 @@ import { EmptyState } from "@/components/EmptyState";
 import { useT } from "@/i18n";
 import { ProviderCard } from "./ProviderCard";
 import { ProviderOfficialCard } from "./ProviderOfficialCard";
+import {
+  CodexFollowDialog,
+  type CodexFollowTarget,
+  type RecentCodexProject
+} from "./CodexFollowDialog";
 
 const GatewaysPage = React.lazy(() =>
   import("./GatewaysPage").then((m) => ({ default: m.GatewaysPage }))
@@ -53,6 +58,11 @@ const InstallGuide = React.lazy(() =>
 const ProviderEditor = React.lazy(() =>
   import("./ProviderEditor").then((m) => ({ default: m.ProviderEditor }))
 );
+
+// Stable Codex model_provider ids: Termory writes "termory" for any custom
+// provider, and Official is the built-in "openai" bucket.
+const CODEX_CUSTOM_PROVIDER_ID = "termory";
+const CODEX_OFFICIAL_PROVIDER_ID = "openai";
 
 // Module-level cache for CLI detection results so the OpenCode tab
 // doesn't flash "Official → InstallGuide" every time the user
@@ -203,6 +213,10 @@ export function ProvidersPage({
   const [toggling, setToggling] = React.useState<string | null>(null);
   const [testing, setTesting] = React.useState<string | null>(null);
   const [settingDefault, setSettingDefault] = React.useState<string | null>(null);
+  // When set, the switch-time Codex "bring sessions along?" picker is open.
+  // The prompt appears BEFORE activation; `activate` runs only after the user
+  // decides (bring-along moves the selected projects first, then activates).
+  const [followTarget, setFollowTarget] = React.useState<CodexFollowTarget | null>(null);
   const [rechecking, setRechecking] = React.useState(false);
 
   // Official-account quota (5h / weekly windows), per CLI. Seeded from
@@ -579,8 +593,10 @@ export function ProvidersPage({
   );
 
   // Activate a gateway binding's synthesized provider via the normal path.
-  const activateGateway = async (synth: Provider) => {
-    if (!(await ensureCliInstalled(synth.app))) return;
+  // Returns true on success (the Codex follow dialog migrates only after a
+  // landed activation).
+  const performActivateGateway = async (synth: Provider): Promise<boolean> => {
+    if (!(await ensureCliInstalled(synth.app))) return false;
     setSettingDefault(synth.id);
     try {
       await invoke("activate_provider", {
@@ -593,11 +609,28 @@ export function ProvidersPage({
       markActive(synth.app, synth.id);
       toast.success(t("toast.nowInUse", { name: synth.name || t("providers.unnamed") }));
       await refreshActive();
+      return true;
     } catch (err) {
       toast.error(String(err));
+      return false;
     } finally {
       setSettingDefault(null);
     }
+  };
+
+  // A Codex gateway binding activates into the same custom "termory" bucket as
+  // a standalone custom provider, so an official→gateway switch hides resume
+  // history too — prompt first, same as setAsDefault.
+  const activateGateway = async (synth: Provider) => {
+    if (synth.app === "codex" && effectiveActiveId === null) {
+      await maybePromptThenActivate({
+        providerId: CODEX_CUSTOM_PROVIDER_ID,
+        label: synth.name || t("providers.unnamed"),
+        activate: () => performActivateGateway(synth)
+      });
+      return;
+    }
+    await performActivateGateway(synth);
   };
 
   const toggleGatewayEnabled = async (synth: Provider) => {
@@ -763,9 +796,13 @@ export function ProvidersPage({
     }
   };
 
-  // Universal "Set as default" — promotes a provider to "In use".
-  const setAsDefault = async (target: Provider) => {
-    if (!(await ensureCliInstalled(target.app))) return;
+  // The actual activation — runs AFTER the Codex follow prompt is resolved
+  // (or immediately for non-Codex CLIs).
+  // Returns true on success so the Codex follow dialog only migrates after the
+  // activation actually landed (migrating to a bucket that never activated
+  // would hide the sessions instead of revealing them).
+  const performSetAsDefault = async (target: Provider): Promise<boolean> => {
+    if (!(await ensureCliInstalled(target.app))) return false;
     setSettingDefault(target.id);
     try {
       // OpenCode: ensure the slot exists first (auto-enable) — the user can
@@ -787,17 +824,66 @@ export function ProvidersPage({
       markActive(target.app, target.id);
       toast.success(t("toast.nowInUse", { name: target.name || t("providers.unnamed") }));
       await refreshActive();
+      return true;
     } catch (err) {
       toast.error(String(err));
+      return false;
     } finally {
       setSettingDefault(null);
     }
   };
 
-  // Official "Set as default" — clears Termory writes from the CLI's
-  // live config so it falls back to its native auth flow.
-  const setOfficialAsDefault = async () => {
-    if (!(await ensureCliInstalled(app))) return;
+  // Decide whether the Codex follow prompt is warranted, then either prompt or
+  // activate directly. Only an official↔custom transition changes the
+  // model_provider bucket (all custom providers share the "termory" id), so
+  // only those transitions can hide resume history. We then keep only the
+  // recent projects whose sessions are NOT already on the target bucket — a
+  // project already tagged with the target provider has nothing to migrate. If
+  // none remain, activate directly without prompting. Order on confirm:
+  // activate first, then migrate (handled in the dialog).
+  const maybePromptThenActivate = async (
+    base: Omit<CodexFollowTarget, "projects">
+  ) => {
+    let projects: RecentCodexProject[] = [];
+    try {
+      // limit 0 = no cap — return every project, newest first; the dialog
+      // scrolls. So a project the user wants is never pushed out by a hard cap.
+      projects = await invoke<RecentCodexProject[]>("recent_codex_projects", {
+        limit: 0
+      });
+    } catch {
+      projects = [];
+    }
+    // Only projects with at least one session whose provider differs from the
+    // target are migration candidates.
+    const candidates = projects.filter((p) =>
+      p.providers.some((id) => id !== base.providerId)
+    );
+    if (candidates.length === 0) {
+      await base.activate();
+      return;
+    }
+    setFollowTarget({ ...base, projects: candidates });
+  };
+
+  // Universal "Set as default" — promotes a provider to "In use". For a Codex
+  // official→custom switch we prompt first (see maybePromptThenActivate).
+  const setAsDefault = async (target: Provider) => {
+    if (target.app === "codex" && effectiveActiveId === null) {
+      await maybePromptThenActivate({
+        providerId: CODEX_CUSTOM_PROVIDER_ID,
+        label: target.name || t("providers.unnamed"),
+        activate: () => performSetAsDefault(target)
+      });
+      return;
+    }
+    await performSetAsDefault(target);
+  };
+
+  // The actual Official switch — clears Termory writes so the CLI falls back
+  // to its native auth flow. Runs after the Codex prompt resolves.
+  const performOfficial = async (): Promise<boolean> => {
+    if (!(await ensureCliInstalled(app))) return false;
     setSettingDefault("__official__");
     try {
       await invoke("deactivate_provider", {
@@ -814,11 +900,28 @@ export function ProvidersPage({
       markActive(app, null);
       toast.success(t("toast.officialInUse", { app: CLI_APP_LABEL[app] }));
       await refreshActive();
+      return true;
     } catch (err) {
       toast.error(String(err));
+      return false;
     } finally {
       setSettingDefault(null);
     }
+  };
+
+  // Official "Set as default". For a Codex custom→official switch we prompt
+  // first — switching back to the "openai" bucket can hide sessions that were
+  // moved to a custom provider, so offer to bring them back.
+  const setOfficialAsDefault = async () => {
+    if (app === "codex" && effectiveActiveId !== null) {
+      await maybePromptThenActivate({
+        providerId: CODEX_OFFICIAL_PROVIDER_ID,
+        label: t("providers.official"),
+        activate: () => performOfficial()
+      });
+      return;
+    }
+    await performOfficial();
   };
 
   const testOne = async (target: Provider) => {
@@ -1025,6 +1128,11 @@ export function ProvidersPage({
           />
         </React.Suspense>
       )}
+
+      <CodexFollowDialog
+        target={followTarget}
+        onClose={() => setFollowTarget(null)}
+      />
     </div>
   );
 }

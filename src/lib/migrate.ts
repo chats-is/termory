@@ -66,7 +66,7 @@ export async function runClaudeMigration(
   const baseMsg = registered
     ? t("menu.migrateConfirm", { to: picked })
     : t("menu.migrateConfirmUnregistered", { to: picked });
-  const confirmed = await ask(`${baseMsg}\n\n${t("menu.exitCliHint")}`, {
+  const confirmed = await ask(`${baseMsg}\n\n${t("menu.exitCliHint", { app: "Claude Code" })}`, {
     title: t("menu.migrate"),
     kind: "warning",
     okLabel: t("menu.migrate"),
@@ -119,8 +119,10 @@ export async function runRecordDelete(
     : command.endsWith("_session")
       ? "menu.deleteSessionConfirm"
       : "menu.deleteMemoryConfirm";
+  // Name the CLI that actually owns this record so the hint matches the action.
+  const app = command.startsWith("delete_gemini") ? "Gemini" : "Claude Code";
   const confirmed = await ask(
-    `${t(confirmKey, { name })}\n\n${t("menu.exitCliHint")}`,
+    `${t(confirmKey, { name })}\n\n${t("menu.exitCliHint", { app })}`,
     {
       title: t("menu.delete"),
       kind: "warning",

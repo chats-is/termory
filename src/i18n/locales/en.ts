@@ -145,12 +145,22 @@ export const en = {
   "menu.deleteProjectConfirm": "Delete all saved sessions + memory for this project?\n\nOnly the stored history is removed — your project folder is NOT deleted. Can't be undone.",
   "menu.deleteSessionConfirm": "Delete this saved session record? Can't be undone.",
   "menu.deleteMemoryConfirm": "Delete this memory file? Can't be undone.",
-  "menu.exitCliHint": "⚠️ Quit the running CLI for this project first.",
+  "menu.exitCliHint":
+    "⚠️ This changes official data — quitting a running {app} first is recommended before you continue.",
   "menu.deleteSuccess": "Deleted: {name}",
   "menu.deleteError": "Delete failed: {error}",
 
   // Providers
   "providers.official": "Official",
+  "providers.followTitle": "Keep earlier sessions?",
+  "providers.followDesc":
+    "Codex lists resume history per provider, so after activating {label} this project's earlier sessions won't show in codex resume. Pick which recent projects' sessions to keep so codex resume still finds them.",
+  "providers.followEmpty": "No recent Codex projects.",
+  "providers.followCount": "{count} sessions",
+  "providers.followAlready": "Already here",
+  "providers.followSkip": "Skip",
+  "providers.followApply": "Activate",
+  "providers.followDone": "Kept {count} sessions.",
   "providers.activate": "Activate",
   "providers.activating": "Activating…",
   "providers.setDefault": "Set as default",

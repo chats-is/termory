@@ -1,3 +1,4 @@
+mod codex_follow;
 mod config;
 mod providers;
 mod quota;
@@ -332,6 +333,35 @@ async fn activate_provider(
     Ok(())
 }
 
+/// List the most recent distinct Codex project cwds (read-only) for the
+/// switch-time "follow sessions" picker. Newest first, capped at `limit`.
+#[tauri::command]
+async fn recent_codex_projects(
+    limit: usize,
+) -> Result<Vec<codex_follow::RecentCodexProject>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        codex_follow::recent_projects(limit).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+/// Re-tag the selected Codex projects' live threads to `target_provider_id`
+/// so `codex resume` lists them under the now-active provider. Backs up
+/// state_5.sqlite first, records originals for reversibility, and refuses to
+/// write while Codex holds the DB lock.
+#[tauri::command]
+async fn follow_codex_sessions(
+    projects: Vec<String>,
+    target_provider_id: String,
+) -> Result<codex_follow::FollowResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        codex_follow::follow_projects(&projects, &target_provider_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
 /// Promote a Termory OpenCode provider to OpenCode's startup default
 /// by writing `model = "<termory-id>/<primary>"` at the top of
 /// opencode.json. The provider must already be activated.
@@ -590,6 +620,8 @@ pub fn run() {
             deactivate_provider,
             delete_provider,
             set_opencode_default_provider,
+            recent_codex_projects,
+            follow_codex_sessions,
             test_provider_api,
             fetch_subscription_quota,
             fetch_provider_models,
