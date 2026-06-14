@@ -96,6 +96,7 @@ export const en = {
   "records.pane.sessions": "Sessions",
   "records.pane.memories": "Memories",
   "records.pane.skills": "Skills",
+  "records.archived": "Archived",
   "records.noSessions": "No sessions yet",
   "records.noSessionsDesc":
     "Termory scans Codex, Claude Code, Gemini, and OpenCode for chat history. None of those tools have recorded sessions here yet.",

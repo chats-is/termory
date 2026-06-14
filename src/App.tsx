@@ -5,6 +5,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { getVersion } from "@tauri-apps/api/app";
 import type { Update } from "@tauri-apps/plugin-updater";
 import {
+  Archive,
   BookOpen,
   Calendar,
   ChevronRight,
@@ -1116,7 +1117,12 @@ export function App() {
                             )}
                           >
                             <div className="flex items-baseline justify-between gap-2">
-                              <h2 className="text-base font-medium leading-snug line-clamp-2 flex-1 min-w-0">
+                              <h2
+                                className={cn(
+                                  "text-base font-medium leading-snug line-clamp-2 flex-1 min-w-0",
+                                  session.archived && !isActive && "text-muted-foreground"
+                                )}
+                              >
                                 {session.title}
                               </h2>
                               <span className="text-xs text-muted-foreground shrink-0">
@@ -1131,6 +1137,15 @@ export function App() {
                                 </span>
                               </span>
                               <span className="flex items-center gap-2 shrink-0">
+                                {session.archived && (
+                                  <span
+                                    className="flex items-center gap-1"
+                                    aria-label={t("records.archived")}
+                                  >
+                                    <Archive size={11} className="shrink-0" />
+                                    <span>{t("records.archived")}</span>
+                                  </span>
+                                )}
                                 <span className="flex items-center gap-1">
                                   <MessageSquare size={11} />
                                   <span className="tabular-nums">{session.message_count}</span>
@@ -1278,6 +1293,18 @@ export function App() {
                       </h2>
 
                       <div className="flex items-center gap-2 text-xs leading-none text-muted-foreground flex-wrap">
+                        {selected.archived && (
+                          <>
+                            <span
+                              className="inline-flex items-center gap-1"
+                              aria-label={t("records.archived")}
+                            >
+                              <Archive size={12} className="shrink-0" />
+                              {t("records.archived")}
+                            </span>
+                            <span className="text-border">·</span>
+                          </>
+                        )}
                         <span className="inline-flex items-center gap-1">
                           <Calendar size={12} className="shrink-0" />
                           {formatDate(selected.updated_at ?? selected.started_at)}

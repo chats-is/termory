@@ -94,6 +94,14 @@ pub struct AppSession {
     pub started_at: Option<String>,
     pub updated_at: Option<String>,
     pub message_count: usize,
+    /// True when the source CLI has archived this session. Only Codex
+    /// (`threads.archived = 1`) and OpenCode (`session.time_archived`
+    /// set) have a local archive flag; Claude / Gemini local history has
+    /// no archive concept, so this is always `false` for them. Termory
+    /// surfaces archived sessions (a history browser shows everything)
+    /// and the list card marks them with an "Archived" badge.
+    #[serde(default)]
+    pub archived: bool,
     pub preview: String,
     /// One-line content hint shown beneath the project on list cards.
     /// For sessions: the last (or first) user prompt, trimmed and
@@ -1184,10 +1192,13 @@ fn scan_codex_state_db(path: &Path) -> Result<Vec<AppSession>, Box<dyn Error>> {
     } else {
         ""
     };
+    // Include archived threads (`archived` not filtered) — Termory is a
+    // history browser and surfaces them with an "Archived" badge. The
+    // column is selected so the badge can be set per row.
     let sql = format!(
-        "select id, rollout_path, created_at, updated_at, cwd, title, first_user_message \
+        "select id, rollout_path, created_at, updated_at, cwd, title, first_user_message, archived \
          from threads \
-         where archived = 0{preview_clause} \
+         where 1 = 1{preview_clause} \
            and source in ('cli', 'vscode', 'atlas', 'chatgpt') \
          order by updated_at desc"
     );
@@ -1200,6 +1211,7 @@ fn scan_codex_state_db(path: &Path) -> Result<Vec<AppSession>, Box<dyn Error>> {
         let cwd: String = row.get(4)?;
         let title: String = row.get(5).unwrap_or_default();
         let first_user_message: String = row.get(6).unwrap_or_default();
+        let archived: bool = row.get::<_, i64>(7).unwrap_or(0) != 0;
         let display_title = codex_display_title(&title)
             .or_else(|| codex_display_title(&first_user_message))
             .unwrap_or_default();
@@ -1215,6 +1227,7 @@ fn scan_codex_state_db(path: &Path) -> Result<Vec<AppSession>, Box<dyn Error>> {
             started_at: normalize_time(created_at.to_string()),
             updated_at: normalize_time(updated_at.to_string()),
             message_count: extract.message_count,
+            archived,
             preview: String::new(),
             snippet,
             message_previews: Vec::new(),
@@ -1435,6 +1448,7 @@ fn scan_claude_projects(root: &Path) -> Result<Vec<AppSession>, Box<dyn Error>> 
                     started_at: lite.started_at,
                     updated_at: lite.updated_at,
                     message_count: extract.message_count,
+                    archived: false,
                     preview: String::new(),
                     snippet: lite.snippet,
                     message_previews: Vec::new(),
@@ -3138,6 +3152,7 @@ fn doc_session_from_file(path: &Path, project: &str, source: &str) -> Option<App
         started_at,
         updated_at,
         message_count: if body_is_empty { 0 } else { 1 },
+        archived: false,
         preview,
         snippet,
         message_previews: Vec::new(),
@@ -3258,6 +3273,7 @@ fn parse_doc_file(path: &Path, source: &str) -> Result<SessionDetail, Box<dyn Er
         started_at: started_at.clone(),
         updated_at: updated_at.clone(),
         message_count: 1,
+        archived: false,
         preview: description,
         snippet: snippet_line(&snippet_source),
         message_previews: Vec::new(),
@@ -5213,11 +5229,12 @@ fn codex_thread_from_state(id: &str) -> Result<AppSession, Box<dyn Error>> {
     };
     let path = home.join(".codex").join("state_5.sqlite");
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // Archived threads load too (the badge stays accurate in the detail
+    // header) — only the `archived = 0` list filter was for the picker.
     let mut stmt = conn.prepare(
-        "select id, rollout_path, created_at, updated_at, cwd, title, first_user_message \
+        "select id, rollout_path, created_at, updated_at, cwd, title, first_user_message, archived \
          from threads \
          where id = ?1 \
-           and archived = 0 \
            and source in ('cli', 'vscode', 'atlas', 'chatgpt')",
     )?;
     let session = stmt.query_row([id], |row| {
@@ -5228,6 +5245,7 @@ fn codex_thread_from_state(id: &str) -> Result<AppSession, Box<dyn Error>> {
         let cwd: String = row.get(4)?;
         let title: String = row.get(5).unwrap_or_default();
         let first_user_message: String = row.get(6).unwrap_or_default();
+        let archived: bool = row.get::<_, i64>(7).unwrap_or(0) != 0;
         let display_title = codex_display_title(&title)
             .or_else(|| codex_display_title(&first_user_message))
             .unwrap_or_default();
@@ -5241,6 +5259,7 @@ fn codex_thread_from_state(id: &str) -> Result<AppSession, Box<dyn Error>> {
             started_at: normalize_time(created_at.to_string()),
             updated_at: normalize_time(updated_at.to_string()),
             message_count: 0,
+            archived,
             preview: String::new(),
             snippet,
             message_previews: Vec::new(),
@@ -5267,19 +5286,30 @@ fn scan_opencode_db(path: &Path) -> Result<Vec<AppSession>, Box<dyn Error>> {
     }
     ensure_opencode_schema(&conn)?;
     let token_cols = opencode_token_columns(&conn)?;
+    // Include archived sessions (`time_archived` not filtered) — surfaced
+    // with an "Archived" badge. `time_archived` is selected (after the
+    // dynamic token columns) so the badge can be set per row. Sub-agent
+    // children (`parent_id` set) are still excluded.
     let mut stmt = conn.prepare(&format!(
-        "select id, directory, title, time_created, time_updated{} \
+        "select id, directory, title, time_created, time_updated{}, time_archived \
          from session \
-         where parent_id is null and time_archived is null \
+         where parent_id is null \
          order by time_updated desc, id desc",
         token_cols.select_suffix()
     ))?;
+    // `time_archived` is the last column: 5 fixed + token cols + model? + 1.
+    let archived_col = token_cols.model_col_index() + usize::from(token_cols.has_model);
     let rows = stmt.query_map([], |row| {
         let id: String = row.get(0)?;
         let project: String = row.get(1)?;
         let title: String = row.get(2)?;
         let created_raw: i64 = row.get(3)?;
         let updated_raw: i64 = row.get(4)?;
+        let archived: bool = row
+            .get::<_, Option<i64>>(archived_col)
+            .ok()
+            .flatten()
+            .is_some();
         let tokens = token_cols.read_from_row(row, 5);
         let model_raw: Option<String> = if token_cols.has_model {
             row.get(token_cols.model_col_index()).ok()
@@ -5303,6 +5333,7 @@ fn scan_opencode_db(path: &Path) -> Result<Vec<AppSession>, Box<dyn Error>> {
             started_at: normalize_time(created_raw.to_string()),
             updated_at: normalize_time(updated_raw.to_string()),
             message_count,
+            archived,
             preview: String::new(),
             snippet,
             message_previews: Vec::new(),
@@ -5346,12 +5377,15 @@ fn opencode_session_from_db(
     id: &str,
 ) -> Result<Option<AppSession>, Box<dyn Error>> {
     let token_cols = opencode_token_columns(conn)?;
+    // Archived sessions load too (badge stays accurate in the detail
+    // header) — the `time_archived is null` filter was only for the list.
+    let archived_col = token_cols.model_col_index() + usize::from(token_cols.has_model);
     let session = conn
         .query_row(
             &format!(
-                "select id, directory, title, time_created, time_updated{} \
+                "select id, directory, title, time_created, time_updated{}, time_archived \
                  from session \
-                 where id = ?1 and time_archived is null",
+                 where id = ?1",
                 token_cols.select_suffix()
             ),
             [id],
@@ -5361,6 +5395,11 @@ fn opencode_session_from_db(
                 let title: String = row.get(2)?;
                 let created_raw: i64 = row.get(3)?;
                 let updated_raw: i64 = row.get(4)?;
+                let archived: bool = row
+                    .get::<_, Option<i64>>(archived_col)
+                    .ok()
+                    .flatten()
+                    .is_some();
                 let tokens = token_cols.read_from_row(row, 5);
                 let model_raw: Option<String> = if token_cols.has_model {
                     row.get(token_cols.model_col_index()).ok()
@@ -5378,6 +5417,7 @@ fn opencode_session_from_db(
                     started_at: normalize_time(created_raw.to_string()),
                     updated_at: normalize_time(updated_raw.to_string()),
                     message_count: 0,
+                    archived,
                     preview: String::new(),
                     snippet,
                     message_previews: Vec::new(),
@@ -6909,6 +6949,7 @@ fn detail_from_messages(
             started_at,
             updated_at,
             message_count: messages.len(),
+            archived: false,
             preview: String::new(),
             snippet,
             message_previews: Vec::new(),
@@ -10299,6 +10340,7 @@ mod tests {
                     started_at: None,
                     updated_at: None,
                     message_count: 0,
+                    archived: false,
                     preview: String::new(),
                     snippet: String::new(),
                     message_previews: Vec::new(),
@@ -10335,6 +10377,7 @@ mod tests {
                     started_at: None,
                     updated_at: None,
                     message_count: 0,
+                    archived: false,
                     preview: String::new(),
                     snippet: String::new(),
                     message_previews: Vec::new(),
@@ -10371,6 +10414,7 @@ mod tests {
                     started_at: None,
                     updated_at: None,
                     message_count: 0,
+                    archived: false,
                     preview: String::new(),
                     snippet: String::new(),
                     message_previews: Vec::new(),
@@ -10420,6 +10464,7 @@ mod tests {
             started_at: None,
             updated_at: None,
             message_count: 0,
+            archived: false,
             preview: String::new(),
             snippet: String::new(),
             message_previews: Vec::new(),
@@ -10540,6 +10585,19 @@ mod tests {
             (),
         )
         .unwrap();
+        // Archived thread (archived = 1) — Termory surfaces it WITH a badge
+        // (history browser), unlike `codex resume` which hides it.
+        let rollout_arch = dir.path().join("rollout-archived.jsonl");
+        fs::write(
+            &rollout_arch,
+            r#"{"type":"session_meta","payload":{"id":"thread-archived","cwd":"/workspace/project"}}"#,
+        )
+        .unwrap();
+        conn.execute(
+            "insert into threads values ('thread-archived', ?1, 1714521600000, 1714521700000, 'cli', '/workspace/project', 'Archived thread', 'first', 'preview', 1)",
+            [rollout_arch.display().to_string()],
+        )
+        .unwrap();
 
         let sessions = scan_codex_state_db(&db).unwrap();
         // thread-1 (cli + non-empty preview) and thread-atlas (atlas) appear;
@@ -10558,6 +10616,12 @@ mod tests {
         assert_eq!(main.title, "Review backend changes");
         assert_eq!(main.project, "/workspace/project");
         assert_eq!(main.message_count, 2);
+        assert!(!main.archived, "a non-archived thread is not flagged");
+        let archived = sessions.iter().find(|s| s.id == "thread-archived").unwrap();
+        assert!(
+            archived.archived,
+            "archived = 1 threads are surfaced and flagged archived"
+        );
     }
 
     #[test]
@@ -12947,11 +13011,28 @@ mod tests {
         .unwrap();
 
         let sessions = scan_opencode_db(&db).unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].id, "ses_123");
-        assert_eq!(sessions[0].project, "/workspace/opencode");
-        assert_eq!(sessions[0].title, "Implement feature");
-        assert_eq!(sessions[0].message_count, 2);
+        // The live `ses_123` AND the archived top-level session appear
+        // (Termory surfaces archived history with a badge); the sub-agent
+        // `child` (parent_id set) is still excluded.
+        assert_eq!(sessions.len(), 2);
+        let live = sessions.iter().find(|s| s.id == "ses_123").unwrap();
+        assert_eq!(live.project, "/workspace/opencode");
+        assert_eq!(live.title, "Implement feature");
+        assert_eq!(live.message_count, 2);
+        assert!(!live.archived, "a live session is not archived");
+        let archived = sessions.iter().find(|s| s.id == "archived").unwrap();
+        assert!(
+            archived.archived,
+            "a session with time_archived set is flagged archived"
+        );
+        assert!(
+            !sessions.iter().any(|s| s.id == "child"),
+            "sub-agent children (parent_id set) stay excluded"
+        );
+
+        // Loading an archived session by id works and keeps the badge.
+        let archived_detail = parse_opencode_db_session(&db, "archived").unwrap();
+        assert!(archived_detail.session.archived);
 
         let detail = parse_opencode_db_session(&db, "ses_123").unwrap();
         assert_eq!(detail.messages.len(), 2);

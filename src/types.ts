@@ -43,6 +43,11 @@ export type AppSession = {
   started_at?: string | null;
   updated_at?: string | null;
   message_count: number;
+  /** True when the source CLI archived this session. Only Codex
+   * (`threads.archived`) and OpenCode (`session.time_archived`) have a
+   * local archive flag; always false for Claude / Gemini. Rendered as an
+   * "Archived" badge on the list card and detail header. */
+  archived?: boolean;
   preview: string;
   snippet?: string;
   message_previews: SessionMessage[];

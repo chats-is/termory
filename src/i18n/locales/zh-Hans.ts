@@ -88,6 +88,7 @@ export const zhHans: Record<MessageKey, string> = {
   "records.pane.sessions": "会话",
   "records.pane.memories": "记忆",
   "records.pane.skills": "技能",
+  "records.archived": "已归档",
   "records.noSessions": "还没有会话",
   "records.noSessionsDesc":
     "Termory 会扫描 Codex、Claude Code、Gemini 和 OpenCode 的聊天历史。这些工具目前还没有在此记录任何会话。",
