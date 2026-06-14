@@ -610,7 +610,7 @@ pub struct ProviderModel {
 impl Provider {
     /// The npm package OpenCode should load for this provider — the
     /// official `provider.<id>.npm` field. Empty/None falls back to the
-    /// OpenAI-compatible adapter (covers most third-party gateways).
+    /// OpenAI Responses adapter (`@ai-sdk/openai`).
     fn opencode_npm(&self) -> &str {
         self.npm
             .as_deref()
@@ -620,7 +620,7 @@ impl Provider {
     }
 }
 
-const OPENCODE_DEFAULT_NPM: &str = "@ai-sdk/openai-compatible";
+const OPENCODE_DEFAULT_NPM: &str = "@ai-sdk/openai";
 
 // ===================================================================
 // Gateway → Provider synthesis. Mirrors the frontend

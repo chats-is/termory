@@ -30,26 +30,26 @@ export const CLI_APP_SOURCE_BADGE: Record<CliApp, string> = {
 // OpenCode `provider.<id>.npm` options — the AI SDK package OpenCode
 // loads for the provider. `value` is the npm package written verbatim to
 // opencode.json (the official config field); `label`/`hint` are display
-// only. Default is the OpenAI-compatible adapter (covers most gateways).
+// only. Default is the OpenAI Responses adapter.
 export const OPENCODE_NPM_OPTIONS: {
   value: string;
   label: string;
   hint: string;
 }[] = [
   {
+    value: "@ai-sdk/openai",
+    label: "OpenAI (Responses) (default)",
+    hint: "OpenAI Responses API (/v1/responses) — api.openai.com or a gateway that implements it."
+  },
+  {
     value: "@ai-sdk/openai-compatible",
-    label: "OpenAI-compatible (default)",
+    label: "OpenAI-compatible",
     hint: "Generic OpenAI-shaped REST. Use for PackyCode, DMXAPI, OpenRouter, and most gateways."
   },
   {
     value: "@ai-sdk/anthropic",
     label: "Anthropic",
     hint: "Anthropic Claude API. Use for endpoints that mimic api.anthropic.com."
-  },
-  {
-    value: "@ai-sdk/openai",
-    label: "OpenAI (Responses)",
-    hint: "OpenAI Responses API (/v1/responses) — api.openai.com or a gateway that implements it."
   },
   {
     value: "@ai-sdk/google",
@@ -73,7 +73,7 @@ export const OPENCODE_NPM_OPTIONS: {
   }
 ];
 
-export const OPENCODE_DEFAULT_NPM = "@ai-sdk/openai-compatible";
+export const OPENCODE_DEFAULT_NPM = "@ai-sdk/openai";
 
 export const ACTIVE_STATE_REFRESH_EVENT = "termory:providers-refresh";
 

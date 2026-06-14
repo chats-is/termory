@@ -284,7 +284,7 @@ export function GatewayEditor({
       if (app === "opencode") {
         b.npm =
           d.npm.trim() ||
-          npmForProtocol(protocols[app][0] ?? "openai-compatible");
+          npmForProtocol(protocols[app][0] ?? "openai");
         const models = d.models
           .map((m) => ({ id: m.id.trim(), name: m.name.trim() }))
           .filter((m) => m.id);
@@ -459,8 +459,7 @@ export function GatewayEditor({
                 // stored.
                 const effectiveNpm =
                   app === "opencode"
-                    ? draft.npm ||
-                      npmForProtocol(allowed[0] ?? "openai-compatible")
+                    ? draft.npm || npmForProtocol(allowed[0] ?? "openai")
                     : "";
                 // One flat catalog for autocomplete — the gateway routes by
                 // model id, so candidates aren't split by protocol.

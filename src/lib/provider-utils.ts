@@ -217,14 +217,16 @@ export function protocolForNpm(npm: string): GatewayProtocol {
 /** Which protocols each CLI can bind to, given detected capabilities.
  * Claude→Anthropic, Codex→OpenAI **Responses** specifically, Gemini→Gemini;
  * OpenCode is flexible (npm SDK) so it lists every supported mode — both
- * OpenAI flavors when present. Empty list ⇒ that CLI can't bind. */
+ * OpenAI flavors when present. OpenAI **Responses** (`openai`) is listed
+ * before `openai-compatible` so it's OpenCode's default when the gateway
+ * supports it. Empty list ⇒ that CLI can't bind. */
 export function appProtocols(
   caps: GatewayCapabilities | undefined
 ): Record<CliApp, GatewayProtocol[]> {
   const opencode: GatewayProtocol[] = [];
   if (caps?.anthropic) opencode.push("anthropic");
-  if (caps?.openaiCompatible) opencode.push("openai-compatible");
   if (caps?.openai) opencode.push("openai");
+  if (caps?.openaiCompatible) opencode.push("openai-compatible");
   if (caps?.gemini) opencode.push("gemini");
   return {
     claude: caps?.anthropic ? ["anthropic"] : [],

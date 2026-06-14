@@ -189,7 +189,8 @@ describe("appProtocols", () => {
   it("Codex bindable only when the Responses (openai) route exists", () => {
     const p = appProtocols(caps({ openai: true, openaiCompatible: true }));
     expect(p.codex).toEqual(["openai"]);
-    expect(p.opencode).toEqual(["openai-compatible", "openai"]);
+    // OpenAI Responses is preferred over openai-compatible (default).
+    expect(p.opencode).toEqual(["openai", "openai-compatible"]);
   });
   it("undefined capabilities → nothing bindable", () => {
     const p = appProtocols(undefined);
