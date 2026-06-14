@@ -211,6 +211,46 @@ async fn delete_gemini_memory(project: String, rel: String) -> Result<(), String
         .map_err(|e| e.to_string())?
 }
 
+/// Permanently delete one Codex session by thread id (row + rollout file).
+#[tauri::command]
+async fn delete_codex_session(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::delete_codex_session(&id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Permanently delete every Codex session under a project cwd (rows + files).
+#[tauri::command]
+async fn delete_codex_project(project: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::delete_codex_project(&project))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Permanently delete one Codex auto-memory (.md under ~/.codex/memories/).
+#[tauri::command]
+async fn delete_codex_memory(rel: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::delete_codex_memory(&rel))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Permanently delete one OpenCode session by id (cascades to message/part).
+#[tauri::command]
+async fn delete_opencode_session(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::delete_opencode_session(&id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Permanently delete an OpenCode project (keyed by worktree; cascades).
+#[tauri::command]
+async fn delete_opencode_project(project: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::delete_opencode_project(&project))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Read-only: is `path` registered in Claude's `~/.claude.json`? After a Claude
 /// migration the frontend uses this to warn that the moved sessions won't show
 /// in `claude --resume` until the user opens Claude in the new dir once. Termory
@@ -611,6 +651,11 @@ pub fn run() {
             delete_gemini_project,
             delete_gemini_session,
             delete_gemini_memory,
+            delete_codex_session,
+            delete_codex_project,
+            delete_codex_memory,
+            delete_opencode_session,
+            delete_opencode_project,
             claude_project_registered,
             set_tray_labels,
             detect_cli_versions_cmd,

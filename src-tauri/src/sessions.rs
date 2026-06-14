@@ -2827,6 +2827,254 @@ fn delete_gemini_project_in(tmp: &Path, project: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Codex deletion — threads live in ~/.codex/state_5.sqlite keyed by id/cwd,
+// with the transcript in a rollout JSONL file. Deleting only the row is NOT
+// durable: Codex's backfill re-creates it from the rollout file (the file is
+// authoritative — see codex_follow.rs). So we DELETE the row AND remove the
+// rollout file. Memories are standalone .md files under ~/.codex/memories/.
+// All DB writes use a busy timeout and surface a clean "locked" error.
+// ---------------------------------------------------------------------------
+
+fn codex_state_db_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".codex").join("state_5.sqlite"))
+}
+
+fn open_codex_rw(db: &Path) -> Result<Connection, String> {
+    if !db.exists() {
+        return Err("Codex state database not found".into());
+    }
+    let conn = Connection::open_with_flags(
+        db,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|e| e.to_string())?;
+    conn.busy_timeout(std::time::Duration::from_millis(1500))
+        .map_err(|e| e.to_string())?;
+    Ok(conn)
+}
+
+fn map_db_locked(err: rusqlite::Error, who: &str) -> String {
+    let msg = err.to_string();
+    if msg.contains("locked") || msg.contains("busy") {
+        return format!("{who} database is locked — quit the running {who} CLI and try again.");
+    }
+    msg
+}
+
+/// Delete every Codex thread where `column = value` (column is an internal
+/// literal — "id" or "cwd"), removing both the row and its rollout file.
+fn delete_codex_threads_in(db: &Path, column: &str, value: &str) -> Result<(), String> {
+    let conn = open_codex_rw(db)?;
+    let select = format!("select rollout_path from threads where {column} = ?1");
+    let paths: Vec<String> = {
+        let mut stmt = conn
+            .prepare(&select)
+            .map_err(|e| map_db_locked(e, "Codex"))?;
+        let rows = stmt
+            .query_map([value], |r| r.get::<_, String>(0))
+            .map_err(|e| map_db_locked(e, "Codex"))?;
+        rows.filter_map(Result::ok).collect()
+    };
+    if paths.is_empty() {
+        return Err("no Codex session found".into());
+    }
+    // Remove the rollout transcripts FIRST, then the rows. The file is the
+    // authoritative source: once it's gone, a crash before the row DELETE can't
+    // resurrect the session (backfill has nothing to rebuild from — it just
+    // leaves a harmless, re-deletable orphan row). The reverse order would let
+    // a crash between the committed DELETE and the file removal resurrect the
+    // row on Codex's next backfill. Missing files are tolerated.
+    for p in &paths {
+        let _ = fs::remove_file(p);
+    }
+    let delete = format!("delete from threads where {column} = ?1");
+    conn.execute(&delete, [value])
+        .map_err(|e| map_db_locked(e, "Codex"))?;
+    Ok(())
+}
+
+/// Permanently delete one Codex session by thread id (+ its rollout file).
+pub fn delete_codex_session(id: &str) -> Result<(), String> {
+    let db = codex_state_db_path().ok_or("cannot locate ~/.codex/state_5.sqlite")?;
+    delete_codex_threads_in(&db, "id", id)
+}
+
+/// Permanently delete every Codex session under a project cwd (+ their rollout
+/// files). Codex has no project folder — a "project" is the `cwd`.
+pub fn delete_codex_project(project: &str) -> Result<(), String> {
+    let db = codex_state_db_path().ok_or("cannot locate ~/.codex/state_5.sqlite")?;
+    delete_codex_threads_in(&db, "cwd", project)
+}
+
+/// Permanently delete one Codex auto-memory file — `rel` joined under
+/// ~/.codex/memories/ (bounded by `is_safe_rel`). These are standalone .md
+/// files; Termory never reads memories_1.sqlite, so there's nothing to sync.
+pub fn delete_codex_memory(rel: &str) -> Result<(), String> {
+    let root = dirs::home_dir()
+        .map(|h| h.join(".codex").join("memories"))
+        .ok_or("cannot locate ~/.codex/memories")?;
+    delete_codex_memory_in(&root, rel)
+}
+
+fn delete_codex_memory_in(root: &Path, rel: &str) -> Result<(), String> {
+    if !is_safe_rel(rel) {
+        return Err("invalid memory path".into());
+    }
+    let file = root.join(rel);
+    if !file.is_file() {
+        return Err(format!("memory file not found ({rel})"));
+    }
+    fs::remove_file(&file).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode deletion — sessions/projects live in
+// ~/.local/share/opencode/opencode.db. session.project_id and the message/part
+// tables have ON DELETE CASCADE, so deleting a session (or a project) cascades.
+// The session table is a durable store (not a rebuilt cache), so a direct
+// DELETE is permanent. OpenCode has NO deletable auto-memory — its memory is
+// the user's own AGENTS.md/CLAUDE.md project files, which are never touched.
+// ---------------------------------------------------------------------------
+
+fn opencode_db_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| {
+        h.join(".local")
+            .join("share")
+            .join("opencode")
+            .join("opencode.db")
+    })
+}
+
+fn open_opencode_rw(db: &Path) -> Result<Connection, String> {
+    if !db.exists() {
+        return Err("OpenCode database not found".into());
+    }
+    let conn = Connection::open_with_flags(
+        db,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|e| e.to_string())?;
+    conn.busy_timeout(std::time::Duration::from_millis(1500))
+        .map_err(|e| e.to_string())?;
+    // Required for the ON DELETE CASCADE to message/part to actually fire.
+    conn.execute_batch("PRAGMA foreign_keys = ON")
+        .map_err(|e| e.to_string())?;
+    Ok(conn)
+}
+
+/// Clear the event log for the given aggregate ids — mirrors the official
+/// `sync.remove()` (sync/index.ts:173-178). The `event` / `event_sequence`
+/// tables only exist on newer OpenCode DBs (written only under
+/// `experimentalWorkspaces`); older layouts skip this. `event` FK-cascades from
+/// `event_sequence`, but we delete both explicitly to match the official op and
+/// to be robust if foreign_keys is off. Orphan events are never replayed on
+/// startup (verified), so this is tidiness/sync-correctness, not a rebuild fix.
+fn clean_opencode_events(conn: &Connection, aggregate_ids: &[String]) -> Result<(), String> {
+    if !table_exists(conn, "event_sequence").unwrap_or(false) {
+        return Ok(());
+    }
+    for id in aggregate_ids {
+        conn.execute("delete from event where aggregate_id = ?1", [id])
+            .map_err(|e| map_db_locked(e, "OpenCode"))?;
+        conn.execute("delete from event_sequence where aggregate_id = ?1", [id])
+            .map_err(|e| map_db_locked(e, "OpenCode"))?;
+    }
+    Ok(())
+}
+
+/// Collect a session id and all its descendants via the `parent_id` tree
+/// (sub-agent sessions). `parent_id` has NO FK cascade, so the official
+/// `session.remove()` walks children recursively — we do the same. A `seen`
+/// set guards against a malformed cycle.
+fn opencode_session_tree(conn: &Connection, root: &str) -> Result<Vec<String>, String> {
+    let mut ids = vec![root.to_string()];
+    let mut i = 0;
+    while i < ids.len() {
+        let parent = ids[i].clone();
+        let mut stmt = conn
+            .prepare("select id from session where parent_id = ?1")
+            .map_err(|e| map_db_locked(e, "OpenCode"))?;
+        let kids: Vec<String> = stmt
+            .query_map([&parent], |r| r.get::<_, String>(0))
+            .map_err(|e| map_db_locked(e, "OpenCode"))?
+            .filter_map(Result::ok)
+            .collect();
+        for k in kids {
+            if !ids.contains(&k) {
+                ids.push(k);
+            }
+        }
+        i += 1;
+    }
+    Ok(ids)
+}
+
+/// Permanently delete one OpenCode session by id — plus its sub-agent children
+/// (recursively, matching the official `session.remove()`), each row cascading
+/// to its message/part, and the event log of every removed aggregate cleared.
+pub fn delete_opencode_session(id: &str) -> Result<(), String> {
+    let db = opencode_db_path().ok_or("cannot locate opencode.db")?;
+    delete_opencode_session_in(&db, id)
+}
+
+fn delete_opencode_session_in(db: &Path, id: &str) -> Result<(), String> {
+    let conn = open_opencode_rw(db)?;
+    let ids = opencode_session_tree(&conn, id)?;
+    let mut total = 0usize;
+    for sid in &ids {
+        total += conn
+            .execute("delete from session where id = ?1", [sid])
+            .map_err(|e| map_db_locked(e, "OpenCode"))?;
+    }
+    if total == 0 {
+        return Err("OpenCode session not found".into());
+    }
+    // Each session's aggregate id IS its session id (sync.remove(sessionID)).
+    clean_opencode_events(&conn, &ids)?;
+    Ok(())
+}
+
+/// Permanently delete an OpenCode project (keyed by `worktree`) — cascades to
+/// its sessions, then to message/part, and clears the event log of the project
+/// and every session it removes.
+pub fn delete_opencode_project(project: &str) -> Result<(), String> {
+    let db = opencode_db_path().ok_or("cannot locate opencode.db")?;
+    delete_opencode_project_in(&db, project)
+}
+
+fn delete_opencode_project_in(db: &Path, project: &str) -> Result<(), String> {
+    let conn = open_opencode_rw(db)?;
+    // Collect every aggregate id (the project ids + their session ids) BEFORE
+    // the cascade removes the rows, so we can clear their events afterward.
+    let project_ids: Vec<String> = {
+        let mut stmt = conn
+            .prepare("select id from project where worktree = ?1")
+            .map_err(|e| map_db_locked(e, "OpenCode"))?;
+        let rows = stmt
+            .query_map([project], |r| r.get::<_, String>(0))
+            .map_err(|e| map_db_locked(e, "OpenCode"))?;
+        rows.filter_map(Result::ok).collect()
+    };
+    if project_ids.is_empty() {
+        return Err("OpenCode project not found".into());
+    }
+    let mut aggregates = project_ids.clone();
+    for pid in &project_ids {
+        let mut stmt = conn
+            .prepare("select id from session where project_id = ?1")
+            .map_err(|e| map_db_locked(e, "OpenCode"))?;
+        let rows = stmt
+            .query_map([pid], |r| r.get::<_, String>(0))
+            .map_err(|e| map_db_locked(e, "OpenCode"))?;
+        aggregates.extend(rows.filter_map(Result::ok));
+    }
+    conn.execute("delete from project where worktree = ?1", [project])
+        .map_err(|e| map_db_locked(e, "OpenCode"))?;
+    clean_opencode_events(&conn, &aggregates)?;
+    Ok(())
+}
+
 fn memory_session_from_file(path: &Path, project: &str) -> Option<AppSession> {
     doc_session_from_file(path, project, "Memory")
 }
@@ -13975,6 +14223,183 @@ mod tests {
 
         // An unsafe relative path (`..`) is refused.
         assert!(delete_claude_memory_in(&projects, "/Users/test/p", "../../etc/x").is_err());
+    }
+
+    /// Seed a minimal Codex state DB with `threads(id, cwd, rollout_path)` and
+    /// the matching rollout files on disk. Returns (db path, dir).
+    fn seed_codex_threads(dir: &Path) {
+        let db = dir.join("state_5.sqlite");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "create table threads (id text primary key, cwd text not null, \
+             rollout_path text not null);",
+        )
+        .unwrap();
+        for (id, cwd) in [("a", "/proj/x"), ("b", "/proj/x"), ("c", "/proj/y")] {
+            let roll = dir.join(format!("{id}.jsonl"));
+            fs::write(&roll, "{}\n").unwrap();
+            conn.execute(
+                "insert into threads values (?1, ?2, ?3)",
+                rusqlite::params![id, cwd, roll.to_string_lossy()],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn delete_codex_session_in_removes_row_and_rollout_file() {
+        let tmp = TestDir::new("del-codex-sess");
+        seed_codex_threads(tmp.path());
+        let db = tmp.path().join("state_5.sqlite");
+
+        delete_codex_threads_in(&db, "id", "a").unwrap();
+        // Row gone, its rollout file gone; siblings untouched.
+        let conn = Connection::open(&db).unwrap();
+        let count: i64 = conn
+            .query_row("select count(*) from threads where id = 'a'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+        assert!(!tmp.path().join("a.jsonl").exists());
+        assert!(tmp.path().join("b.jsonl").exists());
+
+        // Unknown id → error.
+        assert!(delete_codex_threads_in(&db, "id", "zzz").is_err());
+    }
+
+    #[test]
+    fn delete_codex_project_in_removes_all_threads_for_cwd() {
+        let tmp = TestDir::new("del-codex-proj");
+        seed_codex_threads(tmp.path());
+        let db = tmp.path().join("state_5.sqlite");
+
+        delete_codex_threads_in(&db, "cwd", "/proj/x").unwrap();
+        let conn = Connection::open(&db).unwrap();
+        let remaining: i64 = conn
+            .query_row("select count(*) from threads", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1); // only /proj/y's "c" left
+        assert!(!tmp.path().join("a.jsonl").exists());
+        assert!(!tmp.path().join("b.jsonl").exists());
+        assert!(tmp.path().join("c.jsonl").exists());
+    }
+
+    #[test]
+    fn delete_codex_memory_in_removes_md_and_guards_path() {
+        let tmp = TestDir::new("del-codex-mem");
+        let root = tmp.path().join("memories");
+        let md = root.join("sub").join("N.md");
+        fs::create_dir_all(md.parent().unwrap()).unwrap();
+        fs::write(&md, "x").unwrap();
+
+        delete_codex_memory_in(&root, "sub/N.md").unwrap();
+        assert!(!md.exists());
+        // Traversal is refused.
+        assert!(delete_codex_memory_in(&root, "../../etc/x").is_err());
+    }
+
+    /// Schema covering session/message cascade plus the event log tables.
+    fn seed_opencode_db(db: &Path) {
+        let conn = Connection::open(db).unwrap();
+        conn.execute_batch(
+            "create table project (id text primary key, worktree text not null);
+             create table session (
+                id text primary key,
+                project_id text not null references project(id) on delete cascade,
+                parent_id text
+             );
+             create table message (
+                id text primary key,
+                session_id text not null references session(id) on delete cascade
+             );
+             create table event_sequence (aggregate_id text primary key, seq integer not null);
+             create table event (
+                id text primary key,
+                aggregate_id text not null references event_sequence(aggregate_id) on delete cascade,
+                seq integer not null, type text not null, data text not null
+             );",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn delete_opencode_session_in_removes_children_cascades_and_clears_events() {
+        let tmp = TestDir::new("del-oc-sess");
+        let db = tmp.path().join("opencode.db");
+        seed_opencode_db(&db);
+        let conn = Connection::open(&db).unwrap();
+        // s1 has a sub-agent child c1, which itself has a grandchild c2.
+        conn.execute_batch(
+            "insert into project values ('P', '/w');
+             insert into session (id, project_id) values ('s1', 'P');
+             insert into session (id, project_id) values ('s2', 'P');
+             insert into session (id, project_id, parent_id) values ('c1', 'P', 's1');
+             insert into session (id, project_id, parent_id) values ('c2', 'P', 'c1');
+             insert into message values ('m1', 's1');
+             insert into message values ('mc', 'c1');
+             insert into event_sequence values ('s1', 1);
+             insert into event_sequence values ('c1', 1);
+             insert into event_sequence values ('s2', 1);
+             insert into event values ('e1', 's1', 1, 'Created', '{}');",
+        )
+        .unwrap();
+        drop(conn);
+
+        // Deleting s1 also removes child c1 and grandchild c2 (recursive).
+        delete_opencode_session_in(&db, "s1").unwrap();
+        let conn = Connection::open(&db).unwrap();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("select count(*) from session"), 1); // only s2 remains
+        assert_eq!(count("select count(*) from message"), 0); // s1's + c1's cascaded
+                                                              // s1 + c1 events cleared; s2's kept.
+        assert_eq!(
+            count("select count(*) from event_sequence where aggregate_id = 's1'"),
+            0
+        );
+        assert_eq!(
+            count("select count(*) from event_sequence where aggregate_id = 'c1'"),
+            0
+        );
+        assert_eq!(
+            count("select count(*) from event_sequence where aggregate_id = 's2'"),
+            1
+        );
+        assert!(delete_opencode_session_in(&db, "missing").is_err());
+    }
+
+    #[test]
+    fn delete_opencode_project_in_cascades_and_clears_events() {
+        let tmp = TestDir::new("del-oc-proj");
+        let db = tmp.path().join("opencode.db");
+        seed_opencode_db(&db);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "insert into project values ('P', '/w/del');
+             insert into project values ('Q', '/w/keep');
+             insert into session (id, project_id) values ('s1', 'P');
+             insert into session (id, project_id) values ('s2', 'Q');
+             insert into event_sequence values ('s1', 1);
+             insert into event_sequence values ('s2', 1);",
+        )
+        .unwrap();
+        drop(conn);
+
+        delete_opencode_project_in(&db, "/w/del").unwrap();
+        let conn = Connection::open(&db).unwrap();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("select count(*) from project"), 1); // Q remains
+        assert_eq!(count("select count(*) from session"), 1); // P's session cascaded
+                                                              // P's session events cleared; Q's session events kept.
+        assert_eq!(
+            count("select count(*) from event_sequence where aggregate_id = 's1'"),
+            0
+        );
+        assert_eq!(
+            count("select count(*) from event_sequence where aggregate_id = 's2'"),
+            1
+        );
+        assert!(delete_opencode_project_in(&db, "/w/nope").is_err());
     }
 
     #[test]

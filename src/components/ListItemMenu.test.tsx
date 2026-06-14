@@ -243,6 +243,57 @@ describe("ListItemMenu — Delete (single session / memory)", () => {
     );
   });
 
+  it("routes a Codex session to delete_codex_session (by id)", async () => {
+    askMock.mockResolvedValue(true);
+    invokeMock.mockResolvedValue(undefined);
+    render(
+      <ListItemMenu path="/p/r.jsonl" id="cx1" source="Codex" project="/proj">
+        <button>cxrow</button>
+      </ListItemMenu>
+    );
+    fireEvent.contextMenu(screen.getByText("cxrow"));
+    await userEvent.click(await screen.findByText("Delete session…"));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("delete_codex_session", {
+        id: "cx1"
+      })
+    );
+  });
+
+  it("routes an OpenCode session to delete_opencode_session (by id)", async () => {
+    askMock.mockResolvedValue(true);
+    invokeMock.mockResolvedValue(undefined);
+    render(
+      <ListItemMenu path="x" id="oc1" source="OpenCode" project="/proj">
+        <button>ocrow</button>
+      </ListItemMenu>
+    );
+    fireEvent.contextMenu(screen.getByText("ocrow"));
+    await userEvent.click(await screen.findByText("Delete session…"));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("delete_opencode_session", {
+        id: "oc1"
+      })
+    );
+  });
+
+  it("routes a Codex auto-memory to delete_codex_memory (rel under memories/)", async () => {
+    askMock.mockResolvedValue(true);
+    invokeMock.mockResolvedValue(undefined);
+    render(
+      <ListItemMenu path="/u/.codex/memories/sub/NOTE.md" project="~/.codex/memories">
+        <button>cxmem</button>
+      </ListItemMenu>
+    );
+    fireEvent.contextMenu(screen.getByText("cxmem"));
+    await userEvent.click(await screen.findByText("Delete memory…"));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("delete_codex_memory", {
+        rel: "sub/NOTE.md"
+      })
+    );
+  });
+
   it("does not delete when the confirmation is declined", async () => {
     askMock.mockResolvedValue(false);
     render(

@@ -97,7 +97,12 @@ type DeleteCommand =
   | "delete_claude_memory"
   | "delete_gemini_project"
   | "delete_gemini_session"
-  | "delete_gemini_memory";
+  | "delete_gemini_memory"
+  | "delete_codex_session"
+  | "delete_codex_project"
+  | "delete_codex_memory"
+  | "delete_opencode_session"
+  | "delete_opencode_project";
 
 /**
  * Shared flow for the delete entry points (whole project / single session /
@@ -120,7 +125,13 @@ export async function runRecordDelete(
       ? "menu.deleteSessionConfirm"
       : "menu.deleteMemoryConfirm";
   // Name the CLI that actually owns this record so the hint matches the action.
-  const app = command.startsWith("delete_gemini") ? "Gemini" : "Claude Code";
+  const app = command.startsWith("delete_gemini")
+    ? "Gemini"
+    : command.startsWith("delete_codex")
+      ? "Codex"
+      : command.startsWith("delete_opencode")
+        ? "OpenCode"
+        : "Claude Code";
   const confirmed = await ask(
     `${t(confirmKey, { name })}\n\n${t("menu.exitCliHint", { app })}`,
     {

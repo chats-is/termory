@@ -395,7 +395,10 @@ export function App() {
     const records = reconcileTombstones(
       incoming.records,
       tombstonesRef.current,
-      (s) => s.path
+      // Key by full identity, NOT path: DB-backed sources (OpenCode) share one
+      // db-file path across all sessions, so a path-keyed tombstone would hide
+      // every sibling record. sessionKey is source:path:id.
+      (s) => sessionKey(s)
     );
     const projs = reconcileTombstones(
       incoming.projects,
@@ -444,7 +447,8 @@ export function App() {
       removeProject?: { source: string; project: string }
     ) => {
       setSessions((prev) => {
-        for (const s of prev) if (match(s)) tombstonesRef.current.add(s.path);
+        for (const s of prev)
+          if (match(s)) tombstonesRef.current.add(sessionKey(s));
         return prev.filter((s) => !match(s));
       });
       if (removeProject) {
@@ -478,7 +482,8 @@ export function App() {
         path: remappedPath(s.path, res.old_dir, res.new_dir)
       });
       setSessions((prev) => {
-        for (const s of prev) if (match(s)) tombstonesRef.current.add(s.path);
+        for (const s of prev)
+          if (match(s)) tombstonesRef.current.add(sessionKey(s));
         return prev.map((s) => (match(s) ? remap(s) : s));
       });
       setProjects((prev) => {
@@ -939,12 +944,14 @@ export function App() {
                             </span>
                           </div>
                         );
-                        // Claude + Gemini project rows get a right-click menu.
-                        // Delete is available for both; whole-project migration
-                        // is Claude-only for now.
+                        // Claude / Gemini / Codex / OpenCode project rows get a
+                        // right-click menu. Delete is available for all four;
+                        // whole-project migration is Claude-only for now.
                         rows.push(
                           group.source === "Claude" ||
-                          group.source === "Gemini" ? (
+                          group.source === "Gemini" ||
+                          group.source === "Codex" ||
+                          group.source === "OpenCode" ? (
                             <ContextMenu key={projKey}>
                               <ContextMenuTrigger asChild>
                                 {projRow}
@@ -986,7 +993,11 @@ export function App() {
                                     void runRecordDelete(
                                       group.source === "Gemini"
                                         ? "delete_gemini_project"
-                                        : "delete_claude_project",
+                                        : group.source === "Codex"
+                                          ? "delete_codex_project"
+                                          : group.source === "OpenCode"
+                                            ? "delete_opencode_project"
+                                            : "delete_claude_project",
                                       { project: projectName },
                                       projectDisplayName(projectName),
                                       t,
@@ -1076,7 +1087,14 @@ export function App() {
                             source={session.source}
                             project={session.project}
                             onLocalDelete={() =>
-                              removeRecordsLocally((s) => s.path === session.path)
+                              // Match by full identity, NOT path: OpenCode (and
+                              // any DB-backed source) shares one db-file path
+                              // across all its sessions, so a path match would
+                              // wrongly clear the whole list. sessionKey is
+                              // source:path:id — the id disambiguates.
+                              removeRecordsLocally(
+                                (s) => sessionKey(s) === sessionKey(session)
+                              )
                             }
                             onLocalMigrate={(res) =>
                               remapRecordsLocally(

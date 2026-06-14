@@ -88,6 +88,17 @@ export function ListItemMenu({
     path.includes("/.gemini/") &&
     path.includes("/memory/") &&
     path.endsWith(".md");
+  // Codex / OpenCode: delete only (sqlite rows, removed by id — see backend).
+  const isCodexSession = source === "Codex" && !!id;
+  const isOpencodeSession = source === "OpenCode" && !!id;
+  const isCodexAutoMemory =
+    !id && path.includes("/.codex/memories/") && path.endsWith(".md");
+  // Codex memory rel = the path under ~/.codex/memories/ (backend bounds it).
+  const codexMemoryRel = (() => {
+    const marker = "/.codex/memories/";
+    const i = path.indexOf(marker);
+    return i < 0 ? basename(path) : path.slice(i + marker.length);
+  })();
 
   // Migrate/delete locate every record by project + `rel` (the file's path
   // within its project dir) — uniform across Claude/Gemini, session/memory.
@@ -226,6 +237,63 @@ export function ListItemMenu({
                 void runRecordDelete(
                   "delete_gemini_memory",
                   { project: proj, rel },
+                  basename(path),
+                  t,
+                  onLocalDelete
+                )
+              }
+            >
+              {t("menu.deleteMemory")}
+            </ContextMenuItem>
+          </>
+        )}
+        {!hideSessionOps && isCodexSession && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              variant="destructive"
+              onSelect={() =>
+                void runRecordDelete(
+                  "delete_codex_session",
+                  { id: id! },
+                  id ?? basename(path),
+                  t,
+                  onLocalDelete
+                )
+              }
+            >
+              {t("menu.deleteSession")}
+            </ContextMenuItem>
+          </>
+        )}
+        {!hideSessionOps && isOpencodeSession && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              variant="destructive"
+              onSelect={() =>
+                void runRecordDelete(
+                  "delete_opencode_session",
+                  { id: id! },
+                  id ?? basename(path),
+                  t,
+                  onLocalDelete
+                )
+              }
+            >
+              {t("menu.deleteSession")}
+            </ContextMenuItem>
+          </>
+        )}
+        {isCodexAutoMemory && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              variant="destructive"
+              onSelect={() =>
+                void runRecordDelete(
+                  "delete_codex_memory",
+                  { rel: codexMemoryRel },
                   basename(path),
                   t,
                   onLocalDelete
