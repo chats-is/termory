@@ -267,7 +267,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         // kick off a (rate-limited) quota refresh so the quota info
         // rows stay current without any background polling. The fetch
         // lands after the menu is already on screen, so the updated
-        // numbers show from the NEXT open (floors: 10 min after a
+        // numbers show from the NEXT open (floors: 5 min after a
         // success, 60s after a failure — QUOTA_TRAY_MIN_INTERVAL /
         // QUOTA_TRAY_ERROR_RETRY).
         .on_tray_icon_event(|tray, event| {
@@ -281,7 +281,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
 
 /// Minimum spacing between quota fetches per CLI — same window as the
 /// Providers page's auto-refresh cache (QUOTA_STALE_MS).
-const QUOTA_TRAY_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(600);
+const QUOTA_TRAY_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
 /// Retry floor after a FAILED fetch — much shorter, so a transient
 /// network error doesn't mute the tray row for the full window
 /// (frontend mirror: QUOTA_ERROR_RETRY_MS in ProvidersPage.tsx).

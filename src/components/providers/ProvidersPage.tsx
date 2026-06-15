@@ -110,7 +110,7 @@ const QUOTA_SUPPORTED: ReadonlySet<CliApp> = new Set([
 // rate-limited by QUOTA_MIN_INTERVAL_MS (the button shows disabled
 // during the cooldown) so it can't hammer the official endpoint.
 let cachedQuotas: Partial<Record<CliApp, SubscriptionQuota>> = {};
-const QUOTA_STALE_MS = 10 * 60_000;
+const QUOTA_STALE_MS = 5 * 60_000;
 const QUOTA_MIN_INTERVAL_MS = 120_000;
 // A FAILED fetch caches for much less so a transient network error
 // doesn't mute the quota display for the full stale window. Applies
