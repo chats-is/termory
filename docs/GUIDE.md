@@ -68,7 +68,7 @@ Beyond the basic fields, each provider has an **Advanced settings** section wher
 
 1. In the provider editor, expand **Advanced settings**.
 2. Click **Add** to get a new row, then fill in the **KEY** and **VALUE**.
-3. Add as many rows as you need; **Remove** drops one. **Save** the provider.
+3. Add as many rows as you need; use a row's remove button to drop one. **Save** the provider.
 
 The tables below are just common examples — you can add any key/value the CLI accepts. The rules:
 
