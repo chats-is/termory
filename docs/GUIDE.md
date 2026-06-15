@@ -1,4 +1,4 @@
-# Termory — User Guide
+# Termory — Guide
 
 > 中文版见 [GUIDE.zh-CN.md](GUIDE.zh-CN.md)
 

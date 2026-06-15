@@ -15,6 +15,12 @@
 Termory brings **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode** together in one window. Browse every past session, memory file, and skill from all your tools, keep the messages worth saving, search across everything at once, and resume any session right back in your terminal. When you want a different model or platform, switch any CLI to another API provider in a click — no config files, no copy-pasting keys. It runs natively on macOS, Linux, and Windows, and your history never leaves your machine.
 
 <div align="center">
+
+**[Download](https://github.com/chats-is/termory/releases) · [Guide](docs/GUIDE.md) · [中文使用指南](docs/GUIDE.zh-CN.md)**
+
+</div>
+
+<div align="center">
   <img src="docs/screenshots/gateways.png" alt="Termory — one AI gateway bound to every CLI" width="49%">
   <img src="docs/screenshots/providers.png" alt="Termory — switch any CLI between API providers" width="49%">
   <img src="docs/screenshots/stats.png" alt="Termory — usage stats across every tool" width="49%">
@@ -23,16 +29,14 @@ Termory brings **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode** toge
 
 ## Features
 
-| | |
-|---|---|
-| **Records** | Every session, memory file, and skill from all your tools, in one place — each rendered the way its own tool shows it. |
-| **Resume** | Reopen any recent session straight in your terminal, running the CLI's own resume command — one click from the menu bar or a right-click. |
-| **Manage** | Delete or migrate any record — sessions, projects, memory — from the right-click menu, with a confirmation step. |
-| **Providers** | Keep named API profiles for each CLI and switch the active one with a click, or from the menu bar. |
-| **Favorites** | Star any message; it's saved as a snapshot that stays readable even after the original session is gone. |
-| **Search** | Instant search across all your history, with a `⌘K` command palette. |
-| **Stats** | Tokens, messages, projects, and an activity heatmap over any date range. |
-| **Private** | No servers, no accounts, no telemetry. Termory reads your history where it already lives, and only ever changes it when you explicitly ask — deleting or migrating a record, or keeping sessions across a provider switch. |
+- **Records** — Every session, memory file, and skill from all your tools, in one place — each rendered the way its own tool shows it.
+- **Resume** — Reopen any recent session straight in your terminal, running the CLI's own resume command — one click from the menu bar or a right-click.
+- **Manage** — Delete or migrate any record — sessions, projects, memory — from the right-click menu, with a confirmation step.
+- **Providers** — Keep named API profiles for each CLI and switch the active one with a click, or from the menu bar.
+- **Favorites** — Star any message; it's saved as a snapshot that stays readable even after the original session is gone.
+- **Search** — Instant search across all your history, with a `⌘K` command palette.
+- **Stats** — Tokens, messages, projects, and an activity heatmap over any date range.
+- **Private** — No servers, no accounts, no telemetry. Termory reads your history where it already lives, and only ever changes it when you explicitly ask — deleting or migrating a record, or keeping sessions across a provider switch.
 
 ## Supported tools
 
@@ -77,7 +81,3 @@ npm install
 npm run tauri:dev     # run the desktop app
 npm run tauri:build   # build installers
 ```
-
-## Documentation
-
-- **[User Guide](docs/GUIDE.md)** ([中文](docs/GUIDE.zh-CN.md)) — a feature-by-feature walkthrough: Providers (incl. advanced settings & gateways), Records, Favorites, Search, Stats, Settings, the menu-bar tray, privacy, and installation.
