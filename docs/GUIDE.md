@@ -2,7 +2,7 @@
 
 > 中文版见 [GUIDE.zh-CN.md](GUIDE.zh-CN.md)
 
-Termory reads the history your terminal AI coding tools already keep on disk — **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode** — brings it into one window, and lets you manage each tool's API providers. Nothing to import or sync; if a supported tool has run on this machine, it shows up automatically. For installation and downloads, see the [README](../README.md).
+Termory brings the history your terminal AI coding tools — **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode** — already store on your machine (sessions, memory, skills) into one window to browse, with no import or setup (it just reads the tools' existing local data). On top of browsing history, it also lets you manage and switch each tool's API providers in a click. For installation and downloads, see the [README](../README.md).
 
 ## Feature map
 
@@ -157,14 +157,14 @@ Right-click any session, memory, or skill:
 - **Reveal in Finder** — open the underlying file.
 - **Resume in terminal** / **Copy resume command** — see [resuming](#resuming-a-session) below.
 - **Copy path / filename / session ID**.
-- **Migrate project** — re-point a project to a new path (Claude Code & Codex). Useful after you rename or move a repo, so its history regroups under the new location.
+- **Migrate** — re-point a session or its whole project to a new path (Claude Code & Codex). Useful after you rename or move a repo, so its history regroups under the new location. (Project-level migrate is also on the sidebar project row.)
 - **Delete session / project / memory** — with a confirmation step.
 
 > **Delete is permanent**, and deleting **changes the CLI's own data**. If a CLI is running it may hold a database lock — Termory will tell you to quit it first. Deleting a *project* removes its stored history only; the files in your actual project folder (`CLAUDE.md`, `AGENTS.md`, …) are never touched.
 
 ### Resuming a session
 
-Click a session (from the tray or a right-click → **Resume in terminal**) and Termory opens your terminal, `cd`s into the session's working directory, and runs the CLI's own resume command (`claude --resume <id>`, `codex resume <id>`, …). Choose which terminal under **Settings → Terminal**.
+Resume a session from the **tray** (click a recent session) or in Records via **right-click → Resume in terminal**. Termory opens your terminal, `cd`s into the session's working directory, and runs the CLI's own resume command (`claude --resume <id>`, `codex resume <id>`, …). Choose which terminal under **Settings → Terminal**.
 
 The sidebar project row also has **Open in terminal** — opens a terminal in that folder and launches the CLI fresh (a new session, not a resume).
 

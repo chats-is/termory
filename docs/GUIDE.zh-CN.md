@@ -2,7 +2,7 @@
 
 > English version: [GUIDE.md](GUIDE.md)
 
-Termory 读取你的终端 AI 编程工具已经存在本地的历史——**Codex**、**Claude Code**、**Gemini CLI**、**OpenCode**——汇总到一个窗口,并帮你管理每个工具的 API 供应商。无需导入或同步;只要某个受支持的工具在这台机器上运行过,它就会自动出现。安装与下载见 [README](../README.md)。
+Termory 把你的终端 AI 编程工具——**Codex**、**Claude Code**、**Gemini CLI**、**OpenCode**——在本机已经存好的历史(会话、记忆、技能)汇总到一个窗口里浏览,无需导入或额外配置(它只是读取这些工具已有的本地数据)。除了浏览历史,它还能帮你管理并一键切换每个工具的 API 供应商。安装与下载见 [README](../README.md)。
 
 ## 功能地图
 
@@ -157,14 +157,14 @@ Codex 给每个会话打上创建时所用供应商的标记,而 `codex resume` 
 - **Reveal in Finder** — 打开底层文件。
 - **Resume in terminal** / **Copy resume command** — 见下方[恢复会话](#恢复会话)。
 - **Copy path / filename / session ID(复制路径/文件名/会话 ID)**。
-- **Migrate project(迁移项目)** — 把项目重新指向新路径(Claude Code 与 Codex)。在你重命名或移动仓库后很有用,可让历史在新位置重新归组。
+- **Migrate(迁移)** — 把一个会话或它整个项目重新指向新路径(Claude Code 与 Codex)。在你重命名或移动仓库后很有用,可让历史在新位置重新归组。(项目级迁移也在侧边栏的项目行上。)
 - **Delete session / project / memory(删除)** — 带确认步骤。
 
 > **删除是永久的**,且删除会**改动 CLI 自己的数据**。如果某个 CLI 正在运行,可能持有数据库锁——Termory 会提示你先退出它。删除一个**项目**只移除它存储的历史;你实际项目文件夹里的文件(`CLAUDE.md`、`AGENTS.md` 等)绝不会被碰。
 
 ### 恢复会话
 
-点击某个会话(从托盘,或右键 → **Resume in terminal**),Termory 会打开你的终端、`cd` 进该会话的工作目录,并运行该 CLI 自己的恢复命令(`claude --resume <id>`、`codex resume <id>` 等)。在 **设置 → 终端** 里选择用哪个终端。
+从**托盘**(点击某个最近会话)或在 Records 里**右键 → Resume in terminal** 来恢复会话。Termory 会打开你的终端、`cd` 进该会话的工作目录,并运行该 CLI 自己的恢复命令(`claude --resume <id>`、`codex resume <id>` 等)。在 **设置 → 终端** 里选择用哪个终端。
 
 侧边栏项目行还有 **Open in terminal(在终端中打开)**——在该文件夹打开终端并全新启动 CLI(新会话,而非恢复)。
 
