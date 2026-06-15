@@ -77,3 +77,7 @@ npm install
 npm run tauri:dev     # run the desktop app
 npm run tauri:build   # build installers
 ```
+
+## Documentation
+
+- **[User Guide](docs/GUIDE.md)** ([中文](docs/GUIDE.zh-CN.md)) — a feature-by-feature walkthrough: Providers (incl. advanced settings & gateways), Records, Favorites, Search, Stats, Settings, the menu-bar tray, privacy, and installation.
