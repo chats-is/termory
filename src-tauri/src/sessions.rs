@@ -999,7 +999,9 @@ pub fn get_session(source: &str, id: &str) -> Result<SessionDetail, Box<dyn Erro
 /// Stream a Codex rollout JSONL and return:
 ///   1. Cumulative session-total token usage (from the LAST
 ///      `event_msg.token_count` event — Codex emits cumulative values)
-///   2. The model name from `session_meta.payload.model`
+///   2. The model name from `turn_context.payload.model` (current Codex —
+///      `SessionMeta` has no model field, only `model_provider`; falls back
+///      to `session_meta.payload.model` for older rollouts). Last-seen wins.
 ///   3. Per-day token spend, computed by diffing consecutive
 ///      `token_count` events. Each event carries the cumulative
 ///      total at its timestamp, so `current - previous` is the
@@ -1042,14 +1044,25 @@ fn codex_scan_extract(path: &Path) -> ScanExtract {
         if codex_message_from_value(&value).is_some() {
             message_count += 1;
         }
-        if value.get("type").and_then(Value::as_str) == Some("session_meta") {
-            if let Some(m) = value
-                .get("payload")
-                .and_then(|p| p.get("model"))
-                .and_then(value_to_string)
-            {
-                model = Some(m);
+        // Model id: current Codex records it in `turn_context.payload.model`
+        // (TurnContextItem.model, persisted once per user turn — the model can
+        // change mid-session via /model, so last-seen wins). `SessionMeta` has
+        // NO `model` field (only `model_provider`), but older/odd rollouts may
+        // still carry `session_meta.payload.model`, so read both — turn_context
+        // appears after session_meta and on every turn, so it naturally wins.
+        match value.get("type").and_then(Value::as_str) {
+            Some("turn_context") | Some("session_meta") => {
+                if let Some(m) = value
+                    .get("payload")
+                    .and_then(|p| p.get("model"))
+                    .and_then(value_to_string)
+                {
+                    if !m.is_empty() {
+                        model = Some(m);
+                    }
+                }
             }
+            _ => {}
         }
         if value.get("type").and_then(Value::as_str) == Some("event_msg") {
             if let Some(payload) = value.get("payload") {
@@ -5343,7 +5356,24 @@ fn parse_codex_session(path: &Path, id: &str) -> Result<SessionDetail, Box<dyn E
                 if let Some(cwd) = payload.get("cwd").and_then(value_to_string) {
                     project = cwd;
                 }
+                // SessionMeta has no `model` field in current Codex (only
+                // model_provider) — kept for older rollouts that did. The real
+                // model comes from turn_context below.
                 if let Some(m) = payload.get("model").and_then(value_to_string) {
+                    model = Some(m);
+                }
+            }
+            continue;
+        }
+        // Model id lives in `turn_context.payload.model` (TurnContextItem.model,
+        // once per user turn; /model switches re-emit it → last-seen wins).
+        if value.get("type").and_then(Value::as_str) == Some("turn_context") {
+            if let Some(m) = value
+                .get("payload")
+                .and_then(|p| p.get("model"))
+                .and_then(value_to_string)
+            {
+                if !m.is_empty() {
                     model = Some(m);
                 }
             }
@@ -15801,11 +15831,13 @@ mod tests {
         // Codex emits periodic `token_count` events with cumulative
         // `total_token_usage`. The first event has `info: null` (no
         // data yet); we should ignore it and use the second event's
-        // numbers. Model comes from `session_meta.payload.model`.
+        // numbers. Model comes from `turn_context.payload.model` (SessionMeta
+        // has no model field in current Codex — only model_provider).
         let dir = TestDir::new("codex-tokens");
         let path = dir.path().join("rollout.jsonl");
         let lines = [
-            r#"{"type":"session_meta","payload":{"id":"codex-thread-1","cwd":"/work","model":"gpt-5"}}"#,
+            r#"{"type":"session_meta","payload":{"id":"codex-thread-1","cwd":"/work","model_provider":"openai"}}"#,
+            r#"{"timestamp":"2026-05-29T10:00:01Z","type":"turn_context","payload":{"cwd":"/work","model":"gpt-5"}}"#,
             r#"{"timestamp":"2026-05-29T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":null}}"#,
             r#"{"timestamp":"2026-05-29T10:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15000,"cached_input_tokens":6500,"output_tokens":300,"reasoning_output_tokens":70,"total_tokens":21870}}}}"#,
             r#"{"timestamp":"2026-05-29T10:00:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20000,"cached_input_tokens":8000,"output_tokens":500,"reasoning_output_tokens":120,"total_tokens":28620}}}}"#,
@@ -15849,7 +15881,8 @@ mod tests {
         let dir = TestDir::new("codex-scan-tokens");
         let path = dir.path().join("rollout.jsonl");
         let lines = [
-            r#"{"type":"session_meta","payload":{"id":"codex-thread-1","cwd":"/work","model":"gpt-5"}}"#,
+            r#"{"type":"session_meta","payload":{"id":"codex-thread-1","cwd":"/work","model_provider":"openai"}}"#,
+            r#"{"timestamp":"2026-05-29T10:00:01Z","type":"turn_context","payload":{"cwd":"/work","model":"gpt-5"}}"#,
             r#"{"timestamp":"2026-05-29T10:00:00Z","type":"event_msg","payload":{"type":"token_count","info":null}}"#,
             r#"{"timestamp":"2026-05-29T10:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15000,"cached_input_tokens":6500,"output_tokens":300,"reasoning_output_tokens":70,"total_tokens":21870}}}}"#,
             r#"{"timestamp":"2026-05-29T10:00:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20000,"cached_input_tokens":8000,"output_tokens":500,"reasoning_output_tokens":120,"total_tokens":28620}}}}"#,
@@ -15876,6 +15909,31 @@ mod tests {
         assert_eq!(daily[0].tokens.output, 500);
         assert_eq!(daily[0].tokens.cached, 8000);
         assert_eq!(daily[0].tokens.reasoning, 120);
+    }
+
+    #[test]
+    fn codex_model_reads_last_turn_context_when_switched() {
+        // A /model switch mid-session re-emits turn_context. We surface the
+        // model the session ENDED with (last-seen wins) — the model is read
+        // from the session's own history, never the live Codex config.
+        let dir = TestDir::new("codex-model-switch");
+        let path = dir.path().join("rollout.jsonl");
+        let lines = [
+            r#"{"type":"session_meta","payload":{"id":"t","cwd":"/w","model_provider":"openai"}}"#,
+            r#"{"timestamp":"2026-05-29T10:00:00Z","type":"turn_context","payload":{"cwd":"/w","model":"gpt-5.4"}}"#,
+            r#"{"timestamp":"2026-05-29T10:05:00Z","type":"turn_context","payload":{"cwd":"/w","model":"gpt-5.5"}}"#,
+        ];
+        fs::write(&path, lines.join("\n")).unwrap();
+        // Both the scan-time extractor and the detail parser agree on last-seen.
+        assert_eq!(codex_scan_extract(&path).model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(
+            parse_codex_session(&path, "t")
+                .unwrap()
+                .session
+                .model
+                .as_deref(),
+            Some("gpt-5.5")
+        );
     }
 
     #[test]

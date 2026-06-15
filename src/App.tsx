@@ -10,10 +10,12 @@ import {
   BookOpen,
   Calendar,
   ChevronRight,
+  Cpu,
   FolderOpen,
   File,
   FileJson,
   Folder,
+  Hash,
   Layers,
   Loader2,
   MessageSquare,
@@ -41,7 +43,12 @@ import type {
   SessionDetail,
   SessionMessage
 } from "@/types";
-import { formatDate, formatRelativeDate } from "@/lib/format";
+import {
+  formatCompact,
+  formatDate,
+  formatFullNumber,
+  formatRelativeDate
+} from "@/lib/format";
 import {
   basename,
   isMemoryItem,
@@ -1393,6 +1400,51 @@ export function App() {
                               <MessageSquare size={12} className="shrink-0" />
                               {selected.message_count}
                             </span>
+                          </>
+                        )}
+                        {isSessionItem(selected) && selected.model && (
+                          <>
+                            <span className="text-border">·</span>
+                            <span className="inline-flex items-center gap-1 font-mono">
+                              <Cpu size={12} className="shrink-0" />
+                              {selected.model}
+                            </span>
+                          </>
+                        )}
+                        {isSessionItem(selected) && selected.tokens && (
+                          <>
+                            <span className="text-border">·</span>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="inline-flex items-center gap-1 cursor-default tabular-nums">
+                                  <Hash size={12} className="shrink-0" />
+                                  {formatCompact(selected.tokens.total)}
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                <div className="flex flex-col gap-0.5">
+                                  {(
+                                    [
+                                      ["stats.tokens.input", selected.tokens.input],
+                                      ["stats.tokens.output", selected.tokens.output],
+                                      ["stats.tokens.cached", selected.tokens.cached],
+                                      ["stats.tokens.reasoning", selected.tokens.reasoning],
+                                      ["stats.tokens.total", selected.tokens.total]
+                                    ] as const
+                                  ).map(([key, value]) => (
+                                    <div
+                                      key={key}
+                                      className="flex justify-between gap-4 tabular-nums"
+                                    >
+                                      <span className="text-muted-foreground">
+                                        {t(key)}
+                                      </span>
+                                      <span>{formatFullNumber(value)}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </TooltipContent>
+                            </Tooltip>
                           </>
                         )}
                         <span className="text-border">·</span>
