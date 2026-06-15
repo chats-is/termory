@@ -112,7 +112,9 @@ export const zhHant: Record<MessageKey, string> = {
   "favorites.add": "加入收藏",
 
   "menu.revealInFinder": "在 Finder 中顯示",
+  "menu.revealError": "無法在 Finder 中開啟:{error}",
   "menu.resumeInTerminal": "在終端機中恢復",
+  "menu.openInTerminal": "在終端機開啟",
   "menu.copyResumeCommand": "複製恢復指令",
   "menu.copyPath": "複製路徑",
   "menu.copyFilename": "複製檔名",
@@ -126,7 +128,9 @@ export const zhHant: Record<MessageKey, string> = {
   "menu.migrateMemory": "遷移記憶…",
   "menu.migratePickTitle": "選擇改名後的專案資料夾",
   "menu.migrateConfirm": "把保存的記錄遷移到:\n{to}\n\n複製完成後移除舊的記錄儲存;你的專案資料夾不受影響。",
+  "menu.migrateConfirmCodex": "把這些 Codex 工作階段重新歸到:\n{to}\n\n僅更新 `codex resume` 的歸組位置;轉錄檔案本身不會移動。",
   "menu.migrateSuccess": "已遷移 {sessions} 個工作階段 + {memory} 個記憶檔案",
+  "menu.migrateSuccessCodex": "已遷移 {sessions} 個工作階段",
   "menu.migrateError": "遷移失敗:{error}",
   "menu.migrateConfirmUnregistered":
     "遷移到:\n{to}\n\n遷移後,在該目錄執行一次 claude,這些工作階段就會出現在 Claude 的歷史裡。\n\n繼續遷移?",

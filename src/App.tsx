@@ -2,6 +2,7 @@ import React from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { toast } from "sonner";
 import { getVersion } from "@tauri-apps/api/app";
 import type { Update } from "@tauri-apps/plugin-updater";
 import {
@@ -66,10 +67,12 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuSeparator,
   ContextMenuTrigger
 } from "@/components/ui/context-menu";
 import {
   runClaudeMigration,
+  runCodexMigration,
   runRecordDelete,
   type MigrateResult
 } from "@/lib/migrate";
@@ -483,8 +486,16 @@ export function App() {
         path: remappedPath(s.path, res.old_dir, res.new_dir)
       });
       setSessions((prev) => {
-        for (const s of prev)
-          if (match(s)) tombstonesRef.current.add(sessionKey(s));
+        for (const s of prev) {
+          if (!match(s)) continue;
+          // Tombstone the old key ONLY when the remap changes it (the file
+          // moved → new path → new `source:path:id`). A metadata-only re-point
+          // (Codex changes cwd but leaves the rollout file put) keeps the same
+          // key, and tombstoning it would make `reconcileTombstones` hide the
+          // moved record forever — the key never goes absent from later scans.
+          if (sessionKey(remap(s)) !== sessionKey(s))
+            tombstonesRef.current.add(sessionKey(s));
+        }
         return prev.map((s) => (match(s) ? remap(s) : s));
       });
       setProjects((prev) => {
@@ -958,7 +969,41 @@ export function App() {
                                 {projRow}
                               </ContextMenuTrigger>
                               <ContextMenuContent className="w-56">
-                                {/* Migrate is Claude-only and pointless for an
+                                {/* Open the project's source dir (its cwd) in
+                                    Finder. May be gone (renamed/migrated) → toast. */}
+                                <ContextMenuItem
+                                  onSelect={() =>
+                                    revealItemInDir(projectName).catch((err) =>
+                                      toast.error(
+                                        t("menu.revealError", {
+                                          error: String(err)
+                                        })
+                                      )
+                                    )
+                                  }
+                                >
+                                  {t("menu.revealInFinder")}
+                                </ContextMenuItem>
+                                {/* Open a terminal in the project cwd and launch
+                                    this source's CLI fresh (no resume). */}
+                                <ContextMenuItem
+                                  onSelect={() =>
+                                    void invoke("new_session_in_terminal", {
+                                      source: group.source,
+                                      project: projectName
+                                    }).catch((err) =>
+                                      toast.error(
+                                        t("menu.terminalError", {
+                                          error: String(err)
+                                        })
+                                      )
+                                    )
+                                  }
+                                >
+                                  {t("menu.openInTerminal")}
+                                </ContextMenuItem>
+                                <ContextMenuSeparator />
+                                {/* Migrate (Claude + Codex), pointless for an
                                     empty project (count 0) — delete only there. */}
                                 {group.source === "Claude" && count > 0 && (
                                   <ContextMenuItem
@@ -978,6 +1023,38 @@ export function App() {
                                               newProjectSource: group.source,
                                               removeProject: {
                                                 source: group.source,
+                                                project: projectName
+                                              }
+                                            }
+                                          )
+                                      )
+                                    }
+                                  >
+                                    {t("menu.migrateProject")}
+                                  </ContextMenuItem>
+                                )}
+                                {/* Codex has no project folder — match its
+                                    records directly by (source, cwd), NOT
+                                    projectRecordMatch (rollout files share one
+                                    ~/.codex/sessions dir, so a folder match
+                                    would hit unrelated sessions). */}
+                                {group.source === "Codex" && count > 0 && (
+                                  <ContextMenuItem
+                                    onSelect={() =>
+                                      void runCodexMigration(
+                                        "migrate_codex_project",
+                                        { project: projectName },
+                                        t,
+                                        (res) =>
+                                          remapRecordsLocally(
+                                            (s) =>
+                                              s.source === "Codex" &&
+                                              s.project === projectName,
+                                            res,
+                                            {
+                                              newProjectSource: "Codex",
+                                              removeProject: {
+                                                source: "Codex",
                                                 project: projectName
                                               }
                                             }

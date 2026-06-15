@@ -114,6 +114,14 @@ fn resume_session_in_terminal(
     terminal::resume_session(&source, &id, project.as_deref())
 }
 
+/// Open the user's chosen terminal in a project's cwd and launch a FRESH session
+/// of `source`'s CLI there (no resume). Driven by the Records sidebar project-row
+/// "New session" action — same `terminal::new_session` the tray's New Session uses.
+#[tauri::command]
+fn new_session_in_terminal(source: String, project: Option<String>) -> Result<(), String> {
+    terminal::new_session(&source, project.as_deref())
+}
+
 /// Migrate a renamed Claude project's sessions + memory into the new path's
 /// slug dir so the CLI lists/resumes them again. Copies by default (the old
 /// dir stays as a backup); `delete_old` drops the source only after a clean
@@ -233,6 +241,32 @@ async fn delete_codex_memory(rel: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || sessions::delete_codex_memory(&rel))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Migrate one Codex session (by thread id) to a new cwd — rewrites the rollout
+/// file's payload.cwd + the threads row. Regrouping convenience; resume-by-id
+/// already works across renames.
+#[tauri::command]
+async fn migrate_codex_session(
+    id: String,
+    new_path: String,
+) -> Result<sessions::CodexMigrationResult, String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::migrate_codex_session(&id, &new_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Migrate every Codex session under a project cwd to a new cwd (incl archived).
+#[tauri::command]
+async fn migrate_codex_project(
+    project: String,
+    new_path: String,
+) -> Result<sessions::CodexMigrationResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        sessions::migrate_codex_project(&project, &new_path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Permanently delete one OpenCode session by id (cascades to message/part).
@@ -642,6 +676,7 @@ pub fn run() {
             detect_clis,
             detect_terminals,
             resume_session_in_terminal,
+            new_session_in_terminal,
             migrate_claude_project,
             migrate_claude_session,
             migrate_claude_memory,
@@ -654,6 +689,8 @@ pub fn run() {
             delete_codex_session,
             delete_codex_project,
             delete_codex_memory,
+            migrate_codex_session,
+            migrate_codex_project,
             delete_opencode_session,
             delete_opencode_project,
             claude_project_registered,

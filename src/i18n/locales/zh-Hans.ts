@@ -112,7 +112,9 @@ export const zhHans: Record<MessageKey, string> = {
   "favorites.add": "加入收藏",
 
   "menu.revealInFinder": "在 Finder 中显示",
+  "menu.revealError": "无法在 Finder 中打开:{error}",
   "menu.resumeInTerminal": "在终端中恢复",
+  "menu.openInTerminal": "在终端打开",
   "menu.copyResumeCommand": "复制恢复命令",
   "menu.copyPath": "复制路径",
   "menu.copyFilename": "复制文件名",
@@ -126,7 +128,9 @@ export const zhHans: Record<MessageKey, string> = {
   "menu.migrateMemory": "迁移记忆…",
   "menu.migratePickTitle": "选择改名后的项目文件夹",
   "menu.migrateConfirm": "把保存的记录迁移到:\n{to}\n\n复制完成后删除旧的记录存储;你的项目文件夹不受影响。",
+  "menu.migrateConfirmCodex": "把这些 Codex 会话重新归到:\n{to}\n\n仅更新 `codex resume` 的归组位置;转录文件本身不会移动。",
   "menu.migrateSuccess": "已迁移 {sessions} 个会话 + {memory} 个记忆文件",
+  "menu.migrateSuccessCodex": "已迁移 {sessions} 个会话",
   "menu.migrateError": "迁移失败:{error}",
   "menu.migrateConfirmUnregistered":
     "迁移到:\n{to}\n\n迁移后,在该目录运行一次 claude,这些会话就会出现在 Claude 的历史里。\n\n继续迁移?",

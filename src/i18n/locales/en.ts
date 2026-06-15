@@ -121,7 +121,9 @@ export const en = {
 
   // Context menu
   "menu.revealInFinder": "Reveal in Finder",
+  "menu.revealError": "Couldn't open in Finder: {error}",
   "menu.resumeInTerminal": "Resume in terminal",
+  "menu.openInTerminal": "Open in terminal",
   "menu.copyResumeCommand": "Copy resume command",
   "menu.copyPath": "Copy path",
   "menu.copyFilename": "Copy filename",
@@ -135,7 +137,9 @@ export const en = {
   "menu.migrateMemory": "Migrate memory…",
   "menu.migratePickTitle": "Choose the renamed project folder",
   "menu.migrateConfirm": "Move the saved records to:\n{to}\n\nThe old copy is removed after; your project folder is not touched.",
+  "menu.migrateConfirmCodex": "Re-point these Codex sessions to:\n{to}\n\nUpdates where `codex resume` groups them; the transcripts themselves are not moved.",
   "menu.migrateSuccess": "Migrated {sessions} sessions + {memory} memory files",
+  "menu.migrateSuccessCodex": "Migrated {sessions} sessions",
   "menu.migrateError": "Migration failed: {error}",
   "menu.migrateConfirmUnregistered":
     "Migrate to:\n{to}\n\nAfter migrating, run claude in this folder once and the sessions will show up in Claude's history.\n\nContinue?",

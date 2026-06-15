@@ -2462,6 +2462,20 @@ fn rewrite_jsonl_cwd(content: &str, new_cwd: &str) -> String {
         .join("\n")
 }
 
+/// Copy `src`'s last-modified time onto `dst` (best-effort, silent on failure).
+/// Migration writes fresh files (`fs::write` / `fs::copy` reset the mtime), but
+/// Claude's `/resume` list and Termory's mtime fallback (when a session lacks an
+/// explicit timestamp) order by it — so a naive copy would make every migrated
+/// session read "just now" and lose chronological order. Mirrors the Codex
+/// rollout rewrite's mtime restore. mtime is cosmetic, not durability.
+fn preserve_mtime(src: &Path, dst: &Path) {
+    if let Ok(mtime) = fs::metadata(src).and_then(|m| m.modified()) {
+        if let Ok(f) = fs::OpenOptions::new().write(true).open(dst) {
+            let _ = f.set_modified(mtime);
+        }
+    }
+}
+
 /// Recursively copy a Claude project subtree, rewriting the `cwd` in every
 /// `*.jsonl` to `new_cwd` and copying all other files (subagent transcripts,
 /// `tool-results/`, memory `.md`, …) verbatim. Skips the regenerable
@@ -2486,8 +2500,10 @@ fn copy_tree_rewrite_cwd(src: &Path, dst: &Path, new_cwd: &str) -> Result<(), St
         } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
             let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
             fs::write(&dest, rewrite_jsonl_cwd(&content, new_cwd)).map_err(|e| e.to_string())?;
+            preserve_mtime(&path, &dest);
         } else {
             fs::copy(&path, &dest).map_err(|e| e.to_string())?;
+            preserve_mtime(&path, &dest);
         }
     }
     Ok(())
@@ -2633,6 +2649,7 @@ fn migrate_claude_session_in(
     fs::create_dir_all(&new_dir).map_err(|e| e.to_string())?;
     let content = fs::read_to_string(&src).map_err(|e| e.to_string())?;
     fs::write(&dest, rewrite_jsonl_cwd(&content, &new_canon)).map_err(|e| e.to_string())?;
+    preserve_mtime(&src, &dest);
 
     // Bring the session's companion dir (<id>/ — subagent transcripts +
     // tool-results) along, if present, rewriting cwd in any .jsonl inside. It's
@@ -2699,6 +2716,7 @@ fn migrate_claude_memory_in(
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     fs::copy(&src, &dest).map_err(|e| e.to_string())?;
+    preserve_mtime(&src, &dest);
     if delete_old {
         fs::remove_file(&src).map_err(|e| e.to_string())?;
     }
@@ -2940,6 +2958,194 @@ fn delete_codex_memory_in(root: &Path, rel: &str) -> Result<(), String> {
         return Err(format!("memory file not found ({rel})"));
     }
     fs::remove_file(&file).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Codex migration — move a session / project's sessions to a new cwd.
+//
+// Codex has no project FOLDER: a "project" is just the `threads.cwd` value, and
+// the rollout JSONL files live under ~/.codex/sessions/ regardless of cwd. So
+// migrating is a pure METADATA rewrite (no file relocation, unlike Claude).
+//
+// The `threads` table is only a CACHE: Codex rebuilds each row's `cwd` from the
+// rollout JSONL's first-line `session_meta.payload.cwd` on startup backfill /
+// resume reconcile (mirrors codex_follow.rs's model_provider story). So we MUST
+// rewrite the file's payload.cwd (authoritative, durable) AND update the table
+// row (immediate visibility) — editing the table alone is silently reverted.
+//
+// Lower value than Claude migrate: `codex resume <id>` already works across a
+// rename (the DB is global, keyed by id), so this is a regrouping convenience,
+// not a "history lost" fix. Mirrors delete_codex_* in shape (id / cwd column,
+// RW + busy_timeout + map_db_locked, env-free `*_in` for tests).
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CodexMigrationResult {
+    /// Number of sessions whose cwd was rewritten (file + table).
+    pub sessions: usize,
+    /// The canonicalized destination cwd that was written.
+    pub new_project: String,
+}
+
+/// Canonicalize a destination path to the cwd string Codex stores. Falls back to
+/// the trimmed input when the dir doesn't exist yet (Codex resume keys on id, so
+/// a not-yet-created dir still works); strips the Windows `\\?\` verbatim prefix.
+fn codex_canonical_cwd(new_path: &str) -> Result<String, String> {
+    let trimmed = new_path.trim();
+    if trimmed.is_empty() {
+        return Err("destination path is empty".into());
+    }
+    let canon = match fs::canonicalize(trimmed) {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(_) => return Ok(trimmed.to_string()),
+    };
+    Ok(canon.strip_prefix(r"\\?\").unwrap_or(&canon).to_string())
+}
+
+/// Rewrite a rollout JSONL's first-line `payload.cwd` to `new_cwd`, streaming
+/// the (100+ MB) remainder unchanged. Returns Ok(false) when there's nothing to
+/// change (no payload object, or cwd already equals new_cwd). Atomic via
+/// temp + rename; the original mtime is restored afterwards (the Codex resume
+/// picker orders by file mtime, NOT threads.updated_at). Durability does NOT
+/// rely on the mtime — the table is updated directly and Codex's resume
+/// reconcile re-reads the rewritten file. Parallels codex_follow.rs's
+/// `rewrite_rollout_provider` (same shape, `cwd` instead of `model_provider`).
+fn rewrite_rollout_cwd(path: &Path, new_cwd: &str) -> Result<bool, String> {
+    use std::io::{BufRead, BufReader, BufWriter, Write};
+
+    if !path.exists() {
+        return Err(format!("rollout file not found: {}", path.display()));
+    }
+    let original_mtime = fs::metadata(path).and_then(|m| m.modified()).ok();
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut reader = BufReader::new(file);
+    let mut first_line = String::new();
+    if reader
+        .read_line(&mut first_line)
+        .map_err(|e| e.to_string())?
+        == 0
+    {
+        return Ok(false); // empty file
+    }
+    let trimmed = first_line.trim_end_matches(['\n', '\r']);
+    let mut value: Value = serde_json::from_str(trimmed).map_err(|e| e.to_string())?;
+    let payload = match value.get_mut("payload").and_then(|p| p.as_object_mut()) {
+        Some(p) => p,
+        None => return Ok(false),
+    };
+    if let Some(Value::String(s)) = payload.get("cwd") {
+        if s == new_cwd {
+            return Ok(false);
+        }
+    }
+    payload.insert("cwd".into(), Value::String(new_cwd.to_string()));
+    // serde_json has preserve_order enabled (Cargo.toml), so key order survives.
+    let new_first = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+
+    let mut tmp_name = path.file_name().ok_or("invalid rollout path")?.to_owned();
+    tmp_name.push(".termory-tmp");
+    let tmp_path = path.with_file_name(tmp_name);
+    {
+        let out = fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
+        let mut writer = BufWriter::new(out);
+        writer
+            .write_all(new_first.as_bytes())
+            .map_err(|e| e.to_string())?;
+        writer.write_all(b"\n").map_err(|e| e.to_string())?;
+        std::io::copy(&mut reader, &mut writer).map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())?;
+        writer.get_ref().sync_all().map_err(|e| e.to_string())?;
+    }
+    fs::rename(&tmp_path, path).map_err(|e| e.to_string())?;
+    if let Some(mtime) = original_mtime {
+        if let Ok(f) = fs::OpenOptions::new().write(true).open(path) {
+            let _ = f.set_modified(mtime);
+        }
+    }
+    Ok(true)
+}
+
+/// Move every Codex thread matched by `column = value` (column is an internal
+/// literal — "id" or "cwd") to `new_cwd`: rewrite each rollout file's
+/// payload.cwd FIRST (authoritative — a crash before the table update
+/// self-heals on Codex's next backfill, converging to the new cwd), then
+/// `UPDATE threads.cwd` for the rewritten rows. Returns how many sessions moved.
+fn migrate_codex_threads_in(
+    db: &Path,
+    column: &str,
+    value: &str,
+    new_cwd: &str,
+) -> Result<usize, String> {
+    let conn = open_codex_rw(db)?;
+    let select = format!("select id, rollout_path from threads where {column} = ?1");
+    let candidates: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare(&select)
+            .map_err(|e| map_db_locked(e, "Codex"))?;
+        let rows = stmt
+            .query_map([value], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(|e| map_db_locked(e, "Codex"))?;
+        rows.filter_map(Result::ok).collect()
+    };
+    if candidates.is_empty() {
+        return Err("no Codex session found".into());
+    }
+    // Rewrite files first; collect the ids that landed so only those get their
+    // table row updated (a per-file failure self-heals via Codex's backfill).
+    let mut moved_ids: Vec<String> = Vec::new();
+    for (id, rollout_path) in &candidates {
+        match rewrite_rollout_cwd(Path::new(rollout_path), new_cwd) {
+            Ok(_) => moved_ids.push(id.clone()),
+            Err(e) => log::warn!("codex migrate: skip {id}: {e}"),
+        }
+    }
+    if moved_ids.is_empty() {
+        return Err("no Codex session could be migrated".into());
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(moved_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let update = format!("update threads set cwd = ?1 where id in ({placeholders})");
+    let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(moved_ids.len() + 1);
+    params.push(&new_cwd);
+    for id in &moved_ids {
+        params.push(id);
+    }
+    conn.execute(&update, params.as_slice())
+        .map_err(|e| map_db_locked(e, "Codex"))?;
+    Ok(moved_ids.len())
+}
+
+/// Migrate one Codex session (by thread id) to a new cwd.
+pub fn migrate_codex_session(id: &str, new_path: &str) -> Result<CodexMigrationResult, String> {
+    let db = codex_state_db_path().ok_or("cannot locate ~/.codex/state_5.sqlite")?;
+    let new_cwd = codex_canonical_cwd(new_path)?;
+    let sessions = migrate_codex_threads_in(&db, "id", id, &new_cwd)?;
+    Ok(CodexMigrationResult {
+        sessions,
+        new_project: new_cwd,
+    })
+}
+
+/// Migrate every Codex session under a project cwd to a new cwd. Includes
+/// archived threads (whole-project move, consistent with delete_codex_project).
+pub fn migrate_codex_project(
+    project: &str,
+    new_path: &str,
+) -> Result<CodexMigrationResult, String> {
+    let db = codex_state_db_path().ok_or("cannot locate ~/.codex/state_5.sqlite")?;
+    let new_cwd = codex_canonical_cwd(new_path)?;
+    if new_cwd == project {
+        return Err("source and destination are the same".into());
+    }
+    let sessions = migrate_codex_threads_in(&db, "cwd", project, &new_cwd)?;
+    Ok(CodexMigrationResult {
+        sessions,
+        new_project: new_cwd,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -14105,6 +14311,19 @@ mod tests {
         fs::create_dir_all(&new_path_dir).unwrap();
         let new_path = new_path_dir.to_string_lossy().to_string();
 
+        // Stamp the sources with a known past mtime; the migrated copies must
+        // keep it (Claude /resume + Termory's mtime fallback order by it).
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        let companion_src = old_dir.join("bbb").join("subagents").join("agent-y.jsonl");
+        for p in [&src, &companion_src] {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(past)
+                .unwrap();
+        }
+
         let res =
             migrate_claude_session_in(&projects, old_path, "bbb.jsonl", &new_path, false).unwrap();
         assert_eq!((res.sessions, res.memory_files), (1, 0));
@@ -14122,6 +14341,13 @@ mod tests {
         assert!(sub.contains(&format!("\"cwd\":\"{new_canon}\"")));
         assert!(sub.contains("\"s\":9"));
         assert!(src.exists()); // copy, kept
+                               // mtime preserved on both the session JSONL and the companion transcript.
+        for p in [
+            &new_dir.join("bbb.jsonl"),
+            &new_dir.join("bbb").join("subagents").join("agent-y.jsonl"),
+        ] {
+            assert_eq!(fs::metadata(p).unwrap().modified().unwrap(), past);
+        }
     }
 
     #[test]
@@ -14132,6 +14358,15 @@ mod tests {
         let src = old_dir.join("memory").join("sub").join("NOTE.md");
         fs::create_dir_all(src.parent().unwrap()).unwrap();
         fs::write(&src, "remember").unwrap();
+        // Stamp a known past mtime — the migrated copy must keep it (covers the
+        // non-jsonl `fs::copy` branch of preserve_mtime).
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&src)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
         let new_path_dir = tmp.path().join("newproj");
         fs::create_dir_all(&new_path_dir).unwrap();
         let new_path = new_path_dir.to_string_lossy().to_string();
@@ -14150,10 +14385,9 @@ mod tests {
             .to_string_lossy()
             .to_string();
         let new_dir = projects.join(sanitize_claude_path(&new_canon).unwrap());
-        assert_eq!(
-            fs::read_to_string(new_dir.join("memory").join("sub").join("NOTE.md")).unwrap(),
-            "remember"
-        );
+        let dest_md = new_dir.join("memory").join("sub").join("NOTE.md");
+        assert_eq!(fs::read_to_string(&dest_md).unwrap(), "remember");
+        assert_eq!(fs::metadata(&dest_md).unwrap().modified().unwrap(), past);
         assert!(src.exists());
 
         // An unsafe relative path (`..`) is rejected — can't escape memory/.
@@ -14378,6 +14612,146 @@ mod tests {
         assert!(!md.exists());
         // Traversal is refused.
         assert!(delete_codex_memory_in(&root, "../../etc/x").is_err());
+    }
+
+    /// Seed a Codex state DB whose rollout files carry a real `session_meta`
+    /// first line with `payload.cwd` (so migrate can rewrite it). a,b → /proj/x;
+    /// c → /proj/y. Returns the db path.
+    fn seed_codex_threads_with_meta(dir: &Path) -> PathBuf {
+        let db = dir.join("state_5.sqlite");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "create table threads (id text primary key, cwd text not null, \
+             rollout_path text not null);",
+        )
+        .unwrap();
+        for (id, cwd) in [("a", "/proj/x"), ("b", "/proj/x"), ("c", "/proj/y")] {
+            let roll = dir.join(format!("{id}.jsonl"));
+            fs::write(
+                &roll,
+                format!(
+                    "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":\"{cwd}\",\"model_provider\":\"openai\"}}}}\n\
+                     {{\"type\":\"response_item\",\"payload\":{{\"text\":\"hello\"}}}}\n"
+                ),
+            )
+            .unwrap();
+            conn.execute(
+                "insert into threads values (?1, ?2, ?3)",
+                rusqlite::params![id, cwd, roll.to_string_lossy()],
+            )
+            .unwrap();
+        }
+        db
+    }
+
+    fn thread_cwd(db: &Path, id: &str) -> String {
+        Connection::open(db)
+            .unwrap()
+            .query_row("select cwd from threads where id = ?1", [id], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn rewrite_rollout_cwd_changes_first_line_keeps_rest_and_is_idempotent() {
+        let tmp = TestDir::new("codex-rewrite-cwd");
+        let roll = tmp.path().join("r.jsonl");
+        fs::write(
+            &roll,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"x\",\"cwd\":\"/old\",\"model_provider\":\"openai\"}}\n\
+             {\"type\":\"response_item\",\"payload\":{\"text\":\"hello\"}}\n\
+             {\"type\":\"response_item\",\"payload\":{\"text\":\"world\"}}\n",
+        )
+        .unwrap();
+
+        assert!(rewrite_rollout_cwd(&roll, "/new/dest").unwrap());
+        let lines: Vec<String> = fs::read_to_string(&roll)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let first: Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(first["payload"]["cwd"], "/new/dest");
+        // Sibling fields + the id survive; later lines are untouched.
+        assert_eq!(first["payload"]["model_provider"], "openai");
+        assert_eq!(first["payload"]["id"], "x");
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].contains("hello"));
+        assert!(lines[2].contains("world"));
+
+        // Idempotent: re-running with the same cwd is a no-op.
+        assert!(!rewrite_rollout_cwd(&roll, "/new/dest").unwrap());
+        // A line with no payload object → nothing to change.
+        let bare = tmp.path().join("bare.jsonl");
+        fs::write(&bare, "{\"type\":\"x\"}\n").unwrap();
+        assert!(!rewrite_rollout_cwd(&bare, "/new/dest").unwrap());
+    }
+
+    #[test]
+    fn migrate_codex_session_in_rewrites_one_thread_cwd_and_file() {
+        let tmp = TestDir::new("codex-migrate-sess");
+        let db = seed_codex_threads_with_meta(tmp.path());
+
+        let moved = migrate_codex_threads_in(&db, "id", "a", "/new/dest").unwrap();
+        assert_eq!(moved, 1);
+        // Table updated for "a" only; siblings untouched.
+        assert_eq!(thread_cwd(&db, "a"), "/new/dest");
+        assert_eq!(thread_cwd(&db, "b"), "/proj/x");
+        assert_eq!(thread_cwd(&db, "c"), "/proj/y");
+        // Authoritative rollout file rewritten for a, not b.
+        let a: Value = serde_json::from_str(
+            fs::read_to_string(tmp.path().join("a.jsonl"))
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(a["payload"]["cwd"], "/new/dest");
+        let b: Value = serde_json::from_str(
+            fs::read_to_string(tmp.path().join("b.jsonl"))
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(b["payload"]["cwd"], "/proj/x");
+
+        // Unknown id → error.
+        assert!(migrate_codex_threads_in(&db, "id", "zzz", "/new/dest").is_err());
+    }
+
+    #[test]
+    fn migrate_codex_project_in_rewrites_all_threads_for_cwd() {
+        let tmp = TestDir::new("codex-migrate-proj");
+        let db = seed_codex_threads_with_meta(tmp.path());
+
+        let moved = migrate_codex_threads_in(&db, "cwd", "/proj/x", "/new/dest").unwrap();
+        assert_eq!(moved, 2); // a + b
+        assert_eq!(thread_cwd(&db, "a"), "/new/dest");
+        assert_eq!(thread_cwd(&db, "b"), "/new/dest");
+        assert_eq!(thread_cwd(&db, "c"), "/proj/y"); // other project untouched
+        for id in ["a", "b"] {
+            let v: Value = serde_json::from_str(
+                fs::read_to_string(tmp.path().join(format!("{id}.jsonl")))
+                    .unwrap()
+                    .lines()
+                    .next()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(v["payload"]["cwd"], "/new/dest");
+        }
+    }
+
+    #[test]
+    fn codex_canonical_cwd_falls_back_for_missing_dir_and_rejects_empty() {
+        // Non-existent path → returned as-is (trimmed).
+        assert_eq!(
+            codex_canonical_cwd("  /no/such/dir/xyz123  ").unwrap(),
+            "/no/such/dir/xyz123"
+        );
+        assert!(codex_canonical_cwd("   ").is_err());
     }
 
     /// Schema covering session/message cascade plus the event log tables.

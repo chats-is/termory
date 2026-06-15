@@ -13,6 +13,7 @@ import { copyToClipboard } from "@/lib/clipboard";
 import { basename, recordRel, resumeCommandFor } from "@/lib/session-utils";
 import {
   runClaudeMigration,
+  runCodexMigration,
   runRecordDelete,
   type MigrateResult
 } from "@/lib/migrate";
@@ -250,6 +251,18 @@ export function ListItemMenu({
         {!hideSessionOps && isCodexSession && (
           <>
             <ContextMenuSeparator />
+            <ContextMenuItem
+              onSelect={() =>
+                void runCodexMigration(
+                  "migrate_codex_session",
+                  { id: id! },
+                  t,
+                  onLocalMigrate
+                )
+              }
+            >
+              {t("menu.migrateSession")}
+            </ContextMenuItem>
             <ContextMenuItem
               variant="destructive"
               onSelect={() =>

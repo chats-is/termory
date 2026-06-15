@@ -126,13 +126,32 @@ describe("ListItemMenu — Migrate (single session / memory)", () => {
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it("offers no migrate item for non-Claude sessions or plain memory files", async () => {
-    const { unmount } = render(
-      <ListItemMenu path="/p/s.jsonl" id="s1" source="Codex" project="/old">
+  it("offers migrate for Codex sessions (metadata re-point, not a file move)", async () => {
+    openMock.mockResolvedValue("/new/dest");
+    askMock.mockResolvedValue(true);
+    invokeMock.mockResolvedValue({ sessions: 1, new_project: "/new/dest" });
+    render(
+      <ListItemMenu path="/c/r.jsonl" id="thread-1" source="Codex" project="/old">
         <button>codexrow</button>
       </ListItemMenu>
     );
     fireEvent.contextMenu(screen.getByText("codexrow"));
+    await userEvent.click(await screen.findByText("Migrate session…"));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("migrate_codex_session", {
+        id: "thread-1",
+        newPath: "/new/dest"
+      })
+    );
+  });
+
+  it("offers no migrate item for OpenCode sessions or plain memory files", async () => {
+    const { unmount } = render(
+      <ListItemMenu path="/p/s.jsonl" id="s1" source="OpenCode" project="/old">
+        <button>ocrow</button>
+      </ListItemMenu>
+    );
+    fireEvent.contextMenu(screen.getByText("ocrow"));
     expect(await screen.findByText("Reveal in Finder")).toBeTruthy();
     expect(screen.queryByText("Migrate session…")).toBeNull();
     unmount();

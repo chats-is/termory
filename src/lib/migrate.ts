@@ -91,6 +91,54 @@ export async function runClaudeMigration(
   }
 }
 
+/**
+ * Codex migration (session or whole project). Unlike Claude, Codex has no
+ * project folder and the rollout transcripts never move — migrating is a pure
+ * metadata rewrite (the rollout file's payload.cwd + the threads row), so
+ * `codex resume` regroups the sessions under the new folder. There's no
+ * old_dir/new_dir relocation, so the result is adapted to the shared
+ * `MigrateResult` shape with empty dirs (the record's path stays put; only its
+ * `project` is re-pointed in `remapRecordsLocally`).
+ */
+export async function runCodexMigration(
+  command: "migrate_codex_session" | "migrate_codex_project",
+  args: Record<string, string>,
+  t: Translate,
+  onMigrated?: (res: MigrateResult) => void
+): Promise<void> {
+  const picked = await open({
+    directory: true,
+    title: t("menu.migratePickTitle")
+  });
+  if (typeof picked !== "string") return; // cancelled
+  const confirmed = await ask(
+    `${t("menu.migrateConfirmCodex", { to: picked })}\n\n${t("menu.exitCliHint", { app: "Codex" })}`,
+    {
+      title: t("menu.migrate"),
+      kind: "warning",
+      okLabel: t("menu.migrate"),
+      cancelLabel: t("common.cancel")
+    }
+  );
+  if (!confirmed) return;
+  try {
+    const res = await invoke<{ sessions: number; new_project: string }>(command, {
+      ...args,
+      newPath: picked
+    });
+    toast.success(t("menu.migrateSuccessCodex", { sessions: res.sessions }));
+    onMigrated?.({
+      sessions: res.sessions,
+      memory_files: 0,
+      old_dir: "",
+      new_dir: "",
+      new_project: res.new_project
+    });
+  } catch (err) {
+    toast.error(t("menu.migrateError", { error: String(err) }));
+  }
+}
+
 type DeleteCommand =
   | "delete_claude_project"
   | "delete_claude_session"
