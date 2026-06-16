@@ -118,15 +118,12 @@ export function GatewayEditor({
   const [detectAttempted, setDetectAttempted] = React.useState(
     !!gateway.capabilities
   );
-  // Seed `lastTried` to the saved gateway's creds when it already carries
-  // persisted capabilities — so opening it to edit shows the stored caps
-  // immediately and does NOT auto-redetect (the user can refresh, and any
-  // base/key change still triggers a fresh detect).
-  const lastTried = React.useRef<string>(
-    gateway.capabilities
-      ? `${(gateway.baseUrl ?? "").trim()}\n${(gateway.apiKey ?? "").trim()}`
-      : ""
-  );
+  // Start `lastTried` empty so opening the editor auto-detects once (when
+  // base URL + key are present) — mirrors ProviderEditor's model auto-fetch,
+  // so editing always shows a fresh "N models available" and the saved
+  // capabilities/models stay current. The saved caps still render
+  // immediately (from `caps`) until the re-detect resolves.
+  const lastTried = React.useRef<string>("");
   // Monotonic id so an earlier (e.g. typed-base-but-no-key-yet) probe
   // that resolves LATE can't overwrite a newer one's result.
   const detectSeq = React.useRef(0);
@@ -417,6 +414,13 @@ export function GatewayEditor({
                   <span className="text-xs text-destructive truncate">
                     {detectError ??
                       t("providers.noSourcesDetected")}
+                  </span>
+                )}
+                {(detecting || (caps?.models?.length ?? 0) > 0) && (
+                  <span className="text-xs text-muted-foreground truncate">
+                    {detecting
+                      ? t("help.fetchingModels")
+                      : t("help.modelsAvailable", { n: caps?.models?.length ?? 0 })}
                   </span>
                 )}
               </div>
