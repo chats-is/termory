@@ -197,7 +197,7 @@ For TUI tool-message rendering (every Termory branch cites a line here):
 - Codex exec/shell render: `.audit-sources/codex/codex-rs/tui/src/exec_cell/render.rs`, bash highlight alias at `codex-rs/tui/src/render/highlight.rs:533`
 - Claude tool-use wrapper: `.audit-sources/claude-code/src/components/messages/AssistantToolUseMessage.tsx:152` (assembles `<bold>{userFacingName}</bold>({renderToolUseMessage})`); per-tool: `src/tools/<Tool>/UI.tsx` (`userFacingName` + `renderToolUseMessage`)
 - Gemini ToolInfo render: `.audit-sources/gemini-cli/packages/cli/src/ui/components/messages/ToolShared.tsx:202`; type at `packages/cli/src/ui/types.ts:119` `IndividualToolCallDisplay`
-- OpenCode tool components: `.audit-sources/opencode/packages/opencode/src/cli/cmd/tui/feature-plugins/system/session-v2.tsx` (Bash l.707, Glob l.748, Read l.764, Grep l.794, WebFetch l.810, WebSearch l.818, Write l.828, Edit l.857, ApplyPatch l.891, TodoWrite l.964, Question l.991, Skill l.1022, Task l.1030, generic l.522, BlockTool helper l.659, InlineTool helper l.559)
+- OpenCode tool components: `.audit-sources/opencode/packages/tui/src/routes/session/index.tsx` — the per-tool renderers (now named functions: `Shell`/`Glob`/`Read`/`Grep`/`WebFetch`/`WebSearch`/`Write`/`Edit`/`ApplyPatch`/`TodoWrite`/`Question`/`Skill`/`Task`/`GenericTool`) + the `BlockTool` / `InlineTool` helpers. **OpenCode 1.17.x extracted the whole TUI into the `packages/tui` package** (the old `…/feature-plugins/system/session-v2.tsx` is gone). Citations in the OpenCode verb-mapping section have been re-verified against 1.17.11; message-type DATA now lives in `packages/tui/src/context/data.tsx`. See the audit-version note under "Per-platform verb mapping → OpenCode".
 
 When behavior differs by version, match the locally installed or explicitly requested target version and cover it with a focused test. Tool-message rendering should reference the TUI source files above, not the doc sites — docs lag behind the actual UI for many of these tools.
 
@@ -339,7 +339,7 @@ or
 **Rules:**
 
 1. `{status}` glyph: `⏺` success, `✗` failure (Claude `constants/figures.ts:4` + Codex `exec_cell/render.rs:236`). Cross-platform — applied to every tool card.
-2. `{Verb}` text is platform-native (Claude `userFacingName`, OpenCode `session-v2.tsx`, Codex `exec_cell/render.rs`, Gemini `displayName`); the wrapper shape `**Verb**(args)` is identical across platforms.
+2. `{Verb}` text is platform-native (Claude `userFacingName`, OpenCode `routes/session/index.tsx`, Codex `exec_cell/render.rs`, Gemini `displayName`); the wrapper shape `**Verb**(args)` is identical across platforms.
 3. `{args}` always passes through `wrap_inline_code` (sessions.rs:48) so embedded backticks / `*` / `()` don't break markdown.
 4. **`⎿ ` prefix is REQUIRED on every summary line**, with one trailing space before the content. Tools without a structured summary skip the line entirely (Bash, generic MCP, etc.). NEVER put `⎿` inside a code fence — browser monospace fonts render U+23BF inconsistently, breaking column alignment.
 5. Summary content matches the per-tool Claude TUI component verbatim (count bolding, label pluralization). Examples:
@@ -458,37 +458,39 @@ Feature-gated wrappers not handled: `<github-webhook-activity>` (KAIROS_GITHUB_W
   - `compact_boundary` → `---\n\n*{content}*\n\n---` GFM divider notice (Message.tsx:195-203 `CompactBoundaryMessage`)
   - `microcompact_boundary` / `api_error` / other → silent drop (matches verbose-only or null fallthrough)
 
-**OpenCode** (`opencode_v2_tool_part_text`) — each tool header uses the unified `**Verb**(args)` shape but the verb text + body content stay platform-native (matching `session-v2.tsx` lines cited below). Body decorations (`\# description` BlockTool title, bash fence with `$ cmd` prefix, ```diff diff fence, `↳ Loaded` instruction-file list, `{✓/~/✕/☐}` todo icons) are preserved verbatim — only the header line was reshaped:
+**OpenCode** (`opencode_v2_tool_part_text`) — each tool header uses the unified `**Verb**(args)` shape but the verb text + body content stay platform-native (matching the per-tool functions in `routes/session/index.tsx` cited below). Body decorations (`\# description` BlockTool title, bash fence with `$ cmd` prefix, ```diff diff fence, `↳ Loaded` instruction-file list, `{✓/~/✕/☐}` todo icons) are preserved verbatim — only the header line was reshaped:
 
-- `Bash` / `Shell` (l.707): header `**Shell**({wrap_inline_code(cmd)})`. With output → followed by `\# {description ?? "Shell"}\n\n```bash\n$ {cmd}\n{output}\n```` (original BlockTool body). Without output → header alone (original InlineTool was `$ {cmd}`). Output resolution mirrors TUI l.710: `metadata.output ?? state.content` (Bash-specific override — other tools just use `state.content`), then `strip_ansi` to drop terminal colour codes.
-- `Glob` (l.748): `**Glob**(pattern: {wrap_inline_code(pattern)}, path: {wrap_inline_code(path)} — {N} match[es])` (singular/plural matched).
-- `Read` (l.764): `**Read**({wrap_inline_code(filePath)} [other=...])` + per-entry `↳ Loaded {path}` lines using CommonMark hard breaks (`\` line terminator). `metadata.loaded` is the `instruction.resolve` array from `read.ts:264` — the auto-loaded instruction files (AGENTS.md / CLAUDE.md / etc.) the Read tool fetched alongside the requested file; surfaced because it's data, not decoration.
-- `Grep` (l.794): `**Grep**(pattern: {pattern}, path: {path} — {N} match[es])`.
-- `WebFetch` (l.810): `**WebFetch**({wrap_inline_code(url)})`.
-- `WebSearch` (l.818): `**{provider label}**({wrap_inline_code(query)} — {N} results)`. Verb is provider-derived per `webSearchProviderLabel` (`tool/websearch.ts:39-43`): `"parallel"` → `Parallel Web Search`, `"exa"` → `Exa Web Search`, otherwise → `Web Search` (default, with space — matches Claude's verb).
-- `Write` (l.828): `**Write**({wrap_inline_code(filePath)})` + ```{lang from ext}\n{content}\n``` body when completed.
-- `Edit` (l.857): `**Edit**({wrap_inline_code(filePath)})` + ```diff\n{diff}\n``` body when diff present.
-- `ApplyPatch` (l.891): per-file header → `**Deleted**({path})` / `**Created**({path})` / `**Moved**({old → new})` / `**Patched**({path})` + ```diff fence (matches FileChange tags in fileTitle()). When a file has no `patch` text, body falls back to `-N line` / `-N lines` (pluralized per TUI l.923).
-- `TodoWrite` (l.964): `**Todos**\n\n{✓/~/✕/☐} {content}` per todo (verb is "Todos" — matches the original BlockTool title `\# Todos`; icons from todoIcon helper).
-- `Question` (l.991): `**Questions**\n\n{Q}\n{A}` per Q/A pair (verb "Questions" matches `\# Questions` title).
-- `Skill` (l.1022): `**Skill**({wrap_inline_code(name)})`.
-- `Task` (l.1030): `**{Titlecase(subagent_type ?? "General")} Task**({wrap_inline_code(description)})` — verb includes the agent name prefix, matching the original `{Agent} Task — description` heading.
-- generic (l.522): `**{name}**({input})` header + 4-backtick output fence when present.
-- `reasoning` part → `format_reasoning_body` (unified italic blockquote — replaces the old `_Thinking:_` inline prefix).
+(Source coordinates re-verified against OpenCode 1.17.11 `packages/tui/src/routes/session/index.tsx` — each renderer is now a named function, the durable anchor; inner sub-line numbers are approximate.)
 
-All tool cards emit a `⏺` / `✗` leading marker (`status_marker` per session-v2.tsx:572 + l.669 — error state flips the InlineTool/BlockTool color). Failed parts append a 4-backtick `Error: {message}` body from `state.error.message`, mirroring Codex / Claude / Gemini failure formatting.
+- `Bash` / `Shell` (`function Shell`, l.2036): header `**Shell**({wrap_inline_code(cmd)})`. With output → followed by `\# {description ?? "Shell"}\n\n```bash\n$ {cmd}\n{output}\n```` (original BlockTool body). Without output → header alone (original InlineTool was `$ {cmd}`). Output resolution: `metadata.output ?? state.content` then `stripAnsi` (l.2041) to drop terminal colour codes.
+- `Glob` (`function Glob`, l.2132): `**Glob**(pattern: {wrap_inline_code(pattern)}, path: {wrap_inline_code(path)} — {N} match[es])` (singular/plural matched).
+- `Read` (`function Read`, l.2145): `**Read**({wrap_inline_code(filePath)} [other=...])` + per-entry `↳ Loaded {path}` lines using CommonMark hard breaks (`\` line terminator). `metadata.loaded` is the `instruction.resolve` array from `read.ts` — the auto-loaded instruction files (AGENTS.md / CLAUDE.md / etc.) the Read tool fetched alongside the requested file; surfaced because it's data, not decoration.
+- `Grep` (`function Grep`, l.2180): `**Grep**(pattern: {pattern}, path: {path} — {N} match[es])`.
+- `WebFetch` (`function WebFetch`, l.2193): `**WebFetch**({wrap_inline_code(url)})`.
+- `WebSearch` (`function WebSearch`, l.2201): `**{provider label}**({wrap_inline_code(query)} — {N} results)`. Verb is provider-derived per `webSearchProviderLabel` (`tool/websearch.ts`): `"parallel"` → `Parallel Web Search`, `"exa"` → `Exa Web Search`, otherwise → `Web Search` (default, with space — matches Claude's verb).
+- `Write` (`function Write`, l.2095): `**Write**({wrap_inline_code(filePath)})` + ```{lang from ext}\n{content}\n``` body when completed.
+- `Edit` (`function Edit`, l.2325): `**Edit**({wrap_inline_code(filePath)})` + ```diff\n{diff}\n``` body when diff present.
+- `ApplyPatch` (`function ApplyPatch`, l.2378): per-file header → `**Deleted**({path})` / `**Created**({path})` / `**Moved**({old → new})` / `**Patched**({path})` + ```diff fence (matches FileChange tags in fileTitle()). When a file has no `patch` text, body falls back to `-N line` / `-N lines` (pluralized).
+- `TodoWrite` (`function TodoWrite`, l.2454): `**Todos**\n\n{✓/~/✕/☐} {content}` per todo (verb is "Todos" — matches the original BlockTool title `\# Todos`; icons from todoIcon helper).
+- `Question` (`function Question`, l.2480): `**Questions**\n\n{Q}\n{A}` per Q/A pair (verb "Questions" matches `\# Questions` title).
+- `Skill` (`function Skill`, l.2516): `**Skill**({wrap_inline_code(name)})`.
+- `Task` (`function Task`, l.2210): `**{Titlecase(subagent_type ?? "General")} Task**({wrap_inline_code(description)})` — verb includes the agent name prefix, matching the original `{Agent} Task — description` heading.
+- generic (`function GenericTool`, l.1788): `**{name}**({input})` header + 4-backtick output fence when present.
+- `reasoning` part (`function ReasoningPart`, l.1572) → `format_reasoning_body` (unified italic blockquote — replaces the old `_Thinking:_` inline prefix).
 
-Top-level `SessionMessage` types beyond the tool parts (session-v2.tsx Match arms l.92-122):
+All tool cards emit a `⏺` / `✗` leading marker (Termory's own output). NOTE the 1.17 TUI no longer has a `status_marker` helper — `InlineTool` (l.1826) / `BlockTool` (l.1984) take `pending` / `complete` props and colour by `state.status`, the error path still carries `state.error.message`. Termory's mapping is unchanged: failed parts get the `✗` marker + a 4-backtick `Error: {message}` body, mirroring Codex / Claude / Gemini failure formatting.
 
-- `user` (l.159 UserMessage) → `text` body + attachment row built by `opencode_v2_user_attachments`. Files surface as `` `{mime}` `` `` `{name ?? uri}` `` code-span pairs (l.176-185); agents as `` `agent` `` `` `{name}` `` (l.186-193). `references` (PromptReferenceAttachment) are persisted but TUI skips them, so Termory does too.
-- `assistant` (l.296 AssistantMessage) → text from parts; if `message.error.message` is set (l.339-353), append `*✕ {message}*` italic notice on its own line.
-- `synthetic` (l.105-107) → TUI renders `<></>`; Termory returns `None` so they don't appear in the transcript.
-- `shell` (l.200 ShellMessage) → `$ {command}` + `strip_ansi(output)` on a second line.
-- `compaction` (l.231) → bold header `**Auto Compaction**` (when `reason === "auto"`) or `**Compaction**`, followed by the `summary` body.
-- `agent-switched` (l.261) → `▣ Switched agent to {Titlecase(agent)}` (prefix matches the TUI agent-color glyph at l.267).
-- `model-switched` (l.275) → `◇ Switched model to {provider}/{id}[/{variant}]` (prefix matches l.284 secondary-color glyph).
+Top-level `SessionMessage` types beyond the tool parts. **1.17 model change:** the message DATA is now constructed in `packages/tui/src/context/data.tsx` (the old single Match-arm dispatch is gone) and rendered by `UserMessage` / `AssistantMessage` in `routes/session/index.tsx`; `synthetic` and `compaction` are now PART types, not top-level message types. Termory's `opencode_v2_*` output is unchanged — these are the new source coordinates:
 
-Audit reference is OpenCode `1.15.5` (commit `9324ef0`). Compared against `v1.15.7`: only cosmetic reasoning collapse-icon change in session-v2.tsx (`▼/▶` → `-/+`), no structural / schema diffs. No re-audit needed.
+- `user` (`UserMessage`, l.1350) → `text` body + attachment row built by `opencode_v2_user_attachments`. Files surface as `` `{mime}` `` `` `{name ?? uri}` `` code-span pairs; agents as `` `agent` `` `` `{name}` ``. `references` (PromptReferenceAttachment) are persisted but TUI skips them, so Termory does too.
+- `assistant` (`AssistantMessage`, l.1455) → text from parts; if `message.error.message` is set, append `*✕ {message}*` italic notice on its own line.
+- `synthetic` → now a PART property (`part.synthetic`), filtered out of the visible set (`routes/session/index.tsx` l.387); Termory returns `None` so they don't appear in the transcript.
+- `shell` → message type still exists, constructed in `context/data.tsx` l.192 → `$ {command}` + `strip_ansi(output)` on a second line.
+- `compaction` → now a PART type, handled inside `UserMessage` (l.1378 / rendered l.1442) → bold header `**Auto Compaction**` (when `reason === "auto"`) or `**Compaction**`, then the `summary` body.
+- `agent-switched` (constructed `context/data.tsx` l.136) → `▣ Switched agent to {Titlecase(agent)}`.
+- `model-switched` (constructed `context/data.tsx` l.146) → `◇ Switched model to {provider}/{id}[/{variant}]`.
+
+Audit reference is now OpenCode `1.17.11` (commit `77f2d22`) — up from the original `1.15.5` (`9324ef0`), which kept the TUI in `…/feature-plugins/system/session-v2.tsx`. 1.17.x **extracted the whole TUI into the `packages/tui` package**: tool rendering is now `packages/tui/src/routes/session/index.tsx` (per-tool named functions + `BlockTool`/`InlineTool` helpers) and message-type DATA is built in `packages/tui/src/context/data.tsx`. The verb-mapping citations above were re-verified against 1.17.11. **Structural changes from 1.15.5** (Termory's `opencode_v2_*` OUTPUT is unchanged — it's the unified `**Verb**(args)` format, independent of OpenCode's TUI): renderers are now functions (not Match arms); `synthetic` / `compaction` are PART types (not top-level message types); the `status_marker` helper is gone (replaced by `pending`/`complete` props on InlineTool/BlockTool). Per-tool body BEHAVIOUR (fences, icons, summaries) was spot-checked, not exhaustively re-diffed — if a specific tool's output looks off, diff that function in `routes/session/index.tsx` against `opencode_v2_tool_part_text`.
 
 **Gemini CLI** (`gemini_tool_messages_from_value` + `gemini_thought_messages_from_value` + `gemini_part_to_string`) — `.audit-sources/gemini-cli/packages/cli/src/ui/components/messages/`:
 
@@ -517,7 +519,7 @@ Audit reference is OpenCode `1.15.5` (commit `9324ef0`). Compared against `v1.15
 - `merge_tool_outputs(messages)` (sessions.rs runs in `parse_claude_session` and `parse_codex_session`): folds matching `tool_result` / `tool_error` into the leading `tool_use` card. On a matched failure it prefixes the leading line with `✗ ` (instead of `⏺ `) and prepends the fence body with `Error:` (plus `Exit code N` when `SessionMessage.exit_code` is set). Orphan results (no matching tool_use) keep their text but also get a `⏺` / `✗` status prefix.
 - `codex_parse_exec_output(text)` returns `CodexExecOutput { raw, exit_code }` — strips Codex's `Chunk ID: ... Output:` wrapper line-by-line so the visible body is just `aggregated_output`, AND extracts the exit code for the `Error: Exit code N` line.
 - `codex_parse_patch_actions(patch_text)` scans `*** Add/Delete/Update File:` markers and returns `Vec<CodexPatchAction>` for the apply_patch header builder.
-- `strip_ansi(text)` — drop ANSI escapes (CSI colour / cursor codes, OSC title-set sequences, and lone `ESC + letter` escapes). Used for OpenCode Bash output (session-v2.tsx:710) and `type: "shell"` message captures (session-v2.tsx:203). No regex crate — small inline state machine, leaves non-ESC content untouched.
+- `strip_ansi(text)` — drop ANSI escapes (CSI colour / cursor codes, OSC title-set sequences, and lone `ESC + letter` escapes). Used for OpenCode Bash output (`routes/session/index.tsx` l.2041) and `type: "shell"` message captures (`context/data.tsx` l.192). No regex crate — small inline state machine, leaves non-ESC content untouched.
 
 ### Tool message metadata + UI
 
