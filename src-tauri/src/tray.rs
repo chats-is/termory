@@ -267,7 +267,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         // kick off a (rate-limited) quota refresh so the quota info
         // rows stay current without any background polling. The fetch
         // lands after the menu is already on screen, so the updated
-        // numbers show from the NEXT open (floors: 5 min after a
+        // numbers show from the NEXT open (floors: 2 min after a
         // success, 60s after a failure — QUOTA_TRAY_MIN_INTERVAL /
         // QUOTA_TRAY_ERROR_RETRY).
         .on_tray_icon_event(|tray, event| {
@@ -281,7 +281,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
 
 /// Minimum spacing between quota fetches per CLI — same window as the
 /// Providers page's auto-refresh cache (QUOTA_STALE_MS).
-const QUOTA_TRAY_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+const QUOTA_TRAY_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
 /// Retry floor after a FAILED fetch — much shorter, so a transient
 /// network error doesn't mute the tray row for the full window
 /// (frontend mirror: QUOTA_ERROR_RETRY_MS in ProvidersPage.tsx).
@@ -468,6 +468,24 @@ fn update_recent_region(app: &AppHandle, installed_clis: &[CliApp], recent: &Rec
 /// when the displayed numbers changed. Failed fetches only refresh the
 /// rate-limit marker — the menu keeps the last good numbers instead of
 /// flickering empty.
+/// Drop a CLI's cached tray quota and refresh its row title (only when
+/// something was actually removed). Shared by the two "no longer any
+/// quota to show" paths: a definitive logout (`not_found`) and a
+/// successful fetch with no usable windows (logged in but unsubscribed).
+fn clear_quota_entry(app: &AppHandle, cli: CliApp) {
+    let removed = QUOTA
+        .lock()
+        .map(|mut guard| {
+            let before = guard.len();
+            guard.retain(|(c, _)| *c != cli);
+            guard.len() != before
+        })
+        .unwrap_or(false);
+    if removed {
+        update_cli_row_title(app, cli);
+    }
+}
+
 pub fn refresh_quota(app: &AppHandle, quota: &crate::quota::SubscriptionQuota) {
     let Some(cli) = CliApp::parse(&quota.app) else {
         return;
@@ -491,17 +509,7 @@ pub fn refresh_quota(app: &AppHandle, quota: &crate::quota::SubscriptionQuota) {
         // transient failure — drop the stale numbers from the menu.
         // Other failures keep the last good data (no flickering).
         if quota.credential_status == crate::quota::CredentialStatus::NotFound {
-            let removed = QUOTA
-                .lock()
-                .map(|mut guard| {
-                    let before = guard.len();
-                    guard.retain(|(c, _)| *c != cli);
-                    guard.len() != before
-                })
-                .unwrap_or(false);
-            if removed {
-                update_cli_row_title(app, cli);
-            }
+            clear_quota_entry(app, cli);
         }
         return;
     }
@@ -514,6 +522,15 @@ pub fn refresh_quota(app: &AppHandle, quota: &crate::quota::SubscriptionQuota) {
             .collect(),
         plan: quota.plan.clone(),
     };
+    // A successful fetch that carries no usable windows means the
+    // official account has no active subscription quota (e.g. logged in
+    // but unsubscribed — the usage endpoint returns windows with no
+    // `utilization`). Drop any stale numbers instead of leaving them on
+    // the menu, same as a definitive logout (`not_found`).
+    if next.tiers.is_empty() {
+        clear_quota_entry(app, cli);
+        return;
+    }
     match QUOTA.lock() {
         Ok(mut guard) => match guard.iter_mut().find(|(c, _)| *c == cli) {
             Some((_, cur)) if *cur == next => return, // unchanged → no update
