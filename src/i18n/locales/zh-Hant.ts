@@ -53,6 +53,8 @@ export const zhHant: Record<MessageKey, string> = {
   "tray.exit": "退出",
   "tray.newSession": "新建會話",
   "tray.chooseFolder": "選擇資料夾…",
+  "tray.statusBusy": "工作中",
+  "tray.statusWaiting": "需要輸入",
 
   "stats.dailyTokens": "每日 Tokens",
   "stats.dailyActivities": "每日活躍度",

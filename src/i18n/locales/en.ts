@@ -59,6 +59,8 @@ export const en = {
   "tray.exit": "Exit",
   "tray.newSession": "New Session",
   "tray.chooseFolder": "Choose Folder…",
+  "tray.statusBusy": "Working",
+  "tray.statusWaiting": "Needs input",
 
   // Stats
   "stats.dailyTokens": "Daily tokens",

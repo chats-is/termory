@@ -309,6 +309,8 @@ async fn set_tray_labels(
     monthly: String,
     new_session: String,
     choose_folder: String,
+    status_busy: String,
+    status_waiting: String,
 ) -> Result<(), String> {
     tray::set_labels(
         open,
@@ -319,6 +321,8 @@ async fn set_tray_labels(
         monthly,
         new_session,
         choose_folder,
+        status_busy,
+        status_waiting,
     );
     let _ = tray::rebuild_menu(&app);
     Ok(())

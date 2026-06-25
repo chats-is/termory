@@ -1,6 +1,7 @@
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import { getVersion } from "@tauri-apps/api/app";
@@ -103,7 +104,7 @@ import { MemoryCard } from "@/components/MemoryCard";
 import { MessageBody } from "@/components/MessageBody";
 import { MessageList } from "@/components/MessageList";
 import { SnippetLine } from "@/components/SnippetLine";
-import { useT } from "@/i18n";
+import { useI18n, useT } from "@/i18n";
 
 // Route + modal code-splitting (M6). Each lazy chunk only ships when
 // its surface mounts: Providers / Search / Settings are gated on the
@@ -156,10 +157,14 @@ export function App() {
   }, []);
 
   const t = useT();
+  const { ready: localeReady } = useI18n();
   // Keep the macOS tray's static rows (Open / Official / Exit) on the app
-  // language — re-pushed whenever `t` (the locale) changes. Backend stores the
-  // strings + rebuilds the menu; no-ops where there's no tray.
+  // language — re-pushed whenever `t` (the locale) changes. Gated on
+  // `localeReady` so we push the FINAL locale once the saved preference has
+  // loaded, instead of first flashing the system-guessed one onto the tray.
+  // Backend stores the strings + rebuilds the menu; no-ops where there's no tray.
   React.useEffect(() => {
+    if (!localeReady) return;
     void invoke("set_tray_labels", {
       open: t("tray.open"),
       official: t("tray.official"),
@@ -170,9 +175,12 @@ export function App() {
       monthly: t("providers.quotaMonthlyShort"),
       // "New Session" submenu title + its "Choose Folder…" tail.
       newSession: t("tray.newSession"),
-      chooseFolder: t("tray.chooseFolder")
+      chooseFolder: t("tray.chooseFolder"),
+      // Recent-session live work status suffixes (Claude only).
+      statusBusy: t("tray.statusBusy"),
+      statusWaiting: t("tray.statusWaiting")
     }).catch(() => {});
-  }, [t]);
+  }, [t, localeReady]);
   const [sessions, setSessions] = React.useState<AppSession[]>([]);
   // First-class projects (folders/entities), independent of records. The
   // sidebar renders from this; deleting a record never removes a project here.
@@ -572,6 +580,28 @@ export function App() {
     const unlisten = listen<ScanResult>("termory:sources-changed", (event) => {
       setError(null);
       applyScanResult(event.payload);
+    });
+    return () => {
+      void unlisten.then((fn) => fn()).catch(() => {});
+    };
+  }, [applyScanResult]);
+
+  // While the window is hidden (close-to-tray) the backend skips the
+  // sources-changed emit, so re-scan on focus to catch up on what changed
+  // while we were away. Focus also fires when the tray's "Open" shows the
+  // window (show_main_window calls set_focus). Silent — mirrors the
+  // sources-changed handler (no `loading` toggle), since focus fires on
+  // every window activation and a re-scan while already visible is just a
+  // cheap refresh, not a first load.
+  React.useEffect(() => {
+    const unlisten = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (!focused) return;
+      void invoke<ScanResult>("scan_all_sessions")
+        .then((result) => {
+          setError(null);
+          applyScanResult(result);
+        })
+        .catch((err) => console.error("focus rescan failed", err));
     });
     return () => {
       void unlisten.then((fn) => fn()).catch(() => {});

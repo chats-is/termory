@@ -243,7 +243,7 @@ The Settings page (`⌘6`) has these sections:
 
 The tray lets you act without opening the window:
 
-- **Recent sessions** — up to 5 most recent; click to resume in your terminal.
+- **Recent sessions** — up to 5 most recent; click to resume in your terminal. A Claude session that's currently running shows its live status next to the title (**· Working** / **· Needs input**).
 - **New Session** — open a CLI fresh in a recent project folder, or pick a new folder (**Choose Folder…**).
 - **Per-CLI submenus** — switch each CLI's active provider; the official quota shows inline (🟢/🟡/🔴 by pressure).
 

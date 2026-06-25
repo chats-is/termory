@@ -2365,6 +2365,166 @@ pub(crate) fn claude_config_root(home: &Path) -> PathBuf {
     }
 }
 
+/// Live work status of a currently-running Claude session — `Busy`
+/// (actively processing) or `Waiting` (blocked on user input / a
+/// permission approval). Read from the native `~/.claude/sessions/<pid>.json`
+/// snapshot Claude Code writes for `claude ps`
+/// (`utils/concurrentSessions.ts:19` `SessionStatus = 'busy' | 'idle' | 'waiting'`;
+/// derived in `screens/REPL.tsx:1605`). `idle`, the `dialog open`
+/// waiting reason, and the terminal states get NO variant — the tray
+/// shows a marker only for genuinely busy / input-blocked sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeWorkStatus {
+    Busy,
+    Waiting,
+}
+
+/// PID-reuse backstop for the liveness check: even if `process_alive`
+/// says yes, a `<pid>.json` not rewritten within this window is ignored,
+/// since the OS may have recycled the pid for an unrelated process after
+/// the original session crashed. (Crash residue itself is caught by the
+/// liveness probe; this only guards the reuse corner case.)
+const CLAUDE_STATUS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Map `sessionId → ClaudeWorkStatus` for every live Claude session
+/// that's busy or input-blocked. Empty when the sessions dir is absent
+/// (Claude never run, or the `BG_SESSIONS` feature is off so nothing is
+/// written). Cheap — a handful of tiny single-line JSON files.
+pub fn claude_work_statuses() -> HashMap<String, ClaudeWorkStatus> {
+    let Some(home) = dirs::home_dir() else {
+        return HashMap::new();
+    };
+    claude_work_statuses_in(&claude_config_root(&home).join("sessions"))
+}
+
+/// Whether a process with `pid` is currently alive. Mirrors Claude's own
+/// `isProcessRunning` (`genericProcessUtils.ts` — `process.kill(pid, 0)`)
+/// so a crashed session's residual `<pid>.json` doesn't surface a stale
+/// "busy"/"waiting" status. mtime alone can't tell a long-running busy
+/// session (whose file isn't rewritten while the status holds) from a
+/// crashed one. Unix probes via `kill(pid, 0)`, Windows via `OpenProcess`;
+/// any other (exotic) target assumes alive and leans on the mtime backstop
+/// + Claude's own stale-file sweep.
+#[cfg(unix)]
+fn process_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // 0 → alive & signalable; EPERM → alive but owned by another user;
+    // ESRCH → no such process.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(windows)]
+fn process_alive(pid: i32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: plain FFI; we close any handle we successfully open.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+        if handle.is_null() {
+            // ERROR_INVALID_PARAMETER ⇒ no such process; any other error
+            // (e.g. access denied) ⇒ it exists. Mirrors Node's kill(pid, 0).
+            return std::io::Error::last_os_error().raw_os_error()
+                != Some(ERROR_INVALID_PARAMETER as i32);
+        }
+        CloseHandle(handle);
+        true
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_alive(_pid: i32) -> bool {
+    true
+}
+
+/// Env-free core of [`claude_work_statuses`] — reads `<pid>.json`
+/// snapshots from `sessions_dir`. Skips files whose process is dead
+/// (crash residue) or whose mtime is stale (PID-reuse backstop).
+fn claude_work_statuses_in(sessions_dir: &Path) -> HashMap<String, ClaudeWorkStatus> {
+    let mut out = HashMap::new();
+    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
+        return out;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Only `<pid>.json` — matches Claude's own filename guard
+        // (`concurrentSessions.ts` `/^\d+\.json$/`). All-ASCII-digit stem
+        // (no sign) so the parse below can't yield a negative pid, which
+        // `kill` would read as a process GROUP.
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if stem.is_empty() || !stem.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(pid) = stem.parse::<i32>() else {
+            continue; // pid larger than i32 — not a real pid, skip
+        };
+        // Crash residue: the owning process must still be alive.
+        if !process_alive(pid) {
+            continue;
+        }
+        // PID-reuse backstop: also require the file to be recent.
+        if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+            if now
+                .duration_since(modified)
+                .map(|age| age > CLAUDE_STATUS_MAX_AGE)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+        }
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Some((session_id, status)) = parse_claude_status_snapshot(&text) {
+                out.insert(session_id, status);
+            }
+        }
+    }
+    out
+}
+
+/// Parse one `<pid>.json` snapshot into `(sessionId, status)`. `None`
+/// when there's no sessionId, or the session is idle / browsing a dialog
+/// / in a terminal state (done/failed/stopped) — those get no tray
+/// marker. Prefers the richer `state` field (`claude agents --json` /
+/// cc-status compat) then falls back to `status` + `waitingFor` (the
+/// fields Claude 2.1.x's REPL PID file carries — verified on disk).
+fn parse_claude_status_snapshot(json: &str) -> Option<(String, ClaudeWorkStatus)> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let session_id = v.get("sessionId")?.as_str()?.trim().to_string();
+    if session_id.is_empty() {
+        return None;
+    }
+    let waiting_for = v.get("waitingFor").and_then(|s| s.as_str()).unwrap_or("");
+    // `state` (newer / `claude agents --json`): working|blocked|done|failed|stopped.
+    if let Some(state) = v.get("state").and_then(|s| s.as_str()) {
+        return match state {
+            "working" => Some((session_id, ClaudeWorkStatus::Busy)),
+            "blocked" => Some((session_id, ClaudeWorkStatus::Waiting)),
+            _ => None, // done / failed / stopped / unknown → no marker
+        };
+    }
+    // `status` (REPL PID file): busy | waiting | idle.
+    match v.get("status").and_then(|s| s.as_str()) {
+        Some("busy") => Some((session_id, ClaudeWorkStatus::Busy)),
+        // `dialog open` = the user opened a UI, not a real input-block
+        // (`REPL.tsx` ignorableWaitingReasons / cc-status).
+        Some("waiting") if waiting_for != "dialog open" => {
+            Some((session_id, ClaudeWorkStatus::Waiting))
+        }
+        _ => None, // idle / dialog open / unknown → no marker
+    }
+}
+
 /// `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR/projects`).
 fn claude_projects_root() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
@@ -14157,6 +14317,82 @@ mod tests {
         // No session JSONL → None (caller falls back to slug decode).
         let empty = TestDir::new("claude-cwd-empty");
         assert_eq!(claude_cwd_from_project_dir(empty.path()), None);
+    }
+
+    #[test]
+    fn claude_work_statuses_in_filters_by_filename_and_liveness() {
+        let dir = TestDir::new("claude-status");
+        let sessions = dir.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+
+        // This test process's own pid is guaranteed alive.
+        let me = std::process::id();
+        fs::write(
+            sessions.join(format!("{me}.json")),
+            r#"{"sessionId":"sid-live","status":"busy"}"#,
+        )
+        .unwrap();
+        // Non-`<pid>.json` name → excluded by the filename guard.
+        fs::write(
+            sessions.join("notes.json"),
+            r#"{"sessionId":"sid-notes","status":"busy"}"#,
+        )
+        .unwrap();
+        // Implausibly high pid → not a live process.
+        fs::write(
+            sessions.join("2147483646.json"),
+            r#"{"sessionId":"sid-dead","status":"busy"}"#,
+        )
+        .unwrap();
+
+        let map = claude_work_statuses_in(&sessions);
+        // Live pid + busy → included on every platform.
+        assert_eq!(map.get("sid-live"), Some(&ClaudeWorkStatus::Busy));
+        // Filename guard applies everywhere.
+        assert!(!map.contains_key("sid-notes"));
+        // Liveness probe runs on unix + windows; only there is a dead pid
+        // skipped (exotic targets fall back to a conservative `true`).
+        #[cfg(any(unix, windows))]
+        assert!(!map.contains_key("sid-dead"));
+
+        // Missing dir → empty, no panic.
+        assert!(claude_work_statuses_in(&dir.path().join("nope")).is_empty());
+    }
+
+    #[test]
+    fn parse_claude_status_snapshot_maps_running_states() {
+        use super::ClaudeWorkStatus::*;
+        let p = super::parse_claude_status_snapshot;
+
+        // Real REPL PID-file shape (verified on disk): status without state.
+        assert_eq!(
+            p(r#"{"pid":1,"sessionId":"sid-busy","cwd":"/x","status":"busy"}"#),
+            Some(("sid-busy".to_string(), Busy))
+        );
+        assert_eq!(
+            p(r#"{"sessionId":"sid-wait","status":"waiting","waitingFor":"input needed"}"#),
+            Some(("sid-wait".to_string(), Waiting))
+        );
+        // `dialog open` = user opened a UI, not a real input-block → no marker.
+        assert_eq!(
+            p(r#"{"sessionId":"sid-dlg","status":"waiting","waitingFor":"dialog open"}"#),
+            None
+        );
+        // Idle / unknown / missing sessionId → no marker.
+        assert_eq!(p(r#"{"sessionId":"sid-idle","status":"idle"}"#), None);
+        assert_eq!(p(r#"{"status":"busy"}"#), None);
+        assert_eq!(p("not json"), None);
+
+        // `state` (claude agents --json) takes precedence over `status`.
+        assert_eq!(
+            p(r#"{"sessionId":"sid-s","state":"working","status":"idle"}"#),
+            Some(("sid-s".to_string(), Busy))
+        );
+        assert_eq!(
+            p(r#"{"sessionId":"sid-b","state":"blocked"}"#),
+            Some(("sid-b".to_string(), Waiting))
+        );
+        assert_eq!(p(r#"{"sessionId":"sid-d","state":"done"}"#), None);
     }
 
     #[test]

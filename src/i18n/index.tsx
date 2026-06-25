@@ -51,6 +51,11 @@ type I18nValue = {
   locale: Locale;
   setLocale: (l: Locale) => void;
   t: (key: MessageKey, params?: Record<string, string | number>) => string;
+  /** False until the saved language preference has been loaded from config
+   * (or confirmed absent). Consumers that push the locale somewhere external
+   * and costly to re-do — the native tray labels — wait for this so they
+   * push the FINAL locale once instead of flashing the system-guessed one. */
+  ready: boolean;
 };
 
 /** Fallback when no <I18nProvider> is mounted (e.g. unit tests rendering a
@@ -58,7 +63,8 @@ type I18nValue = {
 const DEFAULT_VALUE: I18nValue = {
   locale: "en",
   setLocale: () => {},
-  t: (key, params) => interpolate(en[key] ?? key, params)
+  t: (key, params) => interpolate(en[key] ?? key, params),
+  ready: true
 };
 
 const I18nContext = React.createContext<I18nValue>(DEFAULT_VALUE);
@@ -68,13 +74,17 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   const [locale, setLocaleState] = React.useState<Locale>(() =>
     resolveLocale(typeof navigator !== "undefined" ? navigator.language : "en")
   );
+  // False until the saved preference is loaded — gates the tray-label push
+  // so it fires once with the final locale, not the system-guessed one.
+  const [ready, setReady] = React.useState(false);
 
   React.useEffect(() => {
     void getConfig<unknown>(CONFIG_KEY)
       .then((saved) => {
         if (isLocale(saved)) setLocaleState(saved);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setReady(true));
   }, []);
 
   // Keep the date formatters on the app's language (not the OS locale). Done in
@@ -104,8 +114,8 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   );
 
   const value = React.useMemo<I18nValue>(
-    () => ({ locale, setLocale, t }),
-    [locale, setLocale, t]
+    () => ({ locale, setLocale, t, ready }),
+    [locale, setLocale, t, ready]
   );
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }

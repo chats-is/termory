@@ -53,6 +53,8 @@ export const zhHans: Record<MessageKey, string> = {
   "tray.exit": "退出",
   "tray.newSession": "新建会话",
   "tray.chooseFolder": "选择文件夹…",
+  "tray.statusBusy": "工作中",
+  "tray.statusWaiting": "需要输入",
 
   "stats.dailyTokens": "每日 Tokens",
   "stats.dailyActivities": "每日活跃度",

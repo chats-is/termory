@@ -20,7 +20,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::sessions::scan_sessions;
 
@@ -37,8 +37,9 @@ pub const CLI_INSTALL_CHANGED_EVENT: &str = "termory:cli-install-changed";
 /// Coalesce changes that arrive within this window before triggering
 /// a re-scan. Many editors / DB engines emit a flurry of intermediate
 /// events on save (temp file → rename → mtime touch + WAL writes for
-/// SQLite); 500ms collects the burst without making the UI feel laggy.
-const DEBOUNCE_WINDOW: Duration = Duration::from_millis(500);
+/// SQLite); 600ms collects the burst without making the UI feel laggy,
+/// and trims re-scan frequency during continuous CLI activity.
+const DEBOUNCE_WINDOW: Duration = Duration::from_millis(600);
 
 /// After we've finished a re-scan, drain any events that arrive within
 /// this settle window. Reading the SQLite databases (Codex's
@@ -253,11 +254,25 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
                     };
                     handle.reconfigure_dynamic(new_cwds);
 
-                    // Keep the tray's "recent sessions" list current.
+                    // Keep the tray's "recent sessions" list current — the
+                    // tray is the always-visible surface, so this runs
+                    // unconditionally.
                     crate::tray::refresh_recent(&app_handle, &result.records);
 
-                    if let Err(err) = app_handle.emit(SOURCES_CHANGED_EVENT, result) {
-                        log::warn!("watcher sources-changed emit failed: {err}");
+                    // Skip the frontend emit when the main window is hidden
+                    // (close-to-tray): nobody's looking, so serializing the
+                    // full ScanResult + re-rendering is wasted. The frontend
+                    // re-scans on window focus (App.tsx) when shown again, and
+                    // the next emit once visible is the fallback. Default to
+                    // emitting when visibility can't be determined.
+                    let window_visible = app_handle
+                        .get_webview_window("main")
+                        .and_then(|w| w.is_visible().ok())
+                        .unwrap_or(true);
+                    if window_visible {
+                        if let Err(err) = app_handle.emit(SOURCES_CHANGED_EVENT, result) {
+                            log::warn!("watcher sources-changed emit failed: {err}");
+                        }
                     }
                 }
                 Err(err) => {

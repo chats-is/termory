@@ -41,3 +41,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 base64 = "0.22"
 log = "0.4"
 tauri-plugin-autostart = "2"
+
+# Process-liveness probe for Claude session PID files, so a crashed
+# session's residual `<pid>.json` doesn't surface a stale status. Unix:
+# kill(pid, 0); Windows: OpenProcess.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }

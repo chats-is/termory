@@ -34,7 +34,7 @@ use crate::providers::{
     activate, deactivate, detect_installed_clis, gateway_providers, read_active_state,
     set_opencode_default, CliApp, Provider,
 };
-use crate::sessions::AppSession;
+use crate::sessions::{AppSession, ClaudeWorkStatus};
 use std::sync::Mutex;
 use tauri::{
     menu::{
@@ -60,6 +60,10 @@ struct RecentSession {
     project: String,
     id: String,
     label: String,
+    /// Live work status for a currently-running Claude session (Busy /
+    /// Waiting), joined on `id == sessionId`. `None` for non-Claude
+    /// rows and for sessions that aren't actively running.
+    status: Option<ClaudeWorkStatus>,
 }
 
 /// One "New session" group: a recent project dir. The submenu shows
@@ -176,6 +180,8 @@ struct TrayLabels {
     monthly: String,
     new_session: String,
     choose_folder: String,
+    status_busy: String,
+    status_waiting: String,
 }
 
 impl Default for TrayLabels {
@@ -189,6 +195,8 @@ impl Default for TrayLabels {
             monthly: "Monthly".to_string(),
             new_session: "New Session".to_string(),
             choose_folder: "Choose Folder…".to_string(),
+            status_busy: "Working".to_string(),
+            status_waiting: "Needs input".to_string(),
         }
     }
 }
@@ -215,6 +223,8 @@ pub fn set_labels(
     monthly: String,
     new_session: String,
     choose_folder: String,
+    status_busy: String,
+    status_waiting: String,
 ) {
     if let Ok(mut g) = TRAY_LABELS.lock() {
         *g = Some(TrayLabels {
@@ -226,6 +236,8 @@ pub fn set_labels(
             monthly,
             new_session,
             choose_folder,
+            status_busy,
+            status_waiting,
         });
     }
 }
@@ -273,6 +285,10 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .on_tray_icon_event(|tray, event| {
             if matches!(event, tauri::tray::TrayIconEvent::Click { .. }) {
                 trigger_quota_refresh(tray.app_handle());
+                // Also re-check recent-session work status on open, so a
+                // crashed session's stale status clears even without a
+                // filesystem event (it splices live into the open menu).
+                refresh_work_status(tray.app_handle());
             }
         })
         .build(app)?;
@@ -402,7 +418,11 @@ fn do_rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
 /// (watcher / `scan_all_sessions`); skips the rebuild when nothing changed
 /// so active CLI use doesn't churn the menu on every file event.
 pub fn refresh_recent(app: &AppHandle, sessions: &[AppSession]) {
-    let recent = select_recent_state(sessions);
+    let mut recent = select_recent_state(sessions);
+    // Join live Claude work-status onto the recent rows. The FS read
+    // stays on the CALLER's thread (watcher / async runtime), like the
+    // CLI-install probe below — the queued main-thread task stays lean.
+    attach_work_statuses(&mut recent, &crate::sessions::claude_work_statuses());
     // The whole compare→store→splice sequence runs as ONE queued
     // main-thread task: concurrent refreshers (watcher thread + the
     // scan_all_sessions IPC) serialize in queue order, so the RECENT
@@ -416,26 +436,60 @@ pub fn refresh_recent(app: &AppHandle, sessions: &[AppSession]) {
     // menu.
     // Filesystem PATH probing stays on the CALLER's thread (watcher /
     // async runtime) so the queued main-thread task is lean.
-    let installed = detect_installed_clis();
-    let installed_clis: Vec<CliApp> = CliApp::all()
-        .into_iter()
-        .filter(|c| installed.get(c).copied().unwrap_or(false))
-        .collect();
+    let installed_clis = installed_cli_list();
     let handle = app.clone();
-    let queued = app.run_on_main_thread(move || {
-        match RECENT.lock() {
-            Ok(mut guard) if *guard != recent => *guard = recent.clone(),
-            _ => return, // unchanged (or poisoned) → no update
-        }
-        if !update_recent_region(&handle, &installed_clis, &recent) {
-            if let Err(err) = do_rebuild_menu(&handle) {
-                log::error!("tray recent rebuild failed: {err}");
-            }
-        }
-    });
+    let queued = app.run_on_main_thread(move || commit_recent(&handle, &installed_clis, recent));
     if let Err(err) = queued {
         log::error!("tray recent update queue failed: {err}");
     }
+}
+
+/// Installed CLIs, for the tray submenus. PATH probing — kept on the
+/// caller thread, off the queued main-thread task.
+fn installed_cli_list() -> Vec<CliApp> {
+    let installed = detect_installed_clis();
+    CliApp::all()
+        .into_iter()
+        .filter(|c| installed.get(c).copied().unwrap_or(false))
+        .collect()
+}
+
+/// Store `recent` (when changed) and splice the dynamic region in place,
+/// falling back to a full rebuild. MUST run on the main thread (queued
+/// like every other menu mutation, so concurrent refreshers serialize).
+fn commit_recent(app: &AppHandle, installed_clis: &[CliApp], recent: RecentState) {
+    match RECENT.lock() {
+        Ok(mut guard) if *guard != recent => *guard = recent.clone(),
+        _ => return, // unchanged (or poisoned) → no update
+    }
+    if !update_recent_region(app, installed_clis, &recent) {
+        if let Err(err) = do_rebuild_menu(app) {
+            log::error!("tray recent rebuild failed: {err}");
+        }
+    }
+}
+
+/// Re-evaluate live work status against the CACHED recent list and
+/// re-splice if it changed — without a session scan. Called on menu
+/// open (tray click) so a CRASHED Claude session's stale "Working"
+/// clears promptly: a crash leaves the `<pid>.json` untouched (no
+/// filesystem event), so the normal watcher-driven refresh never fires
+/// for it; this re-runs the liveness probe on demand. Cheap — only the
+/// small `~/.claude/sessions/` dir is re-read (on the caller thread);
+/// the cached recent list is re-read + re-attached on the main thread,
+/// so the base list is never stale.
+pub fn refresh_work_status(app: &AppHandle) {
+    let statuses = crate::sessions::claude_work_statuses();
+    let installed_clis = installed_cli_list();
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let mut recent = match RECENT.lock() {
+            Ok(g) => g.clone(),
+            Err(_) => return,
+        };
+        attach_work_statuses(&mut recent, &statuses);
+        commit_recent(&handle, &installed_clis, recent);
+    });
 }
 
 /// Replace the dynamic region's items in the existing root menu.
@@ -673,6 +727,7 @@ fn select_recent_state(sessions: &[AppSession]) -> RecentState {
             project: s.project.clone(),
             id: s.id.clone(),
             label: recent_label(&s.title, &s.snippet),
+            status: None,
         })
         .collect();
 
@@ -775,6 +830,38 @@ fn is_slash_command(text: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'))
 }
 
+/// Fill each Claude recent row's live work status by matching
+/// `id == sessionId`. Non-Claude rows and sessions that aren't running
+/// stay `None`. Pure (statuses passed in) so it's unit-testable; the
+/// filesystem read happens in `refresh_recent`.
+fn attach_work_statuses(
+    recent: &mut RecentState,
+    statuses: &std::collections::HashMap<String, ClaudeWorkStatus>,
+) {
+    if statuses.is_empty() {
+        return;
+    }
+    for s in recent.sessions.iter_mut() {
+        if s.source == "Claude" {
+            s.status = statuses.get(&s.id).copied();
+        }
+    }
+}
+
+/// Localized live work status shown after a recent row's title
+/// ("Working" / "Needs input"); `None` for idle / not-running sessions,
+/// which get no suffix. Plain text — a native macOS menu is an all-text
+/// list, so a colored dot would mean either an emoji (cheap) or a
+/// far-left icon column (breaks an otherwise icon-less menu); the word
+/// alone stays clean and consistent.
+fn work_status_label(status: Option<ClaudeWorkStatus>, labels: &TrayLabels) -> Option<&str> {
+    match status {
+        Some(ClaudeWorkStatus::Busy) => Some(&labels.status_busy),
+        Some(ClaudeWorkStatus::Waiting) => Some(&labels.status_waiting),
+        None => None,
+    }
+}
+
 /// Menu label for a recent session: title, else snippet, else "(untitled)",
 /// truncated so the menu stays narrow.
 fn recent_label(title: &str, snippet: &str) -> String {
@@ -805,9 +892,15 @@ fn build_recent_region(
             // contains ':') — a click looks the session up by identity,
             // so a refresh between display and click can't resume the
             // WRONG session; worst case is a silent no-op.
-            let item =
-                MenuItemBuilder::with_id(format!("tray:session:{}:{}", r.source, r.id), &r.label)
-                    .build(app)?;
+            let id = format!("tray:session:{}:{}", r.source, r.id);
+            // Live work status (Claude only) shown after the title:
+            // "Fix the test · Working". Idle / not-running rows show
+            // just the title.
+            let label = match work_status_label(r.status, labels) {
+                Some(status) => format!("{} · {}", r.label, status),
+                None => r.label.clone(),
+            };
+            let item = MenuItemBuilder::with_id(id, &label).build(app)?;
             region.push(Box::new(item));
         }
         region.push(Box::new(PredefinedMenuItem::separator(app)?));
@@ -1318,6 +1411,43 @@ mod tests {
         assert_eq!(state.sessions.len(), RECENT_LIMIT);
         assert_eq!(state.targets.len(), NEW_SESSION_PROJECT_LIMIT);
         assert_eq!(state.targets[0].label, "p0");
+    }
+
+    #[test]
+    fn attach_work_statuses_joins_claude_rows_by_id_only() {
+        let sessions = vec![
+            sess_in("Claude", "/work/a", "busy-id", "2026-07-01T00:00:00Z"),
+            sess_in("Claude", "/work/b", "wait-id", "2026-06-01T00:00:00Z"),
+            sess_in("Claude", "/work/c", "idle-id", "2026-05-01T00:00:00Z"),
+            sess_in("Codex", "/work/d", "busy-id", "2026-04-01T00:00:00Z"), // same id, wrong source
+        ];
+        let mut state = select_recent_state(&sessions);
+        let mut statuses = std::collections::HashMap::new();
+        statuses.insert("busy-id".to_string(), ClaudeWorkStatus::Busy);
+        statuses.insert("wait-id".to_string(), ClaudeWorkStatus::Waiting);
+        attach_work_statuses(&mut state, &statuses);
+
+        let by_id = |id: &str| state.sessions.iter().find(|r| r.id == id).unwrap().status;
+        assert_eq!(by_id("busy-id"), Some(ClaudeWorkStatus::Busy));
+        assert_eq!(by_id("wait-id"), Some(ClaudeWorkStatus::Waiting));
+        assert_eq!(by_id("idle-id"), None); // not in the map
+                                            // Codex row sharing the id must NOT pick up Claude's status.
+        let codex = state.sessions.iter().find(|r| r.source == "Codex").unwrap();
+        assert_eq!(codex.status, None);
+    }
+
+    #[test]
+    fn work_status_label_maps_states() {
+        let labels = TrayLabels::default();
+        assert_eq!(
+            work_status_label(Some(ClaudeWorkStatus::Busy), &labels),
+            Some("Working")
+        );
+        assert_eq!(
+            work_status_label(Some(ClaudeWorkStatus::Waiting), &labels),
+            Some("Needs input")
+        );
+        assert_eq!(work_status_label(None, &labels), None);
     }
 
     #[test]
