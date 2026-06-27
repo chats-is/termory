@@ -861,6 +861,26 @@ export function ProvidersPage({
     setFollowTarget({ ...base, projects: candidates });
   };
 
+  // Bridge for the Gateways tab: activate/deactivate a binding there calls the
+  // CLI write directly and would skip the Codex follow prompt the Providers tab
+  // applies. GatewaysPage calls this for a Codex binding on a bucket-changing
+  // switch — `"toCustom"` (official→custom, activate) or `"toOfficial"`
+  // (custom→official, deactivate) — so the prompt fires there too (the dialog
+  // is rendered here, regardless of which tab is open).
+  const codexFollowForBinding = (
+    direction: "toCustom" | "toOfficial",
+    label: string,
+    activate: () => Promise<boolean>
+  ) =>
+    maybePromptThenActivate({
+      providerId:
+        direction === "toOfficial"
+          ? CODEX_OFFICIAL_PROVIDER_ID
+          : CODEX_CUSTOM_PROVIDER_ID,
+      label,
+      activate
+    });
+
   // Universal "Set as default" — promotes a provider to "In use". For a Codex
   // official→custom switch we prompt first (see maybePromptThenActivate).
   const setAsDefault = async (target: Provider) => {
@@ -990,6 +1010,7 @@ export function ProvidersPage({
             markActive={markActive}
             activeProviderIds={activeProviderIds}
             installed={installed}
+            codexFollowForBinding={codexFollowForBinding}
           />
         </React.Suspense>
       )}

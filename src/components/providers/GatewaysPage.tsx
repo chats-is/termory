@@ -50,7 +50,8 @@ export function GatewaysPage({
   addSignal,
   markActive,
   activeProviderIds,
-  installed
+  installed,
+  codexFollowForBinding
 }: {
   gateways: Gateway[];
   setGateways: React.Dispatch<React.SetStateAction<Gateway[]>>;
@@ -66,6 +67,15 @@ export function GatewaysPage({
   /** Per-CLI install map — an app is only offered as a gateway-binding
    * target when it's installed (mirrors the Providers tab's install gate). */
   installed: Record<CliApp, boolean>;
+  /** Run a Codex binding switch through the "follow sessions?" prompt (owned by
+   * ProvidersPage, which renders the dialog). `direction` is the bucket the
+   * switch lands on: `"toCustom"` (activate, official→custom) or `"toOfficial"`
+   * (deactivate, custom→official). */
+  codexFollowForBinding: (
+    direction: "toCustom" | "toOfficial",
+    label: string,
+    activate: () => Promise<boolean>
+  ) => Promise<void>;
 }) {
   const t = useT();
   const [editing, setEditing] = React.useState<Gateway | null>(null);
@@ -197,8 +207,12 @@ export function GatewaysPage({
     );
     if (!confirmed) return;
     // Clear any live config this AI Gateway's bindings injected — but only
-    // the ones THIS gateway actually activated (marker), so we don't wipe
-    // a standalone provider that happens to share the endpoint.
+    // the ones THIS gateway actually activated (marker), so we don't wipe a
+    // standalone provider that happens to share the endpoint. If a cleanup
+    // fails (CLI running → DB locked, etc.) surface it and KEEP the gateway —
+    // mirrors `ProvidersPage.deleteProvider`, so the user can quit the CLI and
+    // retry (already-cleaned bindings skip on the retry, so it's idempotent).
+    let failed = false;
     for (const b of gateway.bindings) {
       const synth = providerFromBinding(gateway, b);
       try {
@@ -211,12 +225,16 @@ export function GatewaysPage({
           });
         }
         if (activeProviderIds[b.app] === b.id) markActive(b.app, null);
-      } catch {
-        /* best-effort cleanup */
+      } catch (err) {
+        failed = true;
+        toast.error(t("toast.clearFailed", { app: CLI_APP_LABEL[b.app], error: String(err) }));
       }
     }
-    setGateways((cur) => cur.filter((r) => r.id !== gateway.id));
     await refreshActive();
+    // Keep the gateway when any binding's live config couldn't be cleared, so
+    // it isn't silently lost while a CLI still points at its endpoint.
+    if (failed) return;
+    setGateways((cur) => cur.filter((r) => r.id !== gateway.id));
   };
 
   const isBindingActive = (gateway: Gateway, b: GatewayBinding): boolean => {
@@ -242,45 +260,71 @@ export function GatewaysPage({
 
   const activateBinding = async (gateway: Gateway, b: GatewayBinding) => {
     const synth = providerFromBinding(gateway, b);
-    setBusy(synth.id);
-    try {
-      await invoke("activate_provider", {
-        provider: synth,
-        providersForApp: [synth]
-      });
-      if (b.app === "opencode") {
-        await invoke("set_opencode_default_provider", { provider: synth });
+    const doActivate = async (): Promise<boolean> => {
+      setBusy(synth.id);
+      try {
+        await invoke("activate_provider", {
+          provider: synth,
+          providersForApp: [synth]
+        });
+        if (b.app === "opencode") {
+          await invoke("set_opencode_default_provider", { provider: synth });
+        }
+        markActive(b.app, synth.id);
+        toast.success(t("toast.bindingActivated", { name: gateway.name, app: CLI_APP_LABEL[b.app] }));
+        await refreshActive();
+        return true;
+      } catch (err) {
+        toast.error(String(err));
+        return false;
+      } finally {
+        setBusy(null);
       }
-      markActive(b.app, synth.id);
-      toast.success(t("toast.bindingActivated", { name: gateway.name, app: CLI_APP_LABEL[b.app] }));
-      await refreshActive();
-    } catch (err) {
-      toast.error(String(err));
-    } finally {
-      setBusy(null);
+    };
+    // Codex official→custom: switching the API endpoint hides a project's prior
+    // sessions from `codex resume`, so prompt to follow them — same as the
+    // Providers tab. Only on official→custom (custom→custom keeps the bucket).
+    if (b.app === "codex" && activeStates.codex?.kind === "official") {
+      await codexFollowForBinding("toCustom", synth.name || gateway.name, doActivate);
+      return;
     }
+    await doActivate();
   };
 
   const deactivateBinding = async (gateway: Gateway, b: GatewayBinding) => {
     const synth = providerFromBinding(gateway, b);
-    setBusy(synth.id);
-    try {
-      if (b.app === "opencode") {
-        await invoke("delete_provider", { provider: synth });
-      } else {
-        await invoke("deactivate_provider", {
-          app: b.app,
-          providersForApp: [synth]
-        });
+    const doDeactivate = async (): Promise<boolean> => {
+      setBusy(synth.id);
+      try {
+        if (b.app === "opencode") {
+          await invoke("delete_provider", { provider: synth });
+        } else {
+          await invoke("deactivate_provider", {
+            app: b.app,
+            providersForApp: [synth]
+          });
+        }
+        markActive(b.app, null);
+        toast.success(t("toast.bindingDeactivated", { name: gateway.name, app: CLI_APP_LABEL[b.app] }));
+        await refreshActive();
+        return true;
+      } catch (err) {
+        toast.error(String(err));
+        return false;
+      } finally {
+        setBusy(null);
       }
-      markActive(b.app, null);
-      toast.success(t("toast.bindingDeactivated", { name: gateway.name, app: CLI_APP_LABEL[b.app] }));
-      await refreshActive();
-    } catch (err) {
-      toast.error(String(err));
-    } finally {
-      setBusy(null);
+    };
+    // Codex custom→official: turning the binding off folds Codex back to the
+    // openai bucket, which can hide sessions moved to a custom provider — prompt
+    // to bring them back, same as the Providers tab's "Set Official". (Codex is
+    // on a custom config now, so kind is custom/unmanaged, not official.)
+    const codexKind = activeStates.codex?.kind;
+    if (b.app === "codex" && (codexKind === "custom" || codexKind === "unmanaged")) {
+      await codexFollowForBinding("toOfficial", t("providers.official"), doDeactivate);
+      return;
     }
+    await doDeactivate();
   };
 
   // OpenCode-only: add / remove the provider slot in opencode.json WITHOUT

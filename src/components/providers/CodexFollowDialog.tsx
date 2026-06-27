@@ -204,7 +204,7 @@ export function CodexFollowDialog({
           </Button>
           <Button
             onClick={() => void handleKeep()}
-            disabled={running}
+            disabled={running || selected.size === 0}
           >
             {running && <Loader2 className="size-4 animate-spin" />}
             {t("providers.followApply")}
