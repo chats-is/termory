@@ -46,10 +46,13 @@ Termory brings **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode** toge
 | Claude Code | ✅ | ✅ | ✅ | ✅ |
 | Gemini CLI | ✅ | ✅ | ✅ | ✅ |
 | OpenCode | ✅ | ✅ | ✅ | ✅ |
+| Claude Desktop | — | — | — | ✅ |
+
+Claude Desktop is the GUI app (no terminal history), so it's **provider-switching only** — point it at a third-party Anthropic-compatible provider and back to Official. macOS and Windows only.
 
 ## Switch providers in a click
 
-Every CLI keeps its own library of named API profiles — your OpenRouter key, a local model, an alternate gateway, or the official login. Pick the one you want and Termory sets it up for that CLI; the next launch just uses it. Switch from the app or straight from the macOS menu bar.
+Every CLI keeps its own library of named API profiles — your OpenRouter key, a local model, an alternate gateway, or the official login. Pick the one you want and Termory sets it up for that CLI; the next launch just uses it. Switch from the app or straight from the macOS menu bar. **Claude Desktop** is a provider here too — Termory writes its native third-party (3P) config, so you can switch the desktop app to another provider just like a CLI.
 
 Going back to **Official** restores your original setup exactly — your native login (OAuth tokens and credentials) is never overwritten, so you can bounce between providers as often as you like without re-logging-in.
 

@@ -11,10 +11,17 @@ export const MEMORY_TOOL_ORDER: MemoryTool[] = [
   "Other"
 ];
 
-export const CLI_APPS: CliApp[] = ["claude", "codex", "gemini", "opencode"];
+export const CLI_APPS: CliApp[] = [
+  "claude",
+  "claude-desktop",
+  "codex",
+  "gemini",
+  "opencode"
+];
 
 export const CLI_APP_LABEL: Record<CliApp, string> = {
   claude: "Claude Code",
+  "claude-desktop": "Claude Desktop",
   codex: "Codex",
   gemini: "Gemini",
   opencode: "OpenCode"
@@ -22,6 +29,8 @@ export const CLI_APP_LABEL: Record<CliApp, string> = {
 
 export const CLI_APP_SOURCE_BADGE: Record<CliApp, string> = {
   claude: "Claude",
+  // Claude Desktop reuses the Claude brand icon (same BrandIcon branch).
+  "claude-desktop": "Claude",
   codex: "Codex",
   gemini: "Gemini",
   opencode: "OpenCode"
@@ -105,6 +114,20 @@ export const CLI_INSTALL: Record<
         id: "curl",
         label: "curl",
         command: "curl -fsSL https://claude.ai/install.sh | bash"
+      }
+    ]
+  },
+  // Claude Desktop is a downloaded GUI app — its tab only appears once it's
+  // already installed (so the InstallGuide is effectively never shown for
+  // it), but the Record<CliApp> must stay total.
+  "claude-desktop": {
+    binary: "Claude",
+    url: "https://claude.ai/download",
+    methods: [
+      {
+        id: "download",
+        label: "Download",
+        command: "https://claude.ai/download"
       }
     ]
   },

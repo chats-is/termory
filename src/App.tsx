@@ -239,7 +239,11 @@ export function App() {
     "providers_app",
     "claude",
     (raw): raw is CliApp =>
-      raw === "claude" || raw === "codex" || raw === "gemini" || raw === "opencode"
+      raw === "claude" ||
+      raw === "claude-desktop" ||
+      raw === "codex" ||
+      raw === "gemini" ||
+      raw === "opencode"
   );
   const [autoCheckUpdates, setAutoCheckUpdates] = usePersistentState<boolean>(
     "auto_check_updates",

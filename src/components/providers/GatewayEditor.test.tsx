@@ -9,7 +9,7 @@ import {
 } from "@testing-library/react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { blankGateway } from "@/lib/provider-utils";
-import type { Gateway, GatewayCapabilities } from "@/types";
+import type { CliApp, Gateway, GatewayCapabilities } from "@/types";
 import { GatewayEditor } from "./GatewayEditor";
 
 // GatewayEditor calls invoke() for `detect_gateway_apis` (auto-detect once
@@ -54,13 +54,26 @@ function render(ui: React.ReactElement, options?: RenderOptions) {
   return rtlRender(<TooltipProvider>{ui}</TooltipProvider>, options);
 }
 
-function setup(overrides?: Partial<Gateway>, isNew = true) {
+const ALL_INSTALLED: Record<CliApp, boolean> = {
+  claude: true,
+  "claude-desktop": true,
+  codex: true,
+  gemini: true,
+  opencode: true
+};
+
+function setup(
+  overrides?: Partial<Gateway>,
+  isNew = true,
+  installed: Record<CliApp, boolean> = ALL_INSTALLED
+) {
   const onSave = vi.fn();
   const onClose = vi.fn();
   render(
     <GatewayEditor
       gateway={{ ...blankGateway(), ...overrides }}
       isNew={isNew}
+      installed={installed}
       onSave={onSave}
       onClose={onClose}
     />
@@ -140,6 +153,22 @@ describe("GatewayEditor — detection + binding", () => {
     expect(screen.getByLabelText("Apply Codex")).not.toBeDisabled();
     expect(screen.getByLabelText("Apply Gemini")).not.toBeDisabled();
     expect(screen.getByLabelText("Apply OpenCode")).not.toBeDisabled();
+  });
+
+  it("only offers a binding for an INSTALLED app, even when the gateway supports it", async () => {
+    // Claude Desktop + Codex not installed; Claude Code + the rest installed.
+    setup({}, true, {
+      ...ALL_INSTALLED,
+      "claude-desktop": false,
+      codex: false
+    });
+    await fillCredsAndDetect();
+    // Capable gateway, but the not-installed apps can't be bound…
+    expect(screen.getByLabelText("Apply Claude Desktop")).toBeDisabled();
+    expect(screen.getByLabelText("Apply Codex")).toBeDisabled();
+    // …while installed ones stay bindable.
+    expect(screen.getByLabelText("Apply Claude Code")).not.toBeDisabled();
+    expect(screen.getByLabelText("Apply Gemini")).not.toBeDisabled();
   });
 });
 

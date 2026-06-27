@@ -151,3 +151,67 @@ describe("ProviderEditor — Claude routing template", () => {
     expect(screen.queryAllByLabelText("Remove override")).toHaveLength(0);
   });
 });
+
+describe("ProviderEditor — Claude Desktop (direct gateway profile)", () => {
+  it("shows the models list + Advanced settings, hides the single primary Model field", () => {
+    render(
+      <ProviderEditor
+        provider={blankProvider("claude-desktop")}
+        isNew
+        onSave={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    // No single primary Model combobox (Claude Desktop has no primary model)…
+    expect(screen.queryByLabelText(/^Model \*?$/)).not.toBeInTheDocument();
+    // …but the models list (→ inferenceModels) and the generic options
+    // escape hatch (→ merged into the 3P profile JSON) are both available.
+    expect(screen.getByLabelText("Model ID")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /advanced settings/i })
+    ).toBeInTheDocument();
+  });
+
+  it("treats the API key as optional (savable blank, filled in later)", () => {
+    render(
+      <ProviderEditor
+        provider={blankProvider("claude-desktop")}
+        isNew
+        onSave={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    // Base URL is pre-seeded; only Name is required — NOT the API key.
+    expect(saveBtn()).toBeDisabled(); // name still blank
+    fireEvent.change(screen.getByLabelText("Name *"), {
+      target: { value: "MyGateway" }
+    });
+    // No API key entered, yet save enables (the key can be filled in later).
+    expect(saveBtn()).toBeEnabled();
+  });
+
+  it("blocks save when a model id isn't a Claude model name", () => {
+    render(
+      <ProviderEditor
+        provider={blankProvider("claude-desktop")}
+        isNew
+        onSave={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.change(screen.getByLabelText("Name *"), {
+      target: { value: "G" }
+    });
+    expect(saveBtn()).toBeEnabled(); // blank model row is fine (base URL pre-seeded)
+    // A non-Claude model id blocks the save (Claude Desktop would reject it).
+    fireEvent.change(screen.getByLabelText("Model ID"), {
+      target: { value: "gpt-4" }
+    });
+    expect(saveBtn()).toBeDisabled();
+    // Fix it → save re-enables.
+    fireEvent.change(screen.getByLabelText("Model ID"), {
+      target: { value: "claude-sonnet-4-6" }
+    });
+    expect(saveBtn()).toBeEnabled();
+  });
+});

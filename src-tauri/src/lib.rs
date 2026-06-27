@@ -1,3 +1,4 @@
+mod claude_desktop;
 mod codex_follow;
 mod config;
 mod providers;
@@ -352,6 +353,7 @@ fn cli_app_key(app: CliApp) -> &'static str {
         CliApp::Codex => "codex",
         CliApp::Gemini => "gemini",
         CliApp::Opencode => "opencode",
+        CliApp::ClaudeDesktop => "claude-desktop",
     }
 }
 
@@ -375,13 +377,8 @@ async fn provider_active_state(
 #[tauri::command]
 async fn provider_active_states(providers: Vec<Provider>) -> Result<Vec<ActiveState>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut out = Vec::with_capacity(4);
-        for app in [
-            CliApp::Claude,
-            CliApp::Codex,
-            CliApp::Gemini,
-            CliApp::Opencode,
-        ] {
+        let mut out = Vec::with_capacity(CliApp::all().len());
+        for app in CliApp::all() {
             out.push(read_active_state(app, &providers).map_err(|e| e.to_string())?);
         }
         Ok(out)

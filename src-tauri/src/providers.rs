@@ -61,6 +61,11 @@ pub enum CliApp {
     Codex,
     Gemini,
     Opencode,
+    /// Claude **Desktop** (the GUI app) — managed via its 3P gateway
+    /// profile, NOT a terminal CLI. Provider-switchable but never
+    /// terminal-launchable, and only supported on macOS / Windows.
+    #[serde(rename = "claude-desktop")]
+    ClaudeDesktop,
 }
 
 impl CliApp {
@@ -70,23 +75,40 @@ impl CliApp {
             "codex" => Some(CliApp::Codex),
             "gemini" => Some(CliApp::Gemini),
             "opencode" => Some(CliApp::Opencode),
+            "claude-desktop" => Some(CliApp::ClaudeDesktop),
             _ => None,
         }
     }
 
     /// Name of the binary this CLI ships as, looked up on `$PATH`.
+    /// Claude Desktop has no CLI binary — installation is detected via
+    /// its config dir (`claude_desktop::is_installed`), so this name is
+    /// never used for a PATH probe (the detection paths special-case it).
     pub fn bin_name(self) -> &'static str {
         match self {
             CliApp::Claude => "claude",
             CliApp::Codex => "codex",
             CliApp::Gemini => "gemini",
             CliApp::Opencode => "opencode",
+            CliApp::ClaudeDesktop => "claude-desktop",
         }
     }
 
-    pub fn all() -> [CliApp; 4] {
+    /// Whether this entry is a terminal-launchable CLI. False only for
+    /// Claude Desktop (a GUI app) — used to keep it out of the tray's
+    /// recent-session / new-session terminal flows and version probes
+    /// while still surfacing it in the provider-switch submenu.
+    pub fn is_cli(self) -> bool {
+        !matches!(self, CliApp::ClaudeDesktop)
+    }
+
+    pub fn all() -> [CliApp; 5] {
+        // Order drives the tray submenu list — Claude Desktop sits right
+        // after Claude Code, matching the Providers page tab order
+        // (`CLI_APPS` in constants.ts).
         [
             CliApp::Claude,
+            CliApp::ClaudeDesktop,
             CliApp::Codex,
             CliApp::Gemini,
             CliApp::Opencode,
@@ -463,8 +485,14 @@ fn shell_version_fallback(_tool: &str) -> Option<String> {
 pub fn detect_installed_clis() -> std::collections::HashMap<CliApp, bool> {
     let mut out = std::collections::HashMap::new();
     for app in CliApp::all() {
-        let installed = find_cli_binary(app.bin_name()).is_some()
-            || shell_version_fallback(app.bin_name()).is_some();
+        // Claude Desktop is a GUI app with no CLI binary — detect it by
+        // its on-disk config dir (and platform support) instead.
+        let installed = if app.is_cli() {
+            find_cli_binary(app.bin_name()).is_some()
+                || shell_version_fallback(app.bin_name()).is_some()
+        } else {
+            crate::claude_desktop::is_installed()
+        };
         out.insert(app, installed);
     }
     out
@@ -476,6 +504,12 @@ pub fn detect_installed_clis() -> std::collections::HashMap<CliApp, bool> {
 pub fn detect_cli_versions() -> std::collections::HashMap<CliApp, Option<String>> {
     let mut out = std::collections::HashMap::new();
     for app in CliApp::all() {
+        // Claude Desktop is a GUI app with no `--version` — read its app
+        // bundle version instead of probing a binary.
+        if !app.is_cli() {
+            out.insert(app, crate::claude_desktop::version());
+            continue;
+        }
         let v = find_cli_binary(app.bin_name())
             .and_then(|p| query_version_at(&p))
             .or_else(|| shell_version_fallback(app.bin_name()));
@@ -691,6 +725,9 @@ fn protocol_for_binding(b: &GatewayBinding) -> GatewayProtocol {
         CliApp::Codex => GatewayProtocol::Openai,
         CliApp::Gemini => GatewayProtocol::Gemini,
         CliApp::Opencode => protocol_for_npm(b.npm.as_deref().unwrap_or("")),
+        // Claude Desktop binds Anthropic-capable gateways (its 3P gateway
+        // speaks the Anthropic Messages format) — same as Claude Code.
+        CliApp::ClaudeDesktop => GatewayProtocol::Anthropic,
     }
 }
 
@@ -737,7 +774,8 @@ fn provider_from_binding(g: &Gateway, b: &GatewayBinding) -> Provider {
         } else {
             None
         },
-        models: if is_opencode {
+        // Models list — OpenCode extra models AND Claude Desktop inferenceModels.
+        models: if matches!(b.app, CliApp::Opencode | CliApp::ClaudeDesktop) {
             b.models.clone()
         } else {
             Vec::new()
@@ -873,6 +911,7 @@ pub fn activate(provider: &Provider, providers_for_app: &[Provider]) -> Result<(
         CliApp::Codex => activate_codex(provider, providers_for_app),
         CliApp::Gemini => activate_gemini(provider, providers_for_app),
         CliApp::Opencode => activate_opencode(provider, providers_for_app),
+        CliApp::ClaudeDesktop => crate::claude_desktop::apply(provider),
     }
 }
 
@@ -884,6 +923,7 @@ pub fn deactivate(app: CliApp, providers_for_app: &[Provider]) -> Result<(), Box
         CliApp::Codex => deactivate_codex(providers_for_app),
         CliApp::Gemini => deactivate_gemini(providers_for_app),
         CliApp::Opencode => deactivate_opencode(providers_for_app),
+        CliApp::ClaudeDesktop => crate::claude_desktop::restore_official(),
     }
 }
 
@@ -899,7 +939,10 @@ pub fn delete_provider_traces(provider: &Provider) -> Result<(), Box<dyn Error>>
         return Ok(());
     }
     match provider.app {
-        CliApp::Claude | CliApp::Codex | CliApp::Gemini => Ok(()),
+        // Single-slot CLIs (and Claude Desktop's single 3P profile) need
+        // no surgical cleanup here — the delete flow runs `deactivate`
+        // when the provider being removed is the one in use.
+        CliApp::Claude | CliApp::Codex | CliApp::Gemini | CliApp::ClaudeDesktop => Ok(()),
         CliApp::Opencode => delete_opencode_provider_entry(provider),
     }
 }
@@ -917,6 +960,7 @@ pub fn read_active_state(
         CliApp::Codex => read_active_codex(providers_for_app),
         CliApp::Gemini => read_active_gemini(providers_for_app),
         CliApp::Opencode => read_active_opencode(providers_for_app),
+        CliApp::ClaudeDesktop => crate::claude_desktop::read_active(providers_for_app),
     }
 }
 
@@ -2361,7 +2405,7 @@ fn ensure_parent_dir(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
     ensure_parent_dir(path)?;
     let mut tmp_name = path.file_name().ok_or("invalid path")?.to_owned();
     let nanos = std::time::SystemTime::now()
@@ -2383,7 +2427,7 @@ fn write_text_file(path: &Path, contents: &str) -> Result<(), Box<dyn Error>> {
     atomic_write(path, contents.as_bytes())
 }
 
-fn load_json_object(path: &Path) -> Result<Map<String, JsonValue>, Box<dyn Error>> {
+pub(crate) fn load_json_object(path: &Path) -> Result<Map<String, JsonValue>, Box<dyn Error>> {
     if !path.exists() {
         return Ok(Map::new());
     }
@@ -2398,7 +2442,10 @@ fn load_json_object(path: &Path) -> Result<Map<String, JsonValue>, Box<dyn Error
     }
 }
 
-fn write_json_object(path: &Path, root: &Map<String, JsonValue>) -> Result<(), Box<dyn Error>> {
+pub(crate) fn write_json_object(
+    path: &Path,
+    root: &Map<String, JsonValue>,
+) -> Result<(), Box<dyn Error>> {
     let serialized = serde_json::to_string_pretty(&JsonValue::Object(root.clone()))?;
     atomic_write(path, serialized.as_bytes())
 }
@@ -2454,7 +2501,7 @@ fn dot_path(key: &str) -> Vec<&str> {
 /// core credential/endpoint/model the user set in their own fields.
 /// Checked at both apply and strip time so a managed key in `overrides`
 /// is silently ignored, and the dedicated field always wins.
-fn override_key_is_managed(app: CliApp, key: &str) -> bool {
+pub(crate) fn override_key_is_managed(app: CliApp, key: &str) -> bool {
     let k = key.trim();
     match app {
         // The DEFAULT_{HAIKU,SONNET,OPUS}_MODEL routing keys are
@@ -2481,6 +2528,21 @@ fn override_key_is_managed(app: CliApp, key: &str) -> bool {
         // `options` bag. The two keys Termory fills from dedicated fields
         // (baseURL / apiKey) are managed and must not be clobbered.
         CliApp::Opencode => k == "baseURL" || k == "apiKey",
+        // Claude Desktop: dedicated fields (baseUrl / apiKey / models)
+        // own these profile keys; Advanced-settings options merge into the
+        // SAME profile JSON for any OTHER `inference*` key, so these are
+        // managed and must not be clobbered. (`claude_desktop::apply`
+        // reuses this check + `json_set_path` to merge the rest.)
+        CliApp::ClaudeDesktop => matches!(
+            k,
+            "inferenceProvider"
+                | "inferenceGatewayBaseUrl"
+                | "inferenceGatewayApiKey"
+                | "inferenceGatewayAuthScheme"
+                | "inferenceModels"
+                | "disableDeploymentModeChooser"
+                | "coworkEgressAllowedHosts"
+        ),
     }
 }
 
@@ -2505,7 +2567,7 @@ fn override_keys(providers: &[Provider], app: CliApp) -> Vec<String> {
 
 /// Infer a JSON scalar from a user-typed string: bool / integer /
 /// finite float / else string. No arrays/objects in v1.
-fn infer_json_value(raw: &str) -> JsonValue {
+pub(crate) fn infer_json_value(raw: &str) -> JsonValue {
     let t = raw.trim();
     match t {
         "true" => return JsonValue::Bool(true),
@@ -2524,7 +2586,7 @@ fn infer_json_value(raw: &str) -> JsonValue {
 }
 
 /// Set a dot-path in a JSON object, creating intermediate objects.
-fn json_set_path(root: &mut Map<String, JsonValue>, key: &str, value: JsonValue) {
+pub(crate) fn json_set_path(root: &mut Map<String, JsonValue>, key: &str, value: JsonValue) {
     let segs = dot_path(key);
     let Some((last, parents)) = segs.split_last() else {
         return;
@@ -2720,20 +2782,21 @@ fn write_dotenv(
     Ok(())
 }
 
-fn mask_secret(value: &str) -> String {
-    if value.len() <= 8 {
-        "•".repeat(value.len())
+pub(crate) fn mask_secret(value: &str) -> String {
+    // Count / slice by CHARS, not bytes — byte slicing (`&value[..4]`) panics
+    // when a multibyte char straddles the boundary (read paths feed this
+    // untrusted on-disk content, e.g. a Claude Desktop profile api key).
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= 8 {
+        "•".repeat(chars.len())
     } else {
-        format!(
-            "{}{}{}",
-            &value[..4],
-            "•".repeat(value.len() - 8),
-            &value[value.len() - 4..]
-        )
+        let head: String = chars[..4].iter().collect();
+        let tail: String = chars[chars.len() - 4..].iter().collect();
+        format!("{}{}{}", head, "•".repeat(chars.len() - 8), tail)
     }
 }
 
-fn string_match(provider_value: &str, live_value: Option<&str>) -> bool {
+pub(crate) fn string_match(provider_value: &str, live_value: Option<&str>) -> bool {
     let live = live_value.unwrap_or("");
     provider_value.trim() == live.trim()
 }

@@ -30,7 +30,7 @@ export function blankProvider(app: CliApp): Provider {
     apiKey: "",
     model: ""
   };
-  if (app === "claude") {
+  if (app === "claude" || app === "claude-desktop") {
     base.baseUrl = "https://api.anthropic.com";
   } else if (app === "codex") {
     base.baseUrl = "https://api.openai.com/v1";
@@ -89,6 +89,7 @@ export function isProviderList(raw: unknown): raw is Provider[] {
     if (typeof p.name !== "string") return false;
     if (
       p.app !== "claude" &&
+      p.app !== "claude-desktop" &&
       p.app !== "codex" &&
       p.app !== "gemini" &&
       p.app !== "opencode"
@@ -103,6 +104,7 @@ export function isProviderList(raw: unknown): raw is Provider[] {
 export function baseUrlPlaceholder(app: CliApp, npm?: string): string {
   switch (app) {
     case "claude":
+    case "claude-desktop":
       return "https://api.anthropic.com";
     case "codex":
       return "https://api.openai.com/v1";
@@ -127,6 +129,8 @@ export function baseUrlHelp(app: CliApp, npm: string | undefined, t: Translate):
   switch (app) {
     case "claude":
       return t("help.baseUrl.claudeNoV1");
+    case "claude-desktop":
+      return t("help.baseUrl.claudeDesktop");
     case "codex":
       return t("help.baseUrl.includeV1");
     case "gemini":
@@ -145,10 +149,6 @@ export function baseUrlHelp(app: CliApp, npm: string | undefined, t: Translate):
   }
 }
 
-export function apiKeyHelp(_app: CliApp, t: Translate): string {
-  return t("help.apiKey");
-}
-
 /** Per-CLI help for the "Advanced settings" / overrides section. Shared
  * by ProviderEditor and the gateway binding editor so the wording stays
  * identical. */
@@ -162,6 +162,8 @@ export function overrideHelpFor(app: CliApp, t: Translate): string {
       return t("help.override.gemini");
     case "opencode":
       return t("help.override.opencode");
+    case "claude-desktop":
+      return t("help.override.claudeDesktop");
   }
 }
 
@@ -230,6 +232,10 @@ export function appProtocols(
   if (caps?.gemini) opencode.push("gemini");
   return {
     claude: caps?.anthropic ? ["anthropic"] : [],
+    // Claude Desktop's 3P gateway speaks the Anthropic Messages format —
+    // bindable whenever the gateway has the Anthropic capability, exactly
+    // like Claude Code.
+    "claude-desktop": caps?.anthropic ? ["anthropic"] : [],
     codex: caps?.openai ? ["openai"] : [], // Codex needs Responses
     gemini: caps?.gemini ? ["gemini"] : [],
     opencode
@@ -279,6 +285,10 @@ export function protocolForBinding(binding: {
       return "gemini";
     case "opencode":
       return protocolForNpm(binding.npm ?? "");
+    // Claude Desktop binds Anthropic-capable gateways (see appProtocols);
+    // its 3P gateway speaks the Anthropic Messages format.
+    case "claude-desktop":
+      return "anthropic";
   }
 }
 
@@ -299,7 +309,13 @@ export function providerFromBinding(gateway: Gateway, binding: GatewayBinding): 
   };
   if (binding.app === "opencode") {
     provider.npm = binding.npm ?? npmForProtocol(protocol);
-    if (binding.models?.length) provider.models = binding.models;
+  }
+  // Models list — OpenCode's extra models AND Claude Desktop's inferenceModels.
+  if (
+    binding.models?.length &&
+    (binding.app === "opencode" || binding.app === "claude-desktop")
+  ) {
+    provider.models = binding.models;
   }
   if (binding.options?.length) provider.options = binding.options;
   return provider;
@@ -353,5 +369,44 @@ export function isManagedOptionKey(app: CliApp, key: string): boolean {
       // Options nest under the provider's own `options` bag; keys are
       // relative to it, and baseURL/apiKey come from the dedicated fields.
       return k === "baseURL" || k === "apiKey";
+    // Claude Desktop: Advanced-settings options merge into the 3P gateway
+    // profile JSON; the keys filled from dedicated fields (Base URL / API
+    // key / models) are managed. MIRROR of `override_key_is_managed`'s
+    // ClaudeDesktop arm in providers.rs.
+    case "claude-desktop":
+      return [
+        "inferenceProvider",
+        "inferenceGatewayBaseUrl",
+        "inferenceGatewayApiKey",
+        "inferenceGatewayAuthScheme",
+        "inferenceModels",
+        "disableDeploymentModeChooser",
+        "coworkEgressAllowedHosts"
+      ].includes(k);
   }
+}
+
+/**
+ * Whether a model id is one Claude Desktop will accept in `inferenceModels`.
+ * Claude Desktop rejects non-Anthropic model names ("is not an Anthropic
+ * model from the provider catalog") — they must be a `claude-*` /
+ * `anthropic/claude-*` role name (sonnet / opus / haiku / fable). A trailing
+ * `[1m]` marker is stripped first. Mirror of `is_claude_safe_model_id`
+ * (cc-switch / the Claude Desktop bundle). Used to BLOCK save in both
+ * editors (feeds `canSave`) and to flag the row — empty ids are treated as
+ * "fine" (they're dropped on save, not written).
+ */
+export function isClaudeSafeModelId(id: string): boolean {
+  let s = id.trim().toLowerCase();
+  if (!s) return true; // blank rows are dropped, not flagged
+  if (s.endsWith("[1m]")) s = s.slice(0, -4).trimEnd();
+  const tail = s.startsWith("anthropic/claude-")
+    ? s.slice("anthropic/claude-".length)
+    : s.startsWith("claude-")
+      ? s.slice("claude-".length)
+      : null;
+  if (tail === null) return false;
+  return ["sonnet-", "opus-", "haiku-", "fable-"].some(
+    (role) => tail.startsWith(role) && tail.length > role.length
+  );
 }

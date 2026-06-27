@@ -31,9 +31,9 @@ import {
   OPENCODE_NPM_OPTIONS
 } from "@/constants";
 import {
-  apiKeyHelp,
   baseUrlHelp,
   baseUrlPlaceholder,
+  isClaudeSafeModelId,
   isManagedOptionKey,
   overrideHelpFor
 } from "@/lib/provider-utils";
@@ -158,11 +158,21 @@ export function ProviderEditor({
   // needs a primary model — without it OpenCode's picker can't surface
   // the provider.
   const isOpencode = draft.app === "opencode";
+  // Claude Desktop direct mode writes a gateway profile (base URL + bearer
+  // key) — it has no per-CLI model field and no overrides, and its bearer
+  // key is REQUIRED (the backend rejects an empty key).
+  const isClaudeDesktop = draft.app === "claude-desktop";
   const modelRequired = isOpencode;
+  // Claude Desktop rejects non-Claude model names in `inferenceModels`, so
+  // block the save when any (non-blank) model id isn't claude-safe. Blank
+  // rows pass (`isClaudeSafeModelId("")` is true) — they're dropped on save.
+  const cdModelsValid =
+    !isClaudeDesktop || modelRows.every((m) => isClaudeSafeModelId(m.id));
   const canSave =
     draft.name.trim().length > 0 &&
     (draft.baseUrl ?? "").trim().length > 0 &&
     (!modelRequired || (draft.model ?? "").trim().length > 0) &&
+    cdModelsValid &&
     duplicateKeys.length === 0 &&
     managedKeys.length === 0;
 
@@ -334,7 +344,6 @@ export function ProviderEditor({
                   {revealKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                 </button>
               </div>
-              <p className="text-xs text-muted-foreground">{apiKeyHelp(draft.app, t)}</p>
             </div>
 
             {isOpencode && (
@@ -358,39 +367,53 @@ export function ProviderEditor({
               </div>
             )}
 
-            <div className="grid gap-2 sm:col-span-2">
-              <Label>{`${t("providers.model")}${modelRequired ? " *" : ""}`}</Label>
-              <ModelCombobox
-                ariaLabel={`Model${modelRequired ? " *" : ""}`}
-                value={draft.model ?? ""}
-                onValueChange={(v) => update("model", v)}
-                options={modelOptions}
-                loading={fetchingModels}
-                ariaInvalid={modelRequired && !(draft.model ?? "").trim()}
-              />
-              {modelError && (
-                <p className="text-xs text-destructive">{modelError}</p>
-              )}
-              {!modelError && (fetchingModels || modelOptions.length > 0) && (
-                <p className="text-xs text-muted-foreground">
-                  {fetchingModels
-                    ? t("help.fetchingModels")
-                    : t("help.modelsAvailable", { n: modelOptions.length })}
-                </p>
-              )}
-            </div>
-
-            {isOpencode && (
+            {/* Claude Desktop direct mode has no per-CLI model field — its
+                gateway profile routes Claude Desktop's own model menu. */}
+            {!isClaudeDesktop && (
               <div className="grid gap-2 sm:col-span-2">
-                <Label>{t("providers.additionalModels")}</Label>
+                <Label>{`${t("providers.model")}${modelRequired ? " *" : ""}`}</Label>
+                <ModelCombobox
+                  ariaLabel={`Model${modelRequired ? " *" : ""}`}
+                  value={draft.model ?? ""}
+                  onValueChange={(v) => update("model", v)}
+                  options={modelOptions}
+                  loading={fetchingModels}
+                  ariaInvalid={modelRequired && !(draft.model ?? "").trim()}
+                />
+                {modelError && (
+                  <p className="text-xs text-destructive">{modelError}</p>
+                )}
+                {!modelError && (fetchingModels || modelOptions.length > 0) && (
+                  <p className="text-xs text-muted-foreground">
+                    {fetchingModels
+                      ? t("help.fetchingModels")
+                      : t("help.modelsAvailable", { n: modelOptions.length })}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Models list — OpenCode's extra-model picker AND Claude
+                Desktop's `inferenceModels` (which Claude id to show in its
+                picker; append [1m] for 1M context, optional display name). */}
+            {(isOpencode || isClaudeDesktop) && (
+              <div className="grid gap-2 sm:col-span-2">
+                <Label>
+                  {t("providers.modelList")}
+                </Label>
                 <p className="text-xs text-muted-foreground">
-                  {t("help.extraModels")}
+                  {t(isClaudeDesktop ? "help.cdModels" : "help.extraModels")}
                 </p>
                 <div className="flex flex-col gap-2">
                   {modelRows.map((m, i) => (
                     <div key={i} className="flex items-center gap-1.5">
                       <ModelCombobox
                         ariaLabel={t("providers.modelId")}
+                        placeholder={
+                          isClaudeDesktop
+                            ? t("providers.cdModelIdPlaceholder")
+                            : undefined
+                        }
                         value={m.id}
                         onValueChange={(v) =>
                           setModelList(
@@ -401,6 +424,7 @@ export function ProviderEditor({
                         }
                         options={modelOptions}
                         loading={fetchingModels}
+                        ariaInvalid={isClaudeDesktop && !isClaudeSafeModelId(m.id)}
                         className="flex-1"
                       />
                       <Input {...INPUT_NO_AUTO}
@@ -432,6 +456,12 @@ export function ProviderEditor({
                     </div>
                   ))}
                 </div>
+                {isClaudeDesktop &&
+                  modelRows.some((m) => !isClaudeSafeModelId(m.id)) && (
+                    <p className="text-xs text-destructive">
+                      {t("help.cdModelInvalid")}
+                    </p>
+                  )}
                 <Button
                   type="button"
                   variant="outline"
@@ -447,6 +477,9 @@ export function ProviderEditor({
               </div>
             )}
 
+            {/* Advanced settings = the generic options escape hatch, merged
+                into the target config (incl. Claude Desktop's 3P profile
+                JSON — any other `inference*` key). Shown for every app. */}
             <Collapsible
               open={overridesOpen}
               onOpenChange={setOverridesOpen}

@@ -42,6 +42,7 @@ import {
 } from "@/components/ui/select";
 import {
   appProtocols,
+  isClaudeSafeModelId,
   newGatewayId,
   npmForProtocol,
   overrideHelpFor
@@ -90,11 +91,13 @@ type BindDraft = {
 export function GatewayEditor({
   gateway,
   isNew,
+  installed,
   onSave,
   onClose
 }: {
   gateway: Gateway;
   isNew: boolean;
+  installed: Record<CliApp, boolean>;
   onSave: (r: Gateway) => void;
   onClose: () => void;
 }) {
@@ -175,6 +178,11 @@ export function GatewayEditor({
   }, [onClose]);
 
   const protocols = appProtocols(caps);
+  // Only offer a binding for an app that's actually installed — mirrors the
+  // Providers tab's install gate, so you can't bind a tool you can't run.
+  for (const app of CLI_APPS) {
+    if (!installed[app]) protocols[app] = [];
+  }
   const hasModes =
     !!caps &&
     (caps.openaiCompatible || caps.openai || caps.anthropic || caps.gemini);
@@ -252,11 +260,19 @@ export function GatewayEditor({
     protocols.opencode.length > 0 &&
     binds.opencode.model.trim().length === 0;
 
+  // Claude Desktop rejects non-Claude model names, so a checked Claude
+  // Desktop binding can't carry an invalid (non-blank) model id.
+  const cdBindingInvalidModel =
+    binds["claude-desktop"].checked &&
+    protocols["claude-desktop"].length > 0 &&
+    binds["claude-desktop"].models.some((m) => !isClaudeSafeModelId(m.id));
+
   const canSave =
     name.trim().length > 0 &&
     baseUrl.trim().length > 0 &&
     // A gateway with no bindings is allowed (detect now, bind later).
-    !opencodeMissingModel;
+    !opencodeMissingModel &&
+    !cdBindingInvalidModel;
 
   const handleSave = async () => {
     if (!canSave || saving) return;
@@ -277,11 +293,15 @@ export function GatewayEditor({
         .filter((o) => o.key && o.value);
       if (options.length) b.options = options;
       // OpenCode-only: the AI SDK package (store the EFFECTIVE one so the
-      // derived protocol stays correct) + extra models (drop blank-id).
+      // derived protocol stays correct).
       if (app === "opencode") {
         b.npm =
           d.npm.trim() ||
           npmForProtocol(protocols[app][0] ?? "openai");
+      }
+      // Models list — OpenCode's extra models AND Claude Desktop's
+      // inferenceModels (drop blank-id rows).
+      if (app === "opencode" || app === "claude-desktop") {
         const models = d.models
           .map((m) => ({ id: m.id.trim(), name: m.name.trim() }))
           .filter((m) => m.id);
@@ -513,29 +533,11 @@ export function GatewayEditor({
 
                     <CollapsibleContent className="overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
                       <div className="flex flex-col gap-2 pl-6 pt-2">
-                        <Label className="text-xs">
-                          {app === "opencode" ? `${t("providers.model")} *` : t("providers.model")}
-                        </Label>
-                        <ModelCombobox
-                          ariaLabel={app === "opencode" ? `${t("providers.model")} *` : t("providers.model")}
-                          value={draft.model}
-                          onValueChange={(v) => setBind(app, { model: v })}
-                          options={models}
-                          loading={detecting}
-                          ariaInvalid={
-                            app === "opencode" && !draft.model.trim()
-                          }
-                        />
-                        {app === "opencode" && !draft.model.trim() && (
-                          <p className="text-xs text-destructive">
-                            OpenCode requires a primary model id.
-                          </p>
-                        )}
-
-                        {/* OpenCode: AI SDK package + extra models. */}
+                        {/* OpenCode: AI SDK package first — it selects the
+                            SDK/protocol before the model. */}
                         {app === "opencode" && (
                           <>
-                            <Label className="text-xs mt-1">{t("providers.aiSdk")}</Label>
+                            <Label className="text-xs">{t("providers.aiSdk")}</Label>
                             <Select
                               value={effectiveNpm}
                               onValueChange={(v) => setBind(app, { npm: v })}
@@ -551,8 +553,116 @@ export function GatewayEditor({
                                 ))}
                               </SelectContent>
                             </Select>
+                          </>
+                        )}
+                        {/* Claude Desktop has no single primary model — its
+                            picker is driven by the model list below. */}
+                        {app !== "claude-desktop" && (
+                          <>
+                            <Label className="text-xs">
+                              {app === "opencode" ? `${t("providers.model")} *` : t("providers.model")}
+                            </Label>
+                            <ModelCombobox
+                              ariaLabel={app === "opencode" ? `${t("providers.model")} *` : t("providers.model")}
+                              value={draft.model}
+                              onValueChange={(v) => setBind(app, { model: v })}
+                              options={models}
+                              loading={detecting}
+                              ariaInvalid={
+                                app === "opencode" && !draft.model.trim()
+                              }
+                            />
+                            {app === "opencode" && !draft.model.trim() && (
+                              <p className="text-xs text-destructive">
+                                OpenCode requires a primary model id.
+                              </p>
+                            )}
+                          </>
+                        )}
+
+                        {/* Claude Desktop: the inferenceModels list (Model ID
+                            + optional display name; append [1m] for 1M). */}
+                        {app === "claude-desktop" && (
+                          <>
+                            <Label className="text-xs">{t("providers.modelList")}</Label>
+                            <p className="text-xs text-muted-foreground">
+                              {t("help.cdModels")}
+                            </p>
+                            {modelRows.map((m, i) => (
+                              <div key={i} className="flex items-center gap-1.5">
+                                <ModelCombobox
+                                  ariaLabel={t("providers.modelId")}
+                                  placeholder={t("providers.cdModelIdPlaceholder")}
+                                  value={m.id}
+                                  onValueChange={(v) =>
+                                    setBind(app, {
+                                      models: modelRows.map((r, j) =>
+                                        j === i ? { ...r, id: v } : r
+                                      )
+                                    })
+                                  }
+                                  options={models}
+                                  loading={detecting}
+                                  ariaInvalid={!isClaudeSafeModelId(m.id)}
+                                  className="flex-1"
+                                />
+                                <Input {...INPUT_NO_AUTO}
+                                  aria-label={t("providers.modelDisplayName")}
+                                  className="flex-1 h-8"
+                                  placeholder={t("providers.displayNameOptional")}
+                                  value={m.name}
+                                  onChange={(e) =>
+                                    setBind(app, {
+                                      models: modelRows.map((r, j) =>
+                                        j === i ? { ...r, name: e.target.value } : r
+                                      )
+                                    })
+                                  }
+                                />
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon"
+                                  className="size-8 shrink-0"
+                                  aria-label={t("providers.removeModel")}
+                                  onClick={() =>
+                                    setBind(app, {
+                                      models: modelRows.filter((_, j) => j !== i)
+                                    })
+                                  }
+                                >
+                                  <Trash2 className="size-4" />
+                                </Button>
+                              </div>
+                            ))}
+                            {modelRows.some(
+                              (m) => !isClaudeSafeModelId(m.id)
+                            ) && (
+                              <p className="text-xs text-destructive">
+                                {t("help.cdModelInvalid")}
+                              </p>
+                            )}
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="self-start"
+                              onClick={() =>
+                                setBind(app, {
+                                  models: [...draft.models, { id: "", name: "" }]
+                                })
+                              }
+                            >
+                              {t("providers.add")}
+                            </Button>
+                          </>
+                        )}
+
+                        {/* OpenCode: extra models (AI SDK is shown first, above). */}
+                        {app === "opencode" && (
+                          <>
                             <Label className="text-xs mt-1">
-                              {t("providers.additionalModels")}
+                              {t("providers.modelList")}
                             </Label>
                             <p className="text-xs text-muted-foreground">
                               {t("help.extraModels")}

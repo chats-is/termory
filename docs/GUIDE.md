@@ -28,7 +28,7 @@ Two cross-cutting topics — **[Privacy & your data](#privacy--your-data)** and 
 
 ### Switching the active provider
 
-1. Open **Providers** and pick the CLI's tab (Claude Code / Codex / Gemini / OpenCode).
+1. Open **Providers** and pick the app's tab (Claude Code / Codex / Gemini / OpenCode / Claude Desktop).
 2. Click **Activate** (or **Set as default**) on the provider you want.
 3. The next time you launch that CLI, it uses the new provider — no manual config editing.
 
@@ -55,10 +55,22 @@ This is the core guarantee: activating a provider **merges a few fields into you
 | Codex | `~/.codex/auth.json` + `~/.codex/config.toml` | the `tokens` inside `auth.json` (the ChatGPT login) |
 | Gemini CLI | `~/.gemini/.env` | `~/.gemini/oauth_creds.json` + `google_accounts.json` |
 | OpenCode | `~/.config/opencode/opencode.json` | `~/.local/share/opencode/auth.json` |
+| Claude Desktop | `…/Claude{,-3p}/claude_desktop_config.json` + a `Claude-3p/configLibrary/` profile | Claude Desktop's own claude.ai login |
 
 (Codex is the one case where config and a credential share a file — there Termory still *merges*: it sets `auth_mode` + the API key but leaves your `tokens` intact, so the ChatGPT login survives.)
 
 **Switching back to Official is symmetric:** Termory removes the override fields it added and leaves everything else as-is. Because your native login was never overwritten, the CLI resumes using it immediately — no re-login.
+
+### Claude Desktop (the GUI app)
+
+Besides the four CLIs, Termory can switch **Claude Desktop** — the desktop app — to a third-party provider, on **macOS and Windows** (its tab shows everywhere but only activates where the app can run). Claude Desktop has no terminal history, so it appears only on the **Providers** page and **AI Gateways**, never in Sessions/Memory/Skills.
+
+It uses Claude Desktop's own **third-party ("3P")** mechanism, not env vars: Termory flips `deploymentMode` to `3p` and writes a provider profile (your base URL + API key) into Claude Desktop's config library; "Official" flips it back to `1p` and removes the profile. Two specifics differ from the CLIs:
+
+- **The endpoint must be Anthropic-compatible**, and **model IDs must be Claude names** (`claude-sonnet-4-6`, `anthropic/claude-…`; append `[1m]` for the 1M-context variant). Claude Desktop rejects non-Claude model names, so the editor blocks saving them. The model list is optional — leave it empty and Claude Desktop auto-discovers from the endpoint.
+- There's **no per-size routing** and no primary "Model" field — just the optional model list plus the generic Advanced settings, which merge into the provider profile.
+
+(This is unrelated to the **AI Gateways** feature below — Claude Desktop is just a provider; "3P" is Claude Desktop's own term for its third-party config.)
 
 ### Advanced settings (per-provider options)
 

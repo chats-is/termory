@@ -9,7 +9,7 @@ import type { DateRange as CalendarRange } from "react-day-picker";
 import { BrandIcon } from "@/components/BrandIcon";
 import { Calendar } from "@/components/ui/calendar";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { CLI_APP_SOURCE_BADGE } from "@/constants";
+import { CLI_APP_LABEL, CLI_APP_SOURCE_BADGE } from "@/constants";
 import { cn } from "@/lib/utils";
 import { useT, type MessageKey } from "@/i18n";
 import type { DateRange, DateRangePreset, SourceFilter } from "@/lib/stats-utils";
@@ -133,7 +133,11 @@ export function StatsFilterBar({
                 ) : (
                   <BrandIcon source={sourceLabel(s)} />
                 )}
-                <span>{s === "All" ? t("stats.source.all") : sourceLabel(s)}</span>
+                <span>
+                  {s === "All"
+                    ? t("stats.source.all")
+                    : CLI_APP_LABEL[s as CliApp]}
+                </span>
               </TabsTrigger>
             ))}
           </TabsList>

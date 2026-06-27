@@ -74,14 +74,36 @@ const CODEX_OFFICIAL_PROVIDER_ID = "openai";
 //
 // Updated by the page itself whenever a fresh detect result lands;
 // stays alive across mount/unmount cycles until the window reloads.
+// Build a full Record<CliApp,…> from a backend `detect_clis` /
+// `detect_cli_versions_cmd` map keyed by CliApp string — keeps the
+// per-CLI literals from drifting as new apps are added.
+function cliBoolRecord(map: Record<string, boolean>): Record<CliApp, boolean> {
+  return Object.fromEntries(CLI_APPS.map((c) => [c, !!map[c]])) as Record<
+    CliApp,
+    boolean
+  >;
+}
+function cliVersionRecord(
+  map: Record<string, string | null>
+): Record<CliApp, string | null> {
+  return Object.fromEntries(
+    CLI_APPS.map((c) => [c, map[c] ?? null])
+  ) as Record<CliApp, string | null>;
+}
+
 let cachedInstalled: Record<CliApp, boolean> = {
   claude: true,
+  // Optimistic default (like the other CLIs) — its tab always shows; detect
+  // flips this to false on unsupported platforms / no install, which only
+  // drives the InstallGuide-vs-provider-list choice, not the tab's visibility.
+  "claude-desktop": true,
   codex: true,
   gemini: true,
   opencode: true
 };
 let cachedVersions: Record<CliApp, string | null> = {
   claude: null,
+  "claude-desktop": null,
   codex: null,
   gemini: null,
   opencode: null
@@ -183,6 +205,7 @@ export function ProvidersPage({
   const [editingIsNew, setEditingIsNew] = React.useState(false);
   const [activeStates, setActiveStates] = React.useState<Record<CliApp, ActiveState | null>>({
     claude: null,
+    "claude-desktop": null,
     codex: null,
     gemini: null,
     opencode: null
@@ -319,12 +342,7 @@ export function ProvidersPage({
   const refreshInstalled = React.useCallback(async () => {
     try {
       const map = await invoke<Record<string, boolean>>("detect_clis");
-      setInstalled({
-        claude: !!map.claude,
-        codex: !!map.codex,
-        gemini: !!map.gemini,
-        opencode: !!map.opencode
-      });
+      setInstalled(cliBoolRecord(map));
     } catch {
       /* leave previous state on error */
     }
@@ -348,12 +366,7 @@ export function ProvidersPage({
       const map = await invoke<Record<string, string | null>>(
         "detect_cli_versions_cmd"
       );
-      setVersions({
-        claude: map.claude ?? null,
-        codex: map.codex ?? null,
-        gemini: map.gemini ?? null,
-        opencode: map.opencode ?? null
-      });
+      setVersions(cliVersionRecord(map));
     } catch {
       /* leave previous state on error */
     } finally {
@@ -366,12 +379,7 @@ export function ProvidersPage({
     setRechecking(true);
     try {
       const map = await invoke<Record<string, boolean>>("detect_clis");
-      const next = {
-        claude: !!map.claude,
-        codex: !!map.codex,
-        gemini: !!map.gemini,
-        opencode: !!map.opencode
-      };
+      const next = cliBoolRecord(map);
       setInstalled(next);
       if (next[app]) {
         toast.success(t("toast.detected", { app: CLI_APP_LABEL[app] }));
@@ -393,12 +401,7 @@ export function ProvidersPage({
   const ensureCliInstalled = async (target: CliApp): Promise<boolean> => {
     try {
       const map = await invoke<Record<string, boolean>>("detect_clis");
-      setInstalled({
-        claude: !!map.claude,
-        codex: !!map.codex,
-        gemini: !!map.gemini,
-        opencode: !!map.opencode
-      });
+      setInstalled(cliBoolRecord(map));
       if (!map[target]) {
         toast.error(
           t("toast.notInstalledFull", { app: CLI_APP_LABEL[target] })
@@ -429,6 +432,7 @@ export function ProvidersPage({
       });
       const next: Record<CliApp, ActiveState | null> = {
         claude: null,
+        "claude-desktop": null,
         codex: null,
         gemini: null,
         opencode: null
@@ -495,18 +499,9 @@ export function ProvidersPage({
     const refresh = async () => {
       try {
         const map = await invoke<Record<string, boolean>>("detect_clis");
-        const next = {
-          claude: !!map.claude,
-          codex: !!map.codex,
-          gemini: !!map.gemini,
-          opencode: !!map.opencode
-        };
+        const next = cliBoolRecord(map);
         const prev = installedRef.current;
-        const changed =
-          prev.claude !== next.claude ||
-          prev.codex !== next.codex ||
-          prev.gemini !== next.gemini ||
-          prev.opencode !== next.opencode;
+        const changed = CLI_APPS.some((c) => prev[c] !== next[c]);
         if (changed) {
           setInstalled(next);
           void refreshVersions();
@@ -994,6 +989,7 @@ export function ProvidersPage({
             addSignal={gatewayAddSignal}
             markActive={markActive}
             activeProviderIds={activeProviderIds}
+            installed={installed}
           />
         </React.Suspense>
       )}

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   appProtocols,
   blankProvider,
+  isClaudeSafeModelId,
   isManagedOptionKey,
   isProviderList,
   isGatewayList,
@@ -58,6 +59,44 @@ describe("isManagedOptionKey", () => {
     expect(isManagedOptionKey("opencode", "  apiKey  ")).toBe(true);
     expect(isManagedOptionKey("codex", "  model  ")).toBe(true);
   });
+
+  it("claude-desktop — the 3P profile keys owned by dedicated fields are managed", () => {
+    // Filled from Base URL / API key / models — options must not clobber them.
+    expect(isManagedOptionKey("claude-desktop", "inferenceGatewayBaseUrl")).toBe(
+      true
+    );
+    expect(isManagedOptionKey("claude-desktop", "inferenceGatewayApiKey")).toBe(
+      true
+    );
+    expect(isManagedOptionKey("claude-desktop", "inferenceModels")).toBe(true);
+    // Any other inference* key passes through (the escape hatch), e.g. headers.
+    expect(
+      isManagedOptionKey("claude-desktop", "inferenceGatewayHeaders.X-Foo")
+    ).toBe(false);
+  });
+});
+
+describe("isClaudeSafeModelId", () => {
+  it("accepts claude-* / anthropic/claude-* role names (and [1m])", () => {
+    expect(isClaudeSafeModelId("claude-sonnet-4-6")).toBe(true);
+    expect(isClaudeSafeModelId("claude-opus-4-8")).toBe(true);
+    expect(isClaudeSafeModelId("claude-haiku-4-5")).toBe(true);
+    expect(isClaudeSafeModelId("claude-fable-5")).toBe(true);
+    expect(isClaudeSafeModelId("anthropic/claude-sonnet-4.6")).toBe(true);
+    expect(isClaudeSafeModelId("claude-sonnet-4-6[1m]")).toBe(true);
+    expect(isClaudeSafeModelId("  CLAUDE-OPUS-4-8  ")).toBe(true);
+  });
+  it("blank is treated as ok (dropped on save, not flagged)", () => {
+    expect(isClaudeSafeModelId("")).toBe(true);
+    expect(isClaudeSafeModelId("   ")).toBe(true);
+  });
+  it("rejects non-Claude names and degenerate role-only ids", () => {
+    expect(isClaudeSafeModelId("gpt-4")).toBe(false);
+    expect(isClaudeSafeModelId("glm-4.6")).toBe(false);
+    expect(isClaudeSafeModelId("claude-3-5-sonnet-20241022")).toBe(false);
+    expect(isClaudeSafeModelId("claude-sonnet-")).toBe(false); // role but nothing after
+    expect(isClaudeSafeModelId("claude-")).toBe(false);
+  });
 });
 
 describe("blankProvider", () => {
@@ -73,6 +112,10 @@ describe("blankProvider", () => {
       "https://generativelanguage.googleapis.com"
     );
     expect(blankProvider("opencode").baseUrl).toBe("https://api.anthropic.com");
+    // Claude Desktop is Anthropic-format, same default endpoint as Claude Code.
+    expect(blankProvider("claude-desktop").baseUrl).toBe(
+      "https://api.anthropic.com"
+    );
   });
 
   it("generates a fresh id each call", () => {
@@ -102,6 +145,14 @@ describe("isProviderList", () => {
     expect(isProviderList([])).toBe(true);
     expect(
       isProviderList([{ id: "a", name: "A", app: "claude", kind: "custom" }])
+    ).toBe(true);
+  });
+
+  it("accepts claude-desktop providers (else they wipe the whole list on load)", () => {
+    expect(
+      isProviderList([
+        { id: "a", name: "A", app: "claude-desktop", kind: "custom" }
+      ])
     ).toBe(true);
   });
 
@@ -197,6 +248,12 @@ describe("appProtocols", () => {
     expect(p.claude).toEqual([]);
     expect(p.opencode).toEqual([]);
   });
+  it("claude-desktop binds an Anthropic-capable gateway (like Claude Code)", () => {
+    expect(appProtocols(caps({ anthropic: true }))["claude-desktop"]).toEqual([
+      "anthropic"
+    ]);
+    expect(appProtocols(caps({ openai: true }))["claude-desktop"]).toEqual([]);
+  });
 });
 
 describe("providerFromBinding", () => {
@@ -225,6 +282,19 @@ describe("providerFromBinding", () => {
   it("Codex binding gets a /v1 base (derived openai protocol)", () => {
     const codex = providerFromBinding(gateway, { id: "b-codex", app: "codex" });
     expect(codex.baseUrl).toBe("https://r.x/v1");
+  });
+  it("Claude Desktop binding: anthropic base, no npm, but carries its models", () => {
+    const cd = providerFromBinding(gateway, {
+      id: "b-cd",
+      app: "claude-desktop",
+      models: [{ id: "claude-sonnet-4-6[1m]", name: "Sonnet" }]
+    });
+    expect(cd.app).toBe("claude-desktop");
+    expect(cd.baseUrl).toBe("https://r.x"); // anthropic → bare host
+    expect(cd.apiKey).toBe("sk-1");
+    expect(cd.npm).toBeUndefined();
+    // The models list must reach the synth provider (→ inferenceModels).
+    expect(cd.models).toEqual([{ id: "claude-sonnet-4-6[1m]", name: "Sonnet" }]);
   });
   it("OpenCode protocol is derived from its npm package", () => {
     const oc = providerFromBinding(gateway, {

@@ -130,7 +130,7 @@ export function CodexFollowDialog({
   return (
     <Dialog open={open} onOpenChange={(o) => !o && !running && onClose()}>
       <DialogContent
-        className="sm:max-w-md"
+        className="sm:max-w-2xl"
         onPointerDownOutside={(e) => running && e.preventDefault()}
         onEscapeKeyDown={(e) => running && e.preventDefault()}
       >
@@ -144,7 +144,7 @@ export function CodexFollowDialog({
           </p>
         </DialogHeader>
 
-        <div className="-mx-6 max-h-[65vh] overflow-y-auto px-6 py-1">
+        <div className="-mx-6 max-h-[45vh] overflow-y-auto px-6 py-1">
           {projects.length === 0 ? (
             <p className="py-6 text-center text-sm text-muted-foreground">
               {t("providers.followEmpty")}

@@ -49,7 +49,8 @@ export function GatewaysPage({
   setGateways,
   addSignal,
   markActive,
-  activeProviderIds
+  activeProviderIds,
+  installed
 }: {
   gateways: Gateway[];
   setGateways: React.Dispatch<React.SetStateAction<Gateway[]>>;
@@ -62,13 +63,22 @@ export function GatewaysPage({
    * marker points at it (creds-matching alone is ambiguous when a
    * standalone provider shares the same endpoint). */
   activeProviderIds: Record<string, string>;
+  /** Per-CLI install map — an app is only offered as a gateway-binding
+   * target when it's installed (mirrors the Providers tab's install gate). */
+  installed: Record<CliApp, boolean>;
 }) {
   const t = useT();
   const [editing, setEditing] = React.useState<Gateway | null>(null);
   const [editingIsNew, setEditingIsNew] = React.useState(false);
   const [activeStates, setActiveStates] = React.useState<
     Record<CliApp, ActiveState | null>
-  >({ claude: null, codex: null, gemini: null, opencode: null });
+  >({
+    claude: null,
+    "claude-desktop": null,
+    codex: null,
+    gemini: null,
+    opencode: null
+  });
   const [busy, setBusy] = React.useState<string | null>(null);
 
   // All gateway bindings materialized as providers — passed to the
@@ -85,6 +95,7 @@ export function GatewaysPage({
       });
       const next: Record<CliApp, ActiveState | null> = {
         claude: null,
+        "claude-desktop": null,
         codex: null,
         gemini: null,
         opencode: null
@@ -517,6 +528,7 @@ export function GatewaysPage({
           <GatewayEditor
             gateway={editing}
             isNew={editingIsNew}
+            installed={installed}
             onSave={saveGateway}
             onClose={closeEditor}
           />

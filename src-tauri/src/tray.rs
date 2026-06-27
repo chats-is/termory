@@ -450,7 +450,9 @@ fn installed_cli_list() -> Vec<CliApp> {
     let installed = detect_installed_clis();
     CliApp::all()
         .into_iter()
-        .filter(|c| installed.get(c).copied().unwrap_or(false))
+        // Terminal flows (recent-session resume, New Session) only — exclude
+        // the Claude Desktop GUI app, which isn't terminal-launchable.
+        .filter(|c| c.is_cli() && installed.get(c).copied().unwrap_or(false))
         .collect()
 }
 
@@ -801,6 +803,9 @@ fn cli_source(cli: CliApp) -> &'static str {
         CliApp::Codex => "Codex",
         CliApp::Gemini => "Gemini",
         CliApp::Opencode => "OpenCode",
+        // Claude Desktop has no terminal sessions, so this is never used
+        // for resume/new dispatch — present only to keep the match total.
+        CliApp::ClaudeDesktop => "ClaudeDesktop",
     }
 }
 
@@ -982,9 +987,12 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     // the "New session" groups below and the per-CLI provider submenus.
     let installed = detect_installed_clis();
 
+    // Terminal flows (recent region + New Session) take only real CLIs;
+    // the provider-switch submenu loop below uses the full CliApp::all()
+    // (including Claude Desktop) with its own per-CLI install gate.
     let installed_clis: Vec<CliApp> = CliApp::all()
         .into_iter()
-        .filter(|c| installed.get(c).copied().unwrap_or(false))
+        .filter(|c| c.is_cli() && installed.get(c).copied().unwrap_or(false))
         .collect();
 
     let recent = RECENT.lock().map(|g| g.clone()).unwrap_or_default();
@@ -1228,6 +1236,7 @@ fn cli_label(cli: CliApp) -> &'static str {
         CliApp::Codex => "Codex",
         CliApp::Gemini => "Gemini",
         CliApp::Opencode => "OpenCode",
+        CliApp::ClaudeDesktop => "Claude Desktop",
     }
 }
 
@@ -1237,6 +1246,7 @@ fn cli_key(cli: CliApp) -> &'static str {
         CliApp::Codex => "codex",
         CliApp::Gemini => "gemini",
         CliApp::Opencode => "opencode",
+        CliApp::ClaudeDesktop => "claude-desktop",
     }
 }
 

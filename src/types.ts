@@ -135,7 +135,7 @@ export type SessionSource = "Claude" | "Codex" | "Gemini" | "OpenCode";
 
 export type MemoryTool = SessionSource | "Other";
 
-export type CliApp = "claude" | "codex" | "gemini" | "opencode";
+export type CliApp = "claude" | "claude-desktop" | "codex" | "gemini" | "opencode";
 
 export type ProviderKind = "official" | "custom";
 

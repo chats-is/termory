@@ -30,7 +30,7 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 
 ### 切换当前供应商
 
-1. 打开**供应商**页,选择 CLI 的标签页(Claude Code / Codex / Gemini / OpenCode)。
+1. 打开**供应商**页,选择应用的标签页(Claude Code / Codex / Gemini / OpenCode / Claude Desktop)。
 2. 在想用的供应商上点**激活**(OpenCode 为**设为默认**)。
 3. 下次启动该 CLI 时就会使用新供应商——无需手动改配置。
 
@@ -57,10 +57,22 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 | Codex | `~/.codex/auth.json` + `~/.codex/config.toml` | `auth.json` 里的 `tokens`(即 ChatGPT 登录) |
 | Gemini CLI | `~/.gemini/.env` | `~/.gemini/oauth_creds.json` + `google_accounts.json` |
 | OpenCode | `~/.config/opencode/opencode.json` | `~/.local/share/opencode/auth.json` |
+| Claude Desktop | `…/Claude{,-3p}/claude_desktop_config.json` + `Claude-3p/configLibrary/` 里的 profile | Claude Desktop 自己的 claude.ai 登录 |
 
 (Codex 是唯一一种配置与某个凭据共用一个文件的情况——即便如此 Termory 仍是**合并**:它设置 `auth_mode` 和 API 密钥,但保留你的 `tokens`,因此 ChatGPT 登录得以存活。)
 
 **切回官方是对称操作:** Termory 移除它追加的覆盖字段,其余原样保留。由于原生登录从未被覆盖,CLI 会立即重新使用它——无需重新登录。
+
+### Claude Desktop(桌面 GUI 应用)
+
+除了四个 CLI,Termory 还能把 **Claude Desktop** 桌面应用切到第三方供应商,仅限 **macOS 和 Windows**(标签到处都显示,但只在能运行该应用的平台上才可激活)。Claude Desktop 没有终端历史,所以它只出现在 **Providers** 页和 **AI Gateway**,不出现在 会话/记忆/技能里。
+
+它用的是 Claude Desktop 自带的**第三方("3P")**机制,不是环境变量:Termory 把 `deploymentMode` 翻成 `3p`,并往它的配置库写一份供应商 profile(你的 Base URL + API 密钥);"官方"则翻回 `1p` 并删除该 profile。和 CLI 有两点不同:
+
+- **端点必须 Anthropic 兼容**,且**模型 ID 必须是 Claude 名**(`claude-sonnet-4-6`、`anthropic/claude-…`;末尾加 `[1m]` 表示 1M 上下文)。Claude Desktop 会拒绝非 Claude 模型名,所以编辑器会拦住保存。模型列表是可选的——留空则 Claude Desktop 自动从端点发现。
+- **没有分档路由**、也没有主"Model"字段——只有可选的模型列表 + 通用的高级设置(合并进供应商 profile)。
+
+(这和下面的 **AI 网关**功能无关——Claude Desktop 只是个供应商;"3P"是 Claude Desktop 自己对第三方配置的叫法。)
 
 ### 高级设置(每个供应商的 options)
 
