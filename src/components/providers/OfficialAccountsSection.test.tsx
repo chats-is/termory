@@ -93,12 +93,23 @@ describe("OfficialAccountsSection", () => {
     expect(invokeMock).toHaveBeenCalledWith("list_accounts", { app: "codex" });
   });
 
-  it("shows the styled empty hint when there are no saved accounts", async () => {
+  it("hides the empty hint when there is no current login (not logged in)", async () => {
     mockList(makeState({ current: null, accounts: [] }));
     render(<OfficialAccountsSection app="codex" />);
-    // Always renders the card (even unused) with the empty hint — no rows.
+    // No login → no rows, no empty hint (nothing to "save")
+    await screen.findByRole("button", { name: /add account/i });
+    expect(screen.queryByText(/No saved accounts/i)).toBeNull();
+  });
+
+  it("shows the empty hint when logged in but nothing saved yet", async () => {
+    mockList(
+      makeState({
+        current: { name: "Jane", email: "jane@example.com", plan: "Max", saved: true },
+        accounts: []
+      })
+    );
+    render(<OfficialAccountsSection app="codex" />);
     expect(await screen.findByText(/No saved accounts/i)).toBeInTheDocument();
-    expect(screen.queryByText("Work")).toBeNull();
   });
 
   it("switches a non-active account after confirm and notifies the parent", async () => {

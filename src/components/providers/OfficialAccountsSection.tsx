@@ -285,7 +285,7 @@ export function OfficialAccountsSection({
         </p>
       )}
 
-      {rows.length === 0 && (
+      {rows.length === 0 && !!current && (
         <p className="px-3 py-2 text-xs text-muted-foreground">
           {t("providers.accountsEmpty")}
         </p>
