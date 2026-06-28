@@ -1,3 +1,4 @@
+mod accounts;
 mod claude_desktop;
 mod codex_follow;
 mod config;
@@ -651,6 +652,79 @@ async fn write_app_favorites(value: serde_json::Value) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+// ===================================================================
+// Official-account management (save / switch / delete the CLI's own
+// OAuth login — see accounts.rs). Phase 1: Codex.
+// ===================================================================
+
+/// List the live + saved official accounts for one CLI.
+#[tauri::command]
+async fn list_accounts(app: String) -> Result<accounts::AccountsState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let cli = CliApp::parse(&app).ok_or_else(|| format!("unknown app: {app}"))?;
+        accounts::list_accounts(cli).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Snapshot the CLI's current official login into the store (upsert by
+/// account). `label` defaults to the account email when omitted.
+#[tauri::command]
+async fn save_account(app: String, label: Option<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let cli = CliApp::parse(&app).ok_or_else(|| format!("unknown app: {app}"))?;
+        accounts::save_current_account(cli, label).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Restore a saved snapshot into the live CLI credential.
+#[tauri::command]
+async fn switch_account(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        accounts::switch_account(id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Rename a saved snapshot (live credential untouched).
+#[tauri::command]
+async fn rename_account(id: String, label: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        accounts::rename_account(id, label).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Try to refresh the current Codex OAuth tokens using the saved
+/// refresh_token. Always returns Ok — failures land in `warning`.
+#[tauri::command]
+async fn refresh_codex_tokens() -> accounts::TokenRefreshResult {
+    accounts::refresh_codex_tokens().await
+}
+
+/// Delete a saved snapshot. Never touches the live credential.
+#[tauri::command]
+async fn delete_account(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        accounts::delete_account(id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Spawn `codex login`, wait for the browser login to complete, then
+/// auto-save the resulting credential. Auth.json is cleared beforehand so
+/// the existing session is not revoked. Returns the new account's store id.
+#[tauri::command]
+async fn login_and_save_codex_account() -> Result<String, String> {
+    accounts::login_and_save_codex_account().await
+}
+
 pub fn run() {
     // Log target directory: `~/.termory/logs/`. Falls back to the
     // OS-default log location if HOME isn't readable so app launch
@@ -746,6 +820,13 @@ pub fn run() {
             write_app_gateways,
             read_app_favorites,
             write_app_favorites,
+            list_accounts,
+            save_account,
+            switch_account,
+            refresh_codex_tokens,
+            rename_account,
+            delete_account,
+            login_and_save_codex_account,
         ])
         .on_window_event(|window, event| {
             // Closing the window hides it instead of quitting, so the
