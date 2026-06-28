@@ -202,7 +202,7 @@ export function App() {
   const [, setSearchingContent] = React.useState(false);
   const [contentQuery, setContentQuery] = React.useState("");
   const [pane, setPane] = usePersistentState<"sessions" | "memory" | "skills">(
-    "default_pane",
+    "records_pane",
     "sessions",
     (raw): raw is "sessions" | "memory" | "skills" =>
       raw === "sessions" || raw === "memory" || raw === "skills"

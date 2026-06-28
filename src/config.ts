@@ -1,5 +1,5 @@
 // Local store split across three files under ~/.termory/:
-//   * config.json    — UI prefs (default_pane, recent_searches, …).
+//   * config.json    — UI prefs (records_pane, recent_searches, …).
 //   * providers.json — Provider library (contains API keys, chmod 0600).
 //   * favorites.json — Saved message snapshots (chmod 0600).
 //

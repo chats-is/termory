@@ -604,7 +604,7 @@ User flow: a Provider is a named snapshot of `{baseUrl, apiKey, model, ...}`. Ea
 
 **Local storage** — `~/.termory/` (same path on macOS / Linux / Windows), permissions `0700` dir / `0600` files on Unix. Atomic write (tmp + rename):
 
-- `~/.termory/config.json` — UI prefs (`default_pane`, `providers_app`, `recent_searches`). No secrets.
+- `~/.termory/config.json` — UI prefs (`records_pane`, `providers_app`, `recent_searches`). No secrets.
 - `~/.termory/providers.json` — provider library. On disk it's `{ "version": N, "providers": [...] }` (`PROVIDERS_SCHEMA_VERSION = 1` in `config.rs`) where `providers` is a UNIFIED array holding BOTH per-CLI providers (`kind: "official"|"custom"`) and gateways (`kind: "gateway"`). `config.rs` splits/merges by `kind`: `read_providers()` returns `kind != "gateway"`, `read_gateways()` returns `kind == "gateway"`, and each writer preserves the other kind (`entry_is_gateway`), so the strongly-typed `Vec<Provider>` parse (tray, IPC) never sees a gateway entry. `read_all_entries` runs the array through `migrate_entries(version, entries)` (a no-op at v1 — the seam where a future schema bump hooks its upgrade). No bare-array / old-`gateways[]` compatibility (clean dev baseline). Contains API keys, `0600`.
 
 Termory does **not** store an "active provider" pointer anywhere. `provider_active_state` reverse-derives the active state on every read by parsing the CLI's live config files and matching against the in-memory provider list — this keeps Termory consistent when other tools (`cc-switch`, manual `vim`, the CLI's own OAuth flow) change the same files.
