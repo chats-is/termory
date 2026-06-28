@@ -352,15 +352,9 @@ fn watch_targets() -> Vec<PathBuf> {
         return Vec::new();
     };
 
-    let claude_config = std::env::var("CLAUDE_CONFIG_DIR")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".claude"));
-
     vec![
         crate::providers::codex_root(&home),
-        claude_config,
+        crate::sessions::claude_config_root(&home),
         home.join(".gemini"),
         crate::sessions::opencode_config_dir(&home),
         crate::sessions::opencode_data_dir(&home),
@@ -542,5 +536,15 @@ mod tests {
         );
         // Ordinary session files don't match.
         assert!(event_credential_clis(&ev(&["/Users/x/.claude/projects/p/s.jsonl"])).is_empty());
+
+        // A relocated CODEX_HOME puts auth.json outside any `.codex` dir;
+        // the CODEX_HOME env var must be consulted so the watcher can still
+        // trigger a quota refresh when that file changes.
+        let _g = crate::testutils::HOME_LOCK.lock().unwrap();
+        let _e = crate::testutils::EnvVarGuard::set("CODEX_HOME", "/custom/cdx");
+        assert_eq!(
+            event_credential_clis(&ev(&["/custom/cdx/auth.json"])),
+            vec![CliApp::Codex]
+        );
     }
 }

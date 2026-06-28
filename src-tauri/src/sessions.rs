@@ -1622,11 +1622,12 @@ fn scan_global_instructions() -> Vec<AppSession> {
     };
 
     let claude_root = claude_config_root(&home);
+    let claude_label = claude_root.to_string_lossy();
     // OpenCode officially falls back to ~/.claude/CLAUDE.md and project
     // CLAUDE.md when no AGENTS.md is found, per https://opencode.ai/docs/rules/
     push_tagged_instruction_file(
         &claude_root.join("CLAUDE.md"),
-        "~/.claude",
+        &claude_label,
         &["claude", "opencode"],
         &mut sessions,
     );
@@ -1775,7 +1776,7 @@ fn scan_claude_rules(project_cwds: &HashSet<String>) -> Vec<AppSession> {
         push_doc_files_recursive(
             &global_dir,
             &global_dir,
-            "~/.claude/rules",
+            &global_dir.to_string_lossy(),
             "claude",
             "Memory",
             &[],
@@ -1962,7 +1963,7 @@ fn scan_claude_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
         push_doc_files_recursive(
             &global_dir,
             &global_dir,
-            "~/.claude/skills",
+            &global_dir.to_string_lossy(),
             tag,
             "Skill",
             &[],
@@ -2356,9 +2357,9 @@ pub struct ClaudeMigrationResult {
 /// `<home>/.claude`. Single source for the scanners in this file and
 /// for quota.rs's credential lookup.
 pub(crate) fn claude_config_root(home: &Path) -> PathBuf {
-    match std::env::var("CLAUDE_CONFIG_DIR") {
-        Ok(dir) => PathBuf::from(dir),
-        Err(_) => home.join(".claude"),
+    match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(v) if !v.is_empty() => PathBuf::from(v),
+        _ => home.join(".claude"),
     }
 }
 
@@ -3705,12 +3706,12 @@ fn derive_memory_project_label(path: &Path) -> String {
 
     // Claude global skills: <claude_root>/skills/<name>/...
     if path.starts_with(claude_root.join("skills")) {
-        return "~/.claude/skills".to_string();
+        return format!("{}/skills", claude_root.display());
     }
 
     // Claude global rules: <claude_root>/rules/**
     if path.starts_with(claude_root.join("rules")) {
-        return "~/.claude/rules".to_string();
+        return format!("{}/rules", claude_root.display());
     }
 
     // Claude structured memory: <claude_root>/projects/<slug>/memory/.../<file>.md
@@ -3761,7 +3762,7 @@ fn derive_memory_project_label(path: &Path) -> String {
 
     // Global instruction files
     if path == claude_root.join("CLAUDE.md") || path == claude_root.join("CLAUDE.local.md") {
-        return "~/.claude".to_string();
+        return format!("{}", claude_root.display());
     }
     let codex_dir = crate::providers::codex_root(&home);
     if path == codex_dir.join("AGENTS.md") || path == codex_dir.join("instructions.md") {
