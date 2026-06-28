@@ -60,6 +60,8 @@ struct CurrentAccount {
     name: Option<String>,
     email: Option<String>,
     plan: Option<String>,
+    /// RFC 3339 timestamp from `last_refresh` in auth.json.
+    last_refresh: Option<String>,
     /// Whether the live login is already captured in `accounts` — when
     /// false the UI can warn that switching away would lose it.
     saved: bool,
@@ -74,6 +76,8 @@ struct SavedAccountView {
     email: Option<String>,
     plan: Option<String>,
     saved_at: String,
+    /// RFC 3339 timestamp from `last_refresh` inside the saved payload.
+    last_refresh: Option<String>,
     /// True when this snapshot matches the live login.
     active: bool,
 }
@@ -363,6 +367,8 @@ struct CodexLive {
     name: Option<String>,
     email: Option<String>,
     plan: Option<String>,
+    /// RFC 3339 timestamp from the `last_refresh` field in auth.json.
+    last_refresh: Option<String>,
     /// Full auth.json content, stored verbatim as the snapshot payload.
     raw: String,
 }
@@ -398,11 +404,14 @@ fn read_codex_live() -> Result<Option<CodexLive>, Box<dyn Error>> {
         .or_else(|| email.clone())
         .unwrap_or_else(|| format!("hash:{}", stable_hash(&raw)));
 
+    let last_refresh = doc.get("last_refresh").and_then(|v| v.as_str()).map(String::from);
+
     Ok(Some(CodexLive {
         fingerprint,
         name,
         email,
         plan,
+        last_refresh,
         raw,
     }))
 }
@@ -423,6 +432,9 @@ fn list_codex_accounts() -> Result<AccountsState, Box<dyn Error>> {
         if active {
             current_saved = true;
         }
+        let last_refresh = str_field(e, "payload")
+            .and_then(|p| serde_json::from_str::<JsonValue>(p).ok())
+            .and_then(|doc| doc.get("last_refresh").and_then(|v| v.as_str()).map(String::from));
         accounts.push(SavedAccountView {
             id: str_field(e, "id").unwrap_or_default().to_string(),
             label: str_field(e, "label").unwrap_or_default().to_string(),
@@ -430,6 +442,7 @@ fn list_codex_accounts() -> Result<AccountsState, Box<dyn Error>> {
             email: str_field(e, "email").map(String::from),
             plan: str_field(e, "plan").map(String::from),
             saved_at: str_field(e, "savedAt").unwrap_or_default().to_string(),
+            last_refresh,
             active,
         });
     }
@@ -438,6 +451,7 @@ fn list_codex_accounts() -> Result<AccountsState, Box<dyn Error>> {
         name: l.name,
         email: l.email,
         plan: l.plan,
+        last_refresh: l.last_refresh,
         saved: current_saved,
     });
 

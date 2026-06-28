@@ -290,6 +290,43 @@ export type SubscriptionQuota = {
   queriedAt?: number;
 };
 
+/** One saved official-login snapshot (see backend `accounts.rs`). The
+ * token payload never leaves the backend; this is the display view. */
+export type SavedAccount = {
+  id: string;
+  label: string;
+  /** Display name from the credential's id_token, if present. */
+  name?: string | null;
+  email?: string | null;
+  plan?: string | null;
+  savedAt: string;
+  /** RFC 3339 — `last_refresh` from the saved auth.json payload. */
+  lastRefresh?: string | null;
+  /** True when this snapshot matches the live login. */
+  active: boolean;
+};
+
+/** The CLI's current official login, parsed from its live credential. */
+export type CurrentAccount = {
+  name?: string | null;
+  email?: string | null;
+  plan?: string | null;
+  /** RFC 3339 — `last_refresh` from the live auth.json. */
+  lastRefresh?: string | null;
+  /** Whether the live login is already captured in `accounts`. */
+  saved: boolean;
+};
+
+/** Result of `list_accounts` for one CLI. */
+export type AccountsState = {
+  current?: CurrentAccount | null;
+  accounts: SavedAccount[];
+  /** Non-null (the store mode, e.g. `"keyring"`) when the CLI isn't using
+   * the file store this feature writes — a file switch may not take
+   * effect. Null = default file store. */
+  storageWarning?: string | null;
+};
+
 export type ActiveKind = "official" | "custom" | "unmanaged";
 
 export type LiveSnapshot = {

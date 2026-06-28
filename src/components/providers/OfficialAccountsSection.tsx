@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/tooltip";
 import { QUOTA_CHANGED_EVENT } from "@/constants";
 import { useT } from "@/i18n";
+import { formatTimeAgo } from "@/lib/format";
 import type { AccountsState, CliApp, CurrentAccount, SavedAccount } from "@/types";
 
 /** Modal collecting / editing an account label. */
@@ -252,6 +253,7 @@ export function OfficialAccountsSection({
     label: string;
     email?: string | null;
     plan?: string | null;
+    lastRefresh?: string | null;
     active: boolean;
     account: SavedAccount | null;
   };
@@ -262,6 +264,7 @@ export function OfficialAccountsSection({
       label: current.name ?? current.email ?? "Codex",
       email: current.email,
       plan: current.plan,
+      lastRefresh: current.lastRefresh,
       active: true,
       account: null
     });
@@ -272,6 +275,7 @@ export function OfficialAccountsSection({
       label: acc.label,
       email: acc.email,
       plan: acc.plan,
+      lastRefresh: acc.lastRefresh,
       active: acc.active,
       account: acc
     });
@@ -330,6 +334,11 @@ export function OfficialAccountsSection({
               {row.email && (
                 <span className="truncate text-[11px] text-muted-foreground">
                   {row.email}
+                </span>
+              )}
+              {row.lastRefresh && (
+                <span className="shrink-0 text-[11px] text-muted-foreground/60">
+                  {formatTimeAgo(new Date(row.lastRefresh).getTime(), t)}
                 </span>
               )}
             </div>
