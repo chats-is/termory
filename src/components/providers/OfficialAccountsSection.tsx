@@ -297,7 +297,7 @@ export function OfficialAccountsSection({
         return (
           <div
             key={row.key}
-            className="flex items-center gap-2 px-3 py-2 hover:bg-accent/40 last:rounded-b-xl"
+            className="flex items-center gap-2 border-t border-border/50 px-3 py-2 hover:bg-accent/40 first:border-t-0 last:rounded-b-xl"
           >
             <button
               type="button"
@@ -384,7 +384,7 @@ export function OfficialAccountsSection({
       })}
 
       {app === "codex" && (
-        <div className="flex items-center px-3 py-2 last:rounded-b-xl">
+        <div className={`flex items-center px-3 py-2 last:rounded-b-xl${rows.length > 0 ? " border-t border-border/50" : ""}`}>
           <Button
             type="button"
             variant="outline"
