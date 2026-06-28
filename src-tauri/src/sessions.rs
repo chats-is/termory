@@ -3725,12 +3725,12 @@ fn derive_memory_project_label(path: &Path) -> String {
     // Codex global skills: $CODEX_HOME/skills/**
     let codex_home = crate::providers::codex_root(&home);
     if path.starts_with(codex_home.join("skills")) {
-        return "~/.codex/skills".to_string();
+        return format!("{}/skills", codex_home.display());
     }
 
     // Codex global memory: $CODEX_HOME/memories/**
     if path.starts_with(codex_home.join("memories")) {
-        return "~/.codex/memories".to_string();
+        return format!("{}/memories", codex_home.display());
     }
 
     // Gemini global skills: ~/.gemini/skills/**
@@ -3748,8 +3748,9 @@ fn derive_memory_project_label(path: &Path) -> String {
     }
 
     // OpenCode global skills: $XDG_CONFIG_HOME/opencode/skills/**
-    if path.starts_with(opencode_config_dir(&home).join("skills")) {
-        return "~/.config/opencode/skills".to_string();
+    let oc_config = opencode_config_dir(&home);
+    if path.starts_with(oc_config.join("skills")) {
+        return format!("{}/skills", oc_config.display());
     }
 
     // Tool-neutral global skills: ~/.agents/skills/**
@@ -3763,7 +3764,7 @@ fn derive_memory_project_label(path: &Path) -> String {
     }
     let codex_dir = crate::providers::codex_root(&home);
     if path == codex_dir.join("AGENTS.md") || path == codex_dir.join("instructions.md") {
-        return "~/.codex".to_string();
+        return format!("{}", codex_dir.display());
     }
     if path == home.join(".gemini").join("GEMINI.md") {
         return "~/.gemini".to_string();

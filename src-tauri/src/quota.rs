@@ -1757,13 +1757,10 @@ mod tests {
 
     #[test]
     fn credential_cli_for_path_matches_relocated_codex_home() {
-        use crate::testutils::HOME_LOCK;
+        use crate::testutils::{EnvVarGuard, HOME_LOCK};
         use std::path::Path;
-        // Mutates CODEX_HOME → serialize with the other env-sensitive
-        // tests and always restore it.
         let _g = HOME_LOCK.lock().unwrap();
-        let prev = std::env::var_os("CODEX_HOME");
-        std::env::set_var("CODEX_HOME", "/custom/cdx");
+        let _e = EnvVarGuard::set("CODEX_HOME", "/custom/cdx");
 
         // auth.json directly under the relocated CODEX_HOME maps to Codex
         // even though the dir isn't named ".codex".
@@ -1776,11 +1773,6 @@ mod tests {
             credential_cli_for_path(Path::new("/u/x/.local/share/opencode/auth.json")),
             None
         );
-
-        match prev {
-            Some(v) => std::env::set_var("CODEX_HOME", v),
-            None => std::env::remove_var("CODEX_HOME"),
-        }
     }
 
     /// The scaffold's four credential-status branches, exercised with

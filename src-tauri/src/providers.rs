@@ -1175,7 +1175,7 @@ pub(crate) fn codex_auth_path() -> Result<PathBuf, Box<dyn Error>> {
     Ok(codex_dir()?.join("auth.json"))
 }
 
-pub(crate) fn codex_config_path() -> Result<PathBuf, Box<dyn Error>> {
+fn codex_config_path() -> Result<PathBuf, Box<dyn Error>> {
     Ok(codex_dir()?.join("config.toml"))
 }
 
@@ -2830,25 +2830,21 @@ mod tests {
 
     #[test]
     fn codex_root_honors_codex_home_env() {
-        // Mutates a process-global env var → serialize with the other
-        // codex-path tests via HOME_LOCK and always restore it.
         let _g = HOME_LOCK.lock().unwrap();
-        let prev = std::env::var_os("CODEX_HOME");
         let home = Path::new("/tmp/fake-home");
 
-        std::env::remove_var("CODEX_HOME");
-        assert_eq!(codex_root(home), home.join(".codex"));
-
-        std::env::set_var("CODEX_HOME", "/custom/codex");
-        assert_eq!(codex_root(home), PathBuf::from("/custom/codex"));
-
+        {
+            let _e = EnvVarGuard::unset("CODEX_HOME");
+            assert_eq!(codex_root(home), home.join(".codex"));
+        }
+        {
+            let _e = EnvVarGuard::set("CODEX_HOME", "/custom/codex");
+            assert_eq!(codex_root(home), PathBuf::from("/custom/codex"));
+        }
         // Empty value is ignored (falls back to ~/.codex).
-        std::env::set_var("CODEX_HOME", "");
-        assert_eq!(codex_root(home), home.join(".codex"));
-
-        match prev {
-            Some(v) => std::env::set_var("CODEX_HOME", v),
-            None => std::env::remove_var("CODEX_HOME"),
+        {
+            let _e = EnvVarGuard::set("CODEX_HOME", "");
+            assert_eq!(codex_root(home), home.join(".codex"));
         }
     }
 
