@@ -63,7 +63,7 @@ fn home() -> Result<PathBuf, Box<dyn Error>> {
 }
 
 fn state_db_path() -> Result<PathBuf, Box<dyn Error>> {
-    Ok(home()?.join(".codex").join("state_5.sqlite"))
+    Ok(crate::providers::codex_root(&home()?).join("state_5.sqlite"))
 }
 
 /// List distinct Codex project cwds newest first. `limit == 0` means no cap

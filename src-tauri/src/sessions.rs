@@ -875,11 +875,7 @@ fn opencode_empty_projects() -> Vec<Project> {
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
-    let db = home
-        .join(".local")
-        .join("share")
-        .join("opencode")
-        .join("opencode.db");
+    let db = opencode_data_dir(&home).join("opencode.db");
     if !db.exists() {
         return Vec::new();
     }
@@ -1180,7 +1176,7 @@ fn scan_codex() -> Result<Vec<AppSession>, Box<dyn Error>> {
     let Some(home) = dirs::home_dir() else {
         return Ok(Vec::new());
     };
-    let state_db = home.join(".codex").join("state_5.sqlite");
+    let state_db = crate::providers::codex_root(&home).join("state_5.sqlite");
     if !state_db.exists() {
         return Ok(Vec::new());
     }
@@ -1542,7 +1538,7 @@ fn scan_opencode() -> Result<Vec<AppSession>, Box<dyn Error>> {
     let Some(home) = dirs::home_dir() else {
         return Ok(Vec::new());
     };
-    let root = home.join(".local").join("share").join("opencode");
+    let root = opencode_data_dir(&home);
     if !root.exists() {
         return Ok(Vec::new());
     }
@@ -1635,7 +1631,7 @@ fn scan_global_instructions() -> Vec<AppSession> {
         &mut sessions,
     );
 
-    let codex_dir = home.join(".codex");
+    let codex_dir = crate::providers::codex_root(&home);
     push_tagged_instruction_file(
         &codex_dir.join("AGENTS.md"),
         "~/.codex",
@@ -1649,7 +1645,7 @@ fn scan_global_instructions() -> Vec<AppSession> {
         &mut sessions,
     );
 
-    let opencode_config = home.join(".config").join("opencode");
+    let opencode_config = opencode_config_dir(&home);
     push_tagged_instruction_file(
         &opencode_config.join("AGENTS.md"),
         "~/.config/opencode",
@@ -1848,7 +1844,7 @@ fn scan_codex_memory() -> Vec<AppSession> {
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
-    let root = home.join(".codex").join("memories");
+    let root = crate::providers::codex_root(&home).join("memories");
     if !root.is_dir() {
         return Vec::new();
     }
@@ -2001,7 +1997,7 @@ fn scan_codex_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
     // codex-rs/core/src/session/tests.rs (`codex_home.join("skills")`) and
     // codex-rs/core/tests/suite/compact_remote_parity.rs
     // (`<CODEX_HOME>/skills/.system/imagegen/SKILL.md`).
-    let global_dir = home.join(".codex").join("skills");
+    let global_dir = crate::providers::codex_root(&home).join("skills");
     if global_dir.is_dir() {
         push_doc_files_recursive(
             &global_dir,
@@ -2106,7 +2102,7 @@ fn scan_opencode_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
         return sessions;
     };
 
-    let global_dir = home.join(".config").join("opencode").join("skills");
+    let global_dir = opencode_config_dir(&home).join("skills");
     if global_dir.is_dir() {
         push_doc_files_recursive(
             &global_dir,
@@ -2363,6 +2359,33 @@ pub(crate) fn claude_config_root(home: &Path) -> PathBuf {
         Ok(dir) => PathBuf::from(dir),
         Err(_) => home.join(".claude"),
     }
+}
+
+/// XDG base dir: the `env` variable when set & non-empty (an absolute
+/// override per the XDG spec), else `default`. Shared by the OpenCode
+/// resolvers below.
+fn xdg_base(env: &str, default: PathBuf) -> PathBuf {
+    match std::env::var_os(env) {
+        Some(v) if !v.is_empty() => PathBuf::from(v),
+        _ => default,
+    }
+}
+
+/// OpenCode's per-user **config** dir (`opencode.json` lives here) —
+/// `$XDG_CONFIG_HOME/opencode` when set, else `<home>/.config/opencode`.
+/// OpenCode resolves it via xdg-basedir's `xdgConfig`
+/// (`.audit-sources/opencode/packages/core/src/global.ts:12`), which
+/// honors the env var, so Termory must too. Single source for the
+/// scanners here, the watcher, and provider switching.
+pub(crate) fn opencode_config_dir(home: &Path) -> PathBuf {
+    xdg_base("XDG_CONFIG_HOME", home.join(".config")).join("opencode")
+}
+
+/// OpenCode's per-user **data** dir (`opencode.db` + storage live here) —
+/// `$XDG_DATA_HOME/opencode` when set, else `<home>/.local/share/opencode`
+/// (xdg-basedir's `xdgData`, same source).
+pub(crate) fn opencode_data_dir(home: &Path) -> PathBuf {
+    xdg_base("XDG_DATA_HOME", home.join(".local").join("share")).join("opencode")
 }
 
 /// Live work status of a currently-running Claude session — `Busy`
@@ -3042,7 +3065,7 @@ fn delete_gemini_project_in(tmp: &Path, project: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 fn codex_state_db_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".codex").join("state_5.sqlite"))
+    dirs::home_dir().map(|h| crate::providers::codex_root(&h).join("state_5.sqlite"))
 }
 
 fn open_codex_rw(db: &Path) -> Result<Connection, String> {
@@ -3117,7 +3140,7 @@ pub fn delete_codex_project(project: &str) -> Result<(), String> {
 /// files; Termory never reads memories_1.sqlite, so there's nothing to sync.
 pub fn delete_codex_memory(rel: &str) -> Result<(), String> {
     let root = dirs::home_dir()
-        .map(|h| h.join(".codex").join("memories"))
+        .map(|h| crate::providers::codex_root(&h).join("memories"))
         .ok_or("cannot locate ~/.codex/memories")?;
     delete_codex_memory_in(&root, rel)
 }
@@ -3331,12 +3354,7 @@ pub fn migrate_codex_project(
 // ---------------------------------------------------------------------------
 
 fn opencode_db_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| {
-        h.join(".local")
-            .join("share")
-            .join("opencode")
-            .join("opencode.db")
-    })
+    dirs::home_dir().map(|h| opencode_data_dir(&h).join("opencode.db"))
 }
 
 fn open_opencode_rw(db: &Path) -> Result<Connection, String> {
@@ -3704,13 +3722,14 @@ fn derive_memory_project_label(path: &Path) -> String {
         }
     }
 
-    // Codex global skills: ~/.codex/skills/**
-    if path.starts_with(home.join(".codex").join("skills")) {
+    // Codex global skills: $CODEX_HOME/skills/**
+    let codex_home = crate::providers::codex_root(&home);
+    if path.starts_with(codex_home.join("skills")) {
         return "~/.codex/skills".to_string();
     }
 
-    // Codex global memory: ~/.codex/memories/**
-    if path.starts_with(home.join(".codex").join("memories")) {
+    // Codex global memory: $CODEX_HOME/memories/**
+    if path.starts_with(codex_home.join("memories")) {
         return "~/.codex/memories".to_string();
     }
 
@@ -3728,8 +3747,8 @@ fn derive_memory_project_label(path: &Path) -> String {
         }
     }
 
-    // OpenCode global skills: ~/.config/opencode/skills/**
-    if path.starts_with(home.join(".config").join("opencode").join("skills")) {
+    // OpenCode global skills: $XDG_CONFIG_HOME/opencode/skills/**
+    if path.starts_with(opencode_config_dir(&home).join("skills")) {
         return "~/.config/opencode/skills".to_string();
     }
 
@@ -3742,14 +3761,14 @@ fn derive_memory_project_label(path: &Path) -> String {
     if path == claude_root.join("CLAUDE.md") || path == claude_root.join("CLAUDE.local.md") {
         return "~/.claude".to_string();
     }
-    let codex_dir = home.join(".codex");
+    let codex_dir = crate::providers::codex_root(&home);
     if path == codex_dir.join("AGENTS.md") || path == codex_dir.join("instructions.md") {
         return "~/.codex".to_string();
     }
     if path == home.join(".gemini").join("GEMINI.md") {
         return "~/.gemini".to_string();
     }
-    let opencode_config = home.join(".config").join("opencode");
+    let opencode_config = opencode_config_dir(&home);
     if path == opencode_config.join("AGENTS.md") || path == opencode_config.join("AGENTS.local.md")
     {
         return "~/.config/opencode".to_string();
@@ -5623,7 +5642,7 @@ fn codex_thread_from_state(id: &str) -> Result<AppSession, Box<dyn Error>> {
     let Some(home) = dirs::home_dir() else {
         return Err("home directory not found".into());
     };
-    let path = home.join(".codex").join("state_5.sqlite");
+    let path = crate::providers::codex_root(&home).join("state_5.sqlite");
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     // Archived threads load too (the badge stays accurate in the detail
     // header) — only the `archived = 0` list filter was for the picker.
@@ -10701,8 +10720,45 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, B
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutils::{EnvVarGuard, HOME_LOCK};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn opencode_dirs_honor_xdg_env() {
+        // Reads/sets process-global XDG vars → serialize against the
+        // providers opencode tests (which resolve the same dirs) and
+        // restore on drop.
+        let _g = HOME_LOCK.lock().unwrap();
+        let home = Path::new("/tmp/fake-home");
+
+        {
+            let _c = EnvVarGuard::unset("XDG_CONFIG_HOME");
+            let _d = EnvVarGuard::unset("XDG_DATA_HOME");
+            assert_eq!(
+                opencode_config_dir(home),
+                home.join(".config").join("opencode")
+            );
+            assert_eq!(
+                opencode_data_dir(home),
+                home.join(".local").join("share").join("opencode")
+            );
+        }
+        {
+            let _c = EnvVarGuard::set("XDG_CONFIG_HOME", "/xc");
+            let _d = EnvVarGuard::set("XDG_DATA_HOME", "/xd");
+            assert_eq!(opencode_config_dir(home), PathBuf::from("/xc/opencode"));
+            assert_eq!(opencode_data_dir(home), PathBuf::from("/xd/opencode"));
+        }
+        // Empty value is ignored (falls back to the home default).
+        {
+            let _c = EnvVarGuard::set("XDG_CONFIG_HOME", "");
+            assert_eq!(
+                opencode_config_dir(home),
+                home.join(".config").join("opencode")
+            );
+        }
+    }
 
     #[test]
     fn is_safe_sql_identifier_accepts_normal_names_and_rejects_injection() {

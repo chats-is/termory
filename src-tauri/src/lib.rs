@@ -16,6 +16,34 @@ mod watcher;
 pub(crate) mod testutils {
     use std::sync::Mutex;
     pub static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Panic-safe override of a process env var, restored on drop. Hold
+    /// `HOME_LOCK` while using it so concurrent tests never observe the
+    /// temporary value (the var resolvers read process-global state).
+    pub struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+    impl EnvVarGuard {
+        pub fn set(key: &'static str, val: impl AsRef<std::ffi::OsStr>) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::set_var(key, val);
+            EnvVarGuard { key, prev }
+        }
+        pub fn unset(key: &'static str) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::remove_var(key);
+            EnvVarGuard { key, prev }
+        }
+    }
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 }
 
 use providers::{

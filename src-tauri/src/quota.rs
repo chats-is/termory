@@ -45,11 +45,19 @@ pub fn credential_cli_for_path(path: &std::path::Path) -> Option<CliApp> {
             .and_then(|n| n.to_str())
             == Some(dir)
     };
+    // A relocated `CODEX_HOME` puts auth.json outside any `.codex`-named
+    // dir, so the basename check above misses it — match the resolved
+    // override dir directly. (Default / unset → CODEX_HOME absent, and
+    // `parent_is(".codex")` already covers `~/.codex/auth.json`.)
+    let parent_is_codex_home = || match std::env::var_os("CODEX_HOME") {
+        Some(v) if !v.is_empty() => path.parent() == Some(std::path::Path::new(&v)),
+        _ => false,
+    };
     match path.file_name().and_then(|n| n.to_str())? {
         ".credentials.json" => Some(CliApp::Claude),
         // The parent check excludes OpenCode's unrelated
         // ~/.local/share/opencode/auth.json.
-        "auth.json" if parent_is(".codex") => Some(CliApp::Codex),
+        "auth.json" if parent_is(".codex") || parent_is_codex_home() => Some(CliApp::Codex),
         "oauth_creds.json" if parent_is(".gemini") => Some(CliApp::Gemini),
         _ => None,
     }
@@ -1745,6 +1753,34 @@ mod tests {
             credential_cli_for_path(Path::new("/u/x/.claude/projects/p/s.jsonl")),
             None
         );
+    }
+
+    #[test]
+    fn credential_cli_for_path_matches_relocated_codex_home() {
+        use crate::testutils::HOME_LOCK;
+        use std::path::Path;
+        // Mutates CODEX_HOME → serialize with the other env-sensitive
+        // tests and always restore it.
+        let _g = HOME_LOCK.lock().unwrap();
+        let prev = std::env::var_os("CODEX_HOME");
+        std::env::set_var("CODEX_HOME", "/custom/cdx");
+
+        // auth.json directly under the relocated CODEX_HOME maps to Codex
+        // even though the dir isn't named ".codex".
+        assert_eq!(
+            credential_cli_for_path(Path::new("/custom/cdx/auth.json")),
+            Some(CliApp::Codex)
+        );
+        // An unrelated auth.json still doesn't match.
+        assert_eq!(
+            credential_cli_for_path(Path::new("/u/x/.local/share/opencode/auth.json")),
+            None
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("CODEX_HOME", v),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
     }
 
     /// The scaffold's four credential-status branches, exercised with

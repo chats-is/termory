@@ -980,7 +980,11 @@ pub fn read_active_state(
 // intact automatically.
 
 fn claude_settings_path() -> Result<PathBuf, Box<dyn Error>> {
-    Ok(home()?.join(".claude").join("settings.json"))
+    // User settings live under Claude's config home — `$CLAUDE_CONFIG_DIR`
+    // when set, else `~/.claude` (official: `getSettingsRootPathForSource`
+    // → `getClaudeConfigHomeDir`, settings.ts:285). Writing the hardcoded
+    // `~/.claude` would silently miss for a relocated config dir.
+    Ok(crate::sessions::claude_config_root(&home()?).join("settings.json"))
 }
 
 fn activate_claude(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>> {
@@ -1148,15 +1152,30 @@ fn read_active_claude(providers: &[Provider]) -> Result<ActiveState, Box<dyn Err
 //          non-reserved id we wrote), read its base_url + model and
 //          match. Otherwise Official.
 
+/// Resolve Codex's home directory the way the CLI itself does
+/// (`codex-rs/utils/home-dir/src/lib.rs:14-59`): the `CODEX_HOME`
+/// environment variable when set and non-empty (an absolute override),
+/// otherwise `~/.codex`. Used for the credential / config files Termory
+/// reads & writes (auth.json / config.toml) so a user who relocated
+/// `CODEX_HOME` still gets provider-switching, quota, and account
+/// management against the right files. Takes `home` so the env-free
+/// tests (HOME override) stay deterministic.
+pub(crate) fn codex_root(home: &Path) -> PathBuf {
+    match std::env::var_os("CODEX_HOME") {
+        Some(v) if !v.is_empty() => PathBuf::from(v),
+        _ => home.join(".codex"),
+    }
+}
+
 fn codex_dir() -> Result<PathBuf, Box<dyn Error>> {
-    Ok(home()?.join(".codex"))
+    Ok(codex_root(&home()?))
 }
 
 pub(crate) fn codex_auth_path() -> Result<PathBuf, Box<dyn Error>> {
     Ok(codex_dir()?.join("auth.json"))
 }
 
-fn codex_config_path() -> Result<PathBuf, Box<dyn Error>> {
+pub(crate) fn codex_config_path() -> Result<PathBuf, Box<dyn Error>> {
     Ok(codex_dir()?.join("config.toml"))
 }
 
@@ -1599,14 +1618,13 @@ fn read_active_gemini(providers: &[Provider]) -> Result<ActiveState, Box<dyn Err
 // top-level model if it pointed at this slot.
 
 fn opencode_config_path() -> Result<PathBuf, Box<dyn Error>> {
-    // xdg-basedir uses ~/.config on every platform (verified at
+    // xdg-basedir resolves the config dir as `$XDG_CONFIG_HOME` (when set)
+    // else `~/.config` on every platform (verified at
     // .audit-sources/opencode/packages/core/src/global.ts:12 +
-    // xdg-basedir source). Don't use dirs::config_dir() — it returns
-    // ~/Library/Application Support on macOS, which is wrong.
-    Ok(home()?
-        .join(".config")
-        .join("opencode")
-        .join("opencode.json"))
+    // xdg-basedir source). `opencode_config_dir` honors the env override;
+    // don't use dirs::config_dir() — it returns ~/Library/Application
+    // Support on macOS, which is wrong.
+    Ok(crate::sessions::opencode_config_dir(&home()?).join("opencode.json"))
 }
 
 /// Stable, per-Termory-provider id used as the key in OpenCode's
@@ -2808,7 +2826,54 @@ pub(crate) fn string_match(provider_value: &str, live_value: Option<&str>) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutils::HOME_LOCK;
+    use crate::testutils::{EnvVarGuard, HOME_LOCK};
+
+    #[test]
+    fn codex_root_honors_codex_home_env() {
+        // Mutates a process-global env var → serialize with the other
+        // codex-path tests via HOME_LOCK and always restore it.
+        let _g = HOME_LOCK.lock().unwrap();
+        let prev = std::env::var_os("CODEX_HOME");
+        let home = Path::new("/tmp/fake-home");
+
+        std::env::remove_var("CODEX_HOME");
+        assert_eq!(codex_root(home), home.join(".codex"));
+
+        std::env::set_var("CODEX_HOME", "/custom/codex");
+        assert_eq!(codex_root(home), PathBuf::from("/custom/codex"));
+
+        // Empty value is ignored (falls back to ~/.codex).
+        std::env::set_var("CODEX_HOME", "");
+        assert_eq!(codex_root(home), home.join(".codex"));
+
+        match prev {
+            Some(v) => std::env::set_var("CODEX_HOME", v),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+    }
+
+    #[test]
+    fn claude_activate_honors_claude_config_dir() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let tmp = tempdir("claude-cfg-dir");
+        let _home = HomeOverride::new(&tmp);
+        let cfg = tmp.join("relocated-claude");
+        fs::create_dir_all(&cfg).unwrap();
+        let _cfg_env = EnvVarGuard::set("CLAUDE_CONFIG_DIR", &cfg);
+
+        let p = make_provider(CliApp::Claude, "X", "https://api.x.io", "sk-secret");
+        activate(&p, &[p.clone()]).unwrap();
+
+        // settings.json must land under CLAUDE_CONFIG_DIR, never ~/.claude.
+        assert!(
+            cfg.join("settings.json").exists(),
+            "settings.json must be written under CLAUDE_CONFIG_DIR"
+        );
+        assert!(!tmp.join(".claude/settings.json").exists());
+        // Reverse-derivation reads the same relocated file.
+        let state = read_active_state(CliApp::Claude, &[p.clone()]).unwrap();
+        assert_eq!(state.kind, ActiveKind::Custom);
+    }
 
     fn binding(app: CliApp, npm: Option<&str>) -> GatewayBinding {
         GatewayBinding {

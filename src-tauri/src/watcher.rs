@@ -359,11 +359,11 @@ fn watch_targets() -> Vec<PathBuf> {
         .unwrap_or_else(|| home.join(".claude"));
 
     vec![
-        home.join(".codex"),
+        crate::providers::codex_root(&home),
         claude_config,
         home.join(".gemini"),
-        home.join(".config").join("opencode"),
-        home.join(".local").join("share").join("opencode"),
+        crate::sessions::opencode_config_dir(&home),
+        crate::sessions::opencode_data_dir(&home),
         home.join(".agents"),
     ]
 }

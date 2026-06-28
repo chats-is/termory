@@ -228,3 +228,4 @@ describe("ProviderOfficialCard — quota section", () => {
     expect(screen.getByLabelText("Refresh usage")).toBeDisabled();
   });
 });
+
