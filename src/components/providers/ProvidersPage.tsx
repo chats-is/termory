@@ -32,6 +32,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { useT } from "@/i18n";
 import { ProviderCard } from "./ProviderCard";
 import { ProviderOfficialCard } from "./ProviderOfficialCard";
+import { OfficialAccountsSection } from "./OfficialAccountsSection";
 import {
   CodexFollowDialog,
   type CodexFollowTarget,
@@ -126,6 +127,8 @@ const QUOTA_SUPPORTED: ReadonlySet<CliApp> = new Set([
   "codex",
   "gemini"
 ]);
+// CLIs whose official login can be saved / switched (backend accounts.rs).
+const ACCOUNTS_SUPPORTED: ReadonlySet<CliApp> = new Set<CliApp>(["codex"]);
 // Quota results survive route remounts (like cachedVersions). An entry
 // older than QUOTA_STALE_MS is silently re-fetched on the next entry
 // to the tab. Manual Refresh bypasses the stale window but is still
@@ -1050,22 +1053,37 @@ export function ProvidersPage({
               </div>
             )}
             {installed[app] && (
-              <ProviderOfficialCard
-                app={app}
-                isInUse={activeState?.kind === "official"}
-                settingDefault={settingDefault === "__official__"}
-                version={versions[app]}
-                versionLoading={versionsLoading}
-                quota={QUOTA_SUPPORTED.has(app) ? quotas[app] ?? null : undefined}
-                quotaLoading={quotaLoading === app}
-                quotaCooldown={quotaInCooldown}
-                onRefreshQuota={
-                  QUOTA_SUPPORTED.has(app)
-                    ? () => void refreshQuota(app, true)
-                    : undefined
-                }
-                onSetDefault={() => void setOfficialAsDefault()}
-              />
+              <div className="flex flex-col">
+                <div className="relative z-10 rounded-xl bg-card">
+                  <ProviderOfficialCard
+                    app={app}
+                    isInUse={activeState?.kind === "official"}
+                    settingDefault={settingDefault === "__official__"}
+                    version={versions[app]}
+                    versionLoading={versionsLoading}
+                    quota={
+                      QUOTA_SUPPORTED.has(app) ? quotas[app] ?? null : undefined
+                    }
+                    quotaLoading={quotaLoading === app}
+                    quotaCooldown={quotaInCooldown}
+                    onRefreshQuota={
+                      QUOTA_SUPPORTED.has(app)
+                        ? () => void refreshQuota(app, true)
+                        : undefined
+                    }
+                    onSetDefault={() => void setOfficialAsDefault()}
+                  />
+                </div>
+                {ACCOUNTS_SUPPORTED.has(app) && (
+                  <OfficialAccountsSection
+                    app={app}
+                    onSwitched={() => {
+                      void refreshActive();
+                      if (QUOTA_SUPPORTED.has(app)) void refreshQuota(app, true);
+                    }}
+                  />
+                )}
+              </div>
             )}
 
             {customProviders.map((p) => {

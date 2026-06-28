@@ -3,19 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { Circle, CircleCheck, Loader2, Pencil, Trash2, UserPlus } from "lucide-react";
+import { Circle, CircleCheck, Loader2, Trash2, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from "@/components/ui/dialog";
 import {
   Tooltip,
   TooltipContent,
@@ -23,87 +14,12 @@ import {
 } from "@/components/ui/tooltip";
 import { QUOTA_CHANGED_EVENT } from "@/constants";
 import { useT } from "@/i18n";
-import { formatTimeAgo } from "@/lib/format";
 import type { AccountsState, CliApp, CurrentAccount, SavedAccount } from "@/types";
-
-/** Modal collecting / editing an account label. */
-function LabelDialog({
-  open,
-  title,
-  initial,
-  onClose,
-  onSubmit
-}: {
-  open: boolean;
-  title: string;
-  initial: string;
-  onClose: () => void;
-  onSubmit: (label: string) => Promise<void>;
-}) {
-  const t = useT();
-  const [label, setLabel] = React.useState(initial);
-  const [saving, setSaving] = React.useState(false);
-  const inputRef = React.useRef<HTMLInputElement>(null);
-
-  React.useEffect(() => {
-    if (open) {
-      setLabel(initial);
-      const id = window.setTimeout(() => {
-        inputRef.current?.focus();
-        inputRef.current?.select();
-      }, 0);
-      return () => window.clearTimeout(id);
-    }
-  }, [open, initial]);
-
-  const submit = async () => {
-    setSaving(true);
-    try {
-      await onSubmit(label.trim());
-      onClose();
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={(o) => !o && !saving && onClose()}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-        </DialogHeader>
-        <div className="space-y-1.5">
-          <Label htmlFor="account-label">{t("providers.accountName")}</Label>
-          <Input
-            ref={inputRef}
-            id="account-label"
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            placeholder={t("providers.accountNamePlaceholder")}
-            disabled={saving}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && label.trim()) void submit();
-            }}
-          />
-        </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={onClose} disabled={saving}>
-            {t("common.cancel")}
-          </Button>
-          <Button onClick={() => void submit()} disabled={saving || !label.trim()}>
-            {saving && <Loader2 className="size-4 animate-spin" />}
-            {saving ? t("providers.saving") : t("providers.save")}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
 
 /** Saved official-account list for one CLI (phase 1: Codex), rendered as
  * a self-contained section directly under the Official card. Lists the
  * saved logins as plain rows, lets the user snapshot the current login,
- * switch between them, rename, and delete. */
+ * switch between them, and delete. */
 export function OfficialAccountsSection({
   app,
   onSwitched
@@ -115,9 +31,6 @@ export function OfficialAccountsSection({
   const [state, setState] = React.useState<AccountsState | null>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
   const [loggingIn, setLoggingIn] = React.useState(false);
-  const [dialog, setDialog] = React.useState<
-    { mode: "save" } | { mode: "rename"; account: SavedAccount } | null
-  >(null);
 
   const reload = React.useCallback(async () => {
     try {
@@ -131,9 +44,6 @@ export function OfficialAccountsSection({
     void reload();
   }, [reload]);
 
-  // Auto-refresh when the user logs in / out of the CLI elsewhere: the
-  // window regaining focus, or the watcher's credential-change event
-  // (a written `auth.json` fires `termory:quota-changed` for this app).
   React.useEffect(() => {
     const cleanups: Array<() => void> = [];
     let live = true;
@@ -158,14 +68,13 @@ export function OfficialAccountsSection({
   const current: CurrentAccount | null = state?.current ?? null;
   const accounts = state?.accounts ?? [];
 
-  const saveCurrent = async (label: string) => {
+  const saveCurrent = async () => {
     try {
-      await invoke("save_account", { app, label: label || null });
+      await invoke("save_account", { app });
       toast.success(t("toast.accountSaved"));
       await reload();
     } catch (err) {
       toast.error(String(err));
-      throw err;
     }
   };
 
@@ -183,16 +92,6 @@ export function OfficialAccountsSection({
     }
   };
 
-  const rename = async (account: SavedAccount, label: string) => {
-    try {
-      await invoke("rename_account", { id: account.id, label });
-      await reload();
-    } catch (err) {
-      toast.error(String(err));
-      throw err;
-    }
-  };
-
   const switchTo = async (account: SavedAccount) => {
     if (account.active) return;
     const warn =
@@ -200,25 +99,21 @@ export function OfficialAccountsSection({
         ? `\n\n${t("providers.accountSwitchWarnUnsaved")}`
         : "";
     const ok = await ask(
-      `${t("providers.accountSwitchConfirm", { name: account.label })}${warn}`,
+      `${t("providers.accountSwitchConfirm", { name: account.name })}${warn}`,
       { title: t("providers.accountSwitchTitle"), kind: "warning" }
     );
     if (!ok) return;
     setBusy(account.id);
     try {
       await invoke("switch_account", { id: account.id });
-      // Attempt to refresh the restored tokens so the CLI doesn't get a 401.
-      const refresh = await invoke<{ refreshed: boolean; warning: string | null }>(
-        "refresh_codex_tokens"
-      );
-      if (refresh?.warning) {
-        toast.warning(t("toast.accountTokenExpired"));
-      }
-      toast.success(t("toast.accountSwitched", { name: account.label }));
+      await invoke("mark_account_relogin", { id: account.id, needed: false });
+      toast.success(t("toast.accountSwitched", { name: account.name }));
       await reload();
       onSwitched?.();
     } catch (err) {
-      toast.error(String(err));
+      await invoke("mark_account_relogin", { id: account.id, needed: true }).catch(() => {});
+      toast.warning(t("toast.accountTokenExpired"));
+      await reload();
     } finally {
       setBusy(null);
     }
@@ -226,7 +121,7 @@ export function OfficialAccountsSection({
 
   const remove = async (account: SavedAccount) => {
     const ok = await ask(
-      t("providers.accountDeleteConfirm", { name: account.label }),
+      t("providers.accountDeleteConfirm", { name: account.name }),
       { title: t("providers.accountDeleteTitle"), kind: "warning" }
     );
     if (!ok) return;
@@ -244,27 +139,22 @@ export function OfficialAccountsSection({
 
   if (!state) return null;
 
-  // The current login is ALWAYS shown (marked active), even before it's
-  // saved — an unsaved one is a synthetic row (account: null) that offers
-  // a Save action; once saved it merges into `accounts` and gains
-  // rename/delete. Saved accounts follow.
   type Row = {
     key: string;
-    label: string;
+    name: string;
     email?: string | null;
     plan?: string | null;
-    lastRefresh?: string | null;
     active: boolean;
+    needsRelogin?: boolean;
     account: SavedAccount | null;
   };
   const rows: Row[] = [];
   if (current && !current.saved) {
     rows.push({
       key: "__current__",
-      label: current.name ?? current.email ?? "Codex",
+      name: current.name ?? current.email ?? "Codex",
       email: current.email,
       plan: current.plan,
-      lastRefresh: current.lastRefresh,
       active: true,
       account: null
     });
@@ -272,11 +162,11 @@ export function OfficialAccountsSection({
   for (const acc of accounts) {
     rows.push({
       key: acc.id,
-      label: acc.label,
+      name: acc.name,
       email: acc.email,
       plan: acc.plan,
-      lastRefresh: acc.lastRefresh,
       active: acc.active,
+      needsRelogin: acc.needsRelogin,
       account: acc
     });
   }
@@ -305,26 +195,26 @@ export function OfficialAccountsSection({
           >
             <button
               type="button"
-              disabled={row.active || rowBusy}
+              disabled={row.active || row.needsRelogin || rowBusy}
               onClick={acc ? () => void switchTo(acc) : undefined}
               aria-label={
                 row.active
                   ? t("providers.accountActive")
                   : t("providers.accountSwitch")
               }
-              className="group/sw flex size-5 shrink-0 items-center justify-center text-primary"
+              className={`group/sw flex size-6 shrink-0 items-center justify-center text-primary${(row.needsRelogin || rowBusy) ? " opacity-30 cursor-not-allowed" : ""}`}
             >
               {rowBusy ? (
-                <Loader2 className="size-4 animate-spin" />
+                <Loader2 className="size-5 animate-spin" />
               ) : row.active ? (
-                <CircleCheck className="size-4" />
+                <CircleCheck className="size-5" />
               ) : (
-                <Circle className="size-4 text-muted-foreground/40 transition-colors group-hover/sw:text-primary" />
+                <Circle className="size-5 text-muted-foreground/40 transition-colors group-hover/sw:enabled:text-primary" />
               )}
             </button>
             <div className="min-w-0 flex-1 flex items-center gap-2">
               <span className="shrink-0 max-w-[45%] truncate text-sm">
-                {row.label}
+                {row.name}
               </span>
               {row.plan && (
                 <Badge className="shrink-0 uppercase text-[9px] tracking-wide px-1.5 py-0 bg-primary/15 text-primary">
@@ -336,31 +226,29 @@ export function OfficialAccountsSection({
                   {row.email}
                 </span>
               )}
-              {row.lastRefresh && (
-                <span className="shrink-0 text-[11px] text-muted-foreground/60">
-                  {formatTimeAgo(new Date(row.lastRefresh).getTime(), t)}
-                </span>
+              {row.needsRelogin && (
+                <Badge className="shrink-0 text-[10px] px-1.5 py-0 bg-destructive/15 text-destructive border-0">
+                  {t("providers.accountNeedsRelogin")}
+                </Badge>
               )}
             </div>
             {acc ? (
               <>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      disabled={rowBusy}
-                      onClick={() =>
-                        setDialog({ mode: "rename", account: acc })
-                      }
-                      aria-label={t("providers.accountRename")}
-                    >
-                      <Pencil className="size-4" />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>{t("providers.accountRename")}</TooltipContent>
-                </Tooltip>
+                {row.needsRelogin && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={loggingIn || rowBusy}
+                    onClick={() => void loginAndSave()}
+                    className="shrink-0 gap-1.5 text-destructive border-destructive/40 hover:bg-destructive/10"
+                  >
+                    {loggingIn ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : null}
+                    {t("providers.accountRelogin")}
+                  </Button>
+                )}
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -383,7 +271,7 @@ export function OfficialAccountsSection({
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => setDialog({ mode: "save" })}
+                onClick={() => void saveCurrent()}
               >
                 {t("providers.accountSaveCurrent")}
               </Button>
@@ -416,26 +304,6 @@ export function OfficialAccountsSection({
           </Button>
         </div>
       )}
-
-      <LabelDialog
-        open={dialog !== null}
-        title={
-          dialog?.mode === "rename"
-            ? t("providers.accountRename")
-            : t("providers.accountSaveCurrent")
-        }
-        initial={
-          dialog?.mode === "rename"
-            ? dialog.account.label
-            : current?.name ?? current?.email ?? ""
-        }
-        onClose={() => setDialog(null)}
-        onSubmit={(label) =>
-          dialog?.mode === "rename"
-            ? rename(dialog.account, label)
-            : saveCurrent(label)
-        }
-      />
     </div>
   );
 }

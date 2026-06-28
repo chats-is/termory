@@ -34,7 +34,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 const { askMock } = vi.hoisted(() => ({ askMock: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: askMock }));
-vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 
 function render(ui: React.ReactElement, options?: RenderOptions) {
   return rtlRender(<TooltipProvider>{ui}</TooltipProvider>, options);
@@ -45,8 +45,7 @@ function makeState(over: Partial<AccountsState> = {}): AccountsState {
     current: { name: "Jane", email: "jane@example.com", plan: "Max", saved: true },
     accounts: [
       {
-        id: "codex:a",
-        label: "Jane",
+        id: "acct-a",
         name: "Jane",
         email: "jane@example.com",
         plan: "Max",
@@ -54,8 +53,8 @@ function makeState(over: Partial<AccountsState> = {}): AccountsState {
         active: true
       },
       {
-        id: "codex:b",
-        label: "Work",
+        id: "acct-b",
+        name: "Work",
         email: "work@example.com",
         plan: "Plus",
         savedAt: "2026-06-26T00:00:00Z",
@@ -121,10 +120,79 @@ describe("OfficialAccountsSection", () => {
     await waitFor(() => expect(askMock).toHaveBeenCalled());
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("switch_account", {
-        id: "codex:b"
+        id: "acct-b"
       })
     );
     await waitFor(() => expect(onSwitched).toHaveBeenCalled());
+  });
+
+  it("marks account needs-relogin when refresh fails, shows badge and Re-login button", async () => {
+    const stateWithExpired: AccountsState = {
+      ...makeState(),
+      accounts: [
+        {
+          id: "acct-a",
+          name: "Jane",
+          email: "jane@example.com",
+          plan: "Max",
+          savedAt: "2026-06-27T00:00:00Z",
+          active: true,
+          needsRelogin: false
+        },
+        {
+          id: "acct-b",
+          name: "Work",
+          email: "work@example.com",
+          plan: "Plus",
+          savedAt: "2026-06-26T00:00:00Z",
+          active: false,
+          needsRelogin: true
+        }
+      ]
+    };
+    mockList(stateWithExpired);
+    render(<OfficialAccountsSection app="codex" />);
+    await screen.findByText("Work");
+    // Badge shown for the expired account
+    expect(screen.getByText("Needs re-login")).toBeInTheDocument();
+    // Re-login button shown for that row
+    expect(screen.getByRole("button", { name: /re-login/i })).toBeInTheDocument();
+  });
+
+  it("calls mark_account_relogin with needed=true when switch_account fails", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "list_accounts") return Promise.resolve(makeState());
+      if (cmd === "switch_account") return Promise.reject(new Error("Token refresh failed (401): refresh_token_reused"));
+      return Promise.resolve(null);
+    });
+    render(<OfficialAccountsSection app="codex" />);
+    await screen.findByText("Work");
+    await userEvent.click(screen.getByRole("button", { name: "Switch" }));
+    await waitFor(() => expect(askMock).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("mark_account_relogin", {
+        id: "acct-b",
+        needed: true
+      })
+    );
+  });
+
+  it("calls mark_account_relogin with needed=false when switch_account succeeds", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "list_accounts") return Promise.resolve(makeState());
+      if (cmd === "switch_account") return Promise.resolve(null);
+      return Promise.resolve(null);
+    });
+    render(<OfficialAccountsSection app="codex" />);
+    await screen.findByText("Work");
+    await userEvent.click(screen.getByRole("button", { name: "Switch" }));
+    await waitFor(() => expect(askMock).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("mark_account_relogin", {
+        id: "acct-b",
+        needed: false
+      })
+    );
   });
 
   it("does not switch when cancelled", async () => {
@@ -148,7 +216,7 @@ describe("OfficialAccountsSection", () => {
     await waitFor(() => expect(askMock).toHaveBeenCalled());
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("delete_account", {
-        id: "codex:a"
+        id: "acct-a"
       })
     );
   });
@@ -161,20 +229,11 @@ describe("OfficialAccountsSection", () => {
       })
     );
     render(<OfficialAccountsSection app="codex" />);
-    // The live login appears without being saved first, marked active
-    // (no Switch button), and offers a Save action.
     expect(await screen.findByText("Jane")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Switch" })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Save current" }));
-    const input = await screen.findByLabelText("Account name");
-    await userEvent.clear(input);
-    await userEvent.type(input, "My Codex");
-    await userEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith("save_account", {
-        app: "codex",
-        label: "My Codex"
-      })
+      expect(invokeMock).toHaveBeenCalledWith("save_account", { app: "codex" })
     );
   });
 
@@ -182,7 +241,6 @@ describe("OfficialAccountsSection", () => {
     mockList(makeState()); // current.saved === true
     render(<OfficialAccountsSection app="codex" />);
     await screen.findByText("Work");
-    // The saved active account gets rename/delete instead of a Save button.
     expect(screen.queryByRole("button", { name: "Save current" })).toBeNull();
   });
 
@@ -195,7 +253,7 @@ describe("OfficialAccountsSection", () => {
   it("shows Add account button for codex and calls login_and_save_codex_account", async () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === "list_accounts") return Promise.resolve(makeState());
-      if (cmd === "login_and_save_codex_account") return Promise.resolve("codex:c");
+      if (cmd === "login_and_save_codex_account") return Promise.resolve("acct-c");
       return Promise.resolve(null);
     });
     const onSwitched = vi.fn();
@@ -224,7 +282,7 @@ describe("OfficialAccountsSection", () => {
     await userEvent.click(screen.getByRole("button", { name: /add account/i }));
     await screen.findByText(/waiting for browser login/i);
     expect(screen.getByRole("button", { name: /waiting/i })).toBeDisabled();
-    resolve("codex:c");
+    resolve("acct-c");
     await waitFor(() =>
       expect(screen.queryByText(/waiting for browser login/i)).toBeNull()
     );

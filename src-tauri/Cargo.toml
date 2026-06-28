@@ -40,6 +40,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process"] }
 base64 = "0.22"
 log = "0.4"
+os_info = "3"
 tauri-plugin-autostart = "2"
 
 # Process-liveness probe for Claude session PID files, so a crashed

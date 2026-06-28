@@ -1175,6 +1175,16 @@ pub(crate) fn codex_auth_path() -> Result<PathBuf, Box<dyn Error>> {
     Ok(codex_dir()?.join("auth.json"))
 }
 
+/// Read the `latest_version` field from `~/.codex/version.json`.
+/// Codex writes this file when checking for updates — it is always a real
+/// Codex version string. Returns `None` when the file is absent or unreadable.
+pub(crate) fn codex_latest_known_version() -> Option<String> {
+    let path = codex_dir().ok()?.join("version.json");
+    let bytes = std::fs::read(path).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    v.get("latest_version")?.as_str().map(String::from)
+}
+
 fn codex_config_path() -> Result<PathBuf, Box<dyn Error>> {
     Ok(codex_dir()?.join("config.toml"))
 }

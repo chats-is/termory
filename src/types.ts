@@ -294,16 +294,15 @@ export type SubscriptionQuota = {
  * token payload never leaves the backend; this is the display view. */
 export type SavedAccount = {
   id: string;
-  label: string;
-  /** Display name from the credential's id_token, if present. */
-  name?: string | null;
+  name: string;
   email?: string | null;
   plan?: string | null;
   savedAt: string;
-  /** RFC 3339 — `last_refresh` from the saved auth.json payload. */
-  lastRefresh?: string | null;
   /** True when this snapshot matches the live login. */
   active: boolean;
+  /** Set when the last switch+refresh for this account failed — the
+   * refresh_token has been revoked and the user must re-authenticate. */
+  needsRelogin?: boolean;
 };
 
 /** The CLI's current official login, parsed from its live credential. */
@@ -311,8 +310,6 @@ export type CurrentAccount = {
   name?: string | null;
   email?: string | null;
   plan?: string | null;
-  /** RFC 3339 — `last_refresh` from the live auth.json. */
-  lastRefresh?: string | null;
   /** Whether the live login is already captured in `accounts`. */
   saved: boolean;
 };

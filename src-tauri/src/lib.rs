@@ -668,43 +668,22 @@ async fn list_accounts(app: String) -> Result<accounts::AccountsState, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Snapshot the CLI's current official login into the store (upsert by
-/// account). `label` defaults to the account email when omitted.
+/// Snapshot the CLI's current official login into the store (upsert by account).
 #[tauri::command]
-async fn save_account(app: String, label: Option<String>) -> Result<(), String> {
+async fn save_account(app: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let cli = CliApp::parse(&app).ok_or_else(|| format!("unknown app: {app}"))?;
-        accounts::save_current_account(cli, label).map_err(|e| e.to_string())
+        accounts::save_current_account(cli).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
 /// Restore a saved snapshot into the live CLI credential.
+/// Validates/refreshes tokens in memory before writing auth.json.
 #[tauri::command]
 async fn switch_account(id: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        accounts::switch_account(id).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Rename a saved snapshot (live credential untouched).
-#[tauri::command]
-async fn rename_account(id: String, label: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        accounts::rename_account(id, label).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Try to refresh the current Codex OAuth tokens using the saved
-/// refresh_token. Always returns Ok — failures land in `warning`.
-#[tauri::command]
-async fn refresh_codex_tokens() -> accounts::TokenRefreshResult {
-    accounts::refresh_codex_tokens().await
+    accounts::switch_account(id).await.map_err(|e| e.to_string())
 }
 
 /// Delete a saved snapshot. Never touches the live credential.
@@ -723,6 +702,11 @@ async fn delete_account(id: String) -> Result<(), String> {
 #[tauri::command]
 async fn login_and_save_codex_account() -> Result<String, String> {
     accounts::login_and_save_codex_account().await
+}
+
+#[tauri::command]
+fn mark_account_relogin(id: String, needed: bool) -> Result<(), String> {
+    accounts::mark_account_relogin(&id, needed).map_err(|e| e.to_string())
 }
 
 pub fn run() {
@@ -823,10 +807,9 @@ pub fn run() {
             list_accounts,
             save_account,
             switch_account,
-            refresh_codex_tokens,
-            rename_account,
             delete_account,
             login_and_save_codex_account,
+            mark_account_relogin,
         ])
         .on_window_event(|window, event| {
             // Closing the window hides it instead of quitting, so the

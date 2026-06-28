@@ -60,8 +60,6 @@ struct CurrentAccount {
     name: Option<String>,
     email: Option<String>,
     plan: Option<String>,
-    /// RFC 3339 timestamp from `last_refresh` in auth.json.
-    last_refresh: Option<String>,
     /// Whether the live login is already captured in `accounts` — when
     /// false the UI can warn that switching away would lose it.
     saved: bool,
@@ -71,15 +69,16 @@ struct CurrentAccount {
 #[serde(rename_all = "camelCase")]
 struct SavedAccountView {
     id: String,
-    label: String,
-    name: Option<String>,
+    name: String,
     email: Option<String>,
     plan: Option<String>,
     saved_at: String,
-    /// RFC 3339 timestamp from `last_refresh` inside the saved payload.
-    last_refresh: Option<String>,
     /// True when this snapshot matches the live login.
     active: bool,
+    /// Set when the last `refresh_codex_tokens` call after switching to this
+    /// account failed — the refresh_token has been revoked and the user must
+    /// re-authenticate.
+    needs_relogin: bool,
 }
 
 // ===================================================================
@@ -99,50 +98,20 @@ pub fn list_accounts(app: CliApp) -> Result<AccountsState, Box<dyn Error>> {
     }
 }
 
-/// Snapshot the CLI's current official login into the store. Upserts by
-/// account fingerprint, so re-saving the same account refreshes its token
-/// payload (and label, when one is supplied). `label` defaults to the
-/// account email.
-pub fn save_current_account(app: CliApp, label: Option<String>) -> Result<(), Box<dyn Error>> {
+/// Snapshot the CLI's current official login into the store.
+/// Upserts by id so re-saving refreshes the token payload.
+pub fn save_current_account(app: CliApp) -> Result<(), Box<dyn Error>> {
     match app {
-        CliApp::Codex => save_codex_account(label),
+        CliApp::Codex => save_codex_account(),
         _ => Err(unsupported(app)),
     }
 }
 
-/// Result of `refresh_codex_tokens` — always `Ok`; failures land in
-/// `warning` so the frontend can show a non-blocking hint.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TokenRefreshResult {
-    pub refreshed: bool,
-    pub warning: Option<String>,
-}
-
-/// Attempt to refresh the Codex access/id tokens using the saved
-/// refresh_token. Called by the frontend immediately after `switch_account`
-/// to avoid the 401 that comes from restoring expired tokens.
-pub async fn refresh_codex_tokens() -> TokenRefreshResult {
-    let path = match codex_auth_path() {
-        Ok(p) => p,
-        Err(e) => {
-            return TokenRefreshResult {
-                refreshed: false,
-                warning: Some(format!("Cannot locate auth.json: {e}")),
-            }
-        }
-    };
-    match try_refresh_codex_tokens(&path).await {
-        Ok(()) => TokenRefreshResult { refreshed: true, warning: None },
-        Err(e) => TokenRefreshResult {
-            refreshed: false,
-            warning: Some(e.to_string()),
-        },
-    }
-}
 
 /// Restore a saved snapshot into the live CLI credential.
-pub fn switch_account(id: String) -> Result<(), Box<dyn Error>> {
+/// Refreshes tokens in memory BEFORE writing to auth.json — if refresh fails
+/// the auth.json is left untouched and the caller should mark needsRelogin.
+pub async fn switch_account(id: String) -> Result<(), Box<dyn Error>> {
     let store = read_store()?;
     let entry = store
         .iter()
@@ -150,23 +119,11 @@ pub fn switch_account(id: String) -> Result<(), Box<dyn Error>> {
         .ok_or("Account not found")?;
     let payload = str_field(entry, "payload").ok_or("Saved account has no credential payload")?;
     match str_field(entry, "app") {
-        Some("codex") => switch_codex(payload),
+        Some("codex") => switch_codex(payload).await,
         other => Err(format!("Unsupported account app: {}", other.unwrap_or("?")).into()),
     }
 }
 
-/// Rename a saved snapshot (live credential untouched).
-pub fn rename_account(id: String, label: String) -> Result<(), Box<dyn Error>> {
-    let mut store = read_store()?;
-    let slot = store
-        .iter_mut()
-        .find(|e| str_field(e, "id") == Some(id.as_str()))
-        .ok_or("Account not found")?;
-    if let JsonValue::Object(o) = slot {
-        o.insert("label".into(), JsonValue::String(label));
-    }
-    write_store(store)
-}
 
 /// Spawn `codex login`, wait for completion, then save the resulting
 /// credential into the accounts store. Returns the new account's id.
@@ -251,28 +208,21 @@ pub async fn login_and_save_codex_account() -> Result<String, String> {
     }
 
     // Save the new account (reads the fresh auth.json codex just wrote).
-    if let Err(e) = save_codex_account(None) {
+    if let Err(e) = save_codex_account() {
         restore_auth(&auth_path, original_auth.as_deref());
         return Err(format!("Login succeeded but could not save account: {e}"));
     }
 
-    // Capture the new account's id from the live fingerprint before we restore.
+    // Capture the new account's id before we restore the previous account.
     let new_id = read_codex_live()
         .ok()
         .flatten()
-        .and_then(|live| {
-            let fp = live.fingerprint;
-            read_store().ok()?.into_iter().find(|e| {
-                str_field(e, "app") == Some("codex")
-                    && str_field(e, "fingerprint") == Some(fp.as_str())
-            })
-            .and_then(|e| str_field(&e, "id").map(String::from))
-        })
+        .map(|live| live.id)
         .unwrap_or_default();
 
     // Restore the previously active account (writes its snapshot back to auth.json).
     if let Some(prev_id) = prev_active_id {
-        let _ = switch_account(prev_id);
+        let _ = switch_account(prev_id).await;
     }
 
     Ok(new_id)
@@ -286,31 +236,20 @@ fn auto_save_unsaved_live_codex_account() -> Result<Option<String>, Box<dyn Erro
         return Ok(None);
     };
     let mut store = read_store()?;
-    let fp = live.fingerprint.as_str();
+    let id = live.id.as_str();
     if store.iter().any(|e| {
-        str_field(e, "app") == Some("codex") && str_field(e, "fingerprint") == Some(fp)
+        str_field(e, "app") == Some("codex") && str_field(e, "id") == Some(id)
     }) {
-        // Already saved — just return its id.
-        return Ok(store
-            .iter()
-            .find(|e| str_field(e, "fingerprint") == Some(fp))
-            .and_then(|e| str_field(e, "id"))
-            .map(String::from));
+        return Ok(Some(id.to_string()));
     }
-    let id = format!("codex:{fp}");
-    let label = live
-        .name
-        .clone()
-        .or_else(|| live.email.clone())
-        .unwrap_or_else(|| "Codex account".to_string());
     let entry = serde_json::json!({
-        "id": id, "app": "codex", "label": label,
+        "id": id, "app": "codex",
         "name": live.name, "email": live.email, "plan": live.plan,
-        "fingerprint": fp, "payload": live.raw, "savedAt": now_rfc3339(),
+        "payload": live.raw, "savedAt": now_rfc3339(),
     });
     store.push(entry);
     write_store(store)?;
-    Ok(Some(id))
+    Ok(Some(id.to_string()))
 }
 
 /// Restore auth.json from a snapshot, or remove it if there was none.
@@ -336,15 +275,40 @@ pub fn delete_account(id: String) -> Result<(), Box<dyn Error>> {
 // Store (~/.termory/accounts.json) helpers
 // ===================================================================
 
+/// Schema version stamped into accounts.json. Bump when the on-disk shape
+/// changes in a backward-incompatible way and add a migration arm to
+/// `migrate_account_entries`. v1 is the current baseline.
+pub const ACCOUNTS_SCHEMA_VERSION: u64 = 1;
+
 fn read_store() -> Result<Vec<JsonValue>, Box<dyn Error>> {
-    match crate::config::read_accounts()? {
-        JsonValue::Array(a) => Ok(a),
-        _ => Ok(Vec::new()),
-    }
+    let raw = crate::config::read_accounts()?;
+    let map = match raw {
+        JsonValue::Object(m) => m,
+        _ => return Ok(Vec::new()),
+    };
+    let version = map
+        .get("version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(ACCOUNTS_SCHEMA_VERSION);
+    let entries = match map.get("accounts") {
+        Some(JsonValue::Array(a)) => a.clone(),
+        _ => Vec::new(),
+    };
+    Ok(migrate_account_entries(version, entries))
+}
+
+/// Upgrade account entries written by an older schema version to the
+/// current shape. Add an arm when bumping `ACCOUNTS_SCHEMA_VERSION`.
+fn migrate_account_entries(_version: u64, entries: Vec<JsonValue>) -> Vec<JsonValue> {
+    // e.g. `if _version < 2 { entries = entries.into_iter().map(...).collect() }`
+    entries
 }
 
 fn write_store(entries: Vec<JsonValue>) -> Result<(), Box<dyn Error>> {
-    crate::config::write_accounts(&JsonValue::Array(entries))
+    let mut env = serde_json::Map::new();
+    env.insert("version".into(), JsonValue::from(ACCOUNTS_SCHEMA_VERSION));
+    env.insert("accounts".into(), JsonValue::Array(entries));
+    crate::config::write_accounts(&JsonValue::Object(env))
 }
 
 fn str_field<'a>(v: &'a JsonValue, key: &str) -> Option<&'a str> {
@@ -361,14 +325,12 @@ fn unsupported(app: CliApp) -> Box<dyn Error> {
 
 /// Parsed view of the live `~/.codex/auth.json`.
 struct CodexLive {
-    /// Stable per-account identity (chatgpt_user_id → account_id → email
-    /// → content hash) used to upsert / match the active snapshot.
-    fingerprint: String,
+    /// Stable per-account identity: tokens.account_id → chatgpt_account_id
+    /// → email → stable_hash. Mirrors official local_chatgpt_auth.rs:37-40.
+    id: String,
     name: Option<String>,
     email: Option<String>,
     plan: Option<String>,
-    /// RFC 3339 timestamp from the `last_refresh` field in auth.json.
-    last_refresh: Option<String>,
     /// Full auth.json content, stored verbatim as the snapshot payload.
     raw: String,
 }
@@ -392,33 +354,34 @@ fn read_codex_live() -> Result<Option<CodexLive>, Box<dyn Error>> {
         .get("id_token")
         .and_then(|v| v.as_str())
         .and_then(|jwt| parse_codex_id_token(jwt).ok());
+    // tokens.account_id is the top-level field in auth.json (set by the
+    // login server alongside the token bundle). Mirrors the official priority
+    // in local_chatgpt_auth.rs:37-40: tokens.account_id → chatgpt_account_id.
     let account_id = tokens.get("account_id").and_then(|v| v.as_str());
 
     let name = id_info.as_ref().and_then(|i| i.name.clone());
     let email = id_info.as_ref().and_then(|i| i.email.clone());
     let plan = id_info.as_ref().and_then(|i| i.plan.clone());
-    let user_id = id_info.as_ref().and_then(|i| i.user_id.clone());
+    let chatgpt_account_id = id_info.as_ref().and_then(|i| i.chatgpt_account_id.clone());
 
-    let fingerprint = user_id
-        .or_else(|| account_id.map(String::from))
+    let id = account_id
+        .map(String::from)
+        .or(chatgpt_account_id)
         .or_else(|| email.clone())
-        .unwrap_or_else(|| format!("hash:{}", stable_hash(&raw)));
-
-    let last_refresh = doc.get("last_refresh").and_then(|v| v.as_str()).map(String::from);
+        .unwrap_or_else(|| stable_hash(&raw).to_string());
 
     Ok(Some(CodexLive {
-        fingerprint,
+        id,
         name,
         email,
         plan,
-        last_refresh,
         raw,
     }))
 }
 
 fn list_codex_accounts() -> Result<AccountsState, Box<dyn Error>> {
     let live = read_codex_live()?;
-    let current_fp = live.as_ref().map(|l| l.fingerprint.clone());
+    let current_id = live.as_ref().map(|l| l.id.as_str());
     let store = read_store()?;
 
     let mut accounts = Vec::new();
@@ -427,23 +390,22 @@ fn list_codex_accounts() -> Result<AccountsState, Box<dyn Error>> {
         if str_field(e, "app") != Some("codex") {
             continue;
         }
-        let fp = str_field(e, "fingerprint");
-        let active = current_fp.is_some() && current_fp.as_deref() == fp;
+        let active = current_id.is_some() && current_id == str_field(e, "id");
         if active {
             current_saved = true;
         }
-        let last_refresh = str_field(e, "payload")
-            .and_then(|p| serde_json::from_str::<JsonValue>(p).ok())
-            .and_then(|doc| doc.get("last_refresh").and_then(|v| v.as_str()).map(String::from));
+        let needs_relogin = e
+            .get("needsRelogin")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         accounts.push(SavedAccountView {
             id: str_field(e, "id").unwrap_or_default().to_string(),
-            label: str_field(e, "label").unwrap_or_default().to_string(),
-            name: str_field(e, "name").map(String::from),
+            name: str_field(e, "name").unwrap_or_default().to_string(),
             email: str_field(e, "email").map(String::from),
             plan: str_field(e, "plan").map(String::from),
             saved_at: str_field(e, "savedAt").unwrap_or_default().to_string(),
-            last_refresh,
             active,
+            needs_relogin,
         });
     }
 
@@ -451,7 +413,6 @@ fn list_codex_accounts() -> Result<AccountsState, Box<dyn Error>> {
         name: l.name,
         email: l.email,
         plan: l.plan,
-        last_refresh: l.last_refresh,
         saved: current_saved,
     });
 
@@ -462,36 +423,19 @@ fn list_codex_accounts() -> Result<AccountsState, Box<dyn Error>> {
     })
 }
 
-fn save_codex_account(label: Option<String>) -> Result<(), Box<dyn Error>> {
+fn save_codex_account() -> Result<(), Box<dyn Error>> {
     let live = read_codex_live()?
         .ok_or("No Codex ChatGPT login found to save (run `codex login` first)")?;
 
-    let id = format!("codex:{}", live.fingerprint);
+    let id = live.id.clone();
     let mut store = read_store()?;
-
-    // Keep the user's existing custom label when re-saving (token refresh)
-    // unless they explicitly passed a new one.
-    let existing_label = store
-        .iter()
-        .find(|e| str_field(e, "id") == Some(id.as_str()))
-        .and_then(|e| str_field(e, "label"))
-        .map(String::from);
-    let label = label
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or(existing_label)
-        .or_else(|| live.name.clone())
-        .or_else(|| live.email.clone())
-        .unwrap_or_else(|| "Codex account".to_string());
 
     let entry = json!({
         "id": id,
         "app": "codex",
-        "label": label,
         "name": live.name,
         "email": live.email,
         "plan": live.plan,
-        "fingerprint": live.fingerprint,
         "payload": live.raw,
         "savedAt": now_rfc3339(),
     });
@@ -506,24 +450,116 @@ fn save_codex_account(label: Option<String>) -> Result<(), Box<dyn Error>> {
     write_store(store)
 }
 
+/// Set or clear the `needsRelogin` flag on a saved account. Called by the
+/// frontend after `refresh_codex_tokens`: on failure the flag is set (the
+/// refresh_token has been revoked; the user must re-authenticate); on success
+/// it is cleared. `save_codex_account` also clears it implicitly because it
+/// replaces the whole store entry without the flag.
+pub fn mark_account_relogin(id: &str, needed: bool) -> Result<(), Box<dyn Error>> {
+    let mut store = read_store()?;
+    let slot = store
+        .iter_mut()
+        .find(|e| str_field(e, "id") == Some(id))
+        .ok_or_else(|| format!("account {id} not found"))?;
+    if let JsonValue::Object(o) = slot {
+        if needed {
+            o.insert("needsRelogin".into(), JsonValue::Bool(true));
+        } else {
+            o.remove("needsRelogin");
+        }
+    }
+    write_store(store)
+}
+
+/// Mirror of Codex `should_refresh_proactively` (`manager.rs:2520`).
+///
+/// Primary: parse `exp` from the access_token JWT. Refresh when
+/// `exp <= now + 5 min` (CHATGPT_ACCESS_TOKEN_REFRESH_WINDOW_MINUTES).
+/// Fallback: when the access_token has no parseable `exp`, refresh when
+/// `last_refresh < now - 8 days` (TOKEN_REFRESH_INTERVAL).
+/// No `last_refresh` and no `exp` → false (mirrors Codex returning false).
+#[allow(dead_code)]
+fn codex_should_refresh(doc: &JsonValue) -> bool {
+    if let Some(access_token) = doc.pointer("/tokens/access_token").and_then(|v| v.as_str()) {
+        if let Some(exp) = jwt_exp(access_token) {
+            return chrono::Utc::now().timestamp() >= exp - 5 * 60;
+        }
+    }
+    if let Some(s) = doc.get("last_refresh").and_then(|v| v.as_str()) {
+        if let Ok(last) = chrono::DateTime::parse_from_rfc3339(s) {
+            return last.with_timezone(&chrono::Utc)
+                < chrono::Utc::now() - chrono::Duration::days(8);
+        }
+    }
+    false
+}
+
+/// Decode only the `exp` Unix timestamp from a JWT payload (no signature
+/// verification). Mirrors `parse_jwt_expiration` in codex-rs `token_data.rs:130`.
+fn jwt_exp(jwt: &str) -> Option<i64> {
+    let payload_b64 = jwt.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .ok()?;
+    let claims: JsonValue = serde_json::from_slice(&bytes).ok()?;
+    claims.get("exp")?.as_i64()
+}
+
+#[allow(dead_code)]
+enum RefreshError {
+    /// Token is permanently invalid (4xx from OAuth server, excluding 429).
+    /// The user must re-authenticate.
+    AuthFailure(String),
+    /// Transient error: rate-limited (429), server error (5xx), network
+    /// failure, or missing refresh_token. Safe to fall back to the snapshot.
+    Transient(String),
+}
+
 /// POST the saved refresh_token to `https://auth.openai.com/oauth/token`,
 /// merge the new id/access/refresh tokens back into auth.json, and update
 /// `last_refresh`. Endpoint + client_id from codex-rs
 /// `login/src/auth/manager.rs:186,CLIENT_ID`.
-async fn try_refresh_codex_tokens(path: &std::path::Path) -> Result<(), String> {
-    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let mut doc: JsonValue = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-
+///
+/// On success the doc is mutated with the new tokens.
+/// On failure returns `RefreshError` — the doc is left unchanged.
+async fn refresh_doc_tokens(doc: &mut JsonValue) -> Result<(), RefreshError> {
     let refresh_token = doc
         .pointer("/tokens/refresh_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "No refresh_token in saved credential".to_string())?
+        .ok_or_else(|| RefreshError::Transient("No refresh_token in saved credential".into()))?
         .to_string();
 
+    // Mirror codex-rs default_client.rs `get_codex_user_agent()` +
+    // `default_headers()` (default_client.rs:138-161, 289-304):
+    //   User-Agent = "codex_cli_rs/{ver} ({OS type} {OS ver}; {arch}) {terminal}"
+    //   originator = "codex_cli_rs"  (DEFAULT_ORIGINATOR, manager.rs:203)
+    // Primary: `codex --version`. Fallback: `~/.codex/version.json` latest_version
+    // (written by Codex itself — a real version string). Both are real Codex
+    // version numbers so the User-Agent is never fabricated.
+    let codex_version = crate::providers::detect_cli_versions()
+        .remove(&crate::providers::CliApp::Codex)
+        .flatten()
+        .or_else(|| crate::providers::codex_latest_known_version())
+        .unwrap_or_else(|| "unknown".to_string());
+    let os = os_info::get();
+    let user_agent_str = format!(
+        "codex_cli_rs/{codex_version} ({} {}; {}) unknown",
+        os.os_type(),
+        os.version(),
+        os.architecture().unwrap_or("unknown"),
+    );
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        .default_headers({
+            let mut h = reqwest::header::HeaderMap::new();
+            h.insert("originator", reqwest::header::HeaderValue::from_static("codex_cli_rs"));
+            if let Ok(ua) = reqwest::header::HeaderValue::from_str(&user_agent_str) {
+                h.insert(reqwest::header::USER_AGENT, ua);
+            }
+            h
+        })
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| RefreshError::Transient(e.to_string()))?;
 
     let resp = client
         .post("https://auth.openai.com/oauth/token")
@@ -534,7 +570,7 @@ async fn try_refresh_codex_tokens(path: &std::path::Path) -> Result<(), String> 
         }))
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| RefreshError::Transient(e.to_string()))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -548,12 +584,15 @@ async fn try_refresh_codex_tokens(path: &std::path::Path) -> Result<(), String> 
                     .map(String::from)
             })
             .unwrap_or(body);
-        return Err(format!("Token refresh failed ({status}): {msg}"));
+        // 4xx (except 429) = permanent auth failure; 429 and 5xx = transient.
+        return if status.is_client_error() && status.as_u16() != 429 {
+            Err(RefreshError::AuthFailure(format!("Token refresh failed ({status}): {msg}")))
+        } else {
+            Err(RefreshError::Transient(format!("Token refresh failed ({status}): {msg}")))
+        };
     }
 
-    let body: JsonValue = resp.json().await.map_err(|e| e.to_string())?;
-
-    // Merge new tokens into the existing doc so all other fields survive.
+    let body: JsonValue = resp.json().await.map_err(|e| RefreshError::Transient(e.to_string()))?;
     if let Some(tokens) = doc.get_mut("tokens").and_then(|v| v.as_object_mut()) {
         for key in ["id_token", "access_token", "refresh_token"] {
             if let Some(v) = body.get(key).filter(|v| v.is_string()) {
@@ -562,21 +601,31 @@ async fn try_refresh_codex_tokens(path: &std::path::Path) -> Result<(), String> 
         }
     }
     doc["last_refresh"] = JsonValue::String(chrono::Utc::now().to_rfc3339());
-
-    let updated = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
-    atomic_write_0600(path, updated.as_bytes()).map_err(|e| e.to_string())?;
     Ok(())
 }
 
-fn switch_codex(payload: &str) -> Result<(), Box<dyn Error>> {
-    // Validate the snapshot still parses before clobbering the live file —
-    // never overwrite a good login with garbage.
-    let _: JsonValue = serde_json::from_str(payload)
+/// Validate/refresh tokens in memory first, then write to auth.json.
+/// If refresh fails auth.json is left untouched and Err is returned.
+async fn switch_codex(payload: &str) -> Result<(), Box<dyn Error>> {
+    let mut doc: JsonValue = serde_json::from_str(payload)
         .map_err(|e| format!("Saved Codex credential is corrupt: {e}"))?;
+
+    // Always attempt a token refresh to validate the credential is still valid
+    // server-side. A 401 (token_revoked — user logged out of Codex since the
+    // snapshot was taken) surfaces as Err so the caller marks needsRelogin
+    // immediately. Network / connectivity failures are non-fatal: we fall back
+    // to writing the snapshot as-is so a temporary outage doesn't block switching.
+    match refresh_doc_tokens(&mut doc).await {
+        Ok(()) => {}
+        Err(RefreshError::AuthFailure(e)) => return Err(e.into()),
+        Err(RefreshError::Transient(_)) => {} // rate-limit / network / no token — proceed with snapshot
+    }
+
     let path = codex_auth_path()?;
-    // Single atomic temp+rename: on any failure the original auth.json is
-    // left intact, so no separate rollback snapshot is needed.
-    atomic_write_0600(&path, payload.as_bytes())
+    let updated = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    atomic_write_0600(&path, updated.as_bytes())?;
+    save_codex_account()?;
+    Ok(())
 }
 
 /// Decode the useful claims from a Codex `id_token` JWT (no signature
@@ -587,7 +636,9 @@ struct CodexIdInfo {
     name: Option<String>,
     email: Option<String>,
     plan: Option<String>,
-    user_id: Option<String>,
+    /// `chatgpt_account_id` from the JWT auth claims — workspace/org ID.
+    /// Present for enterprise/team accounts, absent for personal accounts.
+    chatgpt_account_id: Option<String>,
 }
 
 fn parse_codex_id_token(jwt: &str) -> Result<CodexIdInfo, Box<dyn Error>> {
@@ -620,8 +671,8 @@ fn parse_codex_id_token(jwt: &str) -> Result<CodexIdInfo, Box<dyn Error>> {
         .and_then(|v| v.as_str())
         .map(title_case_plan);
 
-    let user_id = auth
-        .and_then(|a| a.get("chatgpt_user_id").or_else(|| a.get("user_id")))
+    let chatgpt_account_id = auth
+        .and_then(|a| a.get("chatgpt_account_id"))
         .and_then(|v| v.as_str())
         .map(String::from);
 
@@ -629,7 +680,7 @@ fn parse_codex_id_token(jwt: &str) -> Result<CodexIdInfo, Box<dyn Error>> {
         name,
         email,
         plan,
-        user_id,
+        chatgpt_account_id,
     })
 }
 
@@ -764,14 +815,12 @@ mod tests {
             "email": email,
             "https://api.openai.com/auth": {
                 "chatgpt_plan_type": plan,
-                "chatgpt_user_id": format!("user-{email}"),
             },
         }));
         let doc = json!({
             "tokens": {
                 "id_token": jwt,
                 "access_token": "access-xyz",
-                "refresh_token": "refresh-xyz",
                 "account_id": account_id,
             },
             "last_refresh": "2026-06-27T00:00:00Z",
@@ -786,24 +835,24 @@ mod tests {
     }
 
     #[test]
-    fn parse_id_token_extracts_name_email_plan_and_user() {
+    fn parse_id_token_extracts_name_email_plan_and_account_id() {
         let jwt = fake_jwt(json!({
             "name": "Jane Doe",
             "email": "user@example.com",
             "https://api.openai.com/auth": {
                 "chatgpt_plan_type": "pro",
-                "chatgpt_user_id": "u-123",
+                "chatgpt_account_id": "account-123",
             },
         }));
         let info = parse_codex_id_token(&jwt).unwrap();
         assert_eq!(info.name.as_deref(), Some("Jane Doe"));
         assert_eq!(info.email.as_deref(), Some("user@example.com"));
         assert_eq!(info.plan.as_deref(), Some("Pro"));
-        assert_eq!(info.user_id.as_deref(), Some("u-123"));
+        assert_eq!(info.chatgpt_account_id.as_deref(), Some("account-123"));
     }
 
     #[test]
-    fn save_defaults_label_to_name_and_surfaces_it() {
+    fn save_uses_name_from_id_token() {
         let _g = HOME_LOCK.lock().unwrap();
         let tmp = tempdir("name-label");
         let _h = EnvVarGuard::set("HOME", &tmp);
@@ -812,10 +861,9 @@ mod tests {
         let jwt = fake_jwt(json!({
             "name": "Jane Doe",
             "email": "jane@example.com",
-            "https://api.openai.com/auth": { "chatgpt_user_id": "u-jane" },
         }));
         let doc =
-            json!({ "tokens": { "id_token": jwt, "access_token": "ax", "account_id": "acct" } });
+            json!({ "tokens": { "id_token": jwt, "access_token": "ax", "account_id": "acct-jane" } });
         let dir = tmp.join(".codex");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("auth.json"), serde_json::to_string(&doc).unwrap()).unwrap();
@@ -826,12 +874,34 @@ mod tests {
             Some("Jane Doe")
         );
 
-        // Default label prefers the name over the email.
-        save_current_account(CliApp::Codex, None).unwrap();
+        save_current_account(CliApp::Codex).unwrap();
         let saved = &list_accounts(CliApp::Codex).unwrap().accounts[0];
-        assert_eq!(saved.label, "Jane Doe");
-        assert_eq!(saved.name.as_deref(), Some("Jane Doe"));
+        assert_eq!(saved.name, "Jane Doe");
         assert_eq!(saved.email.as_deref(), Some("jane@example.com"));
+    }
+
+    #[test]
+    fn accounts_file_is_versioned_object_envelope() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let tmp = tempdir("versioned-envelope");
+        let _h = EnvVarGuard::set("HOME", &tmp);
+
+        write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
+        save_current_account(CliApp::Codex).unwrap();
+
+        // On disk: `{ "version": N, "accounts": [...] }` — never a bare array.
+        let path = tmp.join(".termory/accounts.json");
+        let raw: JsonValue =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            raw.pointer("/version").and_then(|v| v.as_u64()),
+            Some(ACCOUNTS_SCHEMA_VERSION),
+            "accounts.json must carry a version stamp"
+        );
+        assert!(
+            raw.pointer("/accounts").and_then(|v| v.as_array()).is_some(),
+            "accounts.json must have an 'accounts' array"
+        );
     }
 
     #[test]
@@ -853,8 +923,8 @@ mod tests {
         assert!(state.accounts.is_empty());
     }
 
-    #[test]
-    fn save_then_switch_roundtrip_restores_exact_auth_json() {
+    #[tokio::test]
+    async fn save_then_switch_roundtrip_restores_exact_auth_json() {
         let _g = HOME_LOCK.lock().unwrap();
         let tmp = tempdir("roundtrip");
         let _h = EnvVarGuard::set("HOME", &tmp);
@@ -862,22 +932,20 @@ mod tests {
         // Account A logged in → save it.
         write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
         let a_bytes = std::fs::read(tmp.join(".codex/auth.json")).unwrap();
-        save_current_account(CliApp::Codex, None).unwrap();
+        save_current_account(CliApp::Codex).unwrap();
 
-        // Account A shows current + saved + active, label defaulted to email.
         let state = list_accounts(CliApp::Codex).unwrap();
         let cur = state.current.as_ref().unwrap();
         assert_eq!(cur.email.as_deref(), Some("a@example.com"));
         assert_eq!(cur.plan.as_deref(), Some("Pro"));
         assert!(cur.saved);
         assert_eq!(state.accounts.len(), 1);
-        assert_eq!(state.accounts[0].label, "a@example.com");
         assert!(state.accounts[0].active);
         let a_id = state.accounts[0].id.clone();
 
         // Account B logs in (different file) and is saved too.
         write_codex_auth(&tmp, "b@example.com", "plus", "acct-b");
-        save_current_account(CliApp::Codex, Some("Work".into())).unwrap();
+        save_current_account(CliApp::Codex).unwrap();
         let state = list_accounts(CliApp::Codex).unwrap();
         assert_eq!(state.accounts.len(), 2);
         // Now A is no longer active (B is live).
@@ -885,7 +953,7 @@ mod tests {
         assert!(!a_view.active);
 
         // Switch back to A → live auth.json is byte-identical to A's snapshot.
-        switch_account(a_id.clone()).unwrap();
+        switch_account(a_id.clone()).await.unwrap();
         let live_now = std::fs::read(tmp.join(".codex/auth.json")).unwrap();
         assert_eq!(live_now, a_bytes, "switch must restore A's exact auth.json");
 
@@ -898,36 +966,28 @@ mod tests {
     }
 
     #[test]
-    fn resave_same_account_upserts_and_keeps_custom_label() {
+    fn resave_same_account_upserts_not_duplicates() {
         let _g = HOME_LOCK.lock().unwrap();
         let tmp = tempdir("upsert");
         let _h = EnvVarGuard::set("HOME", &tmp);
 
         write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
-        save_current_account(CliApp::Codex, Some("Personal".into())).unwrap();
-        // Re-save with no label (e.g. token refresh) keeps "Personal".
-        save_current_account(CliApp::Codex, None).unwrap();
+        save_current_account(CliApp::Codex).unwrap();
+        save_current_account(CliApp::Codex).unwrap();
 
         let state = list_accounts(CliApp::Codex).unwrap();
         assert_eq!(state.accounts.len(), 1, "must upsert, not duplicate");
-        assert_eq!(state.accounts[0].label, "Personal");
     }
 
     #[test]
-    fn rename_and_delete_only_touch_the_store() {
+    fn delete_only_touches_the_store() {
         let _g = HOME_LOCK.lock().unwrap();
-        let tmp = tempdir("rename-delete");
+        let tmp = tempdir("delete-store");
         let _h = EnvVarGuard::set("HOME", &tmp);
 
         write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
-        save_current_account(CliApp::Codex, None).unwrap();
+        save_current_account(CliApp::Codex).unwrap();
         let id = list_accounts(CliApp::Codex).unwrap().accounts[0].id.clone();
-
-        rename_account(id.clone(), "Renamed".into()).unwrap();
-        assert_eq!(
-            list_accounts(CliApp::Codex).unwrap().accounts[0].label,
-            "Renamed"
-        );
 
         // Delete leaves the live auth.json intact.
         let live_before = std::fs::read(tmp.join(".codex/auth.json")).unwrap();
@@ -940,26 +1000,26 @@ mod tests {
         );
     }
 
-    #[test]
-    fn switch_unknown_id_errors() {
+    #[tokio::test]
+    async fn switch_unknown_id_errors() {
         let _g = HOME_LOCK.lock().unwrap();
         let tmp = tempdir("switch-unknown");
         let _h = EnvVarGuard::set("HOME", &tmp);
-        assert!(switch_account("codex:nope".into()).is_err());
+        assert!(switch_account("no-such-id".into()).await.is_err());
     }
 
     #[cfg(unix)]
-    #[test]
-    fn switched_auth_json_is_0600() {
+    #[tokio::test]
+    async fn switched_auth_json_is_0600() {
         use std::os::unix::fs::PermissionsExt;
         let _g = HOME_LOCK.lock().unwrap();
         let tmp = tempdir("perms");
         let _h = EnvVarGuard::set("HOME", &tmp);
 
         write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
-        save_current_account(CliApp::Codex, None).unwrap();
+        save_current_account(CliApp::Codex).unwrap();
         let id = list_accounts(CliApp::Codex).unwrap().accounts[0].id.clone();
-        switch_account(id).unwrap();
+        switch_account(id).await.unwrap();
         let mode = std::fs::metadata(tmp.join(".codex/auth.json"))
             .unwrap()
             .permissions()
@@ -968,8 +1028,8 @@ mod tests {
         assert_eq!(mode, 0o600, "restored auth.json must be 0600");
     }
 
-    #[test]
-    fn codex_home_env_redirects_credential_path() {
+    #[tokio::test]
+    async fn codex_home_env_redirects_credential_path() {
         let _g = HOME_LOCK.lock().unwrap();
         let tmp = tempdir("codex-home-env");
         let _h = EnvVarGuard::set("HOME", &tmp);
@@ -978,10 +1038,7 @@ mod tests {
         let _ch = EnvVarGuard::set("CODEX_HOME", &custom);
 
         // The live login lives under CODEX_HOME, NOT ~/.codex.
-        let jwt = fake_jwt(json!({
-            "email": "moved@example.com",
-            "https://api.openai.com/auth": { "chatgpt_user_id": "u-moved" },
-        }));
+        let jwt = fake_jwt(json!({ "email": "moved@example.com" }));
         let doc = json!({
             "tokens": { "id_token": jwt, "access_token": "ax", "account_id": "acct-moved" },
         });
@@ -1001,12 +1058,12 @@ mod tests {
             state.current.as_ref().unwrap().email.as_deref(),
             Some("moved@example.com")
         );
-        save_current_account(CliApp::Codex, None).unwrap();
+        save_current_account(CliApp::Codex).unwrap();
         let id = list_accounts(CliApp::Codex).unwrap().accounts[0].id.clone();
 
         // Switch writes back under CODEX_HOME, never creating ~/.codex.
         std::fs::write(custom.join("auth.json"), "{}").unwrap();
-        switch_account(id).unwrap();
+        switch_account(id).await.unwrap();
         let restored: JsonValue =
             serde_json::from_slice(&std::fs::read(custom.join("auth.json")).unwrap()).unwrap();
         assert_eq!(
@@ -1034,5 +1091,94 @@ mod tests {
 
         std::fs::write(&cfg, "# cli_auth_credentials_store = \"auto\"\n").unwrap();
         assert_eq!(codex_storage_warning(), None, "commented line is ignored");
+    }
+
+    // ── codex_should_refresh / jwt_exp ──────────────────────────────────────
+
+    fn make_doc(access_token: Option<&str>, last_refresh_days_ago: Option<i64>) -> JsonValue {
+        let mut doc = json!({});
+        if let Some(at) = access_token {
+            doc["tokens"] = json!({ "access_token": at });
+        }
+        if let Some(days) = last_refresh_days_ago {
+            let ts = chrono::Utc::now() - chrono::Duration::days(days);
+            doc["last_refresh"] = JsonValue::String(ts.to_rfc3339());
+        }
+        doc
+    }
+
+    #[test]
+    fn should_refresh_when_access_token_is_expired() {
+        // exp = 10 minutes ago → past the 5-minute window
+        let exp = (chrono::Utc::now() - chrono::Duration::minutes(10)).timestamp();
+        let at = fake_jwt(json!({ "exp": exp }));
+        assert!(codex_should_refresh(&make_doc(Some(&at), None)));
+    }
+
+    #[test]
+    fn should_refresh_when_access_token_expires_within_5_minutes() {
+        let exp = (chrono::Utc::now() + chrono::Duration::minutes(3)).timestamp();
+        let at = fake_jwt(json!({ "exp": exp }));
+        assert!(codex_should_refresh(&make_doc(Some(&at), None)));
+    }
+
+    #[test]
+    fn should_not_refresh_when_access_token_is_fresh() {
+        let exp = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp();
+        let at = fake_jwt(json!({ "exp": exp }));
+        assert!(!codex_should_refresh(&make_doc(Some(&at), None)));
+    }
+
+    #[test]
+    fn falls_back_to_last_refresh_when_no_exp() {
+        // No exp in token → use last_refresh (9 days ago → stale)
+        let at = fake_jwt(json!({ "sub": "user" }));
+        assert!(codex_should_refresh(&make_doc(Some(&at), Some(9))));
+    }
+
+    #[test]
+    fn should_not_refresh_when_last_refresh_is_recent() {
+        // No exp, last_refresh = 2 days ago → still within 8-day window
+        let at = fake_jwt(json!({ "sub": "user" }));
+        assert!(!codex_should_refresh(&make_doc(Some(&at), Some(2))));
+    }
+
+    #[test]
+    fn should_not_refresh_with_no_exp_and_no_last_refresh() {
+        // Mirrors Codex returning false when last_refresh is None
+        let at = fake_jwt(json!({ "sub": "user" }));
+        assert!(!codex_should_refresh(&make_doc(Some(&at), None)));
+    }
+
+    #[test]
+    fn should_not_refresh_with_no_tokens_and_no_last_refresh() {
+        assert!(!codex_should_refresh(&make_doc(None, None)));
+    }
+
+    #[test]
+    fn mark_relogin_sets_and_clears_flag() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let tmp = tempdir("mark-relogin");
+        let _h = EnvVarGuard::set("HOME", &tmp);
+
+        write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
+        save_current_account(CliApp::Codex).unwrap();
+        let id = list_accounts(CliApp::Codex).unwrap().accounts[0].id.clone();
+
+        // Set needsRelogin = true.
+        mark_account_relogin(&id, true).unwrap();
+        let state = list_accounts(CliApp::Codex).unwrap();
+        assert!(
+            state.accounts.iter().find(|a| a.id == id).unwrap().needs_relogin,
+            "flag should be set"
+        );
+
+        // Clear needsRelogin = false.
+        mark_account_relogin(&id, false).unwrap();
+        let state = list_accounts(CliApp::Codex).unwrap();
+        assert!(
+            !state.accounts.iter().find(|a| a.id == id).unwrap().needs_relogin,
+            "flag should be cleared"
+        );
     }
 }

@@ -23,6 +23,7 @@ const APP_DIR_NAME: &str = ".termory";
 const CONFIG_FILE_NAME: &str = "config.json";
 const PROVIDERS_FILE_NAME: &str = "providers.json";
 const FAVORITES_FILE_NAME: &str = "favorites.json";
+const ACCOUNTS_FILE_NAME: &str = "accounts.json";
 
 fn app_dir() -> Result<PathBuf, Box<dyn Error>> {
     let home = dirs::home_dir().ok_or("home directory not available")?;
@@ -39,6 +40,10 @@ fn providers_path() -> Result<PathBuf, Box<dyn Error>> {
 
 fn favorites_path() -> Result<PathBuf, Box<dyn Error>> {
     Ok(app_dir()?.join(FAVORITES_FILE_NAME))
+}
+
+fn accounts_path() -> Result<PathBuf, Box<dyn Error>> {
+    Ok(app_dir()?.join(ACCOUNTS_FILE_NAME))
 }
 
 // ===================================================================
@@ -237,6 +242,23 @@ pub fn read_favorites() -> Result<JsonValue, Box<dyn Error>> {
 /// `providers.json`.
 pub fn write_favorites(value: &JsonValue) -> Result<(), Box<dyn Error>> {
     write_json_atomic_0600(&favorites_path()?, value)
+}
+
+// ===================================================================
+// accounts.json — saved official-login snapshots (contains OAuth tokens)
+// ===================================================================
+
+/// Read `~/.termory/accounts.json`. Returns `[]` if missing.
+pub fn read_accounts() -> Result<JsonValue, Box<dyn Error>> {
+    read_json(&accounts_path()?, JsonValue::Array(Vec::new()))
+}
+
+/// Atomically write `~/.termory/accounts.json` (chmod 0600 on Unix).
+/// Each entry snapshots a CLI's official OAuth login (Codex `auth.json`,
+/// …) so the user can switch between multiple accounts — it holds live
+/// access/refresh tokens, hence the same 0600 mode as `providers.json`.
+pub fn write_accounts(value: &JsonValue) -> Result<(), Box<dyn Error>> {
+    write_json_atomic_0600(&accounts_path()?, value)
 }
 
 #[cfg(test)]

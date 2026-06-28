@@ -55,6 +55,7 @@ Current alignment target: data acquisition and message preview formatting should
 - Claude **Desktop** 3P gateway-profile materialization (direct mode only — apply / restore-official / reverse-derive / installed-detect): `src-tauri/src/claude_desktop.rs` (inline tests at the bottom) — see "Claude Desktop (3P gateway profile)" under Providers
 - Codex "follow sessions" on provider switch (re-tag rollout-file + threads `model_provider` so `codex resume` keeps finding a project's history): `src-tauri/src/codex_follow.rs` (+ frontend `src/components/providers/CodexFollowDialog.tsx`) — see "Codex 'follow sessions' on provider switch"
 - Official-account subscription quota (read CLI OAuth creds → query official usage endpoint): `src-tauri/src/quota.rs` (inline tests at the bottom)
+- Codex multi-account management (save / switch / delete login snapshots, token refresh, needsRelogin flag): `src-tauri/src/accounts.rs` (inline tests at the bottom); UI: `src/components/providers/OfficialAccountsSection.tsx`
 - macOS menu-bar tray (build menu / rebuild / click handler): `src-tauri/src/tray.rs`; icon assets `src-tauri/icons/tray-icon.png` (36×36 template) + `tray-template.svg` (vector source)
 - Terminal launching (detect installed terminals / open-and-resume): `src-tauri/src/terminal.rs` (per-OS `#[cfg]`; chosen via Settings → Terminal, `terminal` config key)
 - Local KV store (config.json + providers.json + favorites.json under `~/.termory/`, chmod 0600): `src-tauri/src/config.rs`
@@ -68,7 +69,7 @@ Current alignment target: data acquisition and message preview formatting should
 - Rust provider/store tests: inline tests at the bottom of `src-tauri/src/providers.rs` and `src-tauri/src/config.rs`
 - Rust watcher test: inline at the bottom of `src-tauri/src/watcher.rs` (`dynamic_paths_from_sessions` — absolute-path filter + dedup)
 
-Current Tauri IPC commands (47 registered in `generate_handler!`), called from the frontend with `invoke(...)`:
+Current Tauri IPC commands (53 registered in `generate_handler!`), called from the frontend with `invoke(...)`:
 
 **Scan & detail**
 - `scan_all_sessions` — returns `ScanResult { projects: Project[], records: AppSession[] }` (see "First-class projects" — `projects` are enumerated folders/entities; `records` are session/memory/skill entries distinguished by `source`)
@@ -105,6 +106,14 @@ Current Tauri IPC commands (47 registered in `generate_handler!`), called from t
 
 **Gateways — see the "Gateways" subsection under Providers**
 - `detect_gateway_apis(baseUrl, apiKey)` — probe which API modes the gateway speaks (OpenAI `/v1/models`, OpenAI Responses `/v1/responses`, Anthropic `/v1/models`, Gemini `/v1beta/models`); returns `GatewayCapabilities`. Probes run concurrently and never spend tokens.
+
+**Codex multi-account management** (login snapshots saved to `~/.termory/accounts.json`, `{ "version": 1, "accounts": [...] }` — never writes Codex's own `auth.json` except on switch/login)
+- `list_accounts(app)` — returns `AccountsState { current, accounts, storageWarning }`: current live login + all saved snapshots with `active` + `needsRelogin` flags; Codex-only for now
+- `save_account(app)` — snapshot the current live login into `accounts.json` (upsert by `id`)
+- `switch_account(id)` — restore a saved snapshot to `auth.json`, always attempt token refresh first; `AuthFailure` (4xx non-429) marks `needsRelogin: true` on the entry
+- `delete_account(id)` — remove a saved snapshot from `accounts.json` (never touches `auth.json`)
+- `login_and_save_codex_account()` — snapshot current → clear auth.json → spawn `codex login` (5 min timeout) → save new login → restore previous; rollback on any failure
+- `mark_account_relogin(id, needed)` — set or clear `needsRelogin` on a saved entry; frontend calls with `true` on switch failure, cleared automatically by `save_account` upsert
 
 **App-local KV stores** (all `chmod 0600` on Unix)
 - `read_app_config` / `write_app_config` — `~/.termory/config.json` (UI prefs)
