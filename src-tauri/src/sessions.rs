@@ -1632,15 +1632,16 @@ fn scan_global_instructions() -> Vec<AppSession> {
     );
 
     let codex_dir = crate::providers::codex_root(&home);
+    let codex_label = codex_dir.to_string_lossy();
     push_tagged_instruction_file(
         &codex_dir.join("AGENTS.md"),
-        "~/.codex",
+        &codex_label,
         &["codex"],
         &mut sessions,
     );
     push_tagged_instruction_file(
         &codex_dir.join("AGENTS.override.md"),
-        "~/.codex",
+        &codex_label,
         &["codex"],
         &mut sessions,
     );
@@ -1648,7 +1649,7 @@ fn scan_global_instructions() -> Vec<AppSession> {
     let opencode_config = opencode_config_dir(&home);
     push_tagged_instruction_file(
         &opencode_config.join("AGENTS.md"),
-        "~/.config/opencode",
+        &opencode_config.to_string_lossy(),
         &["opencode"],
         &mut sessions,
     );
@@ -1852,7 +1853,7 @@ fn scan_codex_memory() -> Vec<AppSession> {
     push_doc_files_recursive(
         &root,
         &root,
-        "~/.codex/memories",
+        &root.to_string_lossy(),
         "codex",
         "Memory",
         &["skills"],
@@ -2002,7 +2003,7 @@ fn scan_codex_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
         push_doc_files_recursive(
             &global_dir,
             &global_dir,
-            "~/.codex/skills",
+            &global_dir.to_string_lossy(),
             "codex",
             "Skill",
             &[],
@@ -2107,7 +2108,7 @@ fn scan_opencode_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
         push_doc_files_recursive(
             &global_dir,
             &global_dir,
-            "~/.config/opencode/skills",
+            &global_dir.to_string_lossy(),
             "opencode",
             "Skill",
             &[],
@@ -3772,7 +3773,7 @@ fn derive_memory_project_label(path: &Path) -> String {
     let opencode_config = opencode_config_dir(&home);
     if path == opencode_config.join("AGENTS.md") || path == opencode_config.join("AGENTS.local.md")
     {
-        return "~/.config/opencode".to_string();
+        return format!("{}", opencode_config.display());
     }
 
     // Project-level skill/rule files: <cwd>/.{claude,codex,gemini,opencode,agents}/{skills,rules}/<name>/...
