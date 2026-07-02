@@ -35,6 +35,9 @@ function makeWeekdayTimeFormatter(locale?: string) {
     minute: "2-digit"
   });
 }
+function makeTimeFormatter(locale?: string) {
+  return new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit" });
+}
 
 // The app's formatting locale (drives BOTH dates and `formatCompact` numbers).
 // `undefined` = the OS locale; the i18n provider calls `setFormatLocale` so
@@ -45,6 +48,7 @@ let dateFormatter = makeDateTimeFormatter(currentLocale);
 let shortDateFormatter = makeShortDateFormatter(currentLocale);
 let yearDateFormatter = makeYearDateFormatter(currentLocale);
 let weekdayTimeFormatter = makeWeekdayTimeFormatter(currentLocale);
+let timeFormatter = makeTimeFormatter(currentLocale);
 
 /** Set the app formatting locale (a BCP-47 tag — "en" / "zh-Hans" / "zh-Hant").
  * Rebuilds the date formatters only on change (Intl construction is expensive)
@@ -56,13 +60,25 @@ export function setFormatLocale(locale: string | undefined): void {
   shortDateFormatter = makeShortDateFormatter(locale);
   yearDateFormatter = makeYearDateFormatter(locale);
   weekdayTimeFormatter = makeWeekdayTimeFormatter(locale);
+  timeFormatter = makeTimeFormatter(locale);
 }
 
-/** "Fri 12:00 AM" — weekday + time, used for quota reset times more
- * than a day out. en-US inserts "Fri, 12:00 AM"; the comma is dropped
- * to match Claude's own /usage display. */
-export function formatWeekdayTime(date: Date): string {
-  return weekdayTimeFormatter.format(date).replace(", ", " ");
+/** Quota reset moment in Claude Code's own /usage style —
+ * `11:50am (Asia/Shanghai)` when the reset lands today,
+ * `Fri 11:50am (Asia/Shanghai)` when it lands on another day.
+ * Lowercase compact am/pm (en-US "11:50 AM" → "11:50am"; zh locales
+ * keep their native 上午/下午 form), IANA zone name from Intl. */
+export function formatResetTime(date: Date, now: Date = new Date()): string {
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+  const base = sameDay
+    ? timeFormatter.format(date)
+    : weekdayTimeFormatter.format(date).replace(", ", " ");
+  const compact = base.replace(/\s?(AM|PM)\b/, (m) => m.trim().toLowerCase());
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return tz ? `${compact} (${tz})` : compact;
 }
 
 /** The app's formatting locale, for ad-hoc `toLocale*` calls outside this module

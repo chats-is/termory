@@ -20,7 +20,7 @@ import {
   TooltipTrigger
 } from "@/components/ui/tooltip";
 import { QUOTA_CHANGED_EVENT } from "@/constants";
-import { formatWeekdayTime } from "@/lib/format";
+import { formatResetTime } from "@/lib/format";
 import { quotaLevel, type QuotaLevel } from "@/lib/quota-utils";
 import { cn } from "@/lib/utils";
 import { useT, type MessageKey } from "@/i18n";
@@ -77,16 +77,7 @@ type Translate = (
 function formatReset(iso: string, t: Translate): string | null {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return null;
-  const diffMs = date.getTime() - Date.now();
-  if (diffMs > 0 && diffMs < 24 * 60 * 60 * 1000) {
-    const totalMin = Math.round(diffMs / 60_000);
-    const h = Math.floor(totalMin / 60);
-    const m = totalMin % 60;
-    if (h > 0 && m > 0) return t("providers.quotaResetsInHrMin", { h, m });
-    if (h > 0) return t("providers.quotaResetsInHr", { h });
-    return t("providers.quotaResetsInMin", { m: Math.max(1, m) });
-  }
-  return t("providers.quotaResets", { time: formatWeekdayTime(date) });
+  return t("providers.quotaResets", { time: formatResetTime(date) });
 }
 
 const NOT_USED_TIERS = new Set(["seven_day_opus", "seven_day_sonnet"]);

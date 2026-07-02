@@ -4,6 +4,7 @@ import {
   formatDate,
   formatFullNumber,
   formatRelativeDate,
+  formatResetTime,
   formatTimeAgo,
   setFormatLocale
 } from "./format";
@@ -121,6 +122,33 @@ describe("formatTimeAgo", () => {
   });
   it("returns days otherwise", () => {
     expect(formatTimeAgo(Date.now() - 2 * 86_400_000)).toBe("2d ago");
+  });
+});
+
+describe("formatResetTime", () => {
+  // TZ-independent: assert the shape (Claude Code /usage style), not a
+  // fixed wall-clock value. Locale is pinned to en — the OS locale on
+  // the dev machine is Chinese.
+  beforeEach(() => setFormatLocale("en"));
+  afterEach(() => setFormatLocale(undefined));
+  it("renders a same-day reset as compact time + IANA zone", () => {
+    const now = new Date("2026-07-02T08:00:00");
+    const reset = new Date("2026-07-02T11:50:00");
+    // e.g. "11:50am (Asia/Shanghai)"
+    expect(formatResetTime(reset, now)).toMatch(/^\d{1,2}:\d{2}(am|pm) \(.+\)$/);
+  });
+  it("prefixes the weekday when the reset lands on another day", () => {
+    const now = new Date("2026-07-02T08:00:00");
+    const reset = new Date("2026-07-04T00:59:00");
+    // e.g. "Sat 12:59am (Asia/Shanghai)" — no comma after the weekday
+    const out = formatResetTime(reset, now);
+    expect(out).toMatch(/^[A-Za-z]{3} \d{1,2}:\d{2}(am|pm) \(.+\)$/);
+    expect(out).not.toContain(",");
+  });
+  it("lowercases and joins the en am/pm marker", () => {
+    const now = new Date("2026-07-02T08:00:00");
+    const out = formatResetTime(new Date("2026-07-02T23:05:00"), now);
+    expect(out).not.toMatch(/\s(AM|PM)/);
   });
 });
 
