@@ -397,7 +397,7 @@ export function OfficialAccountsSection({
         return (
           <div
             key={row.key}
-            className="flex items-center gap-2 border-t border-border/50 px-3 py-2 hover:bg-accent/40 first:border-t-0 last:rounded-b-xl"
+            className="flex items-center gap-3 border-t border-border/50 px-3 py-2 hover:bg-accent/40 first:border-t-0 last:rounded-b-xl"
           >
             {/* Switch button — managed only */}
             {isManaged && (
@@ -410,22 +410,22 @@ export function OfficialAccountsSection({
                     ? t("providers.accountActive")
                     : t("providers.accountSwitch")
                 }
-                className={`group/sw flex size-6 shrink-0 items-center justify-center text-primary${(row.needsRelogin || rowBusy) ? " opacity-30 cursor-not-allowed" : ""}`}
+                className={`group/sw flex size-10 shrink-0 items-center justify-center text-primary${(row.needsRelogin || rowBusy) ? " opacity-30 cursor-not-allowed" : ""}`}
               >
                 {rowBusy ? (
-                  <Loader2 className="size-5 animate-spin" />
+                  <Loader2 className="size-6 animate-spin" />
                 ) : row.active ? (
-                  <CircleCheck className="size-5" />
+                  <CircleCheck className="size-6" />
                 ) : (
-                  <Circle className="size-5 text-muted-foreground/40 transition-colors group-hover/sw:enabled:text-primary" />
+                  <Circle className="size-6 text-muted-foreground/40 transition-colors group-hover/sw:enabled:text-primary" />
                 )}
               </button>
             )}
 
             {/* Display-only active indicator */}
             {!isManaged && (
-              <span className="flex size-6 shrink-0 items-center justify-center text-primary">
-                <CircleCheck className="size-5" />
+              <span className="flex size-10 shrink-0 items-center justify-center text-primary">
+                <CircleCheck className="size-6" />
               </span>
             )}
 
