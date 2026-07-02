@@ -1,0 +1,96 @@
+# Runs the full test suite on every push / PR — the release workflow
+# only BUILDS, so without this the tests only run when someone
+# remembers to run them locally, and the `#[cfg(windows)]`-gated Rust
+# tests never run at all (the dev machine is macOS).
+name: Test
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (vitest + build)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Vitest
+        run: npx vitest run
+
+      # `npm run build` = tsc type-check + vite production build, so a
+      # type error that vitest doesn't touch still fails CI.
+      - name: Type-check + production build
+        run: npm run build
+
+  rust:
+    # The three-OS matrix is the point: the release CI proves each
+    # target COMPILES, but only a per-OS `cargo test` executes the
+    # platform-gated tests (e.g. the `#[cfg(windows)]` ones in
+    # providers.rs) and catches runtime-level regressions.
+    name: Rust tests (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-22.04, macos-15, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+
+      # `tauri::generate_context!` requires the frontendDist dir
+      # (../dist) to exist at COMPILE time; the tests never serve it,
+      # so a stub index.html is enough on a clean runner.
+      - name: Stub frontend dist
+        shell: bash
+        run: mkdir -p dist && touch dist/index.html
+
+      - name: rustfmt check
+        if: matrix.platform == 'ubuntu-22.04'
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib

@@ -41,6 +41,29 @@ describe("dictionaries", () => {
   it("offers the three selectable languages", () => {
     expect(LOCALES.map((l) => l.value)).toEqual(["en", "zh-Hans", "zh-Hant"]);
   });
+
+  it("every key's {placeholder} set matches across all locales", () => {
+    // A locale that drops (or typos) a `{var}` renders the literal
+    // brace text to the user — interpolation only replaces exact names.
+    const placeholders = (text: string) =>
+      [...text.matchAll(/\{([a-zA-Z0-9_]+)\}/g)].map((m) => m[1]).sort();
+    const mismatches: string[] = [];
+    for (const key of Object.keys(en) as (keyof typeof en)[]) {
+      const expected = placeholders(en[key]);
+      for (const [name, dict] of [
+        ["zh-Hans", zhHans],
+        ["zh-Hant", zhHant]
+      ] as const) {
+        const got = placeholders(dict[key]);
+        if (JSON.stringify(got) !== JSON.stringify(expected)) {
+          mismatches.push(
+            `${key}: en={${expected.join(",")}} ${name}={${got.join(",")}}`
+          );
+        }
+      }
+    }
+    expect(mismatches).toEqual([]);
+  });
 });
 
 describe("I18nProvider ready gating", () => {

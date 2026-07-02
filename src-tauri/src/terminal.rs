@@ -322,26 +322,48 @@ pub fn detect() -> Vec<TerminalOption> {
     v
 }
 
-#[cfg(target_os = "windows")]
-pub fn open(id: &str, project: Option<&str>, cmd: &str) -> Result<(), String> {
+/// The (program, args) for a Windows terminal launch, plus whether the
+/// spawned HELPER process's console must be hidden (the `cmd /C start`
+/// branch — `start` opens the real terminal window; the outer helper's
+/// own console would otherwise flash first).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Debug, PartialEq)]
+struct WindowsLaunch {
+    program: &'static str,
+    args: Vec<String>,
+    hide_helper_console: bool,
+}
+
+/// Pure command construction for the Windows terminal launch — cfg-free
+/// so it unit-tests on every dev OS (mirror of the
+/// `windows_claude_dir_matches` precedent; the Windows runtime is the
+/// path that never runs locally). The spawn site (`open`) stays gated.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_open_command(id: &str, project: Option<&str>, cmd: &str) -> WindowsLaunch {
     match id {
         "wt" => {
             // Windows Terminal: -d sets the start dir, then the command.
-            let mut c = Command::new("wt");
+            let mut args: Vec<String> = Vec::new();
             if let Some(p) = project {
-                c.args(["-d", p]);
+                args.extend(["-d".to_string(), p.to_string()]);
             }
-            c.args(["cmd", "/k", cmd]);
-            spawn(c)
+            args.extend(["cmd".to_string(), "/k".to_string(), cmd.to_string()]);
+            WindowsLaunch {
+                program: "wt",
+                args,
+                hide_helper_console: false,
+            }
         }
         "powershell" => {
             let full = match project {
                 Some(p) => format!("cd '{}'; {}", p.replace('\'', "''"), cmd),
                 None => cmd.to_string(),
             };
-            let mut c = Command::new("powershell");
-            c.args(["-NoExit", "-Command", &full]);
-            spawn(c)
+            WindowsLaunch {
+                program: "powershell",
+                args: vec!["-NoExit".to_string(), "-Command".to_string(), full],
+                hide_helper_console: false,
+            }
         }
         // "auto" / "cmd" / unknown → Command Prompt.
         _ => {
@@ -349,16 +371,30 @@ pub fn open(id: &str, project: Option<&str>, cmd: &str) -> Result<(), String> {
                 Some(p) => format!("cd /d \"{p}\" && {cmd}"),
                 None => cmd.to_string(),
             };
-            let mut c = Command::new("cmd");
-            c.args(["/C", "start", "cmd", "/K", &full]);
-            // Hide the OUTER `cmd /C` helper's console — `start` still
-            // creates a fresh visible console for the inner `cmd /K`
-            // (the terminal the user asked for); without this the
-            // helper's own window flashes first.
-            crate::providers::hide_console(&mut c);
-            spawn(c)
+            WindowsLaunch {
+                program: "cmd",
+                args: vec![
+                    "/C".to_string(),
+                    "start".to_string(),
+                    "cmd".to_string(),
+                    "/K".to_string(),
+                    full,
+                ],
+                hide_helper_console: true,
+            }
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+pub fn open(id: &str, project: Option<&str>, cmd: &str) -> Result<(), String> {
+    let launch = windows_open_command(id, project, cmd);
+    let mut c = Command::new(launch.program);
+    c.args(&launch.args);
+    if launch.hide_helper_console {
+        crate::providers::hide_console(&mut c);
+    }
+    spawn(c)
 }
 
 // ===================================================================
@@ -383,6 +419,49 @@ mod tests {
     fn detect_always_offers_auto() {
         let opts = detect();
         assert_eq!(opts.first().map(|o| o.id.as_str()), Some("auto"));
+    }
+
+    // windows_open_command is deliberately cfg-free so these run on
+    // every dev OS — the Windows launch path otherwise only executes
+    // on real Windows hardware.
+    #[test]
+    fn windows_open_command_wt_sets_start_dir_then_command() {
+        let l = windows_open_command("wt", Some("C:\\proj"), "codex resume x");
+        assert_eq!(l.program, "wt");
+        assert_eq!(
+            l.args,
+            vec!["-d", "C:\\proj", "cmd", "/k", "codex resume x"]
+        );
+        assert!(!l.hide_helper_console);
+        // No project → no -d pair.
+        let l = windows_open_command("wt", None, "codex");
+        assert_eq!(l.args, vec!["cmd", "/k", "codex"]);
+    }
+
+    #[test]
+    fn windows_open_command_powershell_escapes_single_quotes() {
+        let l = windows_open_command("powershell", Some("C:\\o'brien"), "claude");
+        assert_eq!(l.program, "powershell");
+        assert_eq!(
+            l.args,
+            vec!["-NoExit", "-Command", "cd 'C:\\o''brien'; claude"]
+        );
+        assert!(!l.hide_helper_console);
+    }
+
+    #[test]
+    fn windows_open_command_default_uses_start_and_hides_the_helper() {
+        let l = windows_open_command("auto", Some("C:\\proj"), "claude");
+        assert_eq!(l.program, "cmd");
+        assert_eq!(
+            l.args,
+            vec!["/C", "start", "cmd", "/K", "cd /d \"C:\\proj\" && claude"]
+        );
+        // The OUTER cmd /C helper's console must be hidden — `start`
+        // opens the real terminal window.
+        assert!(l.hide_helper_console);
+        let l = windows_open_command("cmd", None, "claude");
+        assert_eq!(l.args, vec!["/C", "start", "cmd", "/K", "claude"]);
     }
 
     #[cfg(not(target_os = "windows"))]

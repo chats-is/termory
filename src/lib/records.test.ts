@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import type { AppSession, Project } from "@/types";
 import {
   remappedPath,
+  removeMatching,
+  remapMatching,
   reconcileTombstones,
   projectKey,
   projectDirOf,
@@ -104,5 +106,47 @@ describe("reconcileTombstones (projects by source+cwd)", () => {
       projectKey
     );
     expect(result.map((x) => x.project)).toEqual(["/b"]);
+  });
+});
+
+describe("removeMatching", () => {
+  it("keys tombstones by sessionKey so same-path DB rows keep their siblings", () => {
+    // OpenCode: every session shares the ONE db-file path — a
+    // path-keyed removal would clear both (the original bug).
+    const a = { source: "OpenCode", path: "/db/opencode.db", id: "a" } as AppSession;
+    const b = { source: "OpenCode", path: "/db/opencode.db", id: "b" } as AppSession;
+    const { kept, tombstones } = removeMatching([a, b], (r) => r.id === "a");
+    expect(kept).toEqual([b]);
+    expect(tombstones).toEqual(["OpenCode:/db/opencode.db:a"]);
+  });
+});
+
+describe("remapMatching", () => {
+  const claude = (path: string, project: string): AppSession =>
+    ({ source: "Claude", id: "u1", path, project }) as AppSession;
+
+  it("tombstones the old key when the remap moves the file", () => {
+    const rec = claude("/p/-old/u1.jsonl", "/old");
+    const { next, tombstones } = remapMatching(
+      [rec],
+      () => true,
+      (r) => ({ ...r, path: "/p/-new/u1.jsonl", project: "/new" })
+    );
+    expect(next[0].path).toBe("/p/-new/u1.jsonl");
+    expect(tombstones).toEqual(["Claude:/p/-old/u1.jsonl:u1"]);
+  });
+
+  it("does NOT tombstone a metadata-only remap (key unchanged)", () => {
+    // Codex migrate re-points the cwd; the rollout file (and so the
+    // source:path:id key) stays put. Tombstoning it would make
+    // reconcileTombstones hide the record forever.
+    const rec = { source: "Codex", id: "t1", path: "/s/r.jsonl", project: "/old" } as AppSession;
+    const { next, tombstones } = remapMatching(
+      [rec],
+      () => true,
+      (r) => ({ ...r, project: "/new" })
+    );
+    expect(next[0].project).toBe("/new");
+    expect(tombstones).toEqual([]);
   });
 });

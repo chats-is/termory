@@ -1533,6 +1533,23 @@ mod tests {
     }
 
     #[test]
+    fn terminal_clis_filters_to_installed_real_clis() {
+        let mut installed: HashMap<CliApp, bool> = HashMap::new();
+        installed.insert(CliApp::Claude, true);
+        installed.insert(CliApp::Codex, false);
+        // Claude Desktop is installed but NOT a CLI — terminal flows
+        // (recent-session resume, New Session) must exclude it.
+        installed.insert(CliApp::ClaudeDesktop, true);
+        let got = terminal_clis(&installed);
+        assert_eq!(got, vec![CliApp::Claude]);
+        // Order follows CliApp::all(), not map iteration order.
+        installed.insert(CliApp::Codex, true);
+        installed.insert(CliApp::Opencode, true);
+        let got = terminal_clis(&installed);
+        assert_eq!(got, vec![CliApp::Claude, CliApp::Codex, CliApp::Opencode]);
+    }
+
+    #[test]
     fn attach_work_statuses_joins_claude_rows_by_id_only() {
         let sessions = vec![
             sess_in("Claude", "/work/a", "busy-id", "2026-07-01T00:00:00Z"),

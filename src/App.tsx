@@ -86,6 +86,8 @@ import {
 } from "@/lib/migrate";
 import {
   remappedPath,
+  removeMatching,
+  remapMatching,
   reconcileTombstones,
   projectKey,
   projectDirOf,
@@ -470,9 +472,11 @@ export function App() {
       removeProject?: { source: string; project: string }
     ) => {
       setSessions((prev) => {
-        for (const s of prev)
-          if (match(s)) tombstonesRef.current.add(sessionKey(s));
-        return prev.filter((s) => !match(s));
+        // sessionKey-keyed removal (records.ts has the OpenCode
+        // shared-path rationale + the regression test).
+        const { kept, tombstones } = removeMatching(prev, match);
+        for (const k of tombstones) tombstonesRef.current.add(k);
+        return kept;
       });
       if (removeProject) {
         const k = projectKey(removeProject);
@@ -505,17 +509,12 @@ export function App() {
         path: remappedPath(s.path, res.old_dir, res.new_dir)
       });
       setSessions((prev) => {
-        for (const s of prev) {
-          if (!match(s)) continue;
-          // Tombstone the old key ONLY when the remap changes it (the file
-          // moved → new path → new `source:path:id`). A metadata-only re-point
-          // (Codex changes cwd but leaves the rollout file put) keeps the same
-          // key, and tombstoning it would make `reconcileTombstones` hide the
-          // moved record forever — the key never goes absent from later scans.
-          if (sessionKey(remap(s)) !== sessionKey(s))
-            tombstonesRef.current.add(sessionKey(s));
-        }
-        return prev.map((s) => (match(s) ? remap(s) : s));
+        // Tombstones only keys the remap actually changed — the
+        // metadata-only (Codex) case must NOT tombstone; rationale +
+        // regression test live on records.ts `remapMatching`.
+        const { next, tombstones } = remapMatching(prev, match, remap);
+        for (const k of tombstones) tombstonesRef.current.add(k);
+        return next;
       });
       setProjects((prev) => {
         let next = prev;

@@ -1,5 +1,42 @@
-import type { AppSession, Project } from "@/types";
-import { recordRel } from "./session-utils";
+import type { Project } from "@/types";
+import { recordRel, sessionKey } from "./session-utils";
+
+/** Drop the matched records and report their sessionKeys for the
+ * tombstone set. Keying by sessionKey (source:path:id), NOT path, is
+ * the load-bearing part: DB-backed sources (OpenCode) share ONE
+ * db-file path across every session, so a path-keyed removal would
+ * wrongly clear the whole list (the original bug this pins down). */
+export function removeMatching<
+  T extends { source: string; path: string; id: string }
+>(records: T[], match: (r: T) => boolean): { kept: T[]; tombstones: string[] } {
+  return {
+    kept: records.filter((r) => !match(r)),
+    tombstones: records.filter(match).map(sessionKey)
+  };
+}
+
+/** Re-point the matched records via `remap` and report the OLD keys to
+ * tombstone — ONLY for records whose key actually changed (the file
+ * moved). A metadata-only remap (Codex migrate re-points the cwd but
+ * the rollout file — and so the key — stays put) must NOT tombstone:
+ * that key never goes absent from later scans, so reconcileTombstones
+ * would hide the record forever. */
+export function remapMatching<
+  T extends { source: string; path: string; id: string }
+>(
+  records: T[],
+  match: (r: T) => boolean,
+  remap: (r: T) => T
+): { next: T[]; tombstones: string[] } {
+  const tombstones: string[] = [];
+  const next = records.map((r) => {
+    if (!match(r)) return r;
+    const moved = remap(r);
+    if (sessionKey(moved) !== sessionKey(r)) tombstones.push(sessionKey(r));
+    return moved;
+  });
+  return { next, tombstones };
+}
 
 /** Stable key for a project (source + cwd) — the join/tombstone key. */
 export function projectKey(p: { source: string; project: string }): string {
