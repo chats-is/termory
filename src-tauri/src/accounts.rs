@@ -170,13 +170,16 @@ pub async fn login_and_save_codex_account(
     *cancel_state.0.lock().unwrap() = Some(cancel_notify.clone());
 
     // Spawn `codex login` (non-interactive; the browser handles the UI).
-    let mut child = match tokio::process::Command::new("codex")
-        .arg("login")
+    let mut cmd = tokio::process::Command::new("codex");
+    cmd.arg("login")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
+        .stderr(std::process::Stdio::piped());
+    // Silent helper (output is captured, the browser is the UI) — don't
+    // flash a console window on Windows (see providers::hide_console).
+    #[cfg(windows)]
+    cmd.creation_flags(crate::providers::CREATE_NO_WINDOW);
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             restore_auth(&auth_path, original_auth.as_deref());

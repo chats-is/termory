@@ -304,11 +304,12 @@ fn spawn_args(bin: &str, args: &[&str]) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 pub fn detect() -> Vec<TerminalOption> {
     fn where_(bin: &str) -> bool {
-        Command::new("where")
-            .arg(bin)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        let mut c = Command::new("where");
+        c.arg(bin);
+        // Silent probe — without this a console window flashes for
+        // every `where` invocation (GUI-subsystem parent).
+        crate::providers::hide_console(&mut c);
+        c.output().map(|o| o.status.success()).unwrap_or(false)
     }
     // "auto" IS cmd on Windows — don't list Command Prompt again separately.
     let mut v = vec![opt("auto", "Default (Command Prompt)")];
@@ -350,6 +351,11 @@ pub fn open(id: &str, project: Option<&str>, cmd: &str) -> Result<(), String> {
             };
             let mut c = Command::new("cmd");
             c.args(["/C", "start", "cmd", "/K", &full]);
+            // Hide the OUTER `cmd /C` helper's console — `start` still
+            // creates a fresh visible console for the inner `cmd /K`
+            // (the terminal the user asked for); without this the
+            // helper's own window flashes first.
+            crate::providers::hide_console(&mut c);
             spawn(c)
         }
     }

@@ -376,6 +376,32 @@ pub fn find_cli_binary(tool: &str) -> Option<std::path::PathBuf> {
 /// Tokio blocking-pool slot indefinitely.
 const SUBPROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Windows `CREATE_NO_WINDOW` process-creation flag. A GUI-subsystem
+/// process (the release build — `windows_subsystem = "windows"`) that
+/// spawns a console program gets a console WINDOW flashed on screen
+/// for the child; `.cmd` shims (every npm-installed CLI on Windows)
+/// are additionally routed through `cmd.exe` by the Rust runtime
+/// (CVE-2024-24576 hardening), so even `codex --version` pops a cmd
+/// window. This flag gives the child a console with NO window.
+/// Apply it to every SILENT helper spawn (`hide_console`); never to
+/// terminal-LAUNCH spawns, whose whole purpose is a visible window.
+#[cfg(windows)]
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Mark a silent helper process so Windows doesn't flash a console
+/// window for it. No-op on other platforms.
+pub(crate) fn hide_console(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+    }
+}
+
 /// Spawn `cmd` and read its full output, killing the child if it
 /// hasn't exited within [`SUBPROCESS_TIMEOUT`]. Returns `None` on
 /// spawn failure, non-zero exit, or timeout. Polls `try_wait` every
@@ -383,6 +409,9 @@ const SUBPROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5
 /// thread.
 fn output_with_timeout(mut cmd: std::process::Command) -> Option<std::process::Output> {
     use std::process::Stdio;
+    // Every caller is a silent probe (`--version` queries, shell
+    // fallback) — never a window the user should see.
+    hide_console(&mut cmd);
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
