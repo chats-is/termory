@@ -264,26 +264,7 @@ pub fn write_accounts(value: &JsonValue) -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutils::HOME_LOCK;
-
-    struct HomeOverride {
-        prev: Option<std::ffi::OsString>,
-    }
-    impl HomeOverride {
-        fn new(p: &Path) -> Self {
-            let prev = std::env::var_os("HOME");
-            std::env::set_var("HOME", p);
-            HomeOverride { prev }
-        }
-    }
-    impl Drop for HomeOverride {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-    }
+    use crate::testutils::{lock_home, override_home};
 
     fn tempdir(tag: &str) -> PathBuf {
         let mut dir = std::env::temp_dir();
@@ -298,27 +279,27 @@ mod tests {
 
     #[test]
     fn read_missing_config_returns_empty_object() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("config-empty");
-        let _h = HomeOverride::new(&tmp);
+        let _h = override_home(&tmp);
         let value = read_config().unwrap();
         assert!(value.as_object().unwrap().is_empty());
     }
 
     #[test]
     fn read_missing_providers_returns_empty_array() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("providers-empty");
-        let _h = HomeOverride::new(&tmp);
+        let _h = override_home(&tmp);
         let value = read_providers().unwrap();
         assert!(value.as_array().unwrap().is_empty());
     }
 
     #[test]
     fn config_and_providers_live_in_separate_files() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("two-files");
-        let _h = HomeOverride::new(&tmp);
+        let _h = override_home(&tmp);
         write_config(&serde_json::json!({"default_pane": "memory"})).unwrap();
         write_providers(&serde_json::json!([{"id": "p1", "name": "Test"}])).unwrap();
 
@@ -335,9 +316,9 @@ mod tests {
     #[test]
     fn both_files_get_0600_and_dir_0700() {
         use std::os::unix::fs::PermissionsExt;
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("perms");
-        let _h = HomeOverride::new(&tmp);
+        let _h = override_home(&tmp);
         write_config(&serde_json::json!({"k": "v"})).unwrap();
         write_providers(&serde_json::json!([])).unwrap();
         let dir_mode = fs::metadata(tmp.join(".termory"))
@@ -362,9 +343,9 @@ mod tests {
 
     #[test]
     fn providers_roundtrip_preserves_array_order() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("rt-providers");
-        let _h = HomeOverride::new(&tmp);
+        let _h = override_home(&tmp);
         let payload = serde_json::json!([
             {"id": "a", "name": "First"},
             {"id": "b", "name": "Second"},
@@ -377,9 +358,9 @@ mod tests {
 
     #[test]
     fn providers_file_is_a_versioned_object_envelope() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("providers-versioned");
-        let _h = HomeOverride::new(&tmp);
+        let _h = override_home(&tmp);
         write_providers(&serde_json::json!([{"id": "a", "name": "A"}])).unwrap();
 
         // On disk: `{ "version": N, "providers": [...] }` — an object, never
@@ -398,17 +379,17 @@ mod tests {
 
     #[test]
     fn read_missing_gateways_returns_empty_array() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("gateways-empty");
-        let _h = HomeOverride::new(&tmp);
+        let _h = override_home(&tmp);
         assert!(read_gateways().unwrap().as_array().unwrap().is_empty());
     }
 
     #[test]
     fn providers_and_gateways_coexist_without_clobbering() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("prov-gateways");
-        let _h = HomeOverride::new(&tmp);
+        let _h = override_home(&tmp);
 
         write_providers(&serde_json::json!([{"id": "p1", "app": "claude", "name": "P"}])).unwrap();
         write_gateways(&serde_json::json!([
@@ -475,18 +456,18 @@ mod tests {
 
     #[test]
     fn read_missing_favorites_returns_empty_array() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("favorites-empty");
-        let _h = HomeOverride::new(&tmp);
+        let _h = override_home(&tmp);
         let value = read_favorites().unwrap();
         assert!(value.as_array().unwrap().is_empty());
     }
 
     #[test]
     fn favorites_roundtrip_preserves_array_order() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("rt-favorites");
-        let _h = HomeOverride::new(&tmp);
+        let _h = override_home(&tmp);
         let payload = serde_json::json!([
             {"id": "f-1", "message": {"role": "user", "text": "hi", "kind": "text"}},
             {"id": "f-2", "message": {"role": "assistant", "text": "hey", "kind": "text"}},
@@ -500,9 +481,9 @@ mod tests {
     #[test]
     fn favorites_file_gets_0600() {
         use std::os::unix::fs::PermissionsExt;
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("favorites-perms");
-        let _h = HomeOverride::new(&tmp);
+        let _h = override_home(&tmp);
         write_favorites(&serde_json::json!([])).unwrap();
         let mode = fs::metadata(tmp.join(".termory/favorites.json"))
             .unwrap()
@@ -514,9 +495,9 @@ mod tests {
 
     #[test]
     fn config_overwrite_is_atomic_no_stray_tmp() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("atomic");
-        let _h = HomeOverride::new(&tmp);
+        let _h = override_home(&tmp);
         write_config(&serde_json::json!({"a": 1})).unwrap();
         write_providers(&serde_json::json!([])).unwrap();
         write_config(&serde_json::json!({"b": 2})).unwrap();

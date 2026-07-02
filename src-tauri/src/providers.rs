@@ -2872,11 +2872,11 @@ pub(crate) fn string_match(provider_value: &str, live_value: Option<&str>) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutils::{EnvVarGuard, HOME_LOCK};
+    use crate::testutils::{lock_home, override_home, EnvVarGuard};
 
     #[test]
     fn codex_root_honors_codex_home_env() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let home = Path::new("/tmp/fake-home");
 
         {
@@ -2896,9 +2896,9 @@ mod tests {
 
     #[test]
     fn claude_activate_honors_claude_config_dir() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("claude-cfg-dir");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         let cfg = tmp.join("relocated-claude");
         fs::create_dir_all(&cfg).unwrap();
         let _cfg_env = EnvVarGuard::set("CLAUDE_CONFIG_DIR", &cfg);
@@ -3260,9 +3260,9 @@ mod tests {
         // Claude (JSON) overrides: dot-path nesting, type inference,
         // clean removal of the previous provider's keys on switch
         // (incl. empty-parent pruning), and full strip on deactivate.
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("ovr-json");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         fs::create_dir_all(tmp.join(".claude")).unwrap();
 
         let mut a = make_provider(CliApp::Claude, "A", "https://a.x.io", "sk-a");
@@ -3355,9 +3355,9 @@ mod tests {
     fn provider_overrides_apply_strip_nested_toml() {
         // Codex (TOML) overrides: nested table path + bool inference,
         // pruned cleanly on deactivate.
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("ovr-toml");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         fs::create_dir_all(tmp.join(".codex")).unwrap();
 
         let mut p = make_provider(CliApp::Codex, "C", "https://c.x.io/v1", "sk-c");
@@ -3400,9 +3400,9 @@ mod tests {
 
     #[test]
     fn claude_activate_and_reverse_roundtrip() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("claude-rt");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         // Existing unrelated settings preserved.
         fs::create_dir_all(tmp.join(".claude")).unwrap();
         fs::write(
@@ -3482,9 +3482,9 @@ mod tests {
         // (`~/.claude/.credentials.json`, see `src/utils/auth.ts:1323`)
         // that we never touch. Confirm activate → deactivate leaves
         // that file byte-identical, so the user stays logged in.
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("claude-oauth-keep");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         fs::create_dir_all(tmp.join(".claude")).unwrap();
 
         // Stage 1: user ran `claude login` — OAuth tokens persisted.
@@ -3549,9 +3549,9 @@ mod tests {
         // settings.json written by older Termory versions put the
         // model at the top level. The active-state reader should
         // still match these correctly.
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("claude-legacy-model");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         fs::create_dir_all(tmp.join(".claude")).unwrap();
         fs::write(
             tmp.join(".claude/settings.json"),
@@ -3584,9 +3584,9 @@ mod tests {
         // to Haiku — a non-trivial 3P setup. Confirm Termory writes
         // the three ANTHROPIC_DEFAULT_* env vars exactly as Claude
         // Code's `modelOptions.ts` expects.
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("claude-multi-model");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
 
         let mut p = make_provider(
             CliApp::Claude,
@@ -3667,9 +3667,9 @@ mod tests {
         // strip ANTHROPIC_DEFAULT_OPUS_MODEL — the override union cleans
         // up keys any known provider manages, even when the activated
         // provider doesn't set them.
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("claude-switch-strip");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         fs::create_dir_all(tmp.join(".claude")).unwrap();
 
         let mut a = make_provider(CliApp::Claude, "route-opus", "https://a.example", "sk-a");
@@ -3715,9 +3715,9 @@ mod tests {
 
     #[test]
     fn claude_unmanaged_when_external_edit_does_not_match_any_provider() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("claude-unmanaged");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         fs::create_dir_all(tmp.join(".claude")).unwrap();
         // Outside party set an unknown base URL.
         fs::write(
@@ -3735,9 +3735,9 @@ mod tests {
 
     #[test]
     fn codex_activate_and_reverse_roundtrip_preserves_unrelated_blocks() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("codex-rt");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         fs::create_dir_all(tmp.join(".codex")).unwrap();
         // Pre-existing config with unrelated mcp_servers block + an
         // unrelated provider block.
@@ -3829,9 +3829,9 @@ command = "npx"
         // providers to the single stable id `TERMORY_PROVIDER_ID`, so
         // switching among them keeps `model_provider` constant and the
         // whole resume history stays visible. Lock that in here.
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("codex-stable-id");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         fs::create_dir_all(tmp.join(".codex")).unwrap();
 
         let read_model_provider = || {
@@ -3872,9 +3872,9 @@ command = "npx"
         // a Custom API provider via Termory, then swaps back to
         // Official. The OAuth tokens must survive all three stages so
         // the user doesn't have to re-run `codex login`.
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("codex-three-stage");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         fs::create_dir_all(tmp.join(".codex")).unwrap();
 
         // Stage 1: user ran `codex login` — auth.json has OAuth tokens.
@@ -3974,9 +3974,9 @@ command = "npx"
 
     #[test]
     fn codex_deactivate_preserves_existing_oauth_tokens() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("codex-preserve-oauth");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         fs::create_dir_all(tmp.join(".codex")).unwrap();
         // User previously ran `codex login` → OAuth tokens in auth.json.
         // Then activated a Termory Custom provider (auth_mode=apikey,
@@ -4024,9 +4024,9 @@ base_url = "https://x.io/v1"
 
     #[test]
     fn codex_reverse_returns_official_when_model_provider_points_to_builtin() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("codex-builtin");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         fs::create_dir_all(tmp.join(".codex")).unwrap();
         fs::write(
             tmp.join(".codex/config.toml"),
@@ -4040,9 +4040,9 @@ base_url = "https://x.io/v1"
 
     #[test]
     fn gemini_activate_writes_dotenv_and_reverses_with_0600() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("gemini-rt");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         let p = make_provider(CliApp::Gemini, "g-third", "https://g.example", "g-sk");
         activate(&p, &[p.clone()]).unwrap();
         let env_text = fs::read_to_string(tmp.join(".gemini/.env")).unwrap();
@@ -4089,9 +4089,9 @@ base_url = "https://x.io/v1"
         // User's `~/.gemini/.env` may already contain other variables
         // (DEBUG_MODE, custom tooling, etc.). We must merge — never
         // overwrite — and only touch the three Termory-managed keys.
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("gemini-preserve");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         fs::create_dir_all(tmp.join(".gemini")).unwrap();
         fs::write(
             tmp.join(".gemini/.env"),
@@ -4121,9 +4121,9 @@ base_url = "https://x.io/v1"
         // `core/src/config/storage.ts:22`). Termory only writes `.env`,
         // so activate → deactivate must leave the credentials file
         // byte-identical and the user stays logged in.
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("gemini-oauth-keep");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         fs::create_dir_all(tmp.join(".gemini")).unwrap();
         let creds_contents = r#"{
           "access_token": "at-original",
@@ -4162,9 +4162,9 @@ base_url = "https://x.io/v1"
     fn opencode_activate_writes_full_provider_block_in_opencode_json() {
         // cc-switch mode: everything Termory writes lives in
         // ~/.config/opencode/opencode.json. auth.json is never touched.
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("opencode-cc-mode");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
 
         let mut p = make_provider(
             CliApp::Opencode,
@@ -4267,9 +4267,9 @@ base_url = "https://x.io/v1"
 
     #[test]
     fn opencode_activate_dedupes_primary_in_models() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("opencode-dedup");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
 
         let mut p = make_provider(CliApp::Opencode, "dedup", "", "sk-dedup");
         p.model = "gpt-5".into();
@@ -4315,9 +4315,9 @@ base_url = "https://x.io/v1"
 
     #[test]
     fn opencode_options_nest_under_provider_block_and_skip_managed() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("opencode-options");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
 
         let mut p = make_provider(CliApp::Opencode, "p", "https://api.x.io", "sk-p");
         p.model = "m1".into();
@@ -4385,9 +4385,9 @@ base_url = "https://x.io/v1"
     fn opencode_enabling_one_provider_keeps_siblings_options() {
         // Core multi-slot guarantee: enabling B must not wipe A's options,
         // because each provider's options live inside its own block.
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("opencode-sibling-options");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
 
         let mut a = make_provider(CliApp::Opencode, "a", "https://a.io", "sk-a");
         a.id = "aaa".into();
@@ -4430,9 +4430,9 @@ base_url = "https://x.io/v1"
         // but only the one passed to set_opencode_default ends up as
         // the top-level model. Switching default just overwrites the
         // top-level field, slots stay put.
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("opencode-set-default");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
 
         let mut a = make_provider(CliApp::Opencode, "a", "", "sk-a");
         a.id = "aaa".into();
@@ -4482,9 +4482,9 @@ base_url = "https://x.io/v1"
 
     #[test]
     fn opencode_set_default_rejects_inactive_provider() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("opencode-default-rejects");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         let p = make_provider(CliApp::Opencode, "p", "", "sk-p");
         // Never activated.
         let result = set_opencode_default(&p);
@@ -4494,9 +4494,9 @@ base_url = "https://x.io/v1"
 
     #[test]
     fn opencode_activate_rejects_empty_model() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("opencode-no-model");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         let mut p = make_provider(CliApp::Opencode, "no-model", "https://x.io", "sk-x");
         p.model = String::new();
         let result = activate(&p, &[p.clone()]);
@@ -4511,9 +4511,9 @@ base_url = "https://x.io/v1"
     fn opencode_activate_preserves_unrelated_provider_blocks() {
         // Pre-existing user `provider.<...>` blocks (manually edited or
         // from /connect baseURL overlays) must survive Termory's activate.
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("opencode-preserve");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         fs::create_dir_all(tmp.join(".config/opencode")).unwrap();
         fs::write(
             tmp.join(".config/opencode/opencode.json"),
@@ -4564,9 +4564,9 @@ base_url = "https://x.io/v1"
         // `model` (so no Termory provider is the startup default) but
         // keeps the Enabled slots so they remain selectable via
         // OpenCode's `/model` command.
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("opencode-deactivate");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
 
         let mut p = make_provider(
             CliApp::Opencode,
@@ -4625,9 +4625,9 @@ base_url = "https://x.io/v1"
     fn opencode_deactivate_preserves_user_set_top_model() {
         // If the user manually pointed top-level `model` at a
         // non-Termory provider, our deactivate must NOT clear it.
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("opencode-deactivate-user-model");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
 
         let mut p = make_provider(CliApp::Opencode, "t", "", "sk-t");
         p.model = "m".into();
@@ -4661,9 +4661,9 @@ base_url = "https://x.io/v1"
     fn opencode_delete_only_clears_top_model_when_it_points_at_self() {
         // Deleting an inactive provider must NOT touch top-level model
         // (which points at a different Termory provider).
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("opencode-delete-inactive");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
 
         let mut a = make_provider(CliApp::Opencode, "a", "", "sk-a");
         a.id = "aaa".into();
@@ -4696,9 +4696,9 @@ base_url = "https://x.io/v1"
         // should write the slot without options.apiKey when the user
         // left it blank (some gateways don't need auth; or user
         // intends to fill via env var / `/connect` later).
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("opencode-empty-key");
-        let _home = EnvVarGuard::set("HOME", &tmp);
+        let _home = override_home(&tmp);
         let mut p = make_provider(CliApp::Opencode, "no-key", "https://example.com", "");
         p.model = "gpt-5".into();
         p.npm = Some("@ai-sdk/openai-compatible".into());

@@ -10723,7 +10723,7 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, B
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutils::{EnvVarGuard, HOME_LOCK};
+    use crate::testutils::{lock_home, EnvVarGuard};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10732,7 +10732,7 @@ mod tests {
         // Reads/sets process-global XDG vars → serialize against the
         // providers opencode tests (which resolve the same dirs) and
         // restore on drop.
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let home = Path::new("/tmp/fake-home");
 
         {

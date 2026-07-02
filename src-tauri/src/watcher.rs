@@ -572,17 +572,23 @@ mod tests {
 
     #[test]
     fn dynamic_paths_keeps_absolute_dedups_and_drops_empty_or_relative() {
+        // Build absolute paths from temp_dir so the test holds on
+        // Windows too ("/abs/one" isn't absolute there — no drive).
+        let one = std::env::temp_dir().join("one");
+        let two = std::env::temp_dir().join("two");
+        let one_s = one.to_string_lossy().into_owned();
+        let two_s = two.to_string_lossy().into_owned();
         let paths = vec![
-            "/abs/one",
-            "/abs/two",
-            "/abs/one",      // duplicate → deduped by the HashSet
+            one_s.as_str(),
+            two_s.as_str(),
+            one_s.as_str(),  // duplicate → deduped by the HashSet
             "",              // empty → dropped
             "relative/path", // not absolute → dropped
         ];
         let result = dynamic_paths_from_sessions(paths);
         assert_eq!(result.len(), 2);
-        assert!(result.contains(&PathBuf::from("/abs/one")));
-        assert!(result.contains(&PathBuf::from("/abs/two")));
+        assert!(result.contains(&one));
+        assert!(result.contains(&two));
         assert!(!result.contains(&PathBuf::from("relative/path")));
     }
 

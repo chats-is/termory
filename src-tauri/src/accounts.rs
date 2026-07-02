@@ -952,7 +952,7 @@ fn atomic_write_0600(path: &std::path::Path, bytes: &[u8]) -> Result<(), Box<dyn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutils::{EnvVarGuard, HOME_LOCK};
+    use crate::testutils::{lock_home, override_home, EnvVarGuard};
     use std::path::{Path, PathBuf};
 
     fn tempdir(tag: &str) -> PathBuf {
@@ -1019,9 +1019,9 @@ mod tests {
 
     #[test]
     fn save_uses_name_from_id_token() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("name-label");
-        let _h = EnvVarGuard::set("HOME", &tmp);
+        let _h = override_home(&tmp);
 
         // auth.json whose id_token carries a display `name`.
         let jwt = fake_jwt(json!({
@@ -1047,9 +1047,9 @@ mod tests {
 
     #[test]
     fn accounts_file_is_versioned_object_envelope() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("versioned-envelope");
-        let _h = EnvVarGuard::set("HOME", &tmp);
+        let _h = override_home(&tmp);
 
         write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
         save_current_account(CliApp::Codex).unwrap();
@@ -1081,9 +1081,9 @@ mod tests {
 
     #[test]
     fn list_is_empty_when_no_codex_login() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("no-login");
-        let _h = EnvVarGuard::set("HOME", &tmp);
+        let _h = override_home(&tmp);
         let state = list_accounts(CliApp::Codex).unwrap();
         assert!(state.current.is_none());
         assert!(state.accounts.is_empty());
@@ -1091,9 +1091,9 @@ mod tests {
 
     #[tokio::test]
     async fn save_then_switch_roundtrip_restores_exact_auth_json() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("roundtrip");
-        let _h = EnvVarGuard::set("HOME", &tmp);
+        let _h = override_home(&tmp);
 
         // Account A logged in → save it.
         write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
@@ -1133,9 +1133,9 @@ mod tests {
 
     #[test]
     fn resave_same_account_upserts_not_duplicates() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("upsert");
-        let _h = EnvVarGuard::set("HOME", &tmp);
+        let _h = override_home(&tmp);
 
         write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
         save_current_account(CliApp::Codex).unwrap();
@@ -1147,9 +1147,9 @@ mod tests {
 
     #[test]
     fn delete_only_touches_the_store() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("delete-store");
-        let _h = EnvVarGuard::set("HOME", &tmp);
+        let _h = override_home(&tmp);
 
         write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
         save_current_account(CliApp::Codex).unwrap();
@@ -1168,9 +1168,9 @@ mod tests {
 
     #[tokio::test]
     async fn switch_unknown_id_errors() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("switch-unknown");
-        let _h = EnvVarGuard::set("HOME", &tmp);
+        let _h = override_home(&tmp);
         assert!(switch_account("no-such-id".into()).await.is_err());
     }
 
@@ -1178,9 +1178,9 @@ mod tests {
     #[tokio::test]
     async fn switched_auth_json_is_0600() {
         use std::os::unix::fs::PermissionsExt;
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("perms");
-        let _h = EnvVarGuard::set("HOME", &tmp);
+        let _h = override_home(&tmp);
 
         write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
         save_current_account(CliApp::Codex).unwrap();
@@ -1196,9 +1196,9 @@ mod tests {
 
     #[tokio::test]
     async fn codex_home_env_redirects_credential_path() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("codex-home-env");
-        let _h = EnvVarGuard::set("HOME", &tmp);
+        let _h = override_home(&tmp);
         let custom = tmp.join("relocated-codex");
         std::fs::create_dir_all(&custom).unwrap();
         let _ch = EnvVarGuard::set("CODEX_HOME", &custom);
@@ -1243,9 +1243,9 @@ mod tests {
 
     #[test]
     fn storage_warning_fires_only_for_keyring_or_auto() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("store-mode");
-        let _h = EnvVarGuard::set("HOME", &tmp);
+        let _h = override_home(&tmp);
         let cfg = tmp.join(".codex/config.toml");
         std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
 
@@ -1261,9 +1261,9 @@ mod tests {
 
     #[test]
     fn mark_relogin_sets_and_clears_flag() {
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let tmp = tempdir("mark-relogin");
-        let _h = EnvVarGuard::set("HOME", &tmp);
+        let _h = override_home(&tmp);
 
         write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
         save_current_account(CliApp::Codex).unwrap();

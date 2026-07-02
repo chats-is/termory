@@ -18,6 +18,36 @@ pub(crate) mod testutils {
     use std::sync::Mutex;
     pub static HOME_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Serialize env-mutating tests, tolerating poison: a test that
+    /// panicked already failed on its own — letting the poison cascade
+    /// turns ONE failure into dozens of PoisonError noise for every
+    /// later test in the queue (seen on the first CI run).
+    pub fn lock_home() -> std::sync::MutexGuard<'static, ()> {
+        HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Redirect every home-derived path to `dir` for the guard's
+    /// lifetime — cross-platform: sets HOME (unix resolvers) AND
+    /// USERPROFILE (`dirs::home_dir` reads it on Windows, where HOME
+    /// is ignored), and UNSETS XDG_CONFIG_HOME / XDG_DATA_HOME
+    /// (GitHub's ubuntu runners preset them, which leaks the runner's
+    /// real ~/.config into XDG-honoring resolvers while HOME points at
+    /// the tempdir). Hold `lock_home()` while using it.
+    pub struct HomeOverride {
+        _guards: Vec<EnvVarGuard>,
+    }
+    pub fn override_home(dir: impl AsRef<std::ffi::OsStr>) -> HomeOverride {
+        let dir = dir.as_ref();
+        HomeOverride {
+            _guards: vec![
+                EnvVarGuard::set("HOME", dir),
+                EnvVarGuard::set("USERPROFILE", dir),
+                EnvVarGuard::unset("XDG_CONFIG_HOME"),
+                EnvVarGuard::unset("XDG_DATA_HOME"),
+            ],
+        }
+    }
+
     /// Panic-safe override of a process env var, restored on drop. Hold
     /// `HOME_LOCK` while using it so concurrent tests never observe the
     /// temporary value (the var resolvers read process-global state).

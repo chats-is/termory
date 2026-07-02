@@ -1757,9 +1757,9 @@ mod tests {
 
     #[test]
     fn credential_cli_for_path_matches_relocated_codex_home() {
-        use crate::testutils::{EnvVarGuard, HOME_LOCK};
+        use crate::testutils::{lock_home, EnvVarGuard};
         use std::path::Path;
-        let _g = HOME_LOCK.lock().unwrap();
+        let _g = lock_home();
         let _e = EnvVarGuard::set("CODEX_HOME", "/custom/cdx");
 
         // auth.json directly under the relocated CODEX_HOME maps to Codex
