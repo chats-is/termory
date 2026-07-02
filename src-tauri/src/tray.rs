@@ -35,6 +35,7 @@ use crate::providers::{
     set_opencode_default, CliApp, Provider,
 };
 use crate::sessions::{AppSession, ClaudeWorkStatus};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{
     menu::{
@@ -143,6 +144,43 @@ const REGION_START: usize = 2;
 /// macOS, while in-place splicing updates it live.
 static RECENT_REGION: Mutex<Option<(Menu<Wry>, usize)>> = Mutex::new(None);
 
+/// The installed-CLI map the VISIBLE menu reflects. Stored only AFTER
+/// a successful `set_menu` (`do_rebuild_menu_with`) / tray `install` —
+/// storing earlier would let a failed rebuild claim the new set and
+/// permanently defeat the staleness check below. Refresh paths compare
+/// a fresh probe against it: a difference means a CLI was
+/// installed/removed since the menu was built, so the per-CLI provider
+/// submenus (and the New Session rows) are stale — only a full rebuild
+/// refreshes those (the in-place splice covers just the recent
+/// region). `None` until the first build.
+static INSTALLED: Mutex<Option<HashMap<CliApp, bool>>> = Mutex::new(None);
+
+/// Whether the visible menu was built with a DIFFERENT installed set
+/// than `current`. Main-thread only (reads the cache the main-thread
+/// builds).
+fn menu_installed_stale(current: &HashMap<CliApp, bool>) -> bool {
+    INSTALLED
+        .lock()
+        .map(|g| g.as_ref() != Some(current))
+        .unwrap_or(false)
+}
+
+/// Compare `installed` against what the visible menu was built with and
+/// do a full rebuild when they differ. Returns true when the stale path
+/// ran (rebuild attempted — on failure INSTALLED stays stale, so the
+/// next refresh retries). MUST run on the main thread. The single
+/// owner of the "menu reflects the installed set" invariant — both
+/// `commit_recent` and `refresh_installed_with` route through here.
+fn rebuild_if_installed_stale(app: &AppHandle, installed: &HashMap<CliApp, bool>) -> bool {
+    if !menu_installed_stale(installed) {
+        return false;
+    }
+    if let Err(err) = do_rebuild_menu_with(app, installed.clone()) {
+        log::error!("tray installed-set rebuild failed: {err}");
+    }
+    true
+}
+
 /// Compose a CLI row title from its base + (when shown) the cached
 /// plan/quota suffix: "Claude Code · Official (Max) · 🟢 12% 5h · …".
 fn cli_row_title(base: &str, shows_quota: bool, cli: CliApp, labels: &TrayLabels) -> String {
@@ -250,7 +288,8 @@ const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
 
 /// Install the tray icon. Called once from `setup()`.
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
-    let menu = build_menu(app)?;
+    let installed = detect_installed_clis();
+    let menu = build_menu(app, &installed)?;
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .tooltip("Termory");
@@ -292,6 +331,11 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             }
         })
         .build(app)?;
+    // The tray (and its menu) is live — only now may the cache claim the
+    // visible menu reflects `installed` (see the INSTALLED invariant).
+    if let Ok(mut g) = INSTALLED.lock() {
+        *g = Some(installed);
+    }
     Ok(())
 }
 
@@ -406,9 +450,23 @@ pub fn rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
 }
 
 fn do_rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
+    do_rebuild_menu_with(app, detect_installed_clis())
+}
+
+/// Full rebuild from an already-probed installed map (callers that just
+/// paid for the probe pass it in, so the main thread doesn't re-probe —
+/// `detect_installed_clis` can spawn a shell per missing CLI). INSTALLED
+/// is stored only after `set_menu` succeeds: on any failure the cache
+/// keeps the OLD set, `menu_installed_stale` stays true, and the next
+/// refresh retries the rebuild instead of believing a menu that was
+/// never shown.
+fn do_rebuild_menu_with(app: &AppHandle, installed: HashMap<CliApp, bool>) -> tauri::Result<()> {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let menu = build_menu(app)?;
+        let menu = build_menu(app, &installed)?;
         tray.set_menu(Some(menu))?;
+        if let Ok(mut g) = INSTALLED.lock() {
+            *g = Some(installed);
+        }
     }
     Ok(())
 }
@@ -418,6 +476,19 @@ fn do_rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
 /// (watcher / `scan_all_sessions`); skips the rebuild when nothing changed
 /// so active CLI use doesn't churn the menu on every file event.
 pub fn refresh_recent(app: &AppHandle, sessions: &[AppSession]) {
+    refresh_recent_with(app, sessions, detect_installed_clis());
+}
+
+/// `refresh_recent` from an already-probed installed map — the watcher's
+/// install branch just ran the probe via `refresh_installed`, so its
+/// fall-through rescan hands the result here instead of probing the
+/// same PATH (and possibly spawning the same fallback shells) twice in
+/// one burst.
+pub fn refresh_recent_with(
+    app: &AppHandle,
+    sessions: &[AppSession],
+    installed: HashMap<CliApp, bool>,
+) {
     let mut recent = select_recent_state(sessions);
     // Join live Claude work-status onto the recent rows. The FS read
     // stays on the CALLER's thread (watcher / async runtime), like the
@@ -436,38 +507,78 @@ pub fn refresh_recent(app: &AppHandle, sessions: &[AppSession]) {
     // menu.
     // Filesystem PATH probing stays on the CALLER's thread (watcher /
     // async runtime) so the queued main-thread task is lean.
-    let installed_clis = installed_cli_list();
     let handle = app.clone();
-    let queued = app.run_on_main_thread(move || commit_recent(&handle, &installed_clis, recent));
+    let queued = app.run_on_main_thread(move || commit_recent(&handle, &installed, recent));
     if let Err(err) = queued {
         log::error!("tray recent update queue failed: {err}");
     }
 }
 
-/// Installed CLIs, for the tray submenus. PATH probing — kept on the
-/// caller thread, off the queued main-thread task.
-fn installed_cli_list() -> Vec<CliApp> {
-    let installed = detect_installed_clis();
+/// The terminal-launchable subset of an installed map, for the recent
+/// region (recent-session resume, New Session) — excludes the Claude
+/// Desktop GUI app, which isn't terminal-launchable.
+fn terminal_clis(installed: &HashMap<CliApp, bool>) -> Vec<CliApp> {
     CliApp::all()
         .into_iter()
-        // Terminal flows (recent-session resume, New Session) only — exclude
-        // the Claude Desktop GUI app, which isn't terminal-launchable.
         .filter(|c| c.is_cli() && installed.get(c).copied().unwrap_or(false))
         .collect()
 }
 
 /// Store `recent` (when changed) and splice the dynamic region in place,
-/// falling back to a full rebuild. MUST run on the main thread (queued
-/// like every other menu mutation, so concurrent refreshers serialize).
-fn commit_recent(app: &AppHandle, installed_clis: &[CliApp], recent: RecentState) {
-    match RECENT.lock() {
-        Ok(mut guard) if *guard != recent => *guard = recent.clone(),
-        _ => return, // unchanged (or poisoned) → no update
+/// falling back to a full rebuild. When the installed-CLI set differs
+/// from what the menu was built with (a CLI was installed/removed), do
+/// a FULL rebuild instead — the splice can't refresh the per-CLI
+/// provider submenus. MUST run on the main thread (queued like every
+/// other menu mutation, so concurrent refreshers serialize).
+fn commit_recent(app: &AppHandle, installed: &HashMap<CliApp, bool>, recent: RecentState) {
+    let recent_changed = match RECENT.lock() {
+        Ok(mut guard) if *guard != recent => {
+            *guard = recent.clone();
+            true
+        }
+        Ok(_) => false,
+        Err(_) => return, // poisoned → no update
+    };
+    if rebuild_if_installed_stale(app, installed) {
+        return; // build_menu reads the just-stored RECENT — no splice needed
     }
-    if !update_recent_region(app, installed_clis, &recent) {
+    if !recent_changed {
+        return;
+    }
+    if !update_recent_region(app, &terminal_clis(installed), &recent) {
         if let Err(err) = do_rebuild_menu(app) {
             log::error!("tray recent rebuild failed: {err}");
         }
+    }
+}
+
+/// A CLI binary dir (or Claude Desktop's config dir) just changed —
+/// re-probe the installed set and, when it no longer matches what the
+/// menu was built with, do a full rebuild so the new CLI's provider
+/// submenu (and its New Session rows) appear without waiting for a
+/// provider mutation. Called from the filesystem watcher's
+/// install-detection branch; the PATH probe runs on the caller's
+/// thread, the compare + rebuild are queued on the main thread.
+/// Returns the probed map so the caller can reuse it (the watcher
+/// hands it to `refresh_recent_with` for the same burst's rescan).
+pub fn refresh_installed(app: &AppHandle) -> HashMap<CliApp, bool> {
+    let installed = detect_installed_clis();
+    refresh_installed_with(app, installed.clone());
+    installed
+}
+
+/// Compare an already-probed installed map against the menu and rebuild
+/// when stale — the entry point for callers that ran the probe
+/// themselves (the `detect_clis` IPC hands its result over so a
+/// Providers-page Recheck also refreshes the tray, at no extra probe
+/// cost).
+pub fn refresh_installed_with(app: &AppHandle, installed: HashMap<CliApp, bool>) {
+    let handle = app.clone();
+    let queued = app.run_on_main_thread(move || {
+        rebuild_if_installed_stale(&handle, &installed);
+    });
+    if let Err(err) = queued {
+        log::error!("tray installed refresh queue failed: {err}");
     }
 }
 
@@ -482,7 +593,7 @@ fn commit_recent(app: &AppHandle, installed_clis: &[CliApp], recent: RecentState
 /// so the base list is never stale.
 pub fn refresh_work_status(app: &AppHandle) {
     let statuses = crate::sessions::claude_work_statuses();
-    let installed_clis = installed_cli_list();
+    let installed = detect_installed_clis();
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let mut recent = match RECENT.lock() {
@@ -490,7 +601,7 @@ pub fn refresh_work_status(app: &AppHandle) {
             Err(_) => return,
         };
         attach_work_statuses(&mut recent, &statuses);
-        commit_recent(&handle, &installed_clis, recent);
+        commit_recent(&handle, &installed, recent);
     });
 }
 
@@ -965,7 +1076,7 @@ fn build_recent_region(
     Ok(region)
 }
 
-fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
+fn build_menu(app: &AppHandle, installed: &HashMap<CliApp, bool>) -> tauri::Result<Menu<Wry>> {
     let providers: Vec<Provider> = config::read_providers()
         .ok()
         .and_then(|v| serde_json::from_value(v).ok())
@@ -982,18 +1093,16 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let open = MenuItemBuilder::with_id("tray:open", &labels.open).build(app)?;
     menu = menu.item(&open).item(&PredefinedMenuItem::separator(app)?);
 
-    // Only surface CLIs actually installed on this machine — same probe the
-    // Providers page uses (`detect_clis`), so the two agree. Consumed by both
-    // the "New session" groups below and the per-CLI provider submenus.
-    let installed = detect_installed_clis();
-
+    // Only surface CLIs actually installed on this machine (`installed` is
+    // the caller's `detect_installed_clis()` probe — same one the Providers
+    // page uses, so the two agree). The CALLER stores it into INSTALLED
+    // after `set_menu` succeeds; build_menu itself never touches the cache
+    // (a build that fails or is never shown must not claim the new set).
+    //
     // Terminal flows (recent region + New Session) take only real CLIs;
     // the provider-switch submenu loop below uses the full CliApp::all()
     // (including Claude Desktop) with its own per-CLI install gate.
-    let installed_clis: Vec<CliApp> = CliApp::all()
-        .into_iter()
-        .filter(|c| c.is_cli() && installed.get(c).copied().unwrap_or(false))
-        .collect();
+    let installed_clis = terminal_clis(installed);
 
     let recent = RECENT.lock().map(|g| g.clone()).unwrap_or_default();
     let region = build_recent_region(app, &labels, &installed_clis, &recent)?;

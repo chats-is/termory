@@ -110,12 +110,18 @@ async fn search_all_sessions(query: String) -> Result<Vec<SearchHit>, String> {
 /// and before every action so newly-installed CLIs surface without
 /// an app restart.
 #[tauri::command]
-async fn detect_clis() -> Result<std::collections::HashMap<String, bool>, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+async fn detect_clis(
+    app: tauri::AppHandle,
+) -> Result<std::collections::HashMap<String, bool>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
         let map = detect_installed_clis();
+        // The page just paid for a fresh probe — hand it to the tray so a
+        // Providers-page Recheck also updates the menu (compare + rebuild
+        // only when the installed set actually changed).
+        tray::refresh_installed_with(&app, map.clone());
         let serialized = map
             .into_iter()
-            .map(|(app, installed)| (cli_app_key(app).to_string(), installed))
+            .map(|(cli, installed)| (cli_app_key(cli).to_string(), installed))
             .collect();
         Ok(serialized)
     })

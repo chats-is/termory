@@ -171,6 +171,24 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
         }
     }
 
+    // Claude Desktop install detection: its marker is the config dir
+    // itself (created on the app's first run), which can't be watched
+    // before it exists — so watch the PARENT dir non-recursively and
+    // name-filter events to `Claude*` direct children in the routing
+    // (`event_touches_claude_desktop`). These parents (`~/Library/
+    // Application Support` / `%LOCALAPPDATA%`) are busy shared dirs, so
+    // they deliberately do NOT go through the generic
+    // `event_touches_install` path-prefix match.
+    let claude_desktop_parents = crate::claude_desktop::install_watch_parents();
+    for path in &claude_desktop_parents {
+        if !path.exists() {
+            continue;
+        }
+        if let Err(err) = watcher.watch(path, RecursiveMode::NonRecursive) {
+            log::warn!("watcher skip claude-desktop target {path:?}: {err}");
+        }
+    }
+
     let inner = Arc::new(Mutex::new(WatcherInner {
         watcher,
         dynamic_paths: HashSet::new(),
@@ -207,14 +225,25 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
             // event so the frontend re-runs detect_clis. Independent
             // of the session rescan below — these paths usually don't
             // overlap with session storage.
-            if events
-                .iter()
-                .any(|e| event_touches_install(e, &install_targets))
-            {
+            let installed_probe = if events.iter().any(|e| {
+                event_touches_install(e, &install_targets)
+                    || event_touches_claude_desktop(e, &claude_desktop_parents)
+            }) {
                 if let Err(err) = app_handle.emit(CLI_INSTALL_CHANGED_EVENT, ()) {
                     log::warn!("watcher install-changed emit failed: {err}");
                 }
-            }
+                // The tray gates its per-CLI submenus on the installed
+                // set too — re-probe and rebuild it when the set
+                // changed, so a fresh install shows up without waiting
+                // for a provider mutation. (The probe runs here on the
+                // watcher thread; only the compare + rebuild queue on
+                // the main thread.) Keep the probed map: the rescan
+                // below hands it to `refresh_recent_with` so the same
+                // burst doesn't probe PATH twice.
+                Some(crate::tray::refresh_installed(&app_handle))
+            } else {
+                None
+            };
 
             // Credential routing: a change to a CLI's OAuth credential
             // file means a login / logout / token refresh just happened
@@ -235,8 +264,16 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
             // If every event in the burst touched only noise files
             // (SQLite WAL/SHM, OS metadata), there's nothing to re-scan
             // for. Skip without rescanning — otherwise we'd churn on
-            // database internals after every read.
-            if !events.iter().any(event_has_relevant_path) {
+            // database internals after every read. Direct children of
+            // the Claude Desktop watch parents are excluded too: they
+            // are install signals only (handled above), and without the
+            // exclusion every other app's activity in ~/Library/
+            // Application Support / %LOCALAPPDATA% would trigger a full
+            // session rescan.
+            if !events
+                .iter()
+                .any(|e| event_has_relevant_path(e, &claude_desktop_parents))
+            {
                 continue;
             }
 
@@ -256,8 +293,16 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
 
                     // Keep the tray's "recent sessions" list current — the
                     // tray is the always-visible surface, so this runs
-                    // unconditionally.
-                    crate::tray::refresh_recent(&app_handle, &result.records);
+                    // unconditionally. Reuse the install branch's probe
+                    // when it ran (one PATH probe per burst, not two).
+                    match installed_probe {
+                        Some(installed) => crate::tray::refresh_recent_with(
+                            &app_handle,
+                            &result.records,
+                            installed,
+                        ),
+                        None => crate::tray::refresh_recent(&app_handle, &result.records),
+                    }
 
                     // Skip the frontend emit when the main window is hidden
                     // (close-to-tray): nobody's looking, so serializing the
@@ -319,7 +364,7 @@ fn event_credential_clis(event: &notify::Event) -> Vec<crate::providers::CliApp>
         .collect()
 }
 
-fn event_has_relevant_path(event: &notify::Event) -> bool {
+fn event_has_relevant_path(event: &notify::Event, ignore_children_of: &[PathBuf]) -> bool {
     event.paths.iter().any(|path| {
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             return false;
@@ -328,6 +373,15 @@ fn event_has_relevant_path(event: &notify::Event) -> bool {
             || name.ends_with("-shm")
             || name.ends_with("-journal")
             || name == ".DS_Store"
+        {
+            return false;
+        }
+        // The Claude Desktop watch parents (and their direct children)
+        // carry no session data — those events exist only to feed the
+        // install-detection branch, never a rescan.
+        if ignore_children_of
+            .iter()
+            .any(|p| path == p || path.parent() == Some(p.as_path()))
         {
             return false;
         }
@@ -490,6 +544,28 @@ fn event_touches_install(event: &notify::Event, targets: &[(PathBuf, RecursiveMo
         .any(|path| targets.iter().any(|(target, _)| path.starts_with(target)))
 }
 
+/// True if `event` marks Claude Desktop's config dir appearing or
+/// disappearing: a DIRECT `Claude*` child of one of the watched parent
+/// dirs (`claude_desktop::install_watch_parents`). Unlike the bin-dir
+/// targets this is name-filtered — the parents are busy shared dirs
+/// (`~/Library/Application Support` / `%LOCALAPPDATA%`), and a bare
+/// path-prefix match would re-run install detection (PATH probes,
+/// possible shell spawns) on every other app's activity there.
+fn event_touches_claude_desktop(event: &notify::Event, parents: &[PathBuf]) -> bool {
+    event.paths.iter().any(|path| {
+        parents.iter().any(|parent| {
+            path.parent() == Some(parent.as_path())
+                && path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    // The `Claude*` marker rule is owned by claude_desktop
+                    // (shared with its Windows dir resolution) so it can't
+                    // drift from what `is_installed` actually checks.
+                    .is_some_and(crate::claude_desktop::is_install_marker_name)
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,6 +584,79 @@ mod tests {
         assert!(result.contains(&PathBuf::from("/abs/one")));
         assert!(result.contains(&PathBuf::from("/abs/two")));
         assert!(!result.contains(&PathBuf::from("relative/path")));
+    }
+
+    #[test]
+    fn event_has_relevant_path_ignores_claude_desktop_parent_children() {
+        fn ev(paths: &[&str]) -> notify::Event {
+            let mut e = notify::Event::default();
+            e.paths = paths.iter().map(PathBuf::from).collect();
+            e
+        }
+        let parents = vec![PathBuf::from("/Users/x/Library/Application Support")];
+        // Unrelated apps' direct children under the busy shared parent
+        // must NOT trigger a session rescan (they're install-signal
+        // territory only).
+        assert!(!event_has_relevant_path(
+            &ev(&["/Users/x/Library/Application Support/Slack"]),
+            &parents
+        ));
+        // Neither the Claude marker itself (install branch handles it)…
+        assert!(!event_has_relevant_path(
+            &ev(&["/Users/x/Library/Application Support/Claude"]),
+            &parents
+        ));
+        // …nor an event on the watched parent dir itself.
+        assert!(!event_has_relevant_path(
+            &ev(&["/Users/x/Library/Application Support"]),
+            &parents
+        ));
+        // Real session data stays relevant.
+        assert!(event_has_relevant_path(
+            &ev(&["/Users/x/.claude/projects/p/s.jsonl"]),
+            &parents
+        ));
+        // Noise names stay filtered regardless.
+        assert!(!event_has_relevant_path(
+            &ev(&["/Users/x/.codex/state_5.sqlite-wal"]),
+            &parents
+        ));
+    }
+
+    #[test]
+    fn event_touches_claude_desktop_matches_direct_claude_children_only() {
+        fn ev(paths: &[&str]) -> notify::Event {
+            let mut e = notify::Event::default();
+            e.paths = paths.iter().map(PathBuf::from).collect();
+            e
+        }
+        let parents = vec![PathBuf::from("/Users/x/Library/Application Support")];
+        // The config dir appearing / disappearing is the install marker.
+        assert!(event_touches_claude_desktop(
+            &ev(&["/Users/x/Library/Application Support/Claude"]),
+            &parents
+        ));
+        assert!(event_touches_claude_desktop(
+            &ev(&["/Users/x/Library/Application Support/Claude-3p"]),
+            &parents
+        ));
+        // Other apps' dirs in the same busy parent must NOT re-trigger
+        // install detection.
+        assert!(!event_touches_claude_desktop(
+            &ev(&["/Users/x/Library/Application Support/Slack"]),
+            &parents
+        ));
+        // Deep events inside the Claude dir aren't the marker (and the
+        // non-recursive watch filters them out anyway).
+        assert!(!event_touches_claude_desktop(
+            &ev(&["/Users/x/Library/Application Support/Claude/claude_desktop_config.json"]),
+            &parents
+        ));
+        // Unrelated roots never match.
+        assert!(!event_touches_claude_desktop(
+            &ev(&["/Users/x/Claude"]),
+            &parents
+        ));
     }
 
     #[test]

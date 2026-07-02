@@ -527,17 +527,15 @@ fn restore_snapshots(snapshots: &[FileSnapshot]) -> Result<(), Box<dyn Error>> {
 fn current_paths() -> Result<Paths, Box<dyn Error>> {
     #[cfg(target_os = "macos")]
     {
-        let app_support = home()?.join("Library").join("Application Support");
+        let root = config_parent_dir()?;
         Ok(paths_from_dirs(
-            &app_support.join("Claude"),
-            &app_support.join("Claude-3p"),
+            &root.join("Claude"),
+            &root.join("Claude-3p"),
         ))
     }
     #[cfg(windows)]
     {
-        let local = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home().unwrap_or_default().join("AppData").join("Local"));
+        let local = config_parent_dir()?;
         // Resolve the real install folders — the Windows dir isn't always
         // exactly `Claude` / `Claude-3p` (cc-switch fuzzy-matches `Claude*`),
         // so pick the actual folder when the exact name is absent.
@@ -552,9 +550,54 @@ fn current_paths() -> Result<Paths, Box<dyn Error>> {
     }
 }
 
+/// The per-OS parent dir Claude Desktop's config dir(s) live directly
+/// under (`Claude` / `Claude-3p`). THE single source for that root —
+/// `current_paths` resolves the config dirs from it and
+/// `install_watch_parents` hands it to the filesystem watcher, so the
+/// dir the watcher watches is by construction the dir `is_installed`
+/// checks.
+#[cfg(target_os = "macos")]
+fn config_parent_dir() -> Result<PathBuf, Box<dyn Error>> {
+    Ok(home()?.join("Library").join("Application Support"))
+}
+
+#[cfg(windows)]
+fn config_parent_dir() -> Result<PathBuf, Box<dyn Error>> {
+    Ok(std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().unwrap_or_default().join("AppData").join("Local")))
+}
+
 #[cfg(any(target_os = "macos", windows))]
 fn home() -> Result<PathBuf, Box<dyn Error>> {
     dirs::home_dir().ok_or_else(|| "home directory not available".into())
+}
+
+/// Parent dir(s) whose direct `Claude*` child marks a Claude Desktop
+/// install (`is_installed` checks the config dir's existence, and the
+/// app creates it on first run). The filesystem watcher watches these
+/// non-recursively so an install/uninstall — the config dir appearing
+/// or disappearing — triggers install re-detection; the dir itself
+/// can't be watched before it exists. Empty on unsupported platforms.
+pub(crate) fn install_watch_parents() -> Vec<PathBuf> {
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        config_parent_dir().map(|p| vec![p]).unwrap_or_default()
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        Vec::new()
+    }
+}
+
+/// Whether a direct-child NAME under `install_watch_parents()` is a
+/// Claude Desktop config dir (`Claude`, `Claude-3p`, versioned
+/// `Claude*` variants). Owned here so the watcher's install routing
+/// (`event_touches_claude_desktop`) and the Windows dir resolution
+/// (`windows_claude_dir_matches`) share ONE rule and can't drift —
+/// same ownership pattern as `quota::credential_cli_for_path`.
+pub(crate) fn is_install_marker_name(name: &str) -> bool {
+    name.starts_with("Claude")
 }
 
 /// Whether a `%LOCALAPPDATA%` child folder name is Claude Desktop's config
@@ -564,7 +607,7 @@ fn home() -> Result<PathBuf, Box<dyn Error>> {
 /// `pick_windows_claude_dir` filter. Pure (so it's unit-tested off-Windows).
 #[cfg_attr(not(windows), allow(dead_code))]
 fn windows_claude_dir_matches(name: &str, threep: bool) -> bool {
-    name.starts_with("Claude") && name.contains("-3p") == threep
+    is_install_marker_name(name) && name.contains("-3p") == threep
 }
 
 /// Resolve Claude Desktop's Windows config dir for `threep`: the exact
