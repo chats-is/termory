@@ -570,7 +570,7 @@ fn config_parent_dir() -> Result<PathBuf, Box<dyn Error>> {
 
 #[cfg(any(target_os = "macos", windows))]
 fn home() -> Result<PathBuf, Box<dyn Error>> {
-    dirs::home_dir().ok_or_else(|| "home directory not available".into())
+    crate::home_dir().ok_or_else(|| "home directory not available".into())
 }
 
 /// Parent dir(s) whose direct `Claude*` child marks a Claude Desktop

@@ -26,13 +26,20 @@ pub(crate) mod testutils {
         HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// `\` → `/` so path assertions written with unix separators hold
+    /// on Windows too (scan output uses the OS-native separator).
+    pub fn norm(p: &str) -> String {
+        p.replace('\\', "/")
+    }
+
     /// Redirect every home-derived path to `dir` for the guard's
-    /// lifetime — cross-platform: sets HOME (unix resolvers) AND
-    /// USERPROFILE (`dirs::home_dir` reads it on Windows, where HOME
-    /// is ignored), and UNSETS XDG_CONFIG_HOME / XDG_DATA_HOME
-    /// (GitHub's ubuntu runners preset them, which leaks the runner's
-    /// real ~/.config into XDG-honoring resolvers while HOME points at
-    /// the tempdir). Hold `lock_home()` while using it.
+    /// lifetime: sets HOME — which `crate::home_dir()` honors in TEST
+    /// builds on EVERY OS (plain `dirs::home_dir()` on Windows resolves
+    /// via SHGetKnownFolderPath and ignores the environment entirely) —
+    /// and UNSETS XDG_CONFIG_HOME / XDG_DATA_HOME (GitHub's ubuntu
+    /// runners preset them, which leaks the runner's real ~/.config
+    /// into XDG-honoring resolvers while HOME points at the tempdir).
+    /// Hold `lock_home()` while using it.
     pub struct HomeOverride {
         _guards: Vec<EnvVarGuard>,
     }
@@ -41,7 +48,6 @@ pub(crate) mod testutils {
         HomeOverride {
             _guards: vec![
                 EnvVarGuard::set("HOME", dir),
-                EnvVarGuard::set("USERPROFILE", dir),
                 EnvVarGuard::unset("XDG_CONFIG_HOME"),
                 EnvVarGuard::unset("XDG_DATA_HOME"),
             ],
@@ -75,6 +81,27 @@ pub(crate) mod testutils {
             }
         }
     }
+}
+
+/// Crate-wide home resolution — every path derivation routes through
+/// here instead of calling `dirs::home_dir()` directly.
+///
+/// In TEST builds a set `HOME` env var wins on EVERY OS: plain
+/// `dirs::home_dir()` on Windows resolves via
+/// `SHGetKnownFolderPath(FOLDERID_Profile)` and ignores the
+/// environment entirely, so without this override the HOME-redirect
+/// test infrastructure silently read/wrote the REAL user profile on
+/// Windows (cross-test contamination — found by the first Windows CI
+/// runs). Release builds compile without `cfg(test)`, so production
+/// behavior is exactly `dirs::home_dir()` everywhere.
+pub(crate) fn home_dir() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(h) = std::env::var_os("HOME") {
+        if !h.is_empty() {
+            return Some(std::path::PathBuf::from(h));
+        }
+    }
+    dirs::home_dir()
 }
 
 use providers::{
@@ -763,7 +790,7 @@ pub fn run() {
     // never depends on logging setup. Mirrors where `config.json` and
     // `providers.json` live so users have one place to look at when
     // reporting a bug.
-    let logs_dir = dirs::home_dir().map(|h| h.join(".termory").join("logs"));
+    let logs_dir = crate::home_dir().map(|h| h.join(".termory").join("logs"));
 
     let log_plugin = {
         let mut builder = tauri_plugin_log::Builder::new()

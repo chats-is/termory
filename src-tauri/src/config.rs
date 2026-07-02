@@ -26,7 +26,7 @@ const FAVORITES_FILE_NAME: &str = "favorites.json";
 const ACCOUNTS_FILE_NAME: &str = "accounts.json";
 
 fn app_dir() -> Result<PathBuf, Box<dyn Error>> {
-    let home = dirs::home_dir().ok_or("home directory not available")?;
+    let home = crate::home_dir().ok_or("home directory not available")?;
     Ok(home.join(APP_DIR_NAME))
 }
 

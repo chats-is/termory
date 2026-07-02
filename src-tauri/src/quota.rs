@@ -210,7 +210,7 @@ type Credential = (
 /// Claude Code's config dir — `sessions::claude_config_root` (the
 /// scanners' single source: `CLAUDE_CONFIG_DIR`, else `~/.claude`).
 fn claude_config_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| crate::sessions::claude_config_root(&h))
+    crate::home_dir().map(|h| crate::sessions::claude_config_root(&h))
 }
 
 /// Read the Claude Code OAuth credential. Source priority mirrors
@@ -848,7 +848,7 @@ type GeminiCredential = (
 /// `~/.gemini/oauth_creds.json` — gemini-cli `storage.ts:22`
 /// (OAUTH_FILE under the global gemini dir).
 fn gemini_oauth_creds_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".gemini").join("oauth_creds.json"))
+    crate::home_dir().map(|h| h.join(".gemini").join("oauth_creds.json"))
 }
 
 /// Read the Gemini CLI OAuth credential. Source priority mirrors

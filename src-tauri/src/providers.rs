@@ -127,7 +127,7 @@ impl CliApp {
 fn cli_search_paths(tool: &str) -> Vec<std::path::PathBuf> {
     use std::path::PathBuf;
     let mut paths: Vec<PathBuf> = Vec::new();
-    let home = dirs::home_dir().unwrap_or_default();
+    let home = crate::home_dir().unwrap_or_default();
 
     // Cross-platform user-level dir — `~/.npm-global/bin` resolves to
     // `%USERPROFILE%\.npm-global\bin` on Windows; uncommon but valid
@@ -2459,7 +2459,7 @@ pub async fn detect_gateway_apis(base_url: &str, api_key: &str) -> GatewayCapabi
 // ===================================================================
 
 fn home() -> Result<PathBuf, Box<dyn Error>> {
-    dirs::home_dir().ok_or_else(|| "home directory not available".into())
+    crate::home_dir().ok_or_else(|| "home directory not available".into())
 }
 
 fn ensure_parent_dir(path: &Path) -> std::io::Result<()> {

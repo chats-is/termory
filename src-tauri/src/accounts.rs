@@ -427,7 +427,7 @@ struct CodexLive {
 // ===================================================================
 
 fn list_claude_accounts() -> Result<AccountsState, Box<dyn Error>> {
-    let home = dirs::home_dir().ok_or("home directory not available")?;
+    let home = crate::home_dir().ok_or("home directory not available")?;
     let path = home.join(".claude.json");
     if !path.exists() {
         return Ok(AccountsState {
@@ -473,7 +473,7 @@ fn list_claude_accounts() -> Result<AccountsState, Box<dyn Error>> {
 // ===================================================================
 
 fn list_gemini_accounts() -> Result<AccountsState, Box<dyn Error>> {
-    let home = dirs::home_dir().ok_or("home directory not available")?;
+    let home = crate::home_dir().ok_or("home directory not available")?;
     let path = home.join(".gemini").join("oauth_creds.json");
     if !path.exists() {
         return Ok(AccountsState {
@@ -866,7 +866,7 @@ fn title_case_plan(raw: &str) -> String {
 /// unset / unreadable) → `None`. Reads the same `CODEX_HOME`-aware path
 /// that the credential writers use.
 fn codex_storage_warning() -> Option<String> {
-    let home = dirs::home_dir()?;
+    let home = crate::home_dir()?;
     let text = std::fs::read_to_string(codex_root(&home).join("config.toml")).ok()?;
     for line in text.lines() {
         let line = line.trim();

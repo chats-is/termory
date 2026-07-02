@@ -59,7 +59,7 @@ pub struct FollowResult {
 }
 
 fn home() -> Result<PathBuf, Box<dyn Error>> {
-    dirs::home_dir().ok_or_else(|| "home directory not available".into())
+    crate::home_dir().ok_or_else(|| "home directory not available".into())
 }
 
 fn state_db_path() -> Result<PathBuf, Box<dyn Error>> {

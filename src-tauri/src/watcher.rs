@@ -402,7 +402,7 @@ fn event_has_relevant_path(event: &notify::Event, ignore_children_of: &[PathBuf]
 /// Dynamic watches (project cwds derived from session metadata) are
 /// layered on top via `WatcherHandle::reconfigure_dynamic`.
 fn watch_targets() -> Vec<PathBuf> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return Vec::new();
     };
 
@@ -429,7 +429,7 @@ fn watch_targets() -> Vec<PathBuf> {
 /// Non-existent paths are silently skipped at registration time.
 /// Mirrors the install-side of `cli_search_paths` in `providers.rs`.
 fn install_watch_targets() -> Vec<(PathBuf, RecursiveMode)> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return Vec::new();
     };
     let mut targets: Vec<(PathBuf, RecursiveMode)> = Vec::new();
@@ -695,7 +695,7 @@ mod tests {
         // A relocated CODEX_HOME puts auth.json outside any `.codex` dir;
         // the CODEX_HOME env var must be consulted so the watcher can still
         // trigger a quota refresh when that file changes.
-        let _g = crate::testutils::HOME_LOCK.lock().unwrap();
+        let _g = crate::testutils::lock_home();
         let _e = crate::testutils::EnvVarGuard::set("CODEX_HOME", "/custom/cdx");
         assert_eq!(
             event_credential_clis(&ev(&["/custom/cdx/auth.json"])),

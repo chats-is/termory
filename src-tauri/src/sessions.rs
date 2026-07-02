@@ -872,7 +872,7 @@ fn gemini_project_folders_in(tmp: &Path) -> Vec<Project> {
 /// by `worktree` — projects WITH sessions come from `add_record_projects` (by
 /// the session's `directory`), so the two don't overlap.
 fn opencode_empty_projects() -> Vec<Project> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return Vec::new();
     };
     let db = opencode_data_dir(&home).join("opencode.db");
@@ -1173,7 +1173,7 @@ fn codex_scan_extract(path: &Path) -> ScanExtract {
 }
 
 fn scan_codex() -> Result<Vec<AppSession>, Box<dyn Error>> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return Ok(Vec::new());
     };
     let state_db = crate::providers::codex_root(&home).join("state_5.sqlite");
@@ -1418,7 +1418,7 @@ fn claude_scan_extract(path: &Path) -> ScanExtract {
 }
 
 fn scan_claude() -> Result<Vec<AppSession>, Box<dyn Error>> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return Ok(Vec::new());
     };
     let root = claude_config_root(&home).join("projects");
@@ -1489,7 +1489,7 @@ fn scan_claude_projects(root: &Path) -> Result<Vec<AppSession>, Box<dyn Error>> 
 }
 
 fn scan_gemini() -> Result<Vec<AppSession>, Box<dyn Error>> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return Ok(Vec::new());
     };
     let tmp_dir = home.join(".gemini").join("tmp");
@@ -1535,7 +1535,7 @@ fn gemini_project_root(dir: &Path) -> Option<String> {
 }
 
 fn scan_opencode() -> Result<Vec<AppSession>, Box<dyn Error>> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return Ok(Vec::new());
     };
     let root = opencode_data_dir(&home);
@@ -1582,7 +1582,7 @@ fn scan_memory(project_cwds: &HashSet<String>) -> Result<Vec<AppSession>, Box<dy
     // We mirror that: scan cwd, then only ascend if a .git is found at cwd or
     // any ancestor up to (but not including) $HOME. Walk stops at the git root
     // (inclusive).
-    let home_for_walk = dirs::home_dir();
+    let home_for_walk = crate::home_dir();
     for cwd in project_cwds {
         let cwd_path = Path::new(cwd);
         push_project_root_instruction_files(cwd_path, &mut sessions);
@@ -1617,7 +1617,7 @@ fn scan_memory(project_cwds: &HashSet<String>) -> Result<Vec<AppSession>, Box<dy
 
 fn scan_global_instructions() -> Vec<AppSession> {
     let mut sessions = Vec::new();
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return sessions;
     };
 
@@ -1765,7 +1765,7 @@ fn push_tagged_instruction_file(
 // are discovered recursively.
 fn scan_claude_rules(project_cwds: &HashSet<String>) -> Vec<AppSession> {
     let mut sessions = Vec::new();
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return sessions;
     };
 
@@ -1803,7 +1803,7 @@ fn scan_claude_rules(project_cwds: &HashSet<String>) -> Vec<AppSession> {
 }
 
 fn scan_claude_memory() -> Result<Vec<AppSession>, Box<dyn Error>> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return Ok(Vec::new());
     };
     let root = claude_config_root(&home).join("projects");
@@ -1843,7 +1843,7 @@ fn scan_claude_memory() -> Result<Vec<AppSession>, Box<dyn Error>> {
 }
 
 fn scan_codex_memory() -> Vec<AppSession> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return Vec::new();
     };
     let root = crate::providers::codex_root(&home).join("memories");
@@ -1864,7 +1864,7 @@ fn scan_codex_memory() -> Vec<AppSession> {
 }
 
 fn scan_gemini_memory() -> Vec<AppSession> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return Vec::new();
     };
     let mut sessions = Vec::new();
@@ -1949,7 +1949,7 @@ fn scan_skills(project_cwds: &HashSet<String>) -> Result<Vec<AppSession>, Box<dy
 
 fn scan_claude_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
     let mut sessions = Vec::new();
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return sessions;
     };
 
@@ -1991,7 +1991,7 @@ fn scan_claude_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
 
 fn scan_codex_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
     let mut sessions = Vec::new();
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return sessions;
     };
 
@@ -2032,7 +2032,7 @@ fn scan_codex_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
 
 fn scan_gemini_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
     let mut sessions = Vec::new();
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return sessions;
     };
 
@@ -2100,7 +2100,7 @@ fn scan_gemini_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
 
 fn scan_opencode_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
     let mut sessions = Vec::new();
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return sessions;
     };
 
@@ -2141,7 +2141,7 @@ fn scan_opencode_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
 // this location.
 fn scan_agents_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
     let mut sessions = Vec::new();
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return sessions;
     };
 
@@ -2416,7 +2416,7 @@ const CLAUDE_STATUS_MAX_AGE: std::time::Duration = std::time::Duration::from_sec
 /// (Claude never run, or the `BG_SESSIONS` feature is off so nothing is
 /// written). Cheap — a handful of tiny single-line JSON files.
 pub fn claude_work_statuses() -> HashMap<String, ClaudeWorkStatus> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return HashMap::new();
     };
     claude_work_statuses_in(&claude_config_root(&home).join("sessions"))
@@ -2555,7 +2555,7 @@ fn claude_projects_root() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
         return Some(Path::new(&dir).join("projects"));
     }
-    dirs::home_dir().map(|h| h.join(".claude").join("projects"))
+    crate::home_dir().map(|h| h.join(".claude").join("projects"))
 }
 
 /// A frontend-supplied id / relative name is safe to `join` under a bounded
@@ -2612,7 +2612,7 @@ fn sanitize_claude_path(path: &str) -> Result<String, String> {
 /// rewritten by any running claude, so a concurrent write would clash). So we
 /// only READ it here, to warn the user when the moved sessions won't show yet.
 pub fn claude_project_registered(path: &str) -> bool {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return false;
     };
     claude_project_registered_in(&home.join(".claude.json"), path)
@@ -3000,7 +3000,7 @@ fn delete_claude_memory_in(projects: &Path, project: &str, rel: &str) -> Result<
 
 /// `~/.gemini/tmp` — Gemini's per-project temp root.
 fn gemini_tmp_root() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".gemini").join("tmp"))
+    crate::home_dir().map(|h| h.join(".gemini").join("tmp"))
 }
 
 /// Permanently delete one Gemini session — `<project-tmp-dir>/<rel>` (rel =
@@ -3067,7 +3067,7 @@ fn delete_gemini_project_in(tmp: &Path, project: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 fn codex_state_db_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| crate::providers::codex_root(&h).join("state_5.sqlite"))
+    crate::home_dir().map(|h| crate::providers::codex_root(&h).join("state_5.sqlite"))
 }
 
 fn open_codex_rw(db: &Path) -> Result<Connection, String> {
@@ -3141,7 +3141,7 @@ pub fn delete_codex_project(project: &str) -> Result<(), String> {
 /// ~/.codex/memories/ (bounded by `is_safe_rel`). These are standalone .md
 /// files; Termory never reads memories_1.sqlite, so there's nothing to sync.
 pub fn delete_codex_memory(rel: &str) -> Result<(), String> {
-    let root = dirs::home_dir()
+    let root = crate::home_dir()
         .map(|h| crate::providers::codex_root(&h).join("memories"))
         .ok_or("cannot locate ~/.codex/memories")?;
     delete_codex_memory_in(&root, rel)
@@ -3356,7 +3356,7 @@ pub fn migrate_codex_project(
 // ---------------------------------------------------------------------------
 
 fn opencode_db_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| opencode_data_dir(&h).join("opencode.db"))
+    crate::home_dir().map(|h| opencode_data_dir(&h).join("opencode.db"))
 }
 
 fn open_opencode_rw(db: &Path) -> Result<Connection, String> {
@@ -3698,7 +3698,7 @@ fn parse_doc_file(path: &Path, source: &str) -> Result<SessionDetail, Box<dyn Er
 }
 
 fn derive_memory_project_label(path: &Path) -> String {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return String::new();
     };
 
@@ -5642,7 +5642,7 @@ fn parse_codex_session(path: &Path, id: &str) -> Result<SessionDetail, Box<dyn E
 }
 
 fn codex_thread_from_state(id: &str) -> Result<AppSession, Box<dyn Error>> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home_dir() else {
         return Err("home directory not found".into());
     };
     let path = crate::providers::codex_root(&home).join("state_5.sqlite");
@@ -14320,6 +14320,11 @@ mod tests {
 
     #[test]
     fn decode_claude_project_slug_translates_dashes_to_slashes() {
+        // The `-`-prefixed slug is unix-shaped and decodes through
+        // PathBuf, which joins with `\` on Windows; real Windows slugs
+        // are `C--Users-…` shaped (Windows-shaped decode coverage is a
+        // follow-up), so this case asserts on unix only.
+        #[cfg(unix)]
         assert_eq!(
             decode_claude_project_slug("-Users-john-Documents-foo"),
             "/Users/john/Documents/foo"
@@ -14552,6 +14557,12 @@ mod tests {
         assert!(delete_gemini_project_in(tmp.path(), "/Users/me/nope").is_err());
     }
 
+    // Fixtures + assertions are unix-path-shaped: on Windows
+    // fs::canonicalize returns a \\?\-prefixed path (different slug
+    // than production's stripped one) and JSON-escapes the
+    // backslashes, so the substring asserts can't hold verbatim.
+    // Windows-shaped migrate coverage is a tracked follow-up.
+    #[cfg(unix)]
     #[test]
     fn migrate_claude_project_copies_sessions_memory_and_rewrites_cwd() {
         let tmp = TestDir::new("migrate");
@@ -14616,6 +14627,12 @@ mod tests {
         assert!(old_dir.join("aaa.jsonl").exists());
     }
 
+    // Fixtures + assertions are unix-path-shaped: on Windows
+    // fs::canonicalize returns a \\?\-prefixed path (different slug
+    // than production's stripped one) and JSON-escapes the
+    // backslashes, so the substring asserts can't hold verbatim.
+    // Windows-shaped migrate coverage is a tracked follow-up.
+    #[cfg(unix)]
     #[test]
     fn migrate_claude_session_in_copies_one_session_and_rewrites_cwd() {
         let tmp = TestDir::new("migrate-sess");
@@ -14675,6 +14692,12 @@ mod tests {
         }
     }
 
+    // Fixtures + assertions are unix-path-shaped: on Windows
+    // fs::canonicalize returns a \\?\-prefixed path (different slug
+    // than production's stripped one) and JSON-escapes the
+    // backslashes, so the substring asserts can't hold verbatim.
+    // Windows-shaped migrate coverage is a tracked follow-up.
+    #[cfg(unix)]
     #[test]
     fn migrate_claude_memory_in_copies_md_preserving_subpath_and_rejects_stray() {
         let tmp = TestDir::new("migrate-mem");
@@ -14730,6 +14753,12 @@ mod tests {
     // several sessions, a companion <id>/ dir with subagents/ + tool-results/,
     // a nested memory subtree, plus the regenerable index + .DS_Store. Verifies
     // MOVE mode (delete_old) yields a complete new dir AND removes the old one.
+    // Fixtures + assertions are unix-path-shaped: on Windows
+    // fs::canonicalize returns a \\?\-prefixed path (different slug
+    // than production's stripped one) and JSON-escapes the
+    // backslashes, so the substring asserts can't hold verbatim.
+    // Windows-shaped migrate coverage is a tracked follow-up.
+    #[cfg(unix)]
     #[test]
     fn migrate_claude_project_move_mode_is_complete_and_removes_old() {
         let tmp = TestDir::new("migrate-e2e");
@@ -15261,7 +15290,7 @@ mod tests {
 
         let mut out = Vec::new();
         push_memory_files_recursive(base, base, "label", "codex", &mut out);
-        let mut paths: Vec<String> = out.iter().map(|s| s.id.clone()).collect();
+        let mut paths: Vec<String> = out.iter().map(|s| crate::testutils::norm(&s.id)).collect();
         paths.sort();
         assert_eq!(paths, vec!["skills/skill-a/SKILL.md", "top.md"]);
         for entry in &out {
@@ -15425,7 +15454,7 @@ mod tests {
             &["skills"],
             &mut out,
         );
-        let mut paths: Vec<String> = out.iter().map(|s| s.id.clone()).collect();
+        let mut paths: Vec<String> = out.iter().map(|s| crate::testutils::norm(&s.id)).collect();
         paths.sort();
         assert_eq!(paths, vec!["rollout_summaries/r1.md", "top.md"]);
         for entry in &out {
@@ -15458,7 +15487,10 @@ mod tests {
         assert_eq!(out[0].source, "Skill");
         assert_eq!(out[0].preview, "claude");
         assert_eq!(out[0].project, "~/.claude/skills");
-        assert_eq!(out[0].title, "git-workflow/SKILL.md");
+        assert_eq!(
+            crate::testutils::norm(&out[0].title),
+            "git-workflow/SKILL.md"
+        );
     }
 
     #[test]
@@ -15475,7 +15507,9 @@ mod tests {
 
         let entry = sessions
             .iter()
-            .find(|s| s.path.ends_with("my-skill/SKILL.md") && s.project == cwd)
+            .find(|s| {
+                crate::testutils::norm(&s.path).ends_with("my-skill/SKILL.md") && s.project == cwd
+            })
             .expect("project-level Claude skill should be picked up");
         assert_eq!(entry.source, "Skill");
         // OpenCode also reads .claude/skills/, so the entry is tagged with both.
@@ -15496,7 +15530,7 @@ mod tests {
 
         let entry = sessions
             .iter()
-            .find(|s| s.path.ends_with("dbg/SKILL.md") && s.project == cwd)
+            .find(|s| crate::testutils::norm(&s.path).ends_with("dbg/SKILL.md") && s.project == cwd)
             .expect("project-level Codex skill should be picked up");
         assert_eq!(entry.source, "Skill");
         assert_eq!(entry.preview, "codex");
@@ -15516,7 +15550,9 @@ mod tests {
 
         let entry = sessions
             .iter()
-            .find(|s| s.path.ends_with("trace/SKILL.md") && s.project == cwd)
+            .find(|s| {
+                crate::testutils::norm(&s.path).ends_with("trace/SKILL.md") && s.project == cwd
+            })
             .expect("project-level Gemini skill should be picked up");
         assert_eq!(entry.source, "Skill");
         assert_eq!(entry.preview, "gemini");
@@ -15536,7 +15572,9 @@ mod tests {
 
         let entry = sessions
             .iter()
-            .find(|s| s.path.ends_with("review/SKILL.md") && s.project == cwd)
+            .find(|s| {
+                crate::testutils::norm(&s.path).ends_with("review/SKILL.md") && s.project == cwd
+            })
             .expect("project-level OpenCode skill should be picked up");
         assert_eq!(entry.source, "Skill");
         assert_eq!(entry.preview, "opencode");
@@ -15571,7 +15609,10 @@ mod tests {
 
         let entry = sessions
             .iter()
-            .find(|s| s.path.ends_with("debug-deploy/SKILL.md") && s.project == cwd)
+            .find(|s| {
+                crate::testutils::norm(&s.path).ends_with("debug-deploy/SKILL.md")
+                    && s.project == cwd
+            })
             .expect("project-level .agents/skills/ entry should be picked up");
         assert_eq!(entry.source, "Skill");
         // Codex, Gemini CLI, and OpenCode all officially read this path.
@@ -15609,14 +15650,14 @@ mod tests {
 
         let style = sessions
             .iter()
-            .find(|s| s.path.ends_with("style.md") && s.project == cwd)
+            .find(|s| crate::testutils::norm(&s.path).ends_with("style.md") && s.project == cwd)
             .expect("project-level rule style.md should be picked up");
         assert_eq!(style.source, "Memory");
         assert_eq!(style.preview, "claude");
 
         let nested_entry = sessions
             .iter()
-            .find(|s| s.path.ends_with("topics/ts.md") && s.project == cwd)
+            .find(|s| crate::testutils::norm(&s.path).ends_with("topics/ts.md") && s.project == cwd)
             .expect("nested rule ts.md should be picked up recursively");
         assert_eq!(nested_entry.source, "Memory");
         assert_eq!(nested_entry.preview, "claude");
