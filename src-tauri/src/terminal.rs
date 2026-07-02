@@ -237,60 +237,110 @@ pub fn detect() -> Vec<TerminalOption> {
     v
 }
 
+/// A (program, args) pair for a Linux terminal launch — cfg-free so
+/// the construction is unit-testable off-Linux (same rationale as
+/// `WindowsLaunch` below; the Linux runtime never runs on the dev
+/// machine).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, PartialEq)]
+struct LinuxLaunch {
+    program: &'static str,
+    args: Vec<String>,
+}
+
+/// `<pre_args…> bash -lc '<shell_cmd>; exec $SHELL'` — the arg vector
+/// every bash-launching terminal takes (they differ only in pre_args).
+/// `exec $SHELL` keeps the window open after the CLI exits.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+fn bash_lc_args(pre_args: &[&str], shell_cmd: &str) -> Vec<String> {
+    let run = format!("{shell_cmd}; exec $SHELL");
+    let mut args: Vec<String> = pre_args.iter().map(|s| s.to_string()).collect();
+    args.extend(["bash".to_string(), "-lc".to_string(), run]);
+    args
+}
+
+/// Pure command construction for a KNOWN Linux terminal id; `None` for
+/// "auto"/unknown (the caller walks `linux_fallback_commands`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_open_command(id: &str, shell_cmd: &str) -> Option<LinuxLaunch> {
+    let launch = |program: &'static str, pre: &[&str]| LinuxLaunch {
+        program,
+        args: bash_lc_args(pre, shell_cmd),
+    };
+    Some(match id {
+        "gnome-terminal" => launch("gnome-terminal", &["--"]),
+        "konsole" => launch("konsole", &["-e"]),
+        // xfce4-terminal wants the whole command as one `--command`
+        // string; single quotes in the payload are POSIX-escaped.
+        "xfce4-terminal" => LinuxLaunch {
+            program: "xfce4-terminal",
+            args: vec![
+                "--command".to_string(),
+                format!(
+                    "bash -lc '{}; exec $SHELL'",
+                    shell_cmd.replace('\'', "'\\''")
+                ),
+            ],
+        },
+        "alacritty" => launch("alacritty", &["-e"]),
+        "kitty" => launch("kitty", &[]),
+        "wezterm" => launch("wezterm", &["start", "--"]),
+        "xterm" => launch("xterm", &["-e"]),
+        _ => return None,
+    })
+}
+
+/// The "auto"/unknown fallback candidates, tried in order until one
+/// spawns.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_fallback_commands(shell_cmd: &str) -> Vec<LinuxLaunch> {
+    ["x-terminal-emulator", "gnome-terminal", "xterm"]
+        .into_iter()
+        .map(|program| LinuxLaunch {
+            program,
+            args: bash_lc_args(
+                if program == "gnome-terminal" {
+                    &["--"]
+                } else {
+                    &["-e"]
+                },
+                shell_cmd,
+            ),
+        })
+        .collect()
+}
+
 #[cfg(target_os = "linux")]
 pub fn open(id: &str, project: Option<&str>, cmd: &str) -> Result<(), String> {
     let shell_cmd = with_cd(project, cmd);
-    match id {
-        "gnome-terminal" => cli("gnome-terminal", &["--"], &shell_cmd),
-        "konsole" => cli("konsole", &["-e"], &shell_cmd),
-        "xfce4-terminal" => xfce(&shell_cmd),
-        "alacritty" => cli("alacritty", &["-e"], &shell_cmd),
-        "kitty" => cli("kitty", &[], &shell_cmd),
-        "wezterm" => cli("wezterm", &["start", "--"], &shell_cmd),
-        "xterm" => cli("xterm", &["-e"], &shell_cmd),
-        // "auto" / unknown → first available emulator.
-        _ => {
-            let run = format!("{shell_cmd}; exec $SHELL");
-            for bin in ["x-terminal-emulator", "gnome-terminal", "xterm"] {
-                let mut c = Command::new(bin);
-                if bin == "gnome-terminal" {
-                    c.args(["--", "bash", "-lc", &run]);
-                } else {
-                    c.args(["-e", "bash", "-lc", &run]);
-                }
-                if c.spawn().is_ok() {
-                    return Ok(());
-                }
-            }
-            Err("no terminal emulator found".to_string())
+    if let Some(launch) = linux_open_command(id, &shell_cmd) {
+        let mut c = Command::new(launch.program);
+        c.args(&launch.args);
+        return spawn(c);
+    }
+    // "auto" / unknown → first available emulator.
+    for launch in linux_fallback_commands(&shell_cmd) {
+        let mut c = Command::new(launch.program);
+        c.args(&launch.args);
+        if c.spawn().is_ok() {
+            return Ok(());
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn xfce(shell_cmd: &str) -> Result<(), String> {
-    // xfce4-terminal wants the whole command as one `-x`/`--command` string.
-    let run = format!(
-        "bash -lc '{}; exec $SHELL'",
-        shell_cmd.replace('\'', "'\\''")
-    );
-    spawn_args("xfce4-terminal", &["--command", &run])
+    Err("no terminal emulator found".to_string())
 }
 
 // ===================================================================
-// Shared POSIX CLI launcher (macOS + Linux)
+// Shared POSIX CLI launcher (macOS)
 // ===================================================================
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn cli(bin: &str, pre_args: &[&str], shell_cmd: &str) -> Result<(), String> {
-    // Keep the window open after the CLI exits.
-    let run = format!("{shell_cmd}; exec $SHELL");
     let mut c = Command::new(bin);
-    c.args(pre_args).args(["bash", "-lc", &run]);
+    c.args(bash_lc_args(pre_args, shell_cmd));
     spawn(c)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn spawn_args(bin: &str, args: &[&str]) -> Result<(), String> {
     let mut c = Command::new(bin);
     c.args(args);
@@ -419,6 +469,55 @@ mod tests {
     fn detect_always_offers_auto() {
         let opts = detect();
         assert_eq!(opts.first().map(|o| o.id.as_str()), Some("auto"));
+    }
+
+    // linux_open_command / linux_fallback_commands are cfg-free so
+    // these run on every dev OS — the Linux launch path otherwise only
+    // executes on real Linux hardware.
+    #[test]
+    fn linux_open_command_builds_known_terminal_launches() {
+        let l = linux_open_command("gnome-terminal", "cd '/p' && claude").unwrap();
+        assert_eq!(l.program, "gnome-terminal");
+        assert_eq!(
+            l.args,
+            vec!["--", "bash", "-lc", "cd '/p' && claude; exec $SHELL"]
+        );
+        // kitty takes no pre-args; wezterm needs `start --`.
+        let l = linux_open_command("kitty", "claude").unwrap();
+        assert_eq!(l.args, vec!["bash", "-lc", "claude; exec $SHELL"]);
+        let l = linux_open_command("wezterm", "claude").unwrap();
+        assert_eq!(
+            l.args,
+            vec!["start", "--", "bash", "-lc", "claude; exec $SHELL"]
+        );
+        // auto / unknown → fallback list, not a single launch.
+        assert!(linux_open_command("auto", "claude").is_none());
+    }
+
+    #[test]
+    fn linux_open_command_xfce_wraps_the_whole_command_and_escapes_quotes() {
+        let l = linux_open_command("xfce4-terminal", "echo 'hi'").unwrap();
+        assert_eq!(l.program, "xfce4-terminal");
+        assert_eq!(
+            l.args,
+            vec!["--command", "bash -lc 'echo '\\''hi'\\''; exec $SHELL'"]
+        );
+    }
+
+    #[test]
+    fn linux_fallback_commands_try_three_emulators_in_order() {
+        let cands = linux_fallback_commands("claude");
+        assert_eq!(
+            cands.iter().map(|c| c.program).collect::<Vec<_>>(),
+            vec!["x-terminal-emulator", "gnome-terminal", "xterm"]
+        );
+        assert_eq!(
+            cands[0].args,
+            vec!["-e", "bash", "-lc", "claude; exec $SHELL"]
+        );
+        // gnome-terminal separates its command with `--`, not `-e`.
+        assert_eq!(cands[1].args[0], "--");
+        assert_eq!(cands[2].args[0], "-e");
     }
 
     // windows_open_command is deliberately cfg-free so these run on

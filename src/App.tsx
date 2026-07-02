@@ -474,6 +474,15 @@ export function App() {
       setSessions((prev) => {
         // sessionKey-keyed removal (records.ts has the OpenCode
         // shared-path rationale + the regression test).
+        //
+        // CONTRACT: the tombstone mutation is a DELIBERATE side effect
+        // inside the updater — tombstones must derive from `prev`, the
+        // only always-current list under concurrent watcher scans, and
+        // it's safe ONLY because Set.add is idempotent (StrictMode
+        // double-invokes updaters). Don't add non-idempotent effects
+        // here; the pure alternative (latest-ref mirror + value write)
+        // was evaluated and rejected — it trades this documented
+        // contract for a real scan/delete interleaving race.
         const { kept, tombstones } = removeMatching(prev, match);
         for (const k of tombstones) tombstonesRef.current.add(k);
         return kept;
@@ -511,7 +520,9 @@ export function App() {
       setSessions((prev) => {
         // Tombstones only keys the remap actually changed — the
         // metadata-only (Codex) case must NOT tombstone; rationale +
-        // regression test live on records.ts `remapMatching`.
+        // regression test live on records.ts `remapMatching`. Side
+        // effect inside the updater is deliberate and idempotent — see
+        // the CONTRACT note on removeRecordsLocally above.
         const { next, tombstones } = remapMatching(prev, match, remap);
         for (const k of tombstones) tombstonesRef.current.add(k);
         return next;
