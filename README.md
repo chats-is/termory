@@ -12,7 +12,7 @@
 
 </div>
 
-Termory brings **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode** together in one window. Browse every past session, memory file, and skill from all your tools, keep the messages worth saving, search across everything at once, and resume any session right back in your terminal. When you want a different model or platform, switch any CLI to another API provider in a click — no config files, no copy-pasting keys. It runs natively on macOS, Linux, and Windows, and your history never leaves your machine.
+Termory brings **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode** together in one window. Browse every past session, memory file, and skill from all your tools, keep the messages worth saving, search across everything at once, and resume any session right back in your terminal. When you want a different model or platform, switch any CLI — or the **Claude Desktop** app — to another API provider in a click — no config files, no copy-pasting keys. It runs natively on macOS, Linux, and Windows, and your history never leaves your machine.
 
 ## Documentation
 

@@ -2,7 +2,7 @@
 
 > 中文版见 [GUIDE.zh-CN.md](GUIDE.zh-CN.md)
 
-Termory brings the history your terminal AI coding tools — **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode** — already store on your machine (sessions, memory, skills) into one window to browse, with no import or setup (it just reads the tools' existing local data). On top of browsing history, it also lets you manage and switch each tool's API providers in a click. For installation and downloads, see the [README](../README.md).
+Termory brings the history your terminal AI coding tools — **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode** — already store on your machine (sessions, memory, skills) into one window to browse, with no import or setup (it just reads the tools' existing local data). On top of browsing history, it also lets you manage and switch each tool's API providers in a click — including **Claude Desktop**, the GUI app: it keeps no terminal history, but Termory switches it between its official login and third-party Anthropic-compatible providers the same way (macOS / Windows). For installation and downloads, see the [README](../README.md).
 
 ## Feature map
 
@@ -10,7 +10,7 @@ Termory has six destinations on the left activity rail (`⌘1`–`⌘6`), plus a
 
 | # | Destination | What it does |
 |---|-------------|--------------|
-| 1 | **[Providers](#1-providers)** | Manage each CLI's API providers and switch the active one; manage AI Gateways; view official quota. |
+| 1 | **[Providers](#1-providers)** | Manage each CLI's API providers and switch the active one; manage AI Gateways; view official quota; save and switch Codex accounts. |
 | 2 | **[Records](#2-records)** | Browse every session, memory file, and skill; resume, migrate, or delete them. |
 | 3 | **[Favorites](#3-favorites)** | Messages you've starred, saved as snapshots. |
 | 4 | **[Search](#4-search)** | Full-text search across all history, plus a `⌘K` quick-search palette. |
@@ -143,6 +143,10 @@ Bound gateways also appear in each CLI's provider list (view/activate only — e
 ### Official quota
 
 For a CLI logged in with an official subscription, the card shows your usage as donut rings (e.g. **5-hour** and **Weekly** windows), color-coded by pressure (🟢 < 75%, 🟡 ≥ 75%, 🔴 ≥ 90%). **Refresh usage** re-fetches it (with a short cooldown). Quota reads your existing official login only — it's hidden while a custom provider is active.
+
+### Official accounts (Codex multi-account)
+
+On the **Codex** tab, the Official card also manages multiple ChatGPT logins. **Save current** snapshots the live login; **Add account** starts a fresh `codex login` in your browser (cancellable — if you cancel or it fails, your previous login is restored). Each saved row shows the account's email, plan, and when its tokens were last refreshed. **Switch** restores a snapshot — Termory refreshes its tokens first, and an account whose login has expired is flagged **Re-login** instead of being written broken. Snapshots live in `~/.termory/accounts.json` (owner-only file permissions); Codex's own `auth.json` is only touched when you switch or add. For **Claude Code** and **Gemini** the card just shows which official account is currently logged in — saving and switching is Codex-only.
 
 ---
 

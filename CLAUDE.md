@@ -108,7 +108,7 @@ Current Tauri IPC commands (54 registered in `generate_handler!`), called from t
 - `detect_gateway_apis(baseUrl, apiKey)` — probe which API modes the gateway speaks (OpenAI `/v1/models`, OpenAI Responses `/v1/responses`, Anthropic `/v1/models`, Gemini `/v1beta/models`); returns `GatewayCapabilities`. Probes run concurrently and never spend tokens.
 
 **Codex multi-account management** (login snapshots saved to `~/.termory/accounts.json`, `{ "version": 1, "accounts": [...] }` — never writes Codex's own `auth.json` except on switch/login)
-- `list_accounts(app)` — returns `AccountsState { current, accounts, storageWarning }`: current live login + all saved snapshots with `active` + `needsRelogin` flags; Codex-only for now
+- `list_accounts(app)` — returns `AccountsState { current, accounts, storageWarning }`: current live login + all saved snapshots with `active` + `needsRelogin` flags. Snapshot MANAGEMENT (save/switch/delete/login) is Codex-only (frontend `isManaged = app === "codex"`); Claude and Gemini return a DISPLAY-ONLY `current` (Claude: `~/.claude.json` `oauthAccount` email/name; Gemini: `~/.gemini/oauth_creds.json` id_token JWT claims) with an empty `accounts` list
 - `save_account(app)` — snapshot the current live login into `accounts.json` (upsert by `id`)
 - `switch_account(id)` — restore a saved snapshot to `auth.json`, always attempt token refresh first; `AuthFailure` (4xx non-429) marks `needsRelogin: true` on the entry
 - `delete_account(id)` — remove a saved snapshot from `accounts.json` (never touches `auth.json`)

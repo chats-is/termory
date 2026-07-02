@@ -642,40 +642,6 @@ pub fn mark_account_relogin(id: &str, needed: bool) -> Result<(), Box<dyn Error>
     write_store(store)
 }
 
-/// Mirror of Codex `should_refresh_proactively` (`manager.rs:2520`).
-///
-/// Primary: parse `exp` from the access_token JWT. Refresh when
-/// `exp <= now + 5 min` (CHATGPT_ACCESS_TOKEN_REFRESH_WINDOW_MINUTES).
-/// Fallback: when the access_token has no parseable `exp`, refresh when
-/// `last_refresh < now - 8 days` (TOKEN_REFRESH_INTERVAL).
-/// No `last_refresh` and no `exp` → false (mirrors Codex returning false).
-#[allow(dead_code)]
-fn codex_should_refresh(doc: &JsonValue) -> bool {
-    if let Some(access_token) = doc.pointer("/tokens/access_token").and_then(|v| v.as_str()) {
-        if let Some(exp) = jwt_exp(access_token) {
-            return chrono::Utc::now().timestamp() >= exp - 5 * 60;
-        }
-    }
-    if let Some(s) = doc.get("last_refresh").and_then(|v| v.as_str()) {
-        if let Ok(last) = chrono::DateTime::parse_from_rfc3339(s) {
-            return last.with_timezone(&chrono::Utc)
-                < chrono::Utc::now() - chrono::Duration::days(8);
-        }
-    }
-    false
-}
-
-/// Decode only the `exp` Unix timestamp from a JWT payload (no signature
-/// verification). Mirrors `parse_jwt_expiration` in codex-rs `token_data.rs:130`.
-fn jwt_exp(jwt: &str) -> Option<i64> {
-    let payload_b64 = jwt.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload_b64)
-        .ok()?;
-    let claims: JsonValue = serde_json::from_slice(&bytes).ok()?;
-    claims.get("exp")?.as_i64()
-}
-
 #[allow(dead_code)]
 enum RefreshError {
     /// Token is permanently invalid (4xx from OAuth server, excluding 429).
@@ -1272,68 +1238,6 @@ mod tests {
 
         std::fs::write(&cfg, "# cli_auth_credentials_store = \"auto\"\n").unwrap();
         assert_eq!(codex_storage_warning(), None, "commented line is ignored");
-    }
-
-    // ── codex_should_refresh / jwt_exp ──────────────────────────────────────
-
-    fn make_doc(access_token: Option<&str>, last_refresh_days_ago: Option<i64>) -> JsonValue {
-        let mut doc = json!({});
-        if let Some(at) = access_token {
-            doc["tokens"] = json!({ "access_token": at });
-        }
-        if let Some(days) = last_refresh_days_ago {
-            let ts = chrono::Utc::now() - chrono::Duration::days(days);
-            doc["last_refresh"] = JsonValue::String(ts.to_rfc3339());
-        }
-        doc
-    }
-
-    #[test]
-    fn should_refresh_when_access_token_is_expired() {
-        // exp = 10 minutes ago → past the 5-minute window
-        let exp = (chrono::Utc::now() - chrono::Duration::minutes(10)).timestamp();
-        let at = fake_jwt(json!({ "exp": exp }));
-        assert!(codex_should_refresh(&make_doc(Some(&at), None)));
-    }
-
-    #[test]
-    fn should_refresh_when_access_token_expires_within_5_minutes() {
-        let exp = (chrono::Utc::now() + chrono::Duration::minutes(3)).timestamp();
-        let at = fake_jwt(json!({ "exp": exp }));
-        assert!(codex_should_refresh(&make_doc(Some(&at), None)));
-    }
-
-    #[test]
-    fn should_not_refresh_when_access_token_is_fresh() {
-        let exp = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp();
-        let at = fake_jwt(json!({ "exp": exp }));
-        assert!(!codex_should_refresh(&make_doc(Some(&at), None)));
-    }
-
-    #[test]
-    fn falls_back_to_last_refresh_when_no_exp() {
-        // No exp in token → use last_refresh (9 days ago → stale)
-        let at = fake_jwt(json!({ "sub": "user" }));
-        assert!(codex_should_refresh(&make_doc(Some(&at), Some(9))));
-    }
-
-    #[test]
-    fn should_not_refresh_when_last_refresh_is_recent() {
-        // No exp, last_refresh = 2 days ago → still within 8-day window
-        let at = fake_jwt(json!({ "sub": "user" }));
-        assert!(!codex_should_refresh(&make_doc(Some(&at), Some(2))));
-    }
-
-    #[test]
-    fn should_not_refresh_with_no_exp_and_no_last_refresh() {
-        // Mirrors Codex returning false when last_refresh is None
-        let at = fake_jwt(json!({ "sub": "user" }));
-        assert!(!codex_should_refresh(&make_doc(Some(&at), None)));
-    }
-
-    #[test]
-    fn should_not_refresh_with_no_tokens_and_no_last_refresh() {
-        assert!(!codex_should_refresh(&make_doc(None, None)));
     }
 
     #[test]
