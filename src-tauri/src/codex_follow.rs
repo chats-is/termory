@@ -325,7 +325,7 @@ fn rewrite_rollout_provider(path: &Path, target: &str) -> Result<bool, Box<dyn E
 fn map_locked(err: Box<dyn Error>) -> Box<dyn Error> {
     let msg = err.to_string();
     if msg.contains("locked") || msg.contains("busy") {
-        return "Codex state database is locked — quit any running Codex CLI and try again.".into();
+        return "Codex state database is locked — quit any running Codex and try again.".into();
     }
     err
 }

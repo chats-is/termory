@@ -85,11 +85,16 @@ struct SavedAccountView {
 // IPC entry points
 // ===================================================================
 
-/// List the live + saved official accounts for `app`. Phase 1 implements
-/// Codex; other apps return an empty state so the UI degrades cleanly.
+/// List the live + saved official accounts for `app`.
+/// Codex — full multi-account management.
+/// Claude / Gemini — display-only: reads the CLI's live credential file for
+///   current name / email (no saved accounts, no switching).
+/// Other apps — empty state.
 pub fn list_accounts(app: CliApp) -> Result<AccountsState, Box<dyn Error>> {
     match app {
         CliApp::Codex => list_codex_accounts(),
+        CliApp::Claude => list_claude_accounts(),
+        CliApp::Gemini => list_gemini_accounts(),
         _ => Ok(AccountsState {
             current: None,
             accounts: Vec::new(),
@@ -135,7 +140,17 @@ pub async fn switch_account(id: String) -> Result<(), Box<dyn Error>> {
 /// so it can be restored afterwards.
 ///
 /// On any failure the original auth.json is put back (rollback).
-pub async fn login_and_save_codex_account() -> Result<String, String> {
+
+/// Tauri-managed state allowing `cancel_codex_login` to abort an in-flight
+/// `login_and_save_codex_account` call.
+pub struct CodexLoginCancel(pub std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>);
+
+pub const CODEX_LOGIN_URL_EVENT: &str = "codex:login-url";
+
+pub async fn login_and_save_codex_account(
+    app: tauri::AppHandle,
+    cancel_state: &CodexLoginCancel,
+) -> Result<String, String> {
     let auth_path = codex_auth_path().map_err(|e| e.to_string())?;
     if let Some(parent) = auth_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -151,6 +166,10 @@ pub async fn login_and_save_codex_account() -> Result<String, String> {
 
     // Clear auth.json — codex's logout_with_revoke will find nothing to revoke.
     atomic_write_0600(&auth_path, b"{}").map_err(|e| e.to_string())?;
+
+    // Set up a cancel token so `cancel_codex_login` can interrupt the select!.
+    let cancel_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    *cancel_state.0.lock().unwrap() = Some(cancel_notify.clone());
 
     // Spawn `codex login` (non-interactive; the browser handles the UI).
     let mut child = match tokio::process::Command::new("codex")
@@ -172,33 +191,62 @@ pub async fn login_and_save_codex_account() -> Result<String, String> {
         }
     };
 
-    let mut stderr_pipe = child.stderr.take();
+    // Read stderr line-by-line; emit the auth URL as soon as we see it so
+    // the frontend can show a dialog without waiting for login to finish.
+    // The URL appears as a bare `https://…` line (per codex's
+    // `print_login_server_start` in cli/src/login.rs:113).
+    let stderr_pipe = child.stderr.take().expect("stderr piped");
+    let app_clone = app.clone();
+    let stderr_task: tokio::task::JoinHandle<String> = tokio::spawn(async move {
+        use tauri::Emitter as _;
+        use tokio::io::AsyncBufReadExt as _;
+        let reader = tokio::io::BufReader::new(stderr_pipe);
+        let mut lines = reader.lines();
+        let mut collected = String::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let trimmed = line.trim();
+            if trimmed.starts_with("https://") {
+                let _ = app_clone.emit(CODEX_LOGIN_URL_EVENT, trimmed.to_string());
+            }
+            if !collected.is_empty() {
+                collected.push('\n');
+            }
+            collected.push_str(trimmed);
+        }
+        collected
+    });
 
     // Wait up to 5 minutes for the browser login to complete.
     let status = tokio::select! {
         r = child.wait() => match r {
             Ok(s) => s,
             Err(e) => {
+                stderr_task.abort();
                 restore_auth(&auth_path, original_auth.as_deref());
+                *cancel_state.0.lock().unwrap() = None;
                 return Err(format!("codex login error: {e}"));
             }
         },
         _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
             let _ = child.kill().await;
+            stderr_task.abort();
             restore_auth(&auth_path, original_auth.as_deref());
+            *cancel_state.0.lock().unwrap() = None;
             return Err("codex login timed out after 5 minutes".into());
-        }
+        },
+        _ = cancel_notify.notified() => {
+            let _ = child.kill().await;
+            stderr_task.abort();
+            restore_auth(&auth_path, original_auth.as_deref());
+            *cancel_state.0.lock().unwrap() = None;
+            return Err("Login cancelled".into());
+        },
     };
+    *cancel_state.0.lock().unwrap() = None;
+
+    let stderr_msg = stderr_task.await.unwrap_or_default();
 
     if !status.success() {
-        let stderr_msg = if let Some(ref mut se) = stderr_pipe {
-            use tokio::io::AsyncReadExt as _;
-            let mut buf = String::new();
-            let _ = se.read_to_string(&mut buf).await;
-            buf
-        } else {
-            String::new()
-        };
         restore_auth(&auth_path, original_auth.as_deref());
         return Err(format!(
             "codex login failed (exit {}): {}",
@@ -222,7 +270,12 @@ pub async fn login_and_save_codex_account() -> Result<String, String> {
 
     // Restore the previously active account (writes its snapshot back to auth.json).
     if let Some(prev_id) = prev_active_id {
-        let _ = switch_account(prev_id).await;
+        if let Err(e) = switch_account(prev_id.clone()).await {
+            // Don't fail the overall operation — the new account was saved successfully.
+            // Mark the previous account as needing re-login so the UI reflects the issue.
+            log::warn!("Failed to restore previous account {prev_id}: {e}");
+            let _ = mark_account_relogin(&prev_id, true);
+        }
     }
 
     Ok(new_id)
@@ -250,6 +303,15 @@ fn auto_save_unsaved_live_codex_account() -> Result<Option<String>, Box<dyn Erro
     store.push(entry);
     write_store(store)?;
     Ok(Some(id.to_string()))
+}
+
+/// Abort an in-flight `login_and_save_codex_account` call by signalling its
+/// cancel token.  No-op when no login is in progress.
+pub async fn cancel_codex_login(cancel_state: &CodexLoginCancel) -> Result<(), String> {
+    if let Some(notify) = cancel_state.0.lock().unwrap().as_ref() {
+        notify.notify_one();
+    }
+    Ok(())
 }
 
 /// Restore auth.json from a snapshot, or remove it if there was none.
@@ -334,6 +396,83 @@ struct CodexLive {
     /// Full auth.json content, stored verbatim as the snapshot payload.
     raw: String,
 }
+
+// ===================================================================
+// Claude account (display-only — reads ~/.claude.json `oauthAccount`)
+// ===================================================================
+
+fn list_claude_accounts() -> Result<AccountsState, Box<dyn Error>> {
+    let home = dirs::home_dir().ok_or("home directory not available")?;
+    let path = home.join(".claude.json");
+    if !path.exists() {
+        return Ok(AccountsState { current: None, accounts: Vec::new(), storage_warning: None });
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let doc: serde_json::Value = serde_json::from_str(&content).unwrap_or(serde_json::Value::Null);
+    let oauth = doc.get("oauthAccount");
+    let email = oauth
+        .and_then(|o| o.get("emailAddress"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let name = oauth
+        .and_then(|o| o.get("displayName"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if email.is_none() && name.is_none() {
+        return Ok(AccountsState { current: None, accounts: Vec::new(), storage_warning: None });
+    }
+    Ok(AccountsState {
+        current: Some(CurrentAccount { name, email, plan: None, saved: true }),
+        accounts: Vec::new(),
+        storage_warning: None,
+    })
+}
+
+// ===================================================================
+// Gemini account (display-only — decodes id_token from oauth_creds.json)
+// ===================================================================
+
+fn list_gemini_accounts() -> Result<AccountsState, Box<dyn Error>> {
+    let home = dirs::home_dir().ok_or("home directory not available")?;
+    let path = home.join(".gemini").join("oauth_creds.json");
+    if !path.exists() {
+        return Ok(AccountsState { current: None, accounts: Vec::new(), storage_warning: None });
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let doc: serde_json::Value = serde_json::from_str(&content).unwrap_or(serde_json::Value::Null);
+    let id_token = doc.get("id_token").and_then(|v| v.as_str()).unwrap_or("");
+    let email = jwt_claim(id_token, "email");
+    let name = jwt_claim(id_token, "name");
+    if email.is_none() && name.is_none() {
+        return Ok(AccountsState { current: None, accounts: Vec::new(), storage_warning: None });
+    }
+    Ok(AccountsState {
+        current: Some(CurrentAccount { name, email, plan: None, saved: true }),
+        accounts: Vec::new(),
+        storage_warning: None,
+    })
+}
+
+/// Decode one string claim from a JWT payload (no signature verification —
+/// display only). Returns `None` if the JWT is malformed or the claim absent.
+fn jwt_claim(jwt: &str, claim: &str) -> Option<String> {
+    let payload_b64 = jwt.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    claims
+        .get(claim)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+// ===================================================================
+// Codex
+// ===================================================================
 
 fn read_codex_live() -> Result<Option<CodexLive>, Box<dyn Error>> {
     let path = codex_auth_path()?;

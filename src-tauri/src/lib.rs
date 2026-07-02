@@ -700,8 +700,18 @@ async fn delete_account(id: String) -> Result<(), String> {
 /// auto-save the resulting credential. Auth.json is cleared beforehand so
 /// the existing session is not revoked. Returns the new account's store id.
 #[tauri::command]
-async fn login_and_save_codex_account() -> Result<String, String> {
-    accounts::login_and_save_codex_account().await
+async fn login_and_save_codex_account(
+    app: tauri::AppHandle,
+    cancel_state: tauri::State<'_, accounts::CodexLoginCancel>,
+) -> Result<String, String> {
+    accounts::login_and_save_codex_account(app, &cancel_state).await
+}
+
+#[tauri::command]
+async fn cancel_codex_login(
+    cancel_state: tauri::State<'_, accounts::CodexLoginCancel>,
+) -> Result<(), String> {
+    accounts::cancel_codex_login(&cancel_state).await
 }
 
 #[tauri::command]
@@ -809,6 +819,7 @@ pub fn run() {
             switch_account,
             delete_account,
             login_and_save_codex_account,
+            cancel_codex_login,
             mark_account_relogin,
         ])
         .on_window_event(|window, event| {
@@ -844,6 +855,7 @@ pub fn run() {
             // `termory:sources-changed` whenever a watched source
             // directory mutates. Failure is non-fatal — the app still
             // works with only the launch-time scan.
+            app.manage(accounts::CodexLoginCancel(std::sync::Mutex::new(None)));
             let handle = app.handle().clone();
             match watcher::start(handle) {
                 Ok(watcher_handle) => {

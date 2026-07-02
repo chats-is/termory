@@ -3,9 +3,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { AlertTriangle, Plug, Plus, RadioTower } from "lucide-react";
+import { AlertTriangle, Check, Copy, Loader2, Plug, Plus, RadioTower, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   ACTIVE_STATE_REFRESH_EVENT,
@@ -127,8 +135,6 @@ const QUOTA_SUPPORTED: ReadonlySet<CliApp> = new Set([
   "codex",
   "gemini"
 ]);
-// CLIs whose official login can be saved / switched (backend accounts.rs).
-const ACCOUNTS_SUPPORTED: ReadonlySet<CliApp> = new Set<CliApp>(["codex"]);
 // Quota results survive route remounts (like cachedVersions). An entry
 // older than QUOTA_STALE_MS is silently re-fetched on the next entry
 // to the tab. Manual Refresh bypasses the stale window but is still
@@ -239,6 +245,12 @@ export function ProvidersPage({
   const [toggling, setToggling] = React.useState<string | null>(null);
   const [testing, setTesting] = React.useState<string | null>(null);
   const [settingDefault, setSettingDefault] = React.useState<string | null>(null);
+  // Codex "Add account" — state lives here so the button can live in the card.
+  const [codexLoggingIn, setCodexLoggingIn] = React.useState(false);
+  const [codexAccountTrigger, setCodexAccountTrigger] = React.useState(0);
+  const [activeReloginId, setActiveReloginId] = React.useState<string | null>(null);
+  const [codexLoginUrl, setCodexLoginUrl] = React.useState<string | null>(null);
+  const [codexLoginUrlCopied, setCodexLoginUrlCopied] = React.useState(false);
   // When set, the switch-time Codex "bring sessions along?" picker is open.
   // The prompt appears BEFORE activation; `activate` runs only after the user
   // decides (bring-along moves the selected projects first, then activates).
@@ -942,6 +954,38 @@ export function ProvidersPage({
     await performOfficial();
   };
 
+  // Unified handler for both "Add Account" (reloginId=undefined) and
+  // "Re-login" (reloginId=the saved account's id). Mutual exclusion is
+  // enforced by the codexLoggingIn guard so both buttons share one lock.
+  const handleCodexLogin = async (reloginId?: string) => {
+    if (codexLoggingIn) return;
+    setCodexLoggingIn(true);
+    setActiveReloginId(reloginId ?? null);
+    setCodexLoginUrl(null);
+    setCodexLoginUrlCopied(false);
+    const unlisten = await listen<string>("codex:login-url", (event) => {
+      setCodexLoginUrl(event.payload);
+    });
+    try {
+      await invoke<string>("login_and_save_codex_account");
+      toast.success(t("toast.accountAdded"));
+      void refreshQuota("codex", true);
+    } catch (err) {
+      const msg = String(err);
+      if (!msg.includes("Login cancelled")) {
+        toast.error(msg);
+      }
+    } finally {
+      unlisten();
+      setCodexLoggingIn(false);
+      setActiveReloginId(null);
+      setCodexLoginUrl(null);
+      setCodexLoginUrlCopied(false);
+      setCodexAccountTrigger((n) => n + 1);
+      void refreshActive();
+    }
+  };
+
   const testOne = async (target: Provider) => {
     setTesting(target.id);
     try {
@@ -1061,26 +1105,51 @@ export function ProvidersPage({
                     settingDefault={settingDefault === "__official__"}
                     version={versions[app]}
                     versionLoading={versionsLoading}
-                    quota={
-                      QUOTA_SUPPORTED.has(app) ? quotas[app] ?? null : undefined
-                    }
-                    quotaLoading={quotaLoading === app}
-                    quotaCooldown={quotaInCooldown}
-                    onRefreshQuota={
-                      QUOTA_SUPPORTED.has(app)
-                        ? () => void refreshQuota(app, true)
-                        : undefined
-                    }
+                    actions={app === "codex" ? (
+                      codexLoggingIn ? (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+                          <span className="text-sm text-muted-foreground">{t("providers.accountAdding")}</span>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void invoke("cancel_codex_login")}
+                          >
+                            {t("common.cancel")}
+                          </Button>
+                        </div>
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void handleCodexLogin()}
+                          className="shrink-0 gap-1.5"
+                        >
+                          <UserPlus className="size-3.5" />
+                          {t("providers.accountAdd")}
+                        </Button>
+                      )
+                    ) : undefined}
                     onSetDefault={() => void setOfficialAsDefault()}
                   />
                 </div>
-                {ACCOUNTS_SUPPORTED.has(app) && (
+                {QUOTA_SUPPORTED.has(app) && (
                   <OfficialAccountsSection
                     app={app}
                     onSwitched={() => {
                       void refreshActive();
-                      if (QUOTA_SUPPORTED.has(app)) void refreshQuota(app, true);
+                      void refreshQuota(app, true);
                     }}
+                    quota={quotas[app] ?? null}
+                    quotaLoading={quotaLoading === app}
+                    quotaCooldown={quotaInCooldown}
+                    onRefreshQuota={() => void refreshQuota(app, true)}
+                    externalTrigger={app === "codex" ? codexAccountTrigger : undefined}
+                    loginInProgress={app === "codex" ? codexLoggingIn : undefined}
+                    activeReloginId={app === "codex" ? activeReloginId : undefined}
+                    onRelogin={app === "codex" ? (id) => void handleCodexLogin(id) : undefined}
                   />
                 )}
               </div>
@@ -1168,6 +1237,49 @@ export function ProvidersPage({
         target={followTarget}
         onClose={() => setFollowTarget(null)}
       />
+
+      {/* Codex login URL dialog — shown while codex login is in progress and the auth URL has been emitted */}
+      <Dialog open={codexLoginUrl !== null} onOpenChange={(open) => { if (!open) setCodexLoginUrl(null); }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("providers.codexLoginDialogTitle")}</DialogTitle>
+            <DialogDescription>{t("providers.codexLoginDialogDesc")}</DialogDescription>
+          </DialogHeader>
+          <div className="relative rounded-md border bg-muted/50 px-3 py-2 pr-10">
+            <span className="break-all font-mono text-xs select-all">
+              {codexLoginUrl}
+            </span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label={t("common.copy")}
+              className="absolute right-1 top-1"
+              onClick={() => {
+                if (codexLoginUrl) {
+                  void navigator.clipboard.writeText(codexLoginUrl).then(() => {
+                    setCodexLoginUrlCopied(true);
+                    setTimeout(() => setCodexLoginUrlCopied(false), 1500);
+                  });
+                }
+              }}
+            >
+              {codexLoginUrlCopied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+            </Button>
+          </div>
+          <DialogFooter className="flex-row items-center gap-3">
+            <p className="flex-1 text-xs text-muted-foreground">{t("providers.codexLoginDialogWaiting")}</p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void invoke("cancel_codex_login")}
+            >
+              {t("common.cancel")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -3087,7 +3087,7 @@ fn open_codex_rw(db: &Path) -> Result<Connection, String> {
 fn map_db_locked(err: rusqlite::Error, who: &str) -> String {
     let msg = err.to_string();
     if msg.contains("locked") || msg.contains("busy") {
-        return format!("{who} database is locked — quit the running {who} CLI and try again.");
+        return format!("{who} database is locked — quit the running {who} and try again.");
     }
     msg
 }
