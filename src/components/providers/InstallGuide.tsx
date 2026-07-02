@@ -55,26 +55,28 @@ export function InstallGuide({
         </div>
 
         <div className="w-full flex flex-col gap-2">
-          <div className="flex flex-wrap items-center gap-1 rounded-md bg-muted p-1">
-            {info.methods.map((m) => (
-              <button
-                key={m.id}
-                type="button"
-                onClick={() => {
-                  setMethodId(m.id);
-                  setCopied(false);
-                }}
-                className={cn(
-                  "h-7 px-2.5 rounded text-xs font-medium transition-colors",
-                  m.id === methodId
-                    ? "bg-background shadow-sm text-foreground"
-                    : "text-muted-foreground hover:text-foreground"
-                )}
-              >
-                {m.label}
-              </button>
-            ))}
-          </div>
+          {info.methods.length > 1 && (
+            <div className="flex flex-wrap items-center gap-1 rounded-md bg-muted p-1">
+              {info.methods.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => {
+                    setMethodId(m.id);
+                    setCopied(false);
+                  }}
+                  className={cn(
+                    "h-7 px-2.5 rounded text-xs font-medium transition-colors",
+                    m.id === methodId
+                      ? "bg-background shadow-sm text-foreground"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="flex items-center gap-2 rounded-md outline outline-1 outline-foreground/10 bg-muted px-3 py-2">
             <Terminal className="size-3.5 shrink-0 text-muted-foreground" />
             <code className="flex-1 text-left text-xs font-mono break-all">

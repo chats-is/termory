@@ -439,18 +439,25 @@ fn output_with_timeout(mut cmd: std::process::Command) -> Option<std::process::O
     }
 }
 
-/// Run `--version` on the resolved binary, with PATH augmented to
-/// include the binary's directory (so the CLI's own runtime — node,
-/// dyld dependencies, etc. — resolves). Mirrors cc-switch's per-path
-/// `Command::new(tool_path).env("PATH", new_path)` pattern.
-fn query_version_at(binary: &std::path::Path) -> Option<String> {
+/// PATH with `binary`'s own directory prepended, so the CLI's runtime
+/// (node for `.cmd`/shebang shims, dyld deps, …) resolves even when
+/// the dir isn't on the parent process's PATH. Mirrors cc-switch's
+/// per-path `Command::new(tool_path).env("PATH", new_path)` pattern.
+/// Shared by the version probes and the `codex login` spawn.
+pub(crate) fn augmented_path_for(binary: &std::path::Path) -> Option<String> {
     let dir = binary.parent()?;
     let current_path = std::env::var("PATH").unwrap_or_default();
     #[cfg(unix)]
-    let augmented = format!("{}:{}", dir.display(), current_path);
-    #[cfg(windows)]
-    let augmented = format!("{};{}", dir.display(), current_path);
+    let sep = ':';
+    #[cfg(not(unix))]
+    let sep = ';';
+    Some(format!("{}{}{}", dir.display(), sep, current_path))
+}
 
+/// Run `--version` on the resolved binary, with PATH augmented to
+/// include the binary's directory (see `augmented_path_for`).
+fn query_version_at(binary: &std::path::Path) -> Option<String> {
+    let augmented = augmented_path_for(binary)?;
     let mut cmd = std::process::Command::new(binary);
     cmd.arg("--version").env("PATH", &augmented);
     let output = output_with_timeout(cmd)?;
@@ -3095,6 +3102,18 @@ mod tests {
         let dir = std::path::Path::new("/opt/bin");
         let got = executable_candidates("claude", dir);
         assert_eq!(got, vec![dir.join("claude")]);
+    }
+
+    #[test]
+    fn augmented_path_for_prepends_the_binary_dir() {
+        let sep = if cfg!(unix) { ':' } else { ';' };
+        let bin = std::env::temp_dir().join("some-bin-dir").join("codex");
+        let got = augmented_path_for(&bin).expect("binary has a parent dir");
+        let prefix = format!("{}{}", bin.parent().unwrap().display(), sep);
+        assert!(
+            got.starts_with(&prefix),
+            "PATH must start with the binary's dir: {got}"
+        );
     }
 
     #[cfg(windows)]

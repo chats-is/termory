@@ -126,29 +126,49 @@ describe("formatTimeAgo", () => {
 });
 
 describe("formatResetTime", () => {
-  // TZ-independent: assert the shape (Claude Code /usage style), not a
-  // fixed wall-clock value. Locale is pinned to en — the OS locale on
-  // the dev machine is Chinese.
+  // Mirrors Claude Code's own /usage rules (claude-code
+  // utils/format.ts:238 formatResetTime). TZ-independent: local wall
+  // times in/out, so the assertions hold in any zone. Locale pinned to
+  // en — the OS locale on the dev machine is Chinese.
   beforeEach(() => setFormatLocale("en"));
   afterEach(() => setFormatLocale(undefined));
-  it("renders a same-day reset as compact time + IANA zone", () => {
+  it("renders a reset within 24h as compact time + IANA zone", () => {
     const now = new Date("2026-07-02T08:00:00");
-    const reset = new Date("2026-07-02T11:50:00");
-    // e.g. "11:50am (Asia/Shanghai)"
-    expect(formatResetTime(reset, now)).toMatch(/^\d{1,2}:\d{2}(am|pm) \(.+\)$/);
+    const reset = new Date("2026-07-02T23:50:00");
+    // e.g. "11:50pm (Asia/Shanghai)"
+    expect(formatResetTime(reset, now)).toBe(
+      `11:50pm (${Intl.DateTimeFormat().resolvedOptions().timeZone})`
+    );
   });
-  it("prefixes the weekday when the reset lands on another day", () => {
-    const now = new Date("2026-07-02T08:00:00");
-    const reset = new Date("2026-07-04T00:59:00");
-    // e.g. "Sat 12:59am (Asia/Shanghai)" — no comma after the weekday
-    const out = formatResetTime(reset, now);
-    expect(out).toMatch(/^[A-Za-z]{3} \d{1,2}:\d{2}(am|pm) \(.+\)$/);
-    expect(out).not.toContain(",");
+  it("stays time-only across midnight while within 24h", () => {
+    const now = new Date("2026-07-02T23:00:00");
+    const reset = new Date("2026-07-03T03:30:00");
+    expect(formatResetTime(reset, now)).toMatch(/^3:30am \(.+\)$/);
   });
-  it("lowercases and joins the en am/pm marker", () => {
+  it("drops the minute on the exact hour, like the official CLI", () => {
     const now = new Date("2026-07-02T08:00:00");
-    const out = formatResetTime(new Date("2026-07-02T23:05:00"), now);
-    expect(out).not.toMatch(/\s(AM|PM)/);
+    const reset = new Date("2026-07-02T23:00:00");
+    expect(formatResetTime(reset, now)).toMatch(/^11pm \(.+\)$/);
+  });
+  it("shows month + day (with comma, no weekday) past 24h", () => {
+    const now = new Date("2026-07-02T08:00:00");
+    const reset = new Date("2026-07-05T23:09:00");
+    // e.g. "Jul 5, 11:09pm (Asia/Shanghai)"
+    expect(formatResetTime(reset, now)).toMatch(/^Jul 5, 11:09pm \(.+\)$/);
+  });
+  it("adds the year when the reset lands in a different year", () => {
+    const now = new Date("2026-07-02T08:00:00");
+    const reset = new Date("2027-01-01T10:30:00");
+    expect(formatResetTime(reset, now)).toContain("2027");
+  });
+  it("rounds to the nearest minute so API jitter can't flip the display", () => {
+    const now = new Date("2026-07-02T08:00:00");
+    // The same minute-aligned boundary reported from both sides of the
+    // minute (measured server jitter: 23:09:59.733 vs 23:10:00.379).
+    const early = new Date("2026-07-02T23:09:59.733");
+    const late = new Date("2026-07-02T23:10:00.379");
+    expect(formatResetTime(early, now)).toBe(formatResetTime(late, now));
+    expect(formatResetTime(early, now)).toMatch(/^11:10pm \(.+\)$/);
   });
 });
 

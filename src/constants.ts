@@ -117,9 +117,9 @@ export const CLI_INSTALL: Record<
       }
     ]
   },
-  // Claude Desktop is a downloaded GUI app — its tab only appears once it's
-  // already installed (so the InstallGuide is effectively never shown for
-  // it), but the Record<CliApp> must stay total.
+  // Claude Desktop is a downloaded GUI app — no package manager, just one
+  // Download entry (its InstallGuide shows when the app isn't installed;
+  // the method tabs are hidden for single-method apps).
   "claude-desktop": {
     binary: "Claude",
     url: "https://claude.ai/download",

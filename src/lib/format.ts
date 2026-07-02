@@ -28,16 +28,6 @@ function makeYearDateFormatter(locale?: string) {
     day: "numeric"
   });
 }
-function makeWeekdayTimeFormatter(locale?: string) {
-  return new Intl.DateTimeFormat(locale, {
-    weekday: "short",
-    hour: "numeric",
-    minute: "2-digit"
-  });
-}
-function makeTimeFormatter(locale?: string) {
-  return new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit" });
-}
 
 // The app's formatting locale (drives BOTH dates and `formatCompact` numbers).
 // `undefined` = the OS locale; the i18n provider calls `setFormatLocale` so
@@ -47,8 +37,6 @@ let currentLocale: string | undefined;
 let dateFormatter = makeDateTimeFormatter(currentLocale);
 let shortDateFormatter = makeShortDateFormatter(currentLocale);
 let yearDateFormatter = makeYearDateFormatter(currentLocale);
-let weekdayTimeFormatter = makeWeekdayTimeFormatter(currentLocale);
-let timeFormatter = makeTimeFormatter(currentLocale);
 
 /** Set the app formatting locale (a BCP-47 tag — "en" / "zh-Hans" / "zh-Hant").
  * Rebuilds the date formatters only on change (Intl construction is expensive)
@@ -59,23 +47,39 @@ export function setFormatLocale(locale: string | undefined): void {
   dateFormatter = makeDateTimeFormatter(locale);
   shortDateFormatter = makeShortDateFormatter(locale);
   yearDateFormatter = makeYearDateFormatter(locale);
-  weekdayTimeFormatter = makeWeekdayTimeFormatter(locale);
-  timeFormatter = makeTimeFormatter(locale);
 }
 
-/** Quota reset moment in Claude Code's own /usage style —
- * `11:50am (Asia/Shanghai)` when the reset lands today,
- * `Fri 11:50am (Asia/Shanghai)` when it lands on another day.
- * Lowercase compact am/pm (en-US "11:50 AM" → "11:50am"; zh locales
- * keep their native 上午/下午 form), IANA zone name from Intl. */
-export function formatResetTime(date: Date, now: Date = new Date()): string {
-  const sameDay =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate();
-  const base = sameDay
-    ? timeFormatter.format(date)
-    : weekdayTimeFormatter.format(date).replace(", ", " ");
+/** Quota reset moment, matching Claude Code's own /usage formatting
+ * (claude-code `utils/format.ts:238` `formatResetTime`) rule for rule:
+ * within 24 hours → time only (`11:09pm`; the minute is dropped on the
+ * exact hour — `11pm`, not `11:00pm`); more than 24 hours out → date +
+ * time (`Jul 5, 11:09pm`, plus the year when it differs from the
+ * current one). Compact lowercase am/pm, IANA zone name appended.
+ * Formatting follows the app locale — en output is verbatim what the
+ * official en-US CLI prints; zh locales keep their native form. */
+export function formatResetTime(rawDate: Date, now: Date = new Date()): string {
+  // Round to the NEAREST minute first (one deliberate deviation from the
+  // official CLI, which truncates). The API recomputes resets_at per
+  // request with sub-second jitter around a minute-aligned boundary
+  // (measured 70s apart: 20:10:00.379 then 20:09:59.733 for the same
+  // window), so truncation flips the displayed minute between requests
+  // — rounding pins it to the true boundary instead.
+  const date = new Date(Math.round(rawDate.getTime() / 60_000) * 60_000);
+  const minute: Intl.DateTimeFormatOptions["minute"] =
+    date.getMinutes() === 0 ? undefined : "2-digit";
+  const moreThanADayOut = date.getTime() - now.getTime() > 24 * 3_600_000;
+  const options: Intl.DateTimeFormatOptions = moreThanADayOut
+    ? {
+        year: date.getFullYear() === now.getFullYear() ? undefined : "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute
+      }
+    : { hour: "numeric", minute };
+  // Options vary per call (minute/year presence), so no cached formatter —
+  // fine here: this renders a handful of quota tiers, not the hot list path.
+  const base = new Intl.DateTimeFormat(currentLocale, options).format(date);
   const compact = base.replace(/\s?(AM|PM)\b/, (m) => m.trim().toLowerCase());
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
   return tz ? `${compact} (${tz})` : compact;

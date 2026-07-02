@@ -170,7 +170,26 @@ pub async fn login_and_save_codex_account(
     *cancel_state.0.lock().unwrap() = Some(cancel_notify.clone());
 
     // Spawn `codex login` (non-interactive; the browser handles the UI).
-    let mut cmd = tokio::process::Command::new("codex");
+    // Resolve the real binary via the same scan `detect_clis` uses: a bare
+    // `Command::new("codex")` only finds `codex.exe` on Windows (the
+    // runtime appends .exe, never .cmd), so the npm-installed `codex.cmd`
+    // shim made detection say "installed" while this spawn failed
+    // NotFound. An explicit path ending in `.cmd` goes through the
+    // runtime's hardened cmd.exe routing instead; PATH is augmented with
+    // the binary's dir so the shim finds its node (same as the version
+    // probes).
+    let resolved = crate::providers::find_cli_binary("codex");
+    let program: std::ffi::OsString = resolved
+        .as_deref()
+        .map(|p| p.as_os_str().to_os_string())
+        .unwrap_or_else(|| "codex".into());
+    let mut cmd = tokio::process::Command::new(&program);
+    if let Some(path) = resolved
+        .as_deref()
+        .and_then(crate::providers::augmented_path_for)
+    {
+        cmd.env("PATH", path);
+    }
     cmd.arg("login")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
