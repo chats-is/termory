@@ -1,6 +1,6 @@
 [package]
 name = "termory"
-version = "0.2.32"
+version = "0.2.33"
 description = "Local history browser for AI CLIs (Claude Code, Codex, Gemini, OpenCode) with provider profile switching"
 authors = ["John Ma"]
 license = "MIT"
