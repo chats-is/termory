@@ -74,10 +74,12 @@ type Translate = (
   params?: Record<string, string | number>
 ) => string;
 
-function formatReset(iso: string, t: Translate): string | null {
+function formatReset(iso: string, t: Translate, withZone: boolean): string | null {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return null;
-  return t("providers.quotaResets", { time: formatResetTime(date) });
+  return t("providers.quotaResets", {
+    time: formatResetTime(date, new Date(), withZone)
+  });
 }
 
 const NOT_USED_TIERS = new Set(["seven_day_opus", "seven_day_sonnet"]);
@@ -139,13 +141,15 @@ function QuotaTierItem({
 }) {
   const t = useT();
   const labels = tierLabels(name, t);
-  const subline =
+  // Visible subline stays compact (no timezone); the hover tooltip
+  // carries the full form with the IANA zone name.
+  const notUsed =
     utilization <= 0 && NOT_USED_TIERS.has(name)
       ? t("providers.quotaNotUsedYet", { model: labels.short })
-      : resetsAt
-        ? formatReset(resetsAt, t)
-        : null;
-  const detail = [labels.full, `${Math.round(utilization)}%`, subline]
+      : null;
+  const subline = notUsed ?? (resetsAt ? formatReset(resetsAt, t, false) : null);
+  const hoverReset = notUsed ?? (resetsAt ? formatReset(resetsAt, t, true) : null);
+  const detail = [labels.full, `${Math.round(utilization)}%`, hoverReset]
     .filter(Boolean)
     .join(" · ");
   return (

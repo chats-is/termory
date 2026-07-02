@@ -57,7 +57,11 @@ export function setFormatLocale(locale: string | undefined): void {
  * current one). Compact lowercase am/pm, IANA zone name appended.
  * Formatting follows the app locale — en output is verbatim what the
  * official en-US CLI prints; zh locales keep their native form. */
-export function formatResetTime(rawDate: Date, now: Date = new Date()): string {
+export function formatResetTime(
+  rawDate: Date,
+  now: Date = new Date(),
+  withZone = true
+): string {
   // Round to the NEAREST minute first (one deliberate deviation from the
   // official CLI, which truncates). The API recomputes resets_at per
   // request with sub-second jitter around a minute-aligned boundary
@@ -81,6 +85,7 @@ export function formatResetTime(rawDate: Date, now: Date = new Date()): string {
   // fine here: this renders a handful of quota tiers, not the hot list path.
   const base = new Intl.DateTimeFormat(currentLocale, options).format(date);
   const compact = base.replace(/\s?(AM|PM)\b/, (m) => m.trim().toLowerCase());
+  if (!withZone) return compact; // compact inline form; the zone shows on hover
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
   return tz ? `${compact} (${tz})` : compact;
 }

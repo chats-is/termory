@@ -161,6 +161,11 @@ describe("formatResetTime", () => {
     const reset = new Date("2027-01-01T10:30:00");
     expect(formatResetTime(reset, now)).toContain("2027");
   });
+  it("omits the zone suffix when withZone is false (compact inline form)", () => {
+    const now = new Date("2026-07-02T08:00:00");
+    const reset = new Date("2026-07-02T23:50:00");
+    expect(formatResetTime(reset, now, false)).toBe("11:50pm");
+  });
   it("rounds to the nearest minute so API jitter can't flip the display", () => {
     const now = new Date("2026-07-02T08:00:00");
     // The same minute-aligned boundary reported from both sides of the

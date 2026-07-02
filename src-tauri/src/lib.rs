@@ -9,10 +9,10 @@ mod terminal;
 mod tray;
 mod watcher;
 
-/// Shared test infrastructure. The `HOME_LOCK` mutex serializes tests
-/// that mutate the `HOME` env var across both `config` and
-/// `providers` modules — without a single shared lock, parallel test
-/// execution lets one module clobber another's HOME override.
+/// Shared test infrastructure. The `HOME_LOCK` mutex serializes every
+/// env-mutating test across ALL modules (config / providers / accounts /
+/// sessions / quota / watcher) — without a single shared lock, parallel
+/// test execution lets one module clobber another's HOME override.
 #[cfg(test)]
 pub(crate) mod testutils {
     use std::sync::Mutex;
