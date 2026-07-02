@@ -34,6 +34,8 @@ Two cross-cutting topics — **[Privacy & your data](#privacy--your-data)** and 
 
 Click **Official** to go back to your native login at any time.
 
+Two app-scoping notes: switching **Codex** applies to the Codex CLI and the Codex app together (they share one config and login), while **Claude Desktop** is its own tab with its own provider library — managed entirely separately from Claude Code.
+
 ### Adding or editing a provider
 
 1. Click **Add provider**, give it a **Name**, and fill in **Base URL**, **API key**, and **Model**.
