@@ -112,7 +112,6 @@ pub fn save_current_account(app: CliApp) -> Result<(), Box<dyn Error>> {
     }
 }
 
-
 /// Restore a saved snapshot into the live CLI credential.
 /// Refreshes tokens in memory BEFORE writing to auth.json — if refresh fails
 /// the auth.json is left untouched and the caller should mark needsRelogin.
@@ -128,7 +127,6 @@ pub async fn switch_account(id: String) -> Result<(), Box<dyn Error>> {
         other => Err(format!("Unsupported account app: {}", other.unwrap_or("?")).into()),
     }
 }
-
 
 /// Spawn `codex login`, wait for completion, then save the resulting
 /// credential into the accounts store. Returns the new account's id.
@@ -158,8 +156,8 @@ pub async fn login_and_save_codex_account(
 
     // If there is a live Codex login that is not yet saved, auto-save it so
     // we can restore it after the new login completes.
-    let prev_active_id: Option<String> = auto_save_unsaved_live_codex_account()
-        .map_err(|e| e.to_string())?;
+    let prev_active_id: Option<String> =
+        auto_save_unsaved_live_codex_account().map_err(|e| e.to_string())?;
 
     // Snapshot original auth.json for rollback.
     let original_auth: Option<Vec<u8>> = std::fs::read(&auth_path).ok();
@@ -290,9 +288,10 @@ fn auto_save_unsaved_live_codex_account() -> Result<Option<String>, Box<dyn Erro
     };
     let mut store = read_store()?;
     let id = live.id.as_str();
-    if store.iter().any(|e| {
-        str_field(e, "app") == Some("codex") && str_field(e, "id") == Some(id)
-    }) {
+    if store
+        .iter()
+        .any(|e| str_field(e, "app") == Some("codex") && str_field(e, "id") == Some(id))
+    {
         return Ok(Some(id.to_string()));
     }
     let entry = serde_json::json!({
@@ -317,8 +316,12 @@ pub async fn cancel_codex_login(cancel_state: &CodexLoginCancel) -> Result<(), S
 /// Restore auth.json from a snapshot, or remove it if there was none.
 fn restore_auth(path: &std::path::Path, original: Option<&[u8]>) {
     match original {
-        Some(bytes) => { let _ = atomic_write_0600(path, bytes); }
-        None => { let _ = std::fs::remove_file(path); }
+        Some(bytes) => {
+            let _ = atomic_write_0600(path, bytes);
+        }
+        None => {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -405,7 +408,11 @@ fn list_claude_accounts() -> Result<AccountsState, Box<dyn Error>> {
     let home = dirs::home_dir().ok_or("home directory not available")?;
     let path = home.join(".claude.json");
     if !path.exists() {
-        return Ok(AccountsState { current: None, accounts: Vec::new(), storage_warning: None });
+        return Ok(AccountsState {
+            current: None,
+            accounts: Vec::new(),
+            storage_warning: None,
+        });
     }
     let content = std::fs::read_to_string(&path)?;
     let doc: serde_json::Value = serde_json::from_str(&content).unwrap_or(serde_json::Value::Null);
@@ -421,10 +428,19 @@ fn list_claude_accounts() -> Result<AccountsState, Box<dyn Error>> {
         .filter(|s| !s.is_empty())
         .map(String::from);
     if email.is_none() && name.is_none() {
-        return Ok(AccountsState { current: None, accounts: Vec::new(), storage_warning: None });
+        return Ok(AccountsState {
+            current: None,
+            accounts: Vec::new(),
+            storage_warning: None,
+        });
     }
     Ok(AccountsState {
-        current: Some(CurrentAccount { name, email, plan: None, saved: true }),
+        current: Some(CurrentAccount {
+            name,
+            email,
+            plan: None,
+            saved: true,
+        }),
         accounts: Vec::new(),
         storage_warning: None,
     })
@@ -438,7 +454,11 @@ fn list_gemini_accounts() -> Result<AccountsState, Box<dyn Error>> {
     let home = dirs::home_dir().ok_or("home directory not available")?;
     let path = home.join(".gemini").join("oauth_creds.json");
     if !path.exists() {
-        return Ok(AccountsState { current: None, accounts: Vec::new(), storage_warning: None });
+        return Ok(AccountsState {
+            current: None,
+            accounts: Vec::new(),
+            storage_warning: None,
+        });
     }
     let content = std::fs::read_to_string(&path)?;
     let doc: serde_json::Value = serde_json::from_str(&content).unwrap_or(serde_json::Value::Null);
@@ -446,10 +466,19 @@ fn list_gemini_accounts() -> Result<AccountsState, Box<dyn Error>> {
     let email = jwt_claim(id_token, "email");
     let name = jwt_claim(id_token, "name");
     if email.is_none() && name.is_none() {
-        return Ok(AccountsState { current: None, accounts: Vec::new(), storage_warning: None });
+        return Ok(AccountsState {
+            current: None,
+            accounts: Vec::new(),
+            storage_warning: None,
+        });
     }
     Ok(AccountsState {
-        current: Some(CurrentAccount { name, email, plan: None, saved: true }),
+        current: Some(CurrentAccount {
+            name,
+            email,
+            plan: None,
+            saved: true,
+        }),
         accounts: Vec::new(),
         storage_warning: None,
     })
@@ -691,7 +720,10 @@ async fn refresh_doc_tokens(doc: &mut JsonValue) -> Result<(), RefreshError> {
         .timeout(std::time::Duration::from_secs(15))
         .default_headers({
             let mut h = reqwest::header::HeaderMap::new();
-            h.insert("originator", reqwest::header::HeaderValue::from_static("codex_cli_rs"));
+            h.insert(
+                "originator",
+                reqwest::header::HeaderValue::from_static("codex_cli_rs"),
+            );
             if let Ok(ua) = reqwest::header::HeaderValue::from_str(&user_agent_str) {
                 h.insert(reqwest::header::USER_AGENT, ua);
             }
@@ -725,13 +757,20 @@ async fn refresh_doc_tokens(doc: &mut JsonValue) -> Result<(), RefreshError> {
             .unwrap_or(body);
         // 4xx (except 429) = permanent auth failure; 429 and 5xx = transient.
         return if status.is_client_error() && status.as_u16() != 429 {
-            Err(RefreshError::AuthFailure(format!("Token refresh failed ({status}): {msg}")))
+            Err(RefreshError::AuthFailure(format!(
+                "Token refresh failed ({status}): {msg}"
+            )))
         } else {
-            Err(RefreshError::Transient(format!("Token refresh failed ({status}): {msg}")))
+            Err(RefreshError::Transient(format!(
+                "Token refresh failed ({status}): {msg}"
+            )))
         };
     }
 
-    let body: JsonValue = resp.json().await.map_err(|e| RefreshError::Transient(e.to_string()))?;
+    let body: JsonValue = resp
+        .json()
+        .await
+        .map_err(|e| RefreshError::Transient(e.to_string()))?;
     if let Some(tokens) = doc.get_mut("tokens").and_then(|v| v.as_object_mut()) {
         for key in ["id_token", "access_token", "refresh_token"] {
             if let Some(v) = body.get(key).filter(|v| v.is_string()) {
@@ -1001,8 +1040,7 @@ mod tests {
             "name": "Jane Doe",
             "email": "jane@example.com",
         }));
-        let doc =
-            json!({ "tokens": { "id_token": jwt, "access_token": "ax", "account_id": "acct-jane" } });
+        let doc = json!({ "tokens": { "id_token": jwt, "access_token": "ax", "account_id": "acct-jane" } });
         let dir = tmp.join(".codex");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("auth.json"), serde_json::to_string(&doc).unwrap()).unwrap();
@@ -1030,15 +1068,16 @@ mod tests {
 
         // On disk: `{ "version": N, "accounts": [...] }` — never a bare array.
         let path = tmp.join(".termory/accounts.json");
-        let raw: JsonValue =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let raw: JsonValue = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(
             raw.pointer("/version").and_then(|v| v.as_u64()),
             Some(ACCOUNTS_SCHEMA_VERSION),
             "accounts.json must carry a version stamp"
         );
         assert!(
-            raw.pointer("/accounts").and_then(|v| v.as_array()).is_some(),
+            raw.pointer("/accounts")
+                .and_then(|v| v.as_array())
+                .is_some(),
             "accounts.json must have an 'accounts' array"
         );
     }
@@ -1308,7 +1347,12 @@ mod tests {
         mark_account_relogin(&id, true).unwrap();
         let state = list_accounts(CliApp::Codex).unwrap();
         assert!(
-            state.accounts.iter().find(|a| a.id == id).unwrap().needs_relogin,
+            state
+                .accounts
+                .iter()
+                .find(|a| a.id == id)
+                .unwrap()
+                .needs_relogin,
             "flag should be set"
         );
 
@@ -1316,7 +1360,12 @@ mod tests {
         mark_account_relogin(&id, false).unwrap();
         let state = list_accounts(CliApp::Codex).unwrap();
         assert!(
-            !state.accounts.iter().find(|a| a.id == id).unwrap().needs_relogin,
+            !state
+                .accounts
+                .iter()
+                .find(|a| a.id == id)
+                .unwrap()
+                .needs_relogin,
             "flag should be cleared"
         );
     }

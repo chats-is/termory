@@ -683,7 +683,9 @@ async fn save_account(app: String) -> Result<(), String> {
 /// Validates/refreshes tokens in memory before writing auth.json.
 #[tauri::command]
 async fn switch_account(id: String) -> Result<(), String> {
-    accounts::switch_account(id).await.map_err(|e| e.to_string())
+    accounts::switch_account(id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Delete a saved snapshot. Never touches the live credential.
