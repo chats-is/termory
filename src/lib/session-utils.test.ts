@@ -224,3 +224,18 @@ describe("readRouteFromHash", () => {
     expect(readRouteFromHash()).toBe("providers");
   });
 });
+
+describe("recordRel (windows paths)", () => {
+  it("extracts the within-project rel from backslash paths", () => {
+    expect(
+      recordRel("C:\\Users\\x\\.claude\\projects\\C--proj\\memory\\sub\\NOTE.md")
+    ).toBe("memory\\sub\\NOTE.md");
+    expect(
+      recordRel("C:\\Users\\x\\.gemini\\tmp\\hash1\\chats\\session-a.json")
+    ).toBe("chats\\session-a.json");
+    // Flat session file directly in the slug dir.
+    expect(
+      recordRel("C:\\Users\\x\\.claude\\projects\\C--proj\\abc.jsonl")
+    ).toBe("abc.jsonl");
+  });
+});

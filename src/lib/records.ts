@@ -59,7 +59,13 @@ export function projectDirOf(path: string): string {
 export function recordUnderFolder(
   folder: string
 ): (s: { path: string }) => boolean {
-  return (s) => s.path === folder || s.path.startsWith(folder + "/");
+  // Both separators: Windows paths are `\`-joined, and a `/`-only
+  // suffix check silently un-matched every record there (project
+  // delete/migrate then failed to update the list locally).
+  return (s) =>
+    s.path === folder ||
+    s.path.startsWith(folder + "/") ||
+    s.path.startsWith(folder + "\\");
 }
 
 /**

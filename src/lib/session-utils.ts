@@ -85,12 +85,15 @@ export function basename(path: string): string {
  * Falls back to the basename if no marker is found.
  */
 export function recordRel(path: string): string {
-  const marker = path.includes("/.gemini/tmp/") ? "/.gemini/tmp/" : "/projects/";
-  const i = path.indexOf(marker);
-  if (i < 0) return basename(path);
-  const after = path.slice(i + marker.length); // "<dir>/<rel>"
-  const slash = after.indexOf("/");
-  return slash < 0 ? after : after.slice(slash + 1);
+  // Windows paths arrive `\`-separated — match either separator. The
+  // returned rel keeps its NATIVE separators (the backend joins it
+  // under the project dir, so it must match the on-disk shape).
+  const gemini = /[\\/]\.gemini[\\/]tmp[\\/]/.exec(path);
+  const marker = gemini ?? /[\\/]projects[\\/]/.exec(path);
+  if (!marker) return basename(path);
+  const after = path.slice(marker.index + marker[0].length); // "<dir><sep><rel>"
+  const sep = after.search(/[\\/]/);
+  return sep < 0 ? after : after.slice(sep + 1);
 }
 
 // Per-platform "resume this session" shell command. Returns `null`

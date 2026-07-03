@@ -150,3 +150,13 @@ describe("remapMatching", () => {
     expect(tombstones).toEqual([]);
   });
 });
+
+describe("recordUnderFolder (windows paths)", () => {
+  it("matches backslash-joined children and the folder itself", () => {
+    const under = recordUnderFolder("C:\\u\\.claude\\projects\\slug");
+    expect(under({ path: "C:\\u\\.claude\\projects\\slug\\a.jsonl" })).toBe(true);
+    expect(under({ path: "C:\\u\\.claude\\projects\\slug" })).toBe(true);
+    // A sibling slug sharing the prefix must NOT match.
+    expect(under({ path: "C:\\u\\.claude\\projects\\slug-other\\a.jsonl" })).toBe(false);
+  });
+});
