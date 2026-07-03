@@ -7,7 +7,12 @@
 //!   1. Flip `deploymentMode` to `"3p"` in BOTH config files:
 //!        macOS:   ~/Library/Application Support/Claude/claude_desktop_config.json
 //!                 ~/Library/Application Support/Claude-3p/claude_desktop_config.json
-//!        Windows: %LOCALAPPDATA%\Claude\... and \Claude-3p\...
+//!        Windows: the claude.ai installer ships an MSIX-packaged app whose
+//!                 AppData is VIRTUALIZED — the real config dir is
+//!                 %LOCALAPPDATA%\Packages\Claude_<hash>\LocalCache\Roaming\Claude
+//!                 (raw %APPDATA% / %LOCALAPPDATA% remain as unpackaged
+//!                 fallbacks; the installer pre-creates a raw
+//!                 %LOCALAPPDATA%\Claude-3p, resolved independently)
 //!   2. Write a **gateway profile** to
 //!        <Claude-3p>/configLibrary/<PROFILE_ID>.json
 //!      pointing at the provider's Anthropic-compatible base URL + bearer key.
@@ -535,13 +540,18 @@ fn current_paths() -> Result<Paths, Box<dyn Error>> {
     }
     #[cfg(windows)]
     {
-        let local = config_parent_dir()?;
+        let candidates = windows_config_parents();
+        let parent = select_config_parent(&candidates);
         // Resolve the real install folders — the Windows dir isn't always
         // exactly `Claude` / `Claude-3p` (cc-switch fuzzy-matches `Claude*`),
-        // so pick the actual folder when the exact name is absent.
+        // so pick the actual folder when the exact name is absent. The 3p
+        // dir is resolved INDEPENDENTLY: a fresh Windows install
+        // pre-creates `%LOCALAPPDATA%\Claude-3p` while the normal config
+        // dir may land under Roaming, so prefer wherever a `*-3p` dir
+        // already exists (see `select_threep_dir`).
         Ok(paths_from_dirs(
-            &pick_windows_claude_dir(&local, false),
-            &pick_windows_claude_dir(&local, true),
+            &pick_windows_claude_dir(&parent, false),
+            &select_threep_dir(&candidates, &parent),
         ))
     }
     #[cfg(not(any(target_os = "macos", windows)))]
@@ -561,11 +571,103 @@ fn config_parent_dir() -> Result<PathBuf, Box<dyn Error>> {
     Ok(home()?.join("Library").join("Application Support"))
 }
 
+/// Ordered Windows candidates for the parent dir holding Claude
+/// Desktop's config dir(s). Claude Desktop is an Electron app — its
+/// userData, and so `claude_desktop_config.json`, lives under ROAMING
+/// AppData (`%APPDATA%\Claude`, per the official MCP docs at
+/// modelcontextprotocol.io/quickstart/user). `%LOCALAPPDATA%` is kept
+/// as a FALLBACK only because cc-switch resolves there; by itself it
+/// holds the app BINARY dir (`AnthropicClaude`, which doesn't match
+/// the `Claude*` config rule) — looking only there is why Windows
+/// installs were never detected.
+#[cfg(windows)]
+fn windows_config_parents() -> Vec<PathBuf> {
+    let fallback = |sub: &str| home().unwrap_or_default().join("AppData").join(sub);
+    let roaming = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fallback("Roaming"));
+    let local = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fallback("Local"));
+    // The claude.ai Windows installer ships an MSIX-PACKAGED app, whose
+    // AppData is VIRTUALIZED: the app writes %APPDATA%\Claude but the
+    // real on-disk location (the one an unpackaged app like Termory can
+    // see) is Packages\Claude_<publisherhash>\LocalCache\Roaming\Claude
+    // (verified on real hardware). Those parents come FIRST — when a
+    // package exists it IS the install; the raw Roaming/Local parents
+    // remain for unpackaged installs.
+    let mut parents = msix_package_roaming_parents(&local);
+    parents.push(roaming);
+    parents.push(local);
+    parents
+}
+
+/// `<local>\Packages\Claude_*\LocalCache\Roaming` for every installed
+/// Claude MSIX package (the publisher-hash suffix varies per signing
+/// identity, so scan by the `Claude_` prefix instead of hardcoding).
+/// Pure / path-injected — unit-tested off-Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn msix_package_roaming_parents(local_app_data: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(local_app_data.join("Packages"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.path().is_dir()
+                && e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with("Claude_"))
+        })
+        .map(|e| e.path().join("LocalCache").join("Roaming"))
+        .collect();
+    out.sort();
+    out
+}
+
 #[cfg(windows)]
 fn config_parent_dir() -> Result<PathBuf, Box<dyn Error>> {
-    Ok(std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().unwrap_or_default().join("AppData").join("Local")))
+    Ok(select_config_parent(&windows_config_parents()))
+}
+
+/// First candidate that already CONTAINS a Claude Desktop config dir
+/// (a `Claude*` non-3p child); else the first candidate, so fresh
+/// writes target the official Roaming location. Pure / path-injected —
+/// unit-tested off-Windows like the rest of this module.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn select_config_parent(candidates: &[PathBuf]) -> PathBuf {
+    candidates
+        .iter()
+        .find(|parent| parent_has_claude_dir(parent))
+        .cloned()
+        .unwrap_or_else(|| candidates.first().cloned().unwrap_or_default())
+}
+
+/// The `Claude-3p` dir, resolved independently of the normal config
+/// dir: the first candidate parent where a `*-3p` dir already EXISTS
+/// wins (a fresh Windows install pre-creates `%LOCALAPPDATA%\Claude-3p`
+/// even before the normal dir appears), else `<normal parent>\Claude-3p`
+/// so both dirs stay siblings for fresh writes.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn select_threep_dir(candidates: &[PathBuf], normal_parent: &Path) -> PathBuf {
+    candidates
+        .iter()
+        .map(|c| pick_windows_claude_dir(c, true))
+        .find(|p| p.exists())
+        .unwrap_or_else(|| pick_windows_claude_dir(normal_parent, true))
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parent_has_claude_dir(parent: &Path) -> bool {
+    std::fs::read_dir(parent)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|e| {
+            e.path().is_dir()
+                && e.file_name()
+                    .to_str()
+                    .is_some_and(|n| windows_claude_dir_matches(n, false))
+        })
 }
 
 #[cfg(any(target_os = "macos", windows))]
@@ -580,9 +682,23 @@ fn home() -> Result<PathBuf, Box<dyn Error>> {
 /// or disappearing — triggers install re-detection; the dir itself
 /// can't be watched before it exists. Empty on unsupported platforms.
 pub(crate) fn install_watch_parents() -> Vec<PathBuf> {
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(target_os = "macos")]
     {
         config_parent_dir().map(|p| vec![p]).unwrap_or_default()
+    }
+    // Watch every Windows candidate parent (package LocalCache\Roaming
+    // dirs + raw Roaming + raw Local), PLUS the Packages dir itself — a
+    // `Claude_*` package dir appearing there is the MSIX install event
+    // (its LocalCache\Roaming can't be watched before the package
+    // exists; a first-run that happens later self-heals via the tray's
+    // menu-open / Recheck probes).
+    #[cfg(windows)]
+    {
+        let mut parents = windows_config_parents();
+        if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+            parents.push(local.join("Packages"));
+        }
+        parents
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
@@ -616,7 +732,7 @@ fn windows_claude_dir_matches(name: &str, threep: bool) -> bool {
 /// always the exact name. Falls back to the exact name (even if absent) so
 /// the caller always has a deterministic path. The fuzzy scan runs ONLY
 /// when the exact folder is missing (a single shallow `read_dir`).
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn pick_windows_claude_dir(local_app_data: &Path, threep: bool) -> PathBuf {
     let exact = local_app_data.join(if threep { "Claude-3p" } else { "Claude" });
     if exact.exists() {
@@ -659,6 +775,98 @@ mod tests {
 
     fn test_paths(root: &Path) -> Paths {
         paths_from_dirs(&root.join("Claude"), &root.join("Claude-3p"))
+    }
+
+    #[test]
+    fn select_config_parent_picks_the_parent_holding_a_claude_dir() {
+        let base = tempdir("parent-select");
+        let roaming = base.join("Roaming");
+        let local = base.join("Local");
+        fs::create_dir_all(&roaming).unwrap();
+        fs::create_dir_all(&local).unwrap();
+
+        // Neither has a Claude dir → first candidate (Roaming, the
+        // official location) so fresh writes land there.
+        assert_eq!(
+            select_config_parent(&[roaming.clone(), local.clone()]),
+            roaming
+        );
+
+        // The app BINARY dir (`AnthropicClaude`) must NOT count as a
+        // config dir — it fails the `Claude*` prefix rule.
+        fs::create_dir_all(local.join("AnthropicClaude")).unwrap();
+        assert_eq!(
+            select_config_parent(&[roaming.clone(), local.clone()]),
+            roaming
+        );
+
+        // Only Local has a real Claude config dir → Local wins even
+        // though Roaming is listed first (cc-switch-style installs).
+        fs::create_dir_all(local.join("Claude")).unwrap();
+        assert_eq!(
+            select_config_parent(&[roaming.clone(), local.clone()]),
+            local
+        );
+
+        // Both have one → the official Roaming location wins.
+        fs::create_dir_all(roaming.join("Claude")).unwrap();
+        assert_eq!(
+            select_config_parent(&[roaming.clone(), local.clone()]),
+            roaming
+        );
+    }
+
+    #[test]
+    fn msix_package_roaming_parents_finds_claude_packages() {
+        let local = tempdir("msix-scan");
+        // No Packages dir at all → empty.
+        assert!(msix_package_roaming_parents(&local).is_empty());
+        // Real-world shape: Packages\Claude_<publisherhash> (hash varies
+        // per signing identity, so the scan matches the prefix).
+        fs::create_dir_all(local.join("Packages").join("Claude_pzs8sxrjxfjjc")).unwrap();
+        fs::create_dir_all(local.join("Packages").join("Microsoft.Edge_8wekyb")).unwrap();
+        let got = msix_package_roaming_parents(&local);
+        assert_eq!(
+            got,
+            vec![local
+                .join("Packages")
+                .join("Claude_pzs8sxrjxfjjc")
+                .join("LocalCache")
+                .join("Roaming")]
+        );
+    }
+
+    #[test]
+    fn select_threep_dir_prefers_an_existing_3p_dir_across_parents() {
+        let base = tempdir("threep-select");
+        let roaming = base.join("Roaming");
+        let local = base.join("Local");
+        fs::create_dir_all(&roaming).unwrap();
+        fs::create_dir_all(&local).unwrap();
+        let candidates = vec![roaming.clone(), local.clone()];
+
+        // Nothing exists yet → sibling of the normal parent (fresh writes).
+        assert_eq!(
+            select_threep_dir(&candidates, &roaming),
+            roaming.join("Claude-3p")
+        );
+
+        // The app pre-created %LOCALAPPDATA%\Claude-3p (observed on a
+        // fresh Windows install) → it wins even when the normal config
+        // parent is Roaming (split layout).
+        fs::create_dir_all(local.join("Claude-3p")).unwrap();
+        assert_eq!(
+            select_threep_dir(&candidates, &roaming),
+            local.join("Claude-3p")
+        );
+
+        // A Roaming 3p dir (all-Roaming layout) takes precedence by
+        // candidate order.
+        fs::create_dir_all(roaming.join("Claude-3p")).unwrap();
+        assert_eq!(
+            select_threep_dir(&candidates, &roaming),
+            roaming.join("Claude-3p")
+        );
     }
 
     fn provider(id: &str, base: &str, key: &str) -> Provider {
