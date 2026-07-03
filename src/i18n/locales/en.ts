@@ -113,7 +113,6 @@ export const en = {
   "records.noSkillsMatch": "No skill matches",
   "records.tryFilters": "Try a different source, project, or query.",
   "records.nothingMatches": "Nothing matches your current view.",
-  "records.openInFinder": "Open in Finder",
   "records.nothingToView": "Nothing to view yet",
   "records.nothingToViewDesc": "Once Termory finds local history, sessions, memories, and skills will show up here.",
   "records.selectRecord": "Select a record",
@@ -123,7 +122,9 @@ export const en = {
 
   // Context menu
   "menu.revealInFinder": "Reveal in Finder",
-  "menu.revealError": "Couldn't open in Finder: {error}",
+  "menu.revealInExplorer": "Reveal in File Explorer",
+  "menu.revealInFiles": "Reveal in file manager",
+  "menu.revealError": "Couldn't open the file location: {error}",
   "menu.resumeInTerminal": "Resume in terminal",
   "menu.openInTerminal": "Open in terminal",
   "menu.copyResumeCommand": "Copy resume command",

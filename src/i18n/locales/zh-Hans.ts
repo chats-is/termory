@@ -105,7 +105,6 @@ export const zhHans: Record<MessageKey, string> = {
   "records.noSkillsMatch": "没有匹配的技能",
   "records.tryFilters": "换个来源、项目或关键词试试。",
   "records.nothingMatches": "没有符合当前视图的内容。",
-  "records.openInFinder": "在 Finder 中打开",
   "records.nothingToView": "暂无可查看的内容",
   "records.nothingToViewDesc": "Termory 找到本地历史后,会话、记忆和技能会显示在这里。",
   "records.selectRecord": "选择一条记录",
@@ -114,7 +113,9 @@ export const zhHans: Record<MessageKey, string> = {
   "favorites.add": "加入收藏",
 
   "menu.revealInFinder": "在 Finder 中显示",
-  "menu.revealError": "无法在 Finder 中打开:{error}",
+  "menu.revealInExplorer": "在资源管理器中显示",
+  "menu.revealInFiles": "在文件管理器中显示",
+  "menu.revealError": "无法打开文件位置:{error}",
   "menu.resumeInTerminal": "在终端中恢复",
   "menu.openInTerminal": "在终端打开",
   "menu.copyResumeCommand": "复制恢复命令",

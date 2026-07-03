@@ -94,6 +94,7 @@ import {
   recordUnderFolder,
   withProject
 } from "@/lib/records";
+import { revealLabelKey } from "@/lib/platform";
 import { ActivityRail } from "@/components/ActivityRail";
 import { ListItemMenu } from "@/components/ListItemMenu";
 import { BrandIcon } from "@/components/BrandIcon";
@@ -1033,7 +1034,7 @@ export function App() {
                                     )
                                   }
                                 >
-                                  {t("menu.revealInFinder")}
+                                  {t(revealLabelKey())}
                                 </ContextMenuItem>
                                 {/* Open a terminal in the project cwd and launch
                                     this source's CLI fresh (no resume). */}
@@ -1511,13 +1512,13 @@ export function App() {
                               <button
                                 type="button"
                                 onClick={() => revealItemInDir(selected.path)}
-                                aria-label={t("records.openInFinder")}
+                                aria-label={t(revealLabelKey())}
                                 className="inline-flex shrink-0 text-muted-foreground hover:text-foreground transition-colors"
                               >
                                 <FolderOpen size={12} />
                               </button>
                             </TooltipTrigger>
-                            <TooltipContent>{t("records.openInFinder")}</TooltipContent>
+                            <TooltipContent>{t(revealLabelKey())}</TooltipContent>
                           </Tooltip>
                           <CopyMenu
                             items={[

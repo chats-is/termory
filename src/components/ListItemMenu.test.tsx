@@ -45,7 +45,7 @@ describe("ListItemMenu — Resume in terminal", () => {
     fireEvent.contextMenu(screen.getByText("memrow"));
     // The menu opened (Reveal in Finder is always present) but the resume
     // entry is absent for a memory/skill row.
-    expect(await screen.findByText("Reveal in Finder")).toBeTruthy();
+    expect(await screen.findByText(/Reveal in/)).toBeTruthy();
     expect(screen.queryByText("Resume in terminal")).toBeNull();
   });
 });
@@ -152,7 +152,7 @@ describe("ListItemMenu — Migrate (single session / memory)", () => {
       </ListItemMenu>
     );
     fireEvent.contextMenu(screen.getByText("ocrow"));
-    expect(await screen.findByText("Reveal in Finder")).toBeTruthy();
+    expect(await screen.findByText(/Reveal in/)).toBeTruthy();
     expect(screen.queryByText("Migrate session…")).toBeNull();
     unmount();
 
@@ -163,7 +163,7 @@ describe("ListItemMenu — Migrate (single session / memory)", () => {
       </ListItemMenu>
     );
     fireEvent.contextMenu(screen.getByText("plainmem"));
-    expect(await screen.findByText("Reveal in Finder")).toBeTruthy();
+    expect(await screen.findByText(/Reveal in/)).toBeTruthy();
     expect(screen.queryByText("Migrate memory…")).toBeNull();
   });
 });
@@ -368,7 +368,7 @@ describe("ListItemMenu — sourceMissing (deleted favorite)", () => {
     );
     fireEvent.contextMenu(screen.getByText("delrow"));
     await screen.findByText("Copy path"); // menu is open
-    expect(screen.queryByText("Reveal in Finder")).toBeNull();
+    expect(screen.queryByText(/Reveal in/)).toBeNull();
     expect(screen.queryByText("Copy resume command")).toBeNull();
     expect(screen.queryByText("Resume in terminal")).toBeNull();
     // Snapshot copy actions stay.

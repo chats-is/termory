@@ -1,5 +1,6 @@
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { revealLabelKey } from "@/lib/platform";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import {
@@ -115,7 +116,7 @@ export function ListItemMenu({
         {!sourceMissing && (
           <>
             <ContextMenuItem onSelect={() => void revealItemInDir(path)}>
-              {t("menu.revealInFinder")}
+              {t(revealLabelKey())}
             </ContextMenuItem>
             <ContextMenuSeparator />
           </>

@@ -105,7 +105,6 @@ export const zhHant: Record<MessageKey, string> = {
   "records.noSkillsMatch": "沒有符合的技能",
   "records.tryFilters": "換個來源、專案或關鍵字試試。",
   "records.nothingMatches": "沒有符合目前檢視的內容。",
-  "records.openInFinder": "在 Finder 中開啟",
   "records.nothingToView": "暫無可檢視的內容",
   "records.nothingToViewDesc": "Termory 找到本機歷史後,會話、記憶和技能會顯示在這裡。",
   "records.selectRecord": "選擇一筆記錄",
@@ -114,7 +113,9 @@ export const zhHant: Record<MessageKey, string> = {
   "favorites.add": "加入收藏",
 
   "menu.revealInFinder": "在 Finder 中顯示",
-  "menu.revealError": "無法在 Finder 中開啟:{error}",
+  "menu.revealInExplorer": "在檔案總管中顯示",
+  "menu.revealInFiles": "在檔案管理器中顯示",
+  "menu.revealError": "無法開啟檔案位置:{error}",
   "menu.resumeInTerminal": "在終端機中恢復",
   "menu.openInTerminal": "在終端機開啟",
   "menu.copyResumeCommand": "複製恢復指令",
