@@ -381,6 +381,14 @@ pub fn detect() -> Vec<TerminalOption> {
 struct WindowsLaunch {
     program: &'static str,
     args: Vec<String>,
+    /// Working directory for the SPAWN (the `cmd /C start` branch —
+    /// `start`'s new console inherits it). The directory deliberately
+    /// does NOT travel inside the command string: a nested
+    /// `cd /d "path"` inside `cmd /C start cmd /K "…"` hits the
+    /// MSVCRT-vs-cmd quoting mismatch (Rust escapes inner quotes as
+    /// `\"`, cmd.exe doesn't honor backslash escapes), which mangled
+    /// every picked path on real Windows hardware.
+    cwd: Option<String>,
     hide_helper_console: bool,
 }
 
@@ -401,6 +409,7 @@ fn windows_open_command(id: &str, project: Option<&str>, cmd: &str) -> WindowsLa
             WindowsLaunch {
                 program: "wt",
                 args,
+                cwd: None,
                 hide_helper_console: false,
             }
         }
@@ -412,27 +421,25 @@ fn windows_open_command(id: &str, project: Option<&str>, cmd: &str) -> WindowsLa
             WindowsLaunch {
                 program: "powershell",
                 args: vec!["-NoExit".to_string(), "-Command".to_string(), full],
+                cwd: None,
                 hide_helper_console: false,
             }
         }
-        // "auto" / "cmd" / unknown → Command Prompt.
-        _ => {
-            let full = match project {
-                Some(p) => format!("cd /d \"{p}\" && {cmd}"),
-                None => cmd.to_string(),
-            };
-            WindowsLaunch {
-                program: "cmd",
-                args: vec![
-                    "/C".to_string(),
-                    "start".to_string(),
-                    "cmd".to_string(),
-                    "/K".to_string(),
-                    full,
-                ],
-                hide_helper_console: true,
-            }
-        }
+        // "auto" / "cmd" / unknown → Command Prompt. The project dir
+        // rides as the spawn cwd (see WindowsLaunch.cwd), NOT as a
+        // `cd /d` inside the command string.
+        _ => WindowsLaunch {
+            program: "cmd",
+            args: vec![
+                "/C".to_string(),
+                "start".to_string(),
+                "cmd".to_string(),
+                "/K".to_string(),
+                cmd.to_string(),
+            ],
+            cwd: project.map(str::to_string),
+            hide_helper_console: true,
+        },
     }
 }
 
@@ -441,6 +448,9 @@ pub fn open(id: &str, project: Option<&str>, cmd: &str) -> Result<(), String> {
     let launch = windows_open_command(id, project, cmd);
     let mut c = Command::new(launch.program);
     c.args(&launch.args);
+    if let Some(dir) = &launch.cwd {
+        c.current_dir(dir);
+    }
     if launch.hide_helper_console {
         crate::providers::hide_console(&mut c);
     }
@@ -549,18 +559,21 @@ mod tests {
     }
 
     #[test]
-    fn windows_open_command_default_uses_start_and_hides_the_helper() {
-        let l = windows_open_command("auto", Some("C:\\proj"), "claude");
+    fn windows_open_command_default_uses_start_with_spawn_cwd() {
+        let l = windows_open_command("auto", Some("C:\\My Docs\\proj"), "claude");
         assert_eq!(l.program, "cmd");
-        assert_eq!(
-            l.args,
-            vec!["/C", "start", "cmd", "/K", "cd /d \"C:\\proj\" && claude"]
-        );
+        // The project dir must NOT appear inside the command string — a
+        // nested `cd /d "…"` hits the MSVCRT-vs-cmd quoting mismatch
+        // and mangled real paths (the original Windows bug). It rides
+        // as the spawn cwd; `start`'s new console inherits it.
+        assert_eq!(l.args, vec!["/C", "start", "cmd", "/K", "claude"]);
+        assert_eq!(l.cwd.as_deref(), Some("C:\\My Docs\\proj"));
         // The OUTER cmd /C helper's console must be hidden — `start`
         // opens the real terminal window.
         assert!(l.hide_helper_console);
         let l = windows_open_command("cmd", None, "claude");
         assert_eq!(l.args, vec!["/C", "start", "cmd", "/K", "claude"]);
+        assert_eq!(l.cwd, None);
     }
 
     #[cfg(not(target_os = "windows"))]
