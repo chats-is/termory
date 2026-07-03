@@ -816,6 +816,13 @@ pub fn run() {
     // call below.
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut app = tauri::Builder::default()
+        // MUST be the first registered plugin (per its docs). A second
+        // launch (double-clicked exe on Windows — macOS app bundles are
+        // single-instance natively) just surfaces the running
+        // instance's window and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::show_main_window(app);
+        }))
         .plugin(log_plugin)
         .plugin(tauri_plugin_dialog::init())
         // Launch-at-login (Settings → Startup). macOS uses a

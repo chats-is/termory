@@ -362,7 +362,7 @@ pub fn detect() -> Vec<TerminalOption> {
         c.output().map(|o| o.status.success()).unwrap_or(false)
     }
     // "auto" IS cmd on Windows — don't list Command Prompt again separately.
-    let mut v = vec![opt("auto", "Default (Command Prompt)")];
+    let mut v = vec![opt("auto", "Default (cmd)")];
     if where_("wt") {
         v.push(opt("wt", "Windows Terminal"));
     }

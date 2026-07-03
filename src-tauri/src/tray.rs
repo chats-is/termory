@@ -293,6 +293,13 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .tooltip("Termory");
+    // Windows/Linux convention: LEFT click opens the app window, the
+    // menu lives on RIGHT click (handled below). macOS keeps the
+    // menu-bar behavior where left click IS the menu.
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder = builder.show_menu_on_left_click(false);
+    }
     // Prefer the dedicated monochrome menu-bar glyph; fall back to the
     // app window icon if it somehow fails to decode.
     match tauri::image::Image::from_bytes(TRAY_ICON_PNG) {
@@ -322,12 +329,30 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         // success, 60s after a failure — QUOTA_TRAY_MIN_INTERVAL /
         // QUOTA_TRAY_ERROR_RETRY).
         .on_tray_icon_event(|tray, event| {
-            if matches!(event, tauri::tray::TrayIconEvent::Click { .. }) {
+            if let tauri::tray::TrayIconEvent::Click {
+                button,
+                button_state,
+                ..
+            } = event
+            {
                 trigger_quota_refresh(tray.app_handle());
                 // Also re-check recent-session work status on open, so a
                 // crashed session's stale status clears even without a
                 // filesystem event (it splices live into the open menu).
                 refresh_work_status(tray.app_handle());
+                // Windows/Linux: LEFT click (release) opens the app
+                // window — the menu is on right click, see
+                // show_menu_on_left_click(false) above. (Linux
+                // appindicator trays don't deliver click events at
+                // all, so in practice this is the Windows path.)
+                #[cfg(not(target_os = "macos"))]
+                if button == tauri::tray::MouseButton::Left
+                    && button_state == tauri::tray::MouseButtonState::Up
+                {
+                    show_main_window(tray.app_handle());
+                }
+                #[cfg(target_os = "macos")]
+                let _ = (button, button_state);
             }
         })
         .build(app)?;
