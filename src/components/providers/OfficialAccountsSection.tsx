@@ -451,8 +451,10 @@ export function OfficialAccountsSection({
             {/* Quota rings — active row only */}
             {isActiveRow && showQuota && (
               <div className="shrink-0 flex items-center gap-3 ml-1">
-                {quota?.success &&
-                  quota.tiers.map((tier) => (
+                {/* Gate on tiers, not success: a merged transient
+                    failure keeps the last good tiers visible. */}
+                {(quota?.tiers.length ?? 0) > 0 &&
+                  quota!.tiers.map((tier) => (
                     <QuotaTierItem
                       key={tier.name}
                       name={tier.name}

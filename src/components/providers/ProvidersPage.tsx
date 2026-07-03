@@ -27,6 +27,7 @@ import {
   providerFromBinding,
   resolveActiveProviderId
 } from "@/lib/provider-utils";
+import { mergeQuotaResult } from "@/lib/quota-utils";
 import type {
   ActiveState,
   CliApp,
@@ -290,7 +291,9 @@ export function ProvidersPage({
         { app: target }
       );
       setQuotas((cur) => {
-        const next = { ...cur, [target]: result };
+        // Failures merge with the previous entry instead of wiping the
+        // displayed tiers/reset times — see quota-utils mergeQuotaResult.
+        const next = { ...cur, [target]: mergeQuotaResult(cur[target], result) };
         cachedQuotas = next;
         return next;
       });
@@ -326,7 +329,10 @@ export function ProvidersPage({
         ) {
           return cur;
         }
-        const next = { ...cur, [result.app]: result };
+        const next = {
+          ...cur,
+          [result.app]: mergeQuotaResult(prev, result)
+        };
         cachedQuotas = next;
         return next;
       });
