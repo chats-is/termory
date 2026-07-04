@@ -61,7 +61,7 @@ Current alignment target: data acquisition and message preview formatting should
 - Local KV store (config.json + providers.json + favorites.json under `~/.termory/`, chmod 0600): `src-tauri/src/config.rs`
 - Filesystem watcher (static CLI-data dirs + dynamic recursive session-cwd watches → debounced re-scan → `termory:sources-changed`): `src-tauri/src/watcher.rs`
 - Stats aggregations (pure, window-accurate): `src/lib/stats-utils.ts` (+ `stats-utils.test.ts`)
-- Stats UI: `src/components/stats/{StatsPage,StatsFilterBar,OverviewHero,DailyTokensChart,DailyActivitiesHeatmap,shared}.tsx`
+- Stats UI: `src/components/stats/{StatsPage,OverviewTab,TrendsTab,ModelsTab}.tsx` (+ `StatsPage.test.tsx`)
 - Favorites helpers (pure, snapshot-based): `src/lib/favorites.ts` (+ `favorites.test.ts`)
 - Favorites UI: `src/components/favorites/FavoritesPage.tsx` (+ `FavoritesPage.test.tsx`); star button + scroll-to-message hook live on `src/components/MessageList.tsx`
 - Tauri config: `src-tauri/tauri.conf.json`
@@ -752,106 +752,47 @@ The window's title-bar **text is hidden** (`"hiddenTitle": true` on the window i
 
 ## Stats
 
-Three cards stacked under a source filter + date range bar. The date-range control (`StatsFilterBar`) offers presets **Today / Last 7 / 30 / 90 days** plus a **Custom range** picker (shadcn `Calendar` in `mode="range"`, two months, embedded in the existing custom-controlled dropdown — NOT a Radix Popover, to avoid the Tauri WebKit overlay freeze). `react-day-picker` is pinned to **v9** because the shadcn `calendar.tsx` registry component targets v9's `classNames` API (v10 renamed `table` → `month_grid` etc. and breaks the stock component). There is no "365 days" or "All time" preset (removed).
+Three views over one shared filtered window, switched by a tab group (Overview / Trends / Models; reference design: ccusage-style cards). Header: a `bg-muted` card holding the source-filter pills (All / Claude / Codex / Gemini / OpenCode) + refresh, then a plain (card-less) row with the view tabs (Overview / Models) left and **All / 30d / 7d** range pills right. No custom calendar range anymore — `react-day-picker` and `src/components/ui/calendar.tsx` were REMOVED with the old StatsFilterBar.
 
-1. **OverviewHero** — KPI strip: Sessions / Messages / Tokens / **Models** / Projects. The Tokens cell hovers a 4-row breakdown (Input / Output / Reasoning / Cached + Total). The **Models** cell shows the count of distinct *named* models; hovering reveals a per-model token breakdown (`ModelUsageList` in `shared.tsx`, shared with the heatmap). Session counts are NOT shown per model — they wouldn't reconcile with the "sessions created" headline without surfacing an "Unknown" bucket — so the breakdown is a pure token-usage view.
-2. **DailyTokensChart** — 4 trend lines (Input / Output / Cached / Reasoning) on a single linear-scale chart. Tooltip per-day shows fixed 5-row breakdown.
-3. **DailyActivitiesHeatmap** — 24-hour × N-date heatmap. Cell intensity blends per-cell messages + tokens via a weighted geometric mean (see "Heatmap intensity rule" below); hover reveals `Sessions / Messages / Tokens` for that exact `(date, hour)` bucket, plus a per-model token breakdown for that cell (`activities.models[hour][date]`, same `ModelUsageList`). The card's summary line also shows `N models` with the window-level `ModelUsageList` on hover. Hour labels: hand-picked 14 rows, work band 09:00–18:00 highlighted with `text-foreground`.
-
-**Model attribution is session-level (approximate).** `AppSession.model` is one best-guess id per session, so `modelBreakdown` (window-level) and `dailyActivities.models` (per-cell) attribute a session's whole token contribution to its single recorded model. Sessions with no recorded model bucket under `"Unknown"`, which the UI hides everywhere. There is no per-message / per-day model dimension in `DailyTokenBreakdown`, so model-split time-series (per-model daily lines) is NOT possible without a backend change.
+1. **Overview** (`OverviewTab.tsx`) — 8 KPI cards (Sessions / Messages / Total tokens / Active days / Current streak / Longest streak / Peak hour / Favorite model) + a two-panel activity area: LEFT a 24-hour heatmap (4×6 grid, 6-hour bands) for the selected day (defaults to today, `hourlyActivity`), RIGHT a GitHub-style all-history calendar heatmap (week columns Sun→Sat, independent of the range pills). Clicking a calendar day drives the hourly panel; both share the `intensity()` weighted-geometric-mean rule + tier colors.
+2. **Trends** (`TrendsTab.tsx`) — per-day tokens as a STACKED bar chart (Input / Output / Cached / Reasoning; follows the range) + a color legend and an exact per-day breakdown on hover. Stacked (not overlaid lines) because Cached routinely dwarfs the others by 1-3 orders of magnitude (prompt-cache hits) and would flatten them onto the baseline; the bar height is the day's total. Same `dailyTokens` data as the KPI token total.
+3. **Models** (`ModelsTab.tsx`) — per-day stacked token bars split by model (recharts `BarChart`, top-6 models by window tokens each get a fixed blue-ladder color, the rest fold into an "Others" bucket) + a legend list (color dot · `displayModelName` · "{in} in · {out} out" · share%), all models shown.
 
 ### Accuracy rules (LOCKED — do not weaken)
 
 All Stats values are **window-accurate** — they reflect what actually happened in the chosen date range, NOT lifetime totals.
-
-The rules `windowTotals` (and the two visualization functions) follow:
 
 | Metric | Source | Notes |
 |---|---|---|
 | Sessions | `started_at ∈ window` count | Old session reused today does NOT count |
 | Messages | `Σ daily_tokens[date ∈ window].messages` | Per-message timestamps from backend |
 | Tokens | `Σ daily_tokens[date ∈ window].tokens` | Same |
-| Projects | unique projects of sessions with any of the above | Window-bounded |
+| Active days | window days with `messages>0 ∨ tokens>0` | From `dailyTokens` buckets |
+| Streaks | consecutive active days (`overviewKpis`) | current = run ending at the window's last day, with a one-day grace (not-yet-active today counts back from yesterday); longest = max run |
+| Peak hour | argmax of in-window `daily_tokens.hours` sums | null (— shown) with no hourly data |
+| Favorite model | top `modelBreakdown` row, skipping "Unknown" | session-level attribution |
 
-**No fallback smearing**: if a session has `s.tokens` but no `s.daily_tokens`, it contributes ZERO to Messages/Tokens. Termory does not even-distribute lifetime totals across `[started_at, updated_at]` — that would fabricate per-day numbers indistinguishable from real ones. (`sessionActiveDays` and the fallback branch were removed.)
+**No fallback smearing**: a session with `s.tokens` but no `s.daily_tokens` contributes ZERO to Messages/Tokens — Termory does not even-distribute lifetime totals across days (that would fabricate per-day numbers indistinguishable from real ones).
 
-**filter uses interval overlap**: `filterSessions` keeps a session if `[started_at, updated_at] ∩ window ≠ ∅`. Filtering on `updated_at ∈ window` alone would drop sessions whose `updated_at` is after a custom past window even when their `daily_tokens` fall inside it.
+**filter uses interval overlap**: `filterSessions` keeps a session if `[started_at, updated_at] ∩ window ≠ ∅` — filtering on `updated_at ∈ window` alone would drop sessions whose window contribution predates their last update.
 
-**Cross-source consistency** (backend-guaranteed):
-- `entry.messages === Σ entry.hours[h]` per `daily_tokens` entry
-- `entry.tokens.total === Σ entry.hour_tokens[h]` per entry (Gemini edge case: when some records have explicit `total` and others don't, slight drift)
-- Therefore `Σ windowTotals.messages === Σ DailyActivities.messages[h][d]` and `Σ windowTotals.tokens.total === Σ DailyTokens[].total === Σ DailyActivities.tokens[h][d]`
+**`all` range**: `resolveRange(range, sessions)` — starts at the earliest `daily_tokens` date (fallback `started_at`); with no datable activity it degrades to the 30d window. `to` is always end-of-today so sessions still being written stay in the filter.
 
-### Heatmap intensity rule (LOCKED — do not weaken)
+**Cross-source consistency** (backend-guaranteed, test-pinned): `Σ dailyModelTokens.series[*][d] === dailyTokens[d].total` for every date — the stacked chart's per-day totals reconcile exactly with the daily rollup (the "Unknown" bucket rides inside "Others" in the chart precisely so this holds while the legend keeps hiding Unknown).
 
-`DailyActivitiesHeatmap` colors each `(h, d)` cell by a combined intensity ratio. The formula is a **weighted geometric mean** with messages tilted at 60%, tokens at 40%:
+### Model attribution is session-level (approximate)
 
-```
-ratio = m^0.6 * t^0.4    where m = msgCount / maxMsg, t = tokCount / maxTok
-```
+`AppSession.model` is one best-guess id per session, so `modelBreakdown` (window totals incl. the legend's input/output split) and `dailyModelTokens` (stacked series) attribute a session's whole token contribution to its single recorded model — a session that switched models mid-run lands entirely under its main model. Sessions with no recorded model bucket under `"Unknown"`, hidden in the legend/KPIs but folded into the chart's Others bucket (see cross-consistency above). True per-message model splits would need a backend `daily_tokens` model dimension — deliberately not built (approximation accepted by design decision, 2026-07).
 
-Computed per cell in a `useMemo` that pre-scans `maxMsg` / `maxTok` and fills a 24×N ratio matrix once — the render loop only reads `ratios[h][d]`. Do NOT inline the `Math.pow` calls into the JSX map (720+ calls per frame).
+### Calendar heatmap intensity (LOCKED rationale carried over)
 
-**Single-dimension degradation** (don't remove this):
-- `maxMsg === 0 && maxTok === 0` → `ratio = 0` (truly inert)
-- `maxTok === 0` → fall back to `msgCount / maxMsg` (old session users with no `daily_tokens`)
-- `maxMsg === 0` → fall back to `tokCount / maxTok` (degenerate)
-- Otherwise → geometric mean as above
-
-**Tier mapping** (6 buckets, thresholds skewed toward the low end so mid-activity cells don't get stuck in the lightest tier):
-
-| ratio | tier | Tailwind class |
-|---|---|---|
-| `≤ 0` | inert | `bg-foreground/[0.04]` |
-| `< 0.08` | 1 (lightest) | `bg-primary/15` |
-| `< 0.18` | 2 | `bg-primary/30` |
-| `< 0.35` | 3 | `bg-primary/45` |
-| `< 0.55` | 4 | `bg-primary/60` |
-| `< 0.75` | 5 | `bg-primary/75` |
-| `≥ 0.75` | 6 (darkest) | `bg-primary/90` |
-
-**Special cells**:
-- `msg === 0 && sess === 0` → inert color, NO HoverCard (no work to show)
-- `msg === 0 && sess > 0` (a session was created in this hour but its first message landed later) → floor color `bg-primary/10` — deliberately ONE notch below tier 1 so it's distinguishable from a real-but-low activity cell. Hoverable; HoverCard shows `Sessions: N`.
-
-Why weighted geometric mean (not arithmetic, not single-dimension):
-- Pure messages → "one big request" hour reads cold (user was actively waiting on a 100K-token answer)
-- Pure tokens → "many short messages" hour reads cold (user was clearly engaged)
-- Arithmetic mean → "many msg + low tok" cells stay too bright (high m dominates)
-- Geometric mean with `m^0.6 * t^0.4` → messages are the primary signal but tokens still pull ~40%; equal-magnitude cells (`m === t`) collapse cleanly to that shared value
-
-Whoever later tunes the weight: change `MSG_WEIGHT` in `DailyActivitiesHeatmap.tsx` (default `0.6`). Don't change the geometric-mean shape itself unless you have a UX reason as strong as the one above.
-
-### Backend wire shape
-
-`DailyTokenBreakdown` (per-day, per-session):
-
-```rust
-{
-  date: "YYYY-MM-DD",            // scanning machine's local TZ
-  tokens: TokenStats { input, output, cached, reasoning, total },
-  messages: u64,                 // count of AI interactions that day
-  hours: [u64; 24],              // per-hour message count, local hour 0..23
-  hour_tokens: [u64; 24],        // per-hour tokens.total
-}
-```
-
-Populated by all four scanners when underlying records carry timestamps:
-- **Codex** — `event_msg.token_count` events (delta between cumulative usages); per-event `timestamp` → local date+hour.
-- **Claude** — per-`message.usage` JSONL line; line `timestamp` → local date+hour.
-- **Gemini** — per-`record.tokens` entry; record `timestamp` → local date+hour.
-- **OpenCode** — per `step-finish` part; `time.created` (epoch ms) → local date+hour.
-
-All four are gated on a successful local-time parse — records without a timestamp don't appear in `daily_tokens`, the session shows up but contributes zero to time-bucketed widgets.
+Day cells use the SAME weighted-geometric-mean rule as the retired 24h heatmap, at day granularity: `ratio = m^0.6 · t^0.4` (m/t = messages/tokens normalized to the window max), with single-dimension degradation (no tokens anywhere → messages-only; no messages → tokens-only) and the same low-skewed tier thresholds (0.08/0.18/0.35/0.55/0.75 → `bg-primary/15…90`; truly inert → `bg-foreground/[0.06]`). The rationale (messages alone under-light "one big request" hours, tokens alone under-light "many short messages") is unchanged — see git history of `DailyActivitiesHeatmap.tsx` if it needs re-deriving. The heatmap ALWAYS spans the full history (earliest activity day → today, following the source filter but NOT the All/30d/7d range — that scopes only the KPIs + Models chart), like a GitHub contribution graph. Weeks render left→right oldest→newest with a GitHub-style top month axis (label on each month's first column) and a left weekday axis (Mon/Wed/Fri, fixed while the grid scrolls); leading/trailing padding cells share the empty-day grey so the grid is one full rectangle, and it scrolls horizontally auto-scrolled to the newest week.
 
 ### Frontend aggregation
 
-`src/lib/stats-utils.ts` exports the pure helpers (`windowTotals` / `dailyTokens` / `dailyActivities` / `modelBreakdown` / `filterSessions`). Each one iterates `filtered` sessions once; the Stats page memoizes them per `(filtered, resolved)`. `stats-utils.test.ts` covers the window-overlap regression, no-fallback enforcement, per-source attribution, cross-consistency between aggregator outputs, and the model-attribution accounting (`modelBreakdown` + `dailyActivities.models`).
+`src/lib/stats-utils.ts` exports the pure helpers (`windowTotals` / `dailyTokens` / `overviewKpis` / `dailyModelTokens` / `modelBreakdown` / `calendarWeeks` / `hourlyActivity` / `displayModelName` / `filterSessions` / `resolveRange` / `niceMax`). Each iterates `filtered` once; StatsPage memoizes per `(filtered, resolved)`. `displayModelName` prettifies ONLY the Claude family ("claude-opus-4-8" → "Opus 4.8", version-prefix forms like "claude-3-5-haiku-20241022" → "Haiku 3.5" with the trailing date dropped); non-Claude ids pass through. `stats-utils.test.ts` covers window accuracy, streak edges, the stacked-vs-daily cross-consistency, name prettifying, and week-grid padding; `StatsPage.test.tsx` covers the tab/range/source/refresh wiring (Radix Tabs activate on `mouseDown`, not click — the tests fire that).
 
-Naming alignment (UI label ↔ data field ↔ file ↔ component) is intentional:
-- "DAILY TOKENS" card → `DailyTokensChart.tsx` (component) ← `DailyTokens[]` (type) ← `dailyTokens()` (function)
-- "DAILY ACTIVITIES" card → `DailyActivitiesHeatmap.tsx` ← `DailyActivities` ← `dailyActivities()`
-- KPI labels (`Sessions` / `Messages` / `Tokens` / `Projects`) map 1:1 to `WindowTotals` fields
+`stats.tokens.*` i18n keys are ALSO used by the Records detail token tooltip (App.tsx) — they are not Stats-private; don't remove them with Stats changes.
 
 ## Favorites
 
@@ -989,7 +930,7 @@ The whole frontend UI is translated into **English / 简体中文 / 繁體中文
 - **Pure (non-React) helpers that produce UI copy take a translator param.** They can't call `useT()`, so the calling component passes its `t` in: `formatTimeAgo(ts, t)` / `formatRelativeDate(value, t)` (`src/lib/format.ts` — relative time like `time.justNow` / `time.minutesAgo` / `time.yesterday`) and `baseUrlHelp(app, npm, t)` / `apiKeyHelp(app, t)` / `overrideHelpFor(app, t)` (`src/lib/provider-utils.ts` — the editor's per-CLI help text). The format helpers keep `t` **optional** and fall back to English when omitted, so their pure-unit tests stay unchanged; the provider-utils helpers require it. The param is typed `Translate = (key: MessageKey, params?) => string` (provider-utils imports `MessageKey` from `@/i18n` — no cycle, since i18n imports `config`, not these).
 - **Locale-aware date & number formatting follows the APP language, not the OS locale.** `src/lib/format.ts` keeps a module-level `currentLocale`; the `<I18nProvider>` calls `setFormatLocale(locale)` **in its render body** (not an effect — so it's set BEFORE children format in the same pass; the provider renders above all consumers). `Intl.DateTimeFormat` is rebuilt only on change (construction is expensive). Consumers: the cached date formatters (`formatDate` / `formatRelativeDate`) use it directly; ad-hoc `toLocale*` sites outside the module (FreshnessFooter tooltip, stats `formatDateLong`) read it via `getFormatLocale()`. `formatCompact` also branches on it — Chinese groups large numbers by **万 (10⁴) / 亿 (10⁸)** (`21.5B → 215亿`, `1.2M → 120万`), English keeps **K/M/B**. Without a provider (isolated unit tests) the locale is `undefined` = OS default, so existing tests are unaffected. Covered by `format.test.ts`.
 - **English plurals** use two keys (`*_one` / `*_other`) selected by the caller (`t(n === 1 ? "x_one" : "x_other", { n })`); Chinese just maps both to one form.
-- Brand / product names are **not** translated — they read identically in the zh dicts: CLI labels via `CLI_APP_LABEL`, `BrandIcon source`, **`AI Gateway` / `AI Gateways`** (the gateway product name — user decision), **`Base URL`**, **`AI SDK`**, **`Tokens`**, plus literals like `config.json`, `chmod 0600`, `sk-…`, and example URLs. `BrandIcon source` must stay a source literal, so translate the *display* text separately from the icon's `source` prop (see `StatsFilterBar` / sidebar "All", `MemoryCard`). (The "zh value == en value" set is the audit list for this — every entry must be a deliberate keep-English.)
+- Brand / product names are **not** translated — they read identically in the zh dicts: CLI labels via `CLI_APP_LABEL`, `BrandIcon source`, **`AI Gateway` / `AI Gateways`** (the gateway product name — user decision), **`Base URL`**, **`AI SDK`**, **`Tokens`**, plus literals like `config.json`, `chmod 0600`, `sk-…`, and example URLs. `BrandIcon source` must stay a source literal, so translate the *display* text separately from the icon's `source` prop (see the Stats source-filter pills / sidebar "All", `MemoryCard`). (The "zh value == en value" set is the audit list for this — every entry must be a deliberate keep-English.)
 - The gateway editor's add/edit dialog reuses **`providers.addProvider` / `providers.editProvider`** ("Add/Edit provider") — shared with the standalone provider editor, by user decision; the per-gateway-card edit icon keeps its own `providers.editGateway` tooltip.
 - Toasts and `ask()` confirm dialogs are translated too; the only deliberate English left is `toast.error(String(err))` — a raw pass-through of a backend error with no template.
 - The Rust backend's user-facing strings are mostly technical error pass-throughs surfaced via those `String(err)` toasts, so the backend is not part of the i18n system.
@@ -1051,7 +992,7 @@ All P0 items have shipped:
 
 - ~~`tauri-plugin-store`~~ — replaced with custom `config.rs` module (`~/.termory/{config,providers,favorites}.json` with `chmod 0600`). The plugin couldn't control file location or Unix permissions; rolling our own KV gives both.
 - ~~Providers page~~ — done. See the "Providers" section above. Cross-verified against `.audit-sources/cc-switch/` for the per-CLI write shapes; 4 CLIs supported with per-CLI tests. OpenCode adapter writes a full `provider.<termory-id>` block to `~/.config/opencode/opencode.json` (`npm` / `name` / `options.{baseURL,apiKey}` / `models`) — cc-switch's pattern — and never touches `auth.json`. The editor's AI SDK dropdown picks the official `npm` package (`@ai-sdk/openai-compatible` / `@ai-sdk/anthropic` / …), stored verbatim in the Provider's top-level `npm` field.
-- ~~Stats page~~ — done. See the "Stats" section below. KPI strip (Sessions/Messages/Tokens/Projects) + DAILY TOKENS line chart + DAILY ACTIVITIES heatmap. All values window-accurate from each session's `daily_tokens[]` — no fallback smearing, no lifetime-of-touched-session totals.
+- ~~Stats page~~ — done, redesigned 2026-07 (see the "Stats" section): Overview (8 KPI cards + calendar heatmap + fun fact) / Models (stacked per-model daily bars + legend) tabs, All/30d/7d range. All values window-accurate from each session's `daily_tokens[]` — no fallback smearing.
 - ~~App Settings page~~ — done. 7 sections: Appearance (next-themes System/Light/Dark), Startup (launch-at-login toggle via `tauri-plugin-autostart` — macOS LaunchAgent / Windows Run key / Linux XDG autostart; state read from the OS on mount, `autostart:default` capability; the login item launches with `--autostart`, which `setup()` detects to start TRAY-ONLY — window hidden + Dock icon off, same end state as closing the window), Terminal (which terminal the tray's session-resume opens — `detect_terminals` dropdown, `terminal` config key), Storage (`~/.termory/` path + "Open in Finder"), Search history (count + Clear), Keyboard shortcuts (display-only reference), About (version + manual / auto update check). The only spec item NOT in the page is **scan-path overrides** — users with non-default CLI install locations still rely on the per-CLI env vars (`CLAUDE_CONFIG_DIR` etc.). Add a "Sources" section if that ever becomes a real ask. The originally-listed "watcher toggle" was dropped — the watcher just runs unconditionally (see P2 "Watcher completion").
 
 ### P2 — quality of life
@@ -1060,8 +1001,8 @@ All P0 items have shipped:
 - **Keyboard navigation** — ✅ `⌘1..6` switch rail routes (App.tsx:235), `⌘K` / `⌘F` summon Cmd-K search palette (CommandPalette.tsx), `Esc` closes palette / dropdowns. The Cmd-K palette's own ↑/↓/Enter is `cmdk`'s built-in. ❌ Not implemented: arrow-key navigation inside the Records/Favorites lists or the source/project sidebar (a `useListNav` two-step highlight prototype was tried and removed — the focus model was unintuitive).
 - ~~Watcher completion~~ — done. The filesystem watcher (`src-tauri/src/watcher.rs`) **statically** watches the CLI data dirs (`~/.codex`, `~/.claude`, `~/.gemini`, opencode, the CLI-binary dirs for install detection) and **dynamically + recursively** watches each project's cwd — the dynamic set is recomputed from every scan's `projects` list (`dynamic_paths_from_sessions` over `result.projects` → `reconfigure_dynamic`, `RecursiveMode::Recursive`). So per-project files (`<cwd>/CLAUDE.md`, `AGENTS.md`, `.claude/skills/`, …) auto-refresh on edit too, not just at launch. A debounce (`DEBOUNCE_WINDOW` = 600ms) folds the flurry of fs events (incl. `node_modules` / build noise under the recursive cwd watch) into a single re-scan that emits `termory:sources-changed`. Net: **no manual per-source / per-file refresh is needed** — everything Termory surfaces lives under a watched path. **CPU: the `termory:sources-changed` emit is gated on main-window visibility** (`app_handle.get_webview_window("main").is_visible()`) — while the window is hidden (close-to-tray, a menu-bar app's common state) the re-scan still runs (the tray's `refresh_recent` needs it) but the full `ScanResult` is NOT serialized + sent to a frontend nobody's looking at. The frontend re-scans on window **focus** (`App.tsx` `getCurrentWindow().onFocusChanged` → a **silent** `scan_all_sessions` + `applyScanResult`, NOT `refresh()` — focus fires on every activation, so don't toggle the global `loading` or the Stats refresh indicator flashes; mirrors the sources-changed handler), and the next emit once visible is the fallback, so data is fresh whenever the window is shown. (During active CLI use the dominant per-scan cost is re-parsing the one changed session JSONL — mtime-cached so only the active file re-parses — plus this emit; the visibility gate removes the emit half whenever the window's hidden.)
 - ~~Frontend test baseline~~ — done. 322 Vitest tests across 27 files.
-  - **Pure helpers** (`src/lib/`): `session-utils`, `format`, `stats-utils` (incl. `niceMax` — the DailyTokensChart axis-bound helper lives here, not in the component, so it's unit-testable), `favorites`, `provider-utils` (incl. `isManagedOptionKey` — mirrors the Rust `override_key_is_managed`), `search-utils` (`splitSnippet`), `set-utils` (`addSetValue`/`toggleSetValue`).
-  - **Hooks / components**: `usePersistentState`, `CopyMenu`, `FreshnessFooter`, `ListItemMenu`, `FavoritesPage`, `MessageList` (star wiring; `@tanstack/react-virtual` is `vi.mock`'d to bypass jsdom layout limits), `ProviderEditor` (duplicate/managed-key blocking, save trim/drop, OpenCode `{id,name}` models, Claude routing template), `GatewayEditor` (validate / detect+bind / save-shape), `GatewaysPage` (Codex follow prompt fires on a binding activate/deactivate via the `codexFollowForBinding` prop in both directions, not on custom→custom; delete-cleanup keeps the gateway + toasts on a failed deactivate), `CodexFollowDialog` ("Activate & keep" disabled until a project is selected), `CommandPalette` (filter / select incl. `first_match_index` passthrough / recent searches / ⌘K), `ModelCombobox` (aria-label reachability, free-text `onValueChange`, suggestion select/dedup/filter), `ProviderCard` (gateway-binding card hides Edit/Delete), `StatsFilterBar` (preset + source callbacks, custom-range dropdown), `i18n` (the three locale key sets are identical).
+  - **Pure helpers** (`src/lib/`): `session-utils`, `format`, `stats-utils` (incl. `niceMax` — the chart axis-bound helper lives here, not in the component, so it's unit-testable; plus `overviewKpis`/`dailyModelTokens`/`displayModelName`/`calendarWeeks`), `favorites`, `provider-utils` (incl. `isManagedOptionKey` — mirrors the Rust `override_key_is_managed`), `search-utils` (`splitSnippet`), `set-utils` (`addSetValue`/`toggleSetValue`).
+  - **Hooks / components**: `usePersistentState`, `CopyMenu`, `FreshnessFooter`, `ListItemMenu`, `FavoritesPage`, `MessageList` (star wiring; `@tanstack/react-virtual` is `vi.mock`'d to bypass jsdom layout limits), `ProviderEditor` (duplicate/managed-key blocking, save trim/drop, OpenCode `{id,name}` models, Claude routing template), `GatewayEditor` (validate / detect+bind / save-shape), `GatewaysPage` (Codex follow prompt fires on a binding activate/deactivate via the `codexFollowForBinding` prop in both directions, not on custom→custom; delete-cleanup keeps the gateway + toasts on a failed deactivate), `CodexFollowDialog` ("Activate & keep" disabled until a project is selected), `CommandPalette` (filter / select incl. `first_match_index` passthrough / recent searches / ⌘K), `ModelCombobox` (aria-label reachability, free-text `onValueChange`, suggestion select/dedup/filter), `ProviderCard` (gateway-binding card hides Edit/Delete), `StatsPage` (view tabs + All/30d/7d + source pills + refresh wiring), `i18n` (the three locale key sets are identical).
   - **Convention reminders**: components using shadcn `Tooltip`/`HoverCard` are wrapped in `<TooltipProvider>` via a local `render` helper; `useI18n()` falls back to English with no provider so tests assert the English strings; jsdom needs local `ResizeObserver` / `scrollIntoView` shims for `cmdk`-based components (kept inside the test file, NOT in shared setup).
 
 ### P3 — nice to have
