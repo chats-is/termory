@@ -95,8 +95,13 @@ static RECENT: Mutex<RecentState> = Mutex::new(RecentState {
     targets: Vec::new(),
 });
 
-/// Claude's per-model weekly windows stay app-only — the menu row
-/// shows the main session + weekly windows (user decision).
+/// LEGACY per-model weekly windows (the flat `seven_day_opus` /
+/// `seven_day_sonnet` ids) stay app-only. The API has since moved
+/// model-scoped limits into the `limits` array, named by
+/// `scope.model.display_name` (e.g. "Fable") — those DO show on the
+/// tray (brand name, falls through `tray_tier_label` verbatim), so
+/// this hide-set only drops the legacy ids if they ever return
+/// non-null again.
 const TRAY_HIDDEN_TIERS: &[&str] = &["seven_day_opus", "seven_day_sonnet"];
 
 /// Cached official-account quota shown on a CLI's first-level row.

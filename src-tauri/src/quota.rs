@@ -395,13 +395,57 @@ fn parse_claude_usage(body: &serde_json::Value) -> (Vec<QuotaTier>, Option<Extra
     }
     if let Some(obj) = body.as_object() {
         for (key, value) in obj {
-            if key == "extra_usage" || CLAUDE_KNOWN_TIERS.contains(&key.as_str()) {
+            // `limits` is the new structured array (handled below); the
+            // reserved keys and the known tiers are already covered.
+            if key == "extra_usage" || key == "limits" || CLAUDE_KNOWN_TIERS.contains(&key.as_str())
+            {
                 continue;
             }
             if let Some(tier) = window_tier(key, value) {
                 tiers.push(tier);
             }
         }
+    }
+
+    // Newer API shape: a `limits` array carries model-SCOPED weekly
+    // windows (e.g. Fable) that the flat top-level fields don't — the
+    // top-level `seven_day_opus`/`seven_day_sonnet` are now null. Each
+    // `weekly_scoped` entry names its model in `scope.model.display_name`
+    // (a brand name, so it becomes the tier `name` verbatim). Any model
+    // surfaces dynamically, no per-model code. `session`/`weekly_all`
+    // duplicate the flat `five_hour`/`seven_day` already added, so only
+    // scoped entries are taken here.
+    for entry in body
+        .get("limits")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        if entry.get("kind").and_then(|k| k.as_str()) != Some("weekly_scoped") {
+            continue;
+        }
+        let Some(percent) = entry.get("percent").and_then(|p| p.as_f64()) else {
+            continue;
+        };
+        let Some(model) = entry
+            .pointer("/scope/model/display_name")
+            .and_then(|m| m.as_str())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        // De-dup by model name in case the array repeats one.
+        if tiers.iter().any(|tier| tier.name == model) {
+            continue;
+        }
+        tiers.push(QuotaTier {
+            name: model.to_string(),
+            utilization: percent,
+            resets_at: entry
+                .get("resets_at")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        });
     }
 
     let extra_usage = body.get("extra_usage").map(|v| ExtraUsage {
@@ -1376,6 +1420,50 @@ mod tests {
         let (tiers, _) = parse_claude_usage(&body);
         let names: Vec<&str> = tiers.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["five_hour", "thirty_day"]);
+    }
+
+    #[test]
+    fn parse_claude_usage_extracts_model_scoped_limits_from_the_array() {
+        // Real-shape body (2026-07): flat five_hour/seven_day still
+        // carry utilization, the legacy per-model fields are null, and
+        // model-scoped weekly limits live in the `limits` array.
+        let body = json!({
+            "five_hour": { "utilization": 53.0, "resets_at": "2026-07-04T09:29:59Z" },
+            "seven_day": { "utilization": 63.0, "resets_at": "2026-07-09T15:59:59Z" },
+            "seven_day_opus": null,
+            "seven_day_sonnet": null,
+            "limits": [
+                { "kind": "session", "percent": 53, "resets_at": "2026-07-04T09:29:59Z", "scope": null },
+                { "kind": "weekly_all", "percent": 63, "resets_at": "2026-07-09T15:59:59Z", "scope": null },
+                { "kind": "weekly_scoped", "percent": 100, "resets_at": "2026-07-09T15:59:59Z",
+                  "scope": { "model": { "id": null, "display_name": "Fable" } }, "is_active": true }
+            ]
+        });
+        let (tiers, _) = parse_claude_usage(&body);
+        let names: Vec<&str> = tiers.iter().map(|t| t.name.as_str()).collect();
+        // Flat five_hour/seven_day first (session/weekly_all in the
+        // array are NOT re-added), then the scoped model window verbatim.
+        assert_eq!(names, vec!["five_hour", "seven_day", "Fable"]);
+        let fable = tiers.iter().find(|t| t.name == "Fable").unwrap();
+        assert_eq!(fable.utilization, 100.0);
+        assert_eq!(fable.resets_at.as_deref(), Some("2026-07-09T15:59:59Z"));
+    }
+
+    #[test]
+    fn parse_claude_usage_skips_scoped_limits_without_a_model_name() {
+        let body = json!({
+            "five_hour": { "utilization": 10.0 },
+            "limits": [
+                { "kind": "weekly_scoped", "percent": 20, "scope": { "model": { "display_name": "" } } },
+                { "kind": "weekly_scoped", "percent": 30, "scope": null }
+            ]
+        });
+        let (tiers, _) = parse_claude_usage(&body);
+        // Only the flat five_hour — both scoped entries lack a usable name.
+        assert_eq!(
+            tiers.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            vec!["five_hour"]
+        );
     }
 
     #[test]
