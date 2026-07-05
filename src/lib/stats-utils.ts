@@ -9,11 +9,9 @@
 import type { AppSession, CliApp, TokenStats } from "../types";
 import { isSessionItem } from "./session-utils";
 
-export type DateRangePreset = "today" | "7d" | "30d" | "90d" | "custom";
+export type DateRangePreset = "7d" | "30d" | "all";
 
-export type DateRange =
-  | { preset: Exclude<DateRangePreset, "custom"> }
-  | { preset: "custom"; from: Date; to: Date };
+export type DateRange = { preset: DateRangePreset };
 
 export type SourceFilter = "All" | CliApp;
 
@@ -43,21 +41,39 @@ export function sessionTimestamp(session: AppSession): Date | null {
  */
 export function resolveRange(
   range: DateRange,
+  sessions: AppSession[],
   now: Date = new Date()
 ): { from: Date; to: Date } {
-  if (range.preset === "custom") {
-    return { from: range.from, to: range.to };
-  }
   const to = new Date(now);
   to.setHours(23, 59, 59, 999);
-  const days =
-    range.preset === "today"
-      ? 1
-      : range.preset === "7d"
-        ? 7
-        : range.preset === "30d"
-          ? 30
-          : 90;
+  if (range.preset === "all") {
+    // Earliest activity day: min daily_tokens date, falling back to
+    // started_at. Date keys are YYYY-MM-DD, so lexical compare works.
+    let earliest: string | null = null;
+    for (const s of sessions) {
+      if (!isSessionItem(s)) continue;
+      if (s.daily_tokens) {
+        for (const e of s.daily_tokens) {
+          if (!earliest || e.date < earliest) earliest = e.date;
+        }
+      }
+      if (s.started_at) {
+        const d = new Date(s.started_at);
+        if (!Number.isNaN(d.getTime())) {
+          const k = localDateKey(d);
+          if (!earliest || k < earliest) earliest = k;
+        }
+      }
+    }
+    if (earliest) {
+      const [y, m, d] = earliest.split("-").map(Number);
+      const from = new Date(y, m - 1, d);
+      from.setHours(0, 0, 0, 0);
+      return { from, to };
+    }
+    // No datable activity → fall through to the 30d window.
+  }
+  const days = range.preset === "7d" ? 7 : 30;
   const from = new Date(now);
   from.setDate(from.getDate() - days + 1);
   from.setHours(0, 0, 0, 0);
@@ -115,134 +131,6 @@ export function localDateKey(d: Date): string {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
-}
-
-/**
- * Per-hour-per-date matrices for the workload heatmap. All three
- * matrices share the same `dates` axis (column index) so the hover
- * card can read corresponding hour/date data from any of them.
- *
- *   messages[hour][date] — count of AI interactions
- *   tokens[hour][date]   — total tokens
- *   sessions[hour][date] — sessions whose `started_at` fell on
- *                          (date, hour). Sparse — most cells are 0.
- *   models[hour][date]   — per-model messages/tokens in that cell,
- *                          sorted by tokens desc. Attributed at the
- *                          session level (one model per session), same
- *                          approximation as `modelBreakdown`.
- */
-export type ModelCellUsage = {
-  model: string;
-  messages: number;
-  tokens: number;
-};
-
-export type DailyActivities = {
-  dates: string[];
-  messages: number[][];
-  tokens: number[][];
-  sessions: number[][];
-  models: ModelCellUsage[][][];
-};
-
-/** Build the 24-hour × N-date matrices for messages / tokens /
- * sessions-started. */
-export function dailyActivities(
-  sessions: AppSession[],
-  range: { from: Date; to: Date }
-): DailyActivities {
-  const dates: string[] = [];
-  const cursor = new Date(range.from);
-  cursor.setHours(0, 0, 0, 0);
-  const end = new Date(range.to);
-  end.setHours(0, 0, 0, 0);
-  while (cursor.getTime() <= end.getTime()) {
-    dates.push(localDateKey(cursor));
-    cursor.setDate(cursor.getDate() + 1);
-  }
-  const dateIndex = new Map<string, number>();
-  dates.forEach((d, i) => dateIndex.set(d, i));
-  const messages: number[][] = Array.from({ length: 24 }, () =>
-    dates.map(() => 0)
-  );
-  const tokens: number[][] = Array.from({ length: 24 }, () =>
-    dates.map(() => 0)
-  );
-  const sessionsM: number[][] = Array.from({ length: 24 }, () =>
-    dates.map(() => 0)
-  );
-  // Per-cell model accumulator — lazily allocated (most cells are empty).
-  type Cell = Map<string, { messages: number; tokens: number }>;
-  const modelCells: (Cell | null)[][] = Array.from({ length: 24 }, () =>
-    dates.map(() => null)
-  );
-  const cellBucket = (h: number, di: number, model: string) => {
-    let cell = modelCells[h][di];
-    if (!cell) {
-      cell = new Map();
-      modelCells[h][di] = cell;
-    }
-    let b = cell.get(model);
-    if (!b) {
-      b = { messages: 0, tokens: 0 };
-      cell.set(model, b);
-    }
-    return b;
-  };
-  for (const s of sessions) {
-    if (!isSessionItem(s)) continue;
-
-    // Session-creation row: a session's started_at lands at exactly
-    // one (date, hour) cell. Used for the "Sessions" hover row.
-    if (s.started_at) {
-      const startTs = new Date(s.started_at);
-      if (!Number.isNaN(startTs.getTime())) {
-        const di = dateIndex.get(localDateKey(startTs));
-        if (di != null) sessionsM[startTs.getHours()][di] += 1;
-      }
-    }
-
-    if (!s.daily_tokens) continue;
-    const model = s.model && s.model.trim() ? s.model : "Unknown";
-    for (const entry of s.daily_tokens) {
-      const di = dateIndex.get(entry.date);
-      if (di == null) continue;
-      const hours =
-        entry.hours && entry.hours.length === 24 ? entry.hours : null;
-      const hourTokens =
-        entry.hour_tokens && entry.hour_tokens.length === 24
-          ? entry.hour_tokens
-          : null;
-      for (let h = 0; h < 24; h++) {
-        const m = hours ? hours[h] : 0;
-        const t = hourTokens ? hourTokens[h] : 0;
-        if (m) messages[h][di] += m;
-        if (t) tokens[h][di] += t;
-        if (m || t) {
-          const b = cellBucket(h, di, model);
-          b.messages += m;
-          b.tokens += t;
-        }
-      }
-    }
-  }
-  const models: ModelCellUsage[][][] = Array.from({ length: 24 }, (_, h) =>
-    dates.map((_, di) => {
-      const cell = modelCells[h][di];
-      if (!cell) return [];
-      return Array.from(cell, ([model, v]) => ({
-        model,
-        messages: v.messages,
-        tokens: v.tokens
-      })).sort(
-        (a, b) =>
-          b.tokens - a.tokens ||
-          b.messages - a.messages ||
-          a.model.localeCompare(b.model)
-      );
-    })
-  );
-  return { dates, messages, tokens, sessions: sessionsM, models };
 }
 
 /**
@@ -330,6 +218,10 @@ export type ModelUsage = {
   model: string;
   sessions: number;
   tokens: number;
+  /** In-window input / output token sums (same per-entry date check as
+   * `tokens`) — the Models-tab legend renders "{in} in · {out} out". */
+  input: number;
+  output: number;
 };
 
 /**
@@ -352,11 +244,14 @@ export function modelBreakdown(
   const toKey = localDateKey(range.to);
   const inRange = (date: string) => date >= fromKey && date <= toKey;
 
-  const map = new Map<string, { sessions: number; tokens: number }>();
+  const map = new Map<
+    string,
+    { sessions: number; tokens: number; input: number; output: number }
+  >();
   const bucket = (model: string) => {
     let b = map.get(model);
     if (!b) {
-      b = { sessions: 0, tokens: 0 };
+      b = { sessions: 0, tokens: 0, input: 0, output: 0 };
       map.set(model, b);
     }
     return b;
@@ -376,7 +271,10 @@ export function modelBreakdown(
     if (s.daily_tokens) {
       for (const entry of s.daily_tokens) {
         if (!inRange(entry.date)) continue;
-        bucket(model).tokens += entry.tokens.total;
+        const b = bucket(model);
+        b.tokens += entry.tokens.total;
+        b.input += entry.tokens.input;
+        b.output += entry.tokens.output;
       }
     }
   }
@@ -468,4 +366,184 @@ export function dailyTokens(
     }
   }
   return Array.from(buckets.values());
+}
+
+// ─── Overview KPIs ────────────────────────────────────────────────────────────
+
+export type OverviewKpis = {
+  /** Days in the window with any activity (messages or tokens). */
+  activeDays: number;
+  /** Consecutive active days ending at the window\'s last day — with a
+   * one-day grace: a not-yet-active today counts back from yesterday. */
+  currentStreak: number;
+  /** Longest run of consecutive active days in the window. */
+  longestStreak: number;
+  /** Local hour (0-23) with the most messages; null with no activity. */
+  peakHour: number | null;
+};
+
+/** Streak / activity KPIs — window-accurate with the same accounting
+ * as `windowTotals` (per-entry date checks, no smearing). */
+export function overviewKpis(
+  sessions: AppSession[],
+  range: { from: Date; to: Date }
+): OverviewKpis {
+  const daily = dailyTokens(sessions, range);
+  const active = daily.map((d) => d.messages > 0 || d.total > 0);
+
+  let activeDays = 0;
+  let longestStreak = 0;
+  let run = 0;
+  for (const a of active) {
+    if (a) {
+      activeDays += 1;
+      run += 1;
+      if (run > longestStreak) longestStreak = run;
+    } else {
+      run = 0;
+    }
+  }
+
+  let currentStreak = 0;
+  let i = active.length - 1;
+  if (i >= 0 && !active[i]) i -= 1; // today not active yet → from yesterday
+  for (; i >= 0 && active[i]; i -= 1) currentStreak += 1;
+
+  // Per-hour message totals across the window (same in-range per-entry
+  // check the other aggregators use).
+  const fromKey = localDateKey(range.from);
+  const toKey = localDateKey(range.to);
+  const hourMessages = new Array<number>(24).fill(0);
+  for (const s of sessions) {
+    if (!isSessionItem(s) || !s.daily_tokens) continue;
+    for (const entry of s.daily_tokens) {
+      if (entry.date < fromKey || entry.date > toKey) continue;
+      if (!entry.hours || entry.hours.length !== 24) continue;
+      for (let h = 0; h < 24; h++) hourMessages[h] += entry.hours[h];
+    }
+  }
+  let peakHour: number | null = null;
+  let best = 0;
+  for (let h = 0; h < 24; h++) {
+    if (hourMessages[h] > best) {
+      best = hourMessages[h];
+      peakHour = h;
+    }
+  }
+
+  return { activeDays, currentStreak, longestStreak, peakHour };
+}
+
+// ─── Per-day per-model tokens (Models tab) ────────────────────────────────────
+
+export type DailyModelTokens = {
+  /** Every date in the window (same axis as `dailyTokens`). */
+  dates: string[];
+  /** Models sorted by window token total desc (then name). */
+  models: string[];
+  /** Per-model daily totals, aligned with `dates`. */
+  series: Record<string, number[]>;
+};
+
+/**
+ * Stacked-bar data: per-day token totals split by model. Attribution
+ * is SESSION-level (one best-guess model per session — the documented
+ * approximation shared with `modelBreakdown`), so summing every
+ * model\'s series for a date equals that date\'s `dailyTokens[].total`.
+ */
+export function dailyModelTokens(
+  sessions: AppSession[],
+  range: { from: Date; to: Date }
+): DailyModelTokens {
+  const dates: string[] = [];
+  const cursor = new Date(range.from);
+  cursor.setHours(0, 0, 0, 0);
+  const end = new Date(range.to);
+  end.setHours(0, 0, 0, 0);
+  while (cursor.getTime() <= end.getTime()) {
+    dates.push(localDateKey(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  const dateIndex = new Map<string, number>();
+  dates.forEach((d, i) => dateIndex.set(d, i));
+
+  const series: Record<string, number[]> = {};
+  const totals = new Map<string, number>();
+  for (const s of sessions) {
+    if (!isSessionItem(s) || !s.daily_tokens) continue;
+    const model = s.model && s.model.trim() ? s.model : "Unknown";
+    for (const entry of s.daily_tokens) {
+      const di = dateIndex.get(entry.date);
+      if (di == null) continue;
+      let row = series[model];
+      if (!row) {
+        row = dates.map(() => 0);
+        series[model] = row;
+      }
+      row[di] += entry.tokens.total;
+      totals.set(model, (totals.get(model) ?? 0) + entry.tokens.total);
+    }
+  }
+  const models = Array.from(totals.keys()).sort(
+    (a, b) => (totals.get(b) ?? 0) - (totals.get(a) ?? 0) || a.localeCompare(b)
+  );
+  return { dates, models, series };
+}
+
+// ─── Model display names ──────────────────────────────────────────────────────
+
+/**
+ * Friendly model name for the Claude family — "claude-opus-4-8" →
+ * "Opus 4.8", "claude-3-5-haiku-20241022" → "Haiku 3.5",
+ * "anthropic/claude-fable-5" → "Fable 5". Non-Claude ids (gpt-5,
+ * gemini-2.5-pro, …) pass through unchanged, as does "Unknown".
+ */
+export function displayModelName(id: string): string {
+  const m =
+    /(?:^|\/)claude-(?:(\d+)-(\d+)-)?(opus|sonnet|haiku|fable)(?:-(\d+(?:-\d+)*))?/i.exec(
+      id
+    );
+  if (!m) return id;
+  const role = m[3][0].toUpperCase() + m[3].slice(1).toLowerCase();
+  // Version prefix form ("claude-3-5-sonnet-…") or suffix form
+  // ("claude-opus-4-8"); a trailing 8-digit segment is a DATE, not a
+  // version ("…-haiku-20241022").
+  let version = "";
+  if (m[1]) {
+    version = `${m[1]}.${m[2]}`;
+  } else if (m[4]) {
+    const parts = m[4].split("-").filter((p) => p.length < 8);
+    version = parts.join(".");
+  }
+  return version ? `${role} ${version}` : role;
+}
+
+// ─── Calendar heatmap grid ────────────────────────────────────────────────────
+
+export type DayCell = { date: string; messages: number; tokens: number };
+
+/**
+ * GitHub-style week columns for the Overview heatmap: each column is
+ * one week (rows Sun→Sat), the first/last columns padded with null so
+ * every column is exactly 7 cells. Input is `dailyTokens` output (one
+ * entry per day, already date-ordered).
+ */
+export function calendarWeeks(daily: DailyTokens[]): (DayCell | null)[][] {
+  if (daily.length === 0) return [];
+  const cells: (DayCell | null)[] = daily.map((d) => ({
+    date: d.date,
+    messages: d.messages,
+    tokens: d.total
+  }));
+  // Parse the first date key as LOCAL (new Date("YYYY-MM-DD") is UTC).
+  const [y, m, d] = daily[0].date.split("-").map(Number);
+  const firstWeekday = new Date(y, m - 1, d).getDay();
+  const padded: (DayCell | null)[] = [
+    ...Array.from({ length: firstWeekday }, () => null),
+    ...cells
+  ];
+  while (padded.length % 7 !== 0) padded.push(null);
+  const weeks: (DayCell | null)[][] = [];
+  for (let i = 0; i < padded.length; i += 7) weeks.push(padded.slice(i, i + 7));
+  return weeks;
 }

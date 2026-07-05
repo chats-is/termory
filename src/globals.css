@@ -22,6 +22,48 @@
   --primary: oklch(0.6204 0.195 253.83);
   --primary-foreground: oklch(0.985 0 0);
 
+  /* Stats — token-category series (Tokens chart, category mode).
+   * input/output/cached/reasoning are NOMINAL kinds (no magnitude
+   * ordering), so they get four DISTINCT hues, not shades of one blue —
+   * a 4-blue ramp collapsed under color-blindness (tritan ΔE 7.6). These
+   * are dataviz slots blue/green/yellow/magenta, validated as a set on
+   * the muted chart surface (worst all-pairs CVD ΔE 24.2 light / 10.3
+   * dark; backed by the legend's direct labels). Light steps here; the
+   * .dark block re-steps them for the dark surface. */
+  --stat-tok-input: #2a78d6;
+  --stat-tok-output: #008300;
+  --stat-tok-cached: #eda100;
+  --stat-tok-reasoning: #e87ba4;
+
+  /* Stats — model series colored by PROVIDER FAMILY (Tokens chart, model
+   * mode). Every Claude model is a CLAY tone, every Gemini a BLUE tone,
+   * every OpenAI a TEAL tone — so a model always reads as its provider,
+   * never as a "custom" color. Same-provider models are told apart by
+   * lightness, assigned by usage rank: step 0 is the BOLD brand anchor
+   * (the most-used model), then progressively LIGHTER shades (bold → faint
+   * as usage drops). One ramp for both themes — the anchor reads on the
+   * light surface and its lighter tints read on the dark surface; in a
+   * stacked bar each segment is bounded by its neighbours + a legend label,
+   * so the palest steps stay legible. Validated ordinal scale (one hue,
+   * monotone L, ΔL ≥ 0.06 — Claude's palest pair is 0.055, JND-distinct;
+   * clay clips the sRGB gamut near white). Unknown-provider models (custom
+   * / gateway) fall to the neutral pool in TokensChart instead. */
+  --stat-claude-0: #d97745;
+  --stat-claude-1: #e8956d;
+  --stat-claude-2: #f1b091;
+  --stat-claude-3: #f7c9b4;
+  --stat-claude-4: #fbe0d3;
+  --stat-gemini-0: #4285f4;
+  --stat-gemini-1: #5f9cff;
+  --stat-gemini-2: #7bb2ff;
+  --stat-gemini-3: #97c9ff;
+  --stat-gemini-4: #b4dfff;
+  --stat-openai-0: #10a37f;
+  --stat-openai-1: #4ab694;
+  --stat-openai-2: #6ec9aa;
+  --stat-openai-3: #8fddc1;
+  --stat-openai-4: #aef0d8;
+
   --secondary: oklch(0.965 0.004 250);
   --secondary-foreground: oklch(0.205 0 0);
 
@@ -88,6 +130,16 @@
    * jarring brightness shift when the user toggles theme. */
   --primary: oklch(0.6204 0.195 253.83);
   --primary-foreground: oklch(0.985 0 0);
+
+  /* Stats token-category series, re-stepped for the dark chart surface
+   * (#191b1d): same four hues, dark-band steps (OKLCH L 0.48–0.67,
+   * ≥3:1 contrast). See the :root block for the rationale. */
+  --stat-tok-input: #3987e5;
+  --stat-tok-output: #008300;
+  --stat-tok-cached: #c98500;
+  --stat-tok-reasoning: #d55181;
+  /* Model provider-family ramps (--stat-claude/gemini/openai-*) are
+   * theme-independent — defined once in :root, no dark override needed. */
 
   --secondary: oklch(0.22 0.006 250);
   --secondary-foreground: oklch(0.96 0.003 250);
