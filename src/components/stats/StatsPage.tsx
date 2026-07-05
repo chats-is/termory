@@ -18,17 +18,8 @@ import {
   resolveRange,
   windowTotals,
 } from "@/lib/stats-utils";
-import { OverviewTab } from "./OverviewTab";
-import { TrendsTab } from "./TrendsTab";
-import { ModelsTab } from "./ModelsTab";
-
-type StatsView = "overview" | "trends" | "models";
-
-const VIEWS: { id: StatsView; labelKey: MessageKey }[] = [
-  { id: "overview", labelKey: "stats.tab.overview" },
-  { id: "trends", labelKey: "stats.tab.trends" },
-  { id: "models", labelKey: "stats.tab.models" },
-];
+import { OverviewSection } from "./OverviewSection";
+import { TokensChart, type TokensGroupBy } from "./TokensChart";
 
 // Reference order: All | 30d | 7d.
 const RANGES: { id: DateRangePreset; labelKey: MessageKey }[] = [
@@ -46,11 +37,11 @@ const SOURCES: SourceFilter[] = [
 ];
 
 /**
- * Stats dashboard — two views over the same filtered window:
- *   Overview — 8 KPI cards + calendar heatmap
- *   Trends   — per-day token trend lines (Input/Output/Cached/Reasoning)
- *   Models   — per-day stacked token bars split by model + legend
- * Shared controls: view tabs, source filter, All/30d/7d range, refresh.
+ * Stats dashboard — one continuous page over the same filtered window:
+ * 8 KPI cards + calendar heatmap, followed by one Tokens chart toggled
+ * between type and model breakdown (see TokensChart — both
+ * breakdowns sum to the same per-day total). Shared controls: source
+ * filter, All/30d/7d range, refresh.
  */
 export function StatsPage({
   sessions,
@@ -62,9 +53,9 @@ export function StatsPage({
   refreshing: boolean;
 }) {
   const t = useT();
-  const [view, setView] = React.useState<StatsView>("overview");
   const [range, setRange] = React.useState<DateRange>({ preset: "30d" });
   const [source, setSource] = React.useState<SourceFilter>("All");
+  const [groupBy, setGroupBy] = React.useState<TokensGroupBy>("type");
 
   const resolved = React.useMemo(
     () => resolveRange(range, sessions),
@@ -82,11 +73,11 @@ export function StatsPage({
     () => modelBreakdown(filtered, resolved),
     [filtered, resolved],
   );
-  // The calendar heatmap is a GitHub-style all-history view: ALWAYS the
-  // earliest activity day → today, independent of the All/30d/7d range
-  // (which only scopes the KPIs and the Models chart). It still follows
-  // the source filter. Source-filter the sessions, then resolve the
-  // full "all" window over that subset for the day grid.
+  // The calendar heatmap is a GitHub-style contribution graph: a FIXED
+  // grid of the last 52 weeks (today back to ~1 year), generated the
+  // same regardless of how much data exists — every day is a cell, data
+  // just fills them in. It follows the source filter but NOT the
+  // All/30d/7d range (which scopes only the KPIs + Tokens chart).
   const sourceFiltered = React.useMemo(
     () =>
       source === "All"
@@ -94,10 +85,25 @@ export function StatsPage({
         : sessions.filter((s) => s.source.toLowerCase() === source),
     [sessions, source],
   );
+  // Stable model color rank: all-time usage WITHIN the current source
+  // filter, ignoring the All/30d/7d range preset — so a model's TokensChart
+  // color doesn't repaint just because the range toggle changed the
+  // window's relative ranking (only a source-filter change can reorder it).
+  const globalModelRank = React.useMemo(() => {
+    const allTime = resolveRange({ preset: "all" }, sourceFiltered);
+    return modelBreakdown(sourceFiltered, allTime)
+      .filter((u) => u.model !== "Unknown")
+      .map((u) => u.model);
+  }, [sourceFiltered]);
   const heatmapDaily = React.useMemo(() => {
-    const allRange = resolveRange({ preset: "all" }, sourceFiltered);
-    // dailyTokens already skips non-session items, so no extra filter.
-    return dailyTokens(sourceFiltered, allRange);
+    const to = new Date();
+    to.setHours(23, 59, 59, 999);
+    const from = new Date();
+    from.setDate(from.getDate() - 364); // fixed 365-day window
+    from.setHours(0, 0, 0, 0);
+    // dailyTokens generates a bucket per day across the fixed window;
+    // it already skips non-session items.
+    return dailyTokens(sourceFiltered, { from, to });
   }, [sourceFiltered]);
   const kpis = React.useMemo(
     () => overviewKpis(filtered, resolved),
@@ -107,19 +113,18 @@ export function StatsPage({
     () => dailyModelTokens(filtered, resolved),
     [filtered, resolved],
   );
-  // Windowed per-day tokens for the Trends chart (follows the range).
-  const windowDaily = React.useMemo(
+  // Per-day token rollups for the Tokens chart's type mode — follows the range.
+  const rangeDaily = React.useMemo(
     () => dailyTokens(filtered, resolved),
     [filtered, resolved],
   );
-
   return (
     <div className="flex-1 min-h-0 flex flex-col">
-      {/* Fixed header (outside the scroll area, like the Providers page).
-          Two SEPARATE cards: source filter + refresh, then view/range. */}
+      {/* Fixed header (outside the scroll area, like the Providers page):
+          one card holding the source filter, range pills, and refresh. */}
       <div className="px-3 mt-3 mb-3 flex flex-col gap-3">
         <div className="rounded-md bg-muted p-3">
-          {/* Card 1: source filter (fills) + refresh. */}
+          {/* Source filter (fills) + range pills + refresh. */}
           <div className="flex items-center gap-2">
             <Tabs
               value={source}
@@ -146,6 +151,20 @@ export function StatsPage({
                 ))}
               </TabsList>
             </Tabs>
+            {/* Range pills — to the right of the source filter. */}
+            <Tabs
+              value={range.preset}
+              onValueChange={(v) => setRange({ preset: v as DateRangePreset })}
+              className="shrink-0"
+            >
+              <TabsList aria-label={t("stats.range.label")}>
+                {RANGES.map((r) => (
+                  <TabsTrigger key={r.id} value={r.id}>
+                    {t(r.labelKey)}
+                  </TabsTrigger>
+                ))}
+              </TabsList>
+            </Tabs>
             <button
               type="button"
               onClick={onRefresh}
@@ -163,48 +182,48 @@ export function StatsPage({
             </button>
           </div>
         </div>
-        {/* Row 2 (no card): view tabs (left) + range pills (right). */}
-        <div className="flex items-center gap-2 flex-wrap">
-          <Tabs value={view} onValueChange={(v) => setView(v as StatsView)}>
-            <TabsList>
-              {VIEWS.map((v) => (
-                <TabsTrigger key={v.id} value={v.id}>
-                  {t(v.labelKey)}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-          </Tabs>
-          <div className="flex-1" />
-          <Tabs
-            value={range.preset}
-            onValueChange={(v) => setRange({ preset: v as DateRangePreset })}
-          >
-            <TabsList aria-label={t("stats.range.label")}>
-              {RANGES.map((r) => (
-                <TabsTrigger key={r.id} value={r.id}>
-                  {t(r.labelKey)}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-          </Tabs>
-        </div>
       </div>
-      <div className="flex-1 min-h-0 overflow-auto px-3 pb-3">
-        {view === "overview" ? (
-          <OverviewTab
+      <div className="flex-1 min-h-0 overflow-auto px-3 pb-0">
+        <div className="flex flex-col gap-4">
+          <OverviewSection
             totals={totals}
             kpis={kpis}
             favoriteModel={
               models.find((m) => m.model !== "Unknown")?.model ?? null
             }
             daily={heatmapDaily}
-            sessions={sourceFiltered}
           />
-        ) : view === "trends" ? (
-          <TrendsTab data={windowDaily} />
-        ) : (
-          <ModelsTab data={modelDaily} usage={models} />
-        )}
+          {/* Tokens — one chart, toggled between token-type and model
+              breakdown (both sum to the same per-day total). "Tokens"
+              title on the left, the type/model toggle on the right. */}
+          <div className="rounded-lg bg-muted p-4 flex flex-col gap-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs text-muted-foreground">
+                {t("stats.tokensChart")}
+              </div>
+              <Tabs
+                value={groupBy}
+                onValueChange={(v) => setGroupBy(v as TokensGroupBy)}
+              >
+                <TabsList aria-label={t("stats.tokensChart")}>
+                  <TabsTrigger value="type">
+                    {t("stats.groupByType")}
+                  </TabsTrigger>
+                  <TabsTrigger value="model">
+                    {t("stats.groupByModel")}
+                  </TabsTrigger>
+                </TabsList>
+              </Tabs>
+            </div>
+            <TokensChart
+              groupBy={groupBy}
+              daily={rangeDaily}
+              modelData={modelDaily}
+              usage={models}
+              globalModelRank={globalModelRank}
+            />
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -547,39 +547,3 @@ export function calendarWeeks(daily: DailyTokens[]): (DayCell | null)[][] {
   for (let i = 0; i < padded.length; i += 7) weeks.push(padded.slice(i, i + 7));
   return weeks;
 }
-
-// ─── Hourly activity (Overview day view) ──────────────────────────────────────
-
-export type HourlyActivity = {
-  /** Per-hour (0-23, local) message counts for one day. */
-  messages: number[];
-  /** Per-hour total tokens for the same day. */
-  tokens: number[];
-};
-
-/**
- * The 24-hour message/token distribution for a single day (`YYYY-MM-DD`
- * local key) — sums every session's `daily_tokens[date].hours` /
- * `hour_tokens` for that date. Same session-set the caller already
- * source-filtered; days with no hourly data return all-zero arrays.
- */
-export function hourlyActivity(
-  sessions: AppSession[],
-  dateKey: string
-): HourlyActivity {
-  const messages = new Array<number>(24).fill(0);
-  const tokens = new Array<number>(24).fill(0);
-  for (const s of sessions) {
-    if (!isSessionItem(s) || !s.daily_tokens) continue;
-    for (const e of s.daily_tokens) {
-      if (e.date !== dateKey) continue;
-      if (e.hours && e.hours.length === 24) {
-        for (let h = 0; h < 24; h++) messages[h] += e.hours[h];
-      }
-      if (e.hour_tokens && e.hour_tokens.length === 24) {
-        for (let h = 0; h < 24; h++) tokens[h] += e.hour_tokens[h];
-      }
-    }
-  }
-  return { messages, tokens };
-}

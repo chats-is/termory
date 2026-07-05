@@ -6,7 +6,6 @@ import {
   dailyTokens,
   displayModelName,
   filterSessions,
-  hourlyActivity,
   modelBreakdown,
   niceMax,
   overviewKpis,
@@ -666,56 +665,6 @@ describe("calendarWeeks", () => {
 
   it("returns an empty grid for no days", () => {
     expect(calendarWeeks([])).toEqual([]);
-  });
-});
-
-describe("hourlyActivity", () => {
-  it("sums hours/hour_tokens for the given day only", () => {
-    const sessions = [
-      mk({
-        started_at: "2026-05-28T09:00:00",
-        daily_tokens: [
-          {
-            date: "2026-05-28",
-            tokens: { input: 0, output: 0, cached: 0, reasoning: 0, total: 0 },
-            hours: hoursWith({ 9: 3, 14: 2 }),
-            hour_tokens: hoursWith({ 9: 1500, 14: 800 })
-          },
-          {
-            date: "2026-05-29",
-            tokens: { input: 0, output: 0, cached: 0, reasoning: 0, total: 0 },
-            hours: hoursWith({ 9: 99 }),
-            hour_tokens: hoursWith({ 9: 9999 })
-          }
-        ]
-      }),
-      mk({
-        started_at: "2026-05-28T14:00:00",
-        daily_tokens: [
-          {
-            date: "2026-05-28",
-            tokens: { input: 0, output: 0, cached: 0, reasoning: 0, total: 0 },
-            hours: hoursWith({ 14: 1 }),
-            hour_tokens: hoursWith({ 14: 200 })
-          }
-        ]
-      })
-    ];
-    const out = hourlyActivity(sessions, "2026-05-28");
-    expect(out.messages[9]).toBe(3);
-    expect(out.messages[14]).toBe(3); // 2 + 1 across sessions
-    expect(out.tokens[9]).toBe(1500);
-    expect(out.tokens[14]).toBe(1000);
-    // The 29th's data must not leak in.
-    const total = out.messages.reduce((a, b) => a + b, 0);
-    expect(total).toBe(6);
-  });
-
-  it("returns all-zero arrays for a day with no data", () => {
-    const out = hourlyActivity([], "2026-05-28");
-    expect(out.messages).toHaveLength(24);
-    expect(out.messages.every((m) => m === 0)).toBe(true);
-    expect(out.tokens.every((tk) => tk === 0)).toBe(true);
   });
 });
 

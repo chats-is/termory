@@ -14,7 +14,7 @@ Termory has six destinations on the left activity rail (`⌘1`–`⌘6`), plus a
 | 2 | **[Records](#2-records)** | Browse every session, memory file, and skill; resume, migrate, or delete them. |
 | 3 | **[Favorites](#3-favorites)** | Messages you've starred, saved as snapshots. |
 | 4 | **[Search](#4-search)** | Full-text search across all history, plus a `⌘K` quick-search palette. |
-| 5 | **[Stats](#5-stats)** | Overview KPIs + calendar heatmap and per-model token usage over All / 30d / 7d. |
+| 5 | **[Stats](#5-stats)** | Overview KPIs + calendar heatmap and a token chart split by type / model over All / 30d / 7d. |
 | 6 | **[Settings](#6-settings)** | Appearance, language, startup, terminal, storage, search history, shortcuts, updates. |
 | — | **[Menu-bar tray](#menu-bar-tray-macos)** | Resume a session, start a new one, or switch providers without opening the window. |
 
@@ -217,19 +217,19 @@ Recent searches are remembered; clear them under **Settings → Search history**
 
 **What it is.** Usage analytics over a date range you choose, for the selected source(s). All values are **window-accurate** — they reflect what happened in the chosen range, not lifetime totals.
 
-**How to use:** pick a range — **All / 30d / 7d** — and optionally filter by source. Two views:
+**How to use:** pick a range — **All / 30d / 7d** — and optionally filter by source. The page shows two stacked blocks:
 
 **Overview** —
 
 - **8 KPI cards** — Sessions, Messages, Total tokens, Active days, Current streak, Longest streak, Peak hour, Favorite model.
-- **Calendar heatmap** — one square per day (GitHub-style week columns); intensity blends messages and tokens. Hover a day for its date, messages, and tokens.
+- **Calendar heatmap** — one square per day (GitHub-style week columns); intensity blends messages and tokens. Hover a day for its date, messages, and tokens. It always spans your full history, regardless of the range pills.
 
-**Models** —
+**Tokens** — one stacked bar chart of daily tokens, with a **Type / Model** toggle (top-left):
 
-- A **stacked bar chart** of daily tokens split by model (top models get their own color, the rest fold into "Others").
-- A **legend** listing each model with its input/output tokens and share of the window's usage.
+- **Type** — split by token kind: Input / Output / Cached / Reasoning.
+- **Model** — split by model. Every Claude model is a shade of clay, every Gemini a shade of blue, every OpenAI a shade of teal — so a model always reads as its provider; other (custom / gateway) models get their own distinct colors. The top models each get a bar, the rest fold into "Others"; the legend lists each model with its input/output tokens and share of the window's usage.
 
-> Model attribution is per-session (each session is attributed to its one recorded model); sessions with no recorded model are hidden from the KPIs/legend but still counted in the totals.
+> Both breakdowns add up to the same daily total. Model attribution is per-session (each session is attributed to its one recorded model); sessions with no recorded model are hidden from the KPIs/legend but still counted in the totals.
 
 ---
 
