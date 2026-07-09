@@ -36,18 +36,29 @@
   --stat-tok-reasoning: #e87ba4;
 
   /* Stats — model series colored by PROVIDER FAMILY (Tokens chart, model
-   * mode). Every Claude model is a CLAY tone, every Gemini a BLUE tone,
-   * every OpenAI a TEAL tone — so a model always reads as its provider,
-   * never as a "custom" color. Same-provider models are told apart by
-   * lightness, assigned by usage rank: step 0 is the BOLD brand anchor
-   * (the most-used model), then progressively LIGHTER shades (bold → faint
-   * as usage drops). One ramp for both themes — the anchor reads on the
-   * light surface and its lighter tints read on the dark surface; in a
-   * stacked bar each segment is bounded by its neighbours + a legend label,
-   * so the palest steps stay legible. Validated ordinal scale (one hue,
-   * monotone L, ΔL ≥ 0.06 — Claude's palest pair is 0.055, JND-distinct;
-   * clay clips the sRGB gamut near white). Unknown-provider models (custom
-   * / gateway) fall to the neutral pool in TokensChart instead. */
+   * mode). Every model of a provider wears a SHADE of that provider's hue —
+   * Claude clay, Gemini blue, OpenAI teal, Mistral gold, DeepSeek violet,
+   * Qwen magenta, xAI/Grok crimson, GLM indigo, MiniMax rose — so a model
+   * always reads as its provider, never as a "custom" color. Same-provider
+   * models are told apart by lightness, assigned by usage rank: step 0 is
+   * the BOLD brand anchor (the most-used model), then progressively LIGHTER
+   * shades (bold → faint as usage drops). One ramp for both themes — the
+   * anchor reads on the light surface and its lighter tints read on the dark
+   * surface; in a stacked bar each segment is bounded by its neighbours + a
+   * legend label, so the palest steps stay legible. The NINE anchors are
+   * validated as a categorical set (dataviz --pairs all: worst CVD ΔE 9.4 —
+   * the 8–12 floor band, legal here because every segment carries a legend
+   * label; worst NORMAL-vision ΔE 15.9, so none collapse for the sighted —
+   * on BOTH surfaces) and each ramp as an ordinal scale (one hue, monotone
+   * L, ΔL ≥ 0.06 — the palest Claude/MiniMax pairs sit ~0.05, JND-distinct;
+   * those warm hues clip the sRGB gamut near white). The three fixed brand
+   * anchors (Claude/Gemini/OpenAI) crowd the warm/blue/teal hue space, so
+   * the six added ones are brand-ADJACENT distinct hues (gold≈Mistral,
+   * violet≈DeepSeek, magenta≈Qwen, crimson=Grok(monochrome), indigo≈GLM-blue,
+   * rose≈MiniMax-coral) rather than exact logos — with nine families past
+   * the CVD-safe ceiling, distinctness is the hard requirement and brand a
+   * lean (per user call). Unknown-provider models (custom / gateway) fall to
+   * the neutral pool in TokensChart instead. */
   --stat-claude-0: #d97745;
   --stat-claude-1: #e8956d;
   --stat-claude-2: #f1b091;
@@ -63,6 +74,36 @@
   --stat-openai-2: #6ec9aa;
   --stat-openai-3: #8fddc1;
   --stat-openai-4: #aef0d8;
+  --stat-mistral-0: #bd7d0a;
+  --stat-mistral-1: #ce9443;
+  --stat-mistral-2: #dfab67;
+  --stat-mistral-3: #efc289;
+  --stat-mistral-4: #ffdaaa;
+  --stat-deepseek-0: #7c3aed;
+  --stat-deepseek-1: #8c5cf7;
+  --stat-deepseek-2: #9e7aff;
+  --stat-deepseek-3: #b195ff;
+  --stat-deepseek-4: #c4afff;
+  --stat-qwen-0: #a21caf;
+  --stat-qwen-1: #b245bd;
+  --stat-qwen-2: #c264cb;
+  --stat-qwen-3: #d281d9;
+  --stat-qwen-4: #e19de7;
+  --stat-grok-0: #be123c;
+  --stat-grok-1: #ce4154;
+  --stat-grok-2: #dc616c;
+  --stat-grok-3: #ea7e85;
+  --stat-grok-4: #f79a9f;
+  --stat-glm-0: #6366f1;
+  --stat-glm-1: #7780fc;
+  --stat-glm-2: #8d98ff;
+  --stat-glm-3: #a4b0ff;
+  --stat-glm-4: #bcc8ff;
+  --stat-minimax-0: #f43f5e;
+  --stat-minimax-1: #ff6577;
+  --stat-minimax-2: #ff8591;
+  --stat-minimax-3: #ffa3ab;
+  --stat-minimax-4: #ffc1c6;
 
   --secondary: oklch(0.965 0.004 250);
   --secondary-foreground: oklch(0.205 0 0);

@@ -1,17 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppSession } from "../types";
 import {
-  calendarWeeks,
+  dailyActivity,
   dailyModelTokens,
   dailyTokens,
-  displayModelName,
   filterSessions,
-  modelBreakdown,
-  niceMax,
   overviewKpis,
-  resolveRange,
-  sessionTimestamp,
-  windowTotals
+  resolveRange
 } from "./stats-utils";
 
 function mk(partial: Partial<AppSession>): AppSession {
@@ -49,25 +44,6 @@ function withTokens(
   });
 }
 
-describe("sessionTimestamp", () => {
-  it("prefers updated_at over started_at", () => {
-    const s = mk({
-      started_at: "2026-01-01T00:00:00Z",
-      updated_at: "2026-02-01T00:00:00Z"
-    });
-    expect(sessionTimestamp(s)?.toISOString()).toBe("2026-02-01T00:00:00.000Z");
-  });
-  it("falls back to started_at when updated_at is null", () => {
-    const s = mk({ started_at: "2026-03-15T10:00:00Z" });
-    expect(sessionTimestamp(s)?.toISOString()).toBe("2026-03-15T10:00:00.000Z");
-  });
-  it("returns null for unparseable timestamps", () => {
-    expect(sessionTimestamp(mk({ updated_at: "not-a-date" }))).toBeNull();
-  });
-  it("returns null when both fields are missing", () => {
-    expect(sessionTimestamp(mk({}))).toBeNull();
-  });
-});
 
 describe("resolveRange", () => {
   const now = new Date("2026-05-29T12:00:00Z");
@@ -176,7 +152,9 @@ describe("filterSessions", () => {
   });
 });
 
-describe("windowTotals", () => {
+// Module 1 — the KPI-card totals (sessions / messages / tokens) now come
+// from the merged `overviewKpis`.
+describe("overviewKpis totals", () => {
   const range = {
     from: new Date("2026-05-28T00:00:00"),
     to: new Date("2026-05-30T23:59:59")
@@ -216,7 +194,7 @@ describe("windowTotals", () => {
         ]
       })
     ];
-    const t = windowTotals(sessions, range);
+    const t = overviewKpis(sessions, range);
     expect(t.sessions).toBe(2);
     expect(t.messages).toBe(9);
     expect(t.tokens).toEqual({
@@ -226,7 +204,6 @@ describe("windowTotals", () => {
       reasoning: 0,
       total: 480
     });
-    expect(t.projects).toBe(2);
   });
 
   it("excludes daily_tokens entries OUTSIDE the window", () => {
@@ -252,11 +229,10 @@ describe("windowTotals", () => {
         ]
       })
     ];
-    const t = windowTotals(sessions, range);
+    const t = overviewKpis(sessions, range);
     expect(t.sessions).toBe(0); // started_at before window
     expect(t.messages).toBe(1); // only the in-window entry
     expect(t.tokens.total).toBe(15);
-    expect(t.projects).toBe(1); // contributed via in-window daily_tokens
   });
 
   it("ignores sessions without daily_tokens AND without started_at in window", () => {
@@ -272,15 +248,14 @@ describe("windowTotals", () => {
         { input: 9_999_999, output: 9_999_999 }
       )
     ];
-    const t = windowTotals(sessions, range);
+    const t = overviewKpis(sessions, range);
     expect(t.sessions).toBe(0);
     expect(t.messages).toBe(0);
     expect(t.tokens.total).toBe(0);
-    expect(t.projects).toBe(0);
   });
 
   it("ignores Memory / Skill items", () => {
-    const t = windowTotals(
+    const t = overviewKpis(
       [
         mk({ source: "Memory", started_at: "2026-05-29T10:00:00" }),
         mk({ source: "Skill", started_at: "2026-05-29T10:00:00" })
@@ -291,12 +266,19 @@ describe("windowTotals", () => {
       sessions: 0,
       messages: 0,
       tokens: { input: 0, output: 0, cached: 0, reasoning: 0, total: 0 },
-      projects: 0
+      activeDays: 0,
+      currentStreak: 0,
+      longestStreak: 0,
+      peakHour: null,
+      favoriteModel: null
     });
   });
 });
 
-describe("modelBreakdown", () => {
+// Module 4 legend + module 1 favorite model — the per-model window totals
+// now ride on `dailyModelTokens().legend` (folded in from the old
+// `modelBreakdown`), and the top model on `overviewKpis().favoriteModel`.
+describe("model legend + favoriteModel", () => {
   const range = {
     from: new Date("2026-05-28T00:00:00"),
     to: new Date("2026-05-30T23:59:59")
@@ -310,7 +292,7 @@ describe("modelBreakdown", () => {
     total
   });
 
-  it("groups in-window sessions + tokens by model, sorted by tokens desc", () => {
+  it("groups in-window tokens by model, sorted by tokens desc; favoriteModel is the top", () => {
     const sessions: AppSession[] = [
       mk({
         source: "Claude",
@@ -331,58 +313,51 @@ describe("modelBreakdown", () => {
         daily_tokens: [{ date: "2026-05-29", tokens: tk(500), messages: 3 }]
       })
     ];
-    const b = modelBreakdown(sessions, range);
-    expect(b).toEqual([
-      { model: "gpt-5", sessions: 1, tokens: 500, input: 500, output: 0 },
-      { model: "claude-opus-4-7", sessions: 2, tokens: 150, input: 150, output: 0 }
+    expect(dailyModelTokens(sessions, range).legend).toEqual([
+      { model: "gpt-5", tokens: 500, input: 500, output: 0 },
+      { model: "claude-opus-4-7", tokens: 150, input: 150, output: 0 }
+    ]);
+    expect(overviewKpis(sessions, range).favoriteModel).toBe("gpt-5");
+  });
+
+  it("buckets sessions with no model under 'Unknown'; favoriteModel skips it", () => {
+    const sessions = [
+      mk({
+        source: "Gemini",
+        started_at: "2026-05-29T10:00:00",
+        daily_tokens: [{ date: "2026-05-29", tokens: tk(30), messages: 1 }]
+      })
+    ];
+    expect(dailyModelTokens(sessions, range).legend).toEqual([
+      { model: "Unknown", tokens: 30, input: 30, output: 0 }
+    ]);
+    // Unknown is skipped, so there is no favorite model.
+    expect(overviewKpis(sessions, range).favoriteModel).toBeNull();
+  });
+
+  it("excludes out-of-window tokens from the legend", () => {
+    const sessions = [
+      mk({
+        source: "Claude",
+        model: "claude-opus-4-7",
+        started_at: "2026-05-01T10:00:00",
+        daily_tokens: [
+          { date: "2026-05-01", tokens: tk(9999), messages: 9 }, // out of window
+          { date: "2026-05-29", tokens: tk(20), messages: 1 } // in window
+        ]
+      })
+    ];
+    expect(dailyModelTokens(sessions, range).legend).toEqual([
+      { model: "claude-opus-4-7", tokens: 20, input: 20, output: 0 }
     ]);
   });
 
-  it("buckets sessions with no model under 'Unknown'", () => {
-    const b = modelBreakdown(
-      [
-        mk({
-          source: "Gemini",
-          started_at: "2026-05-29T10:00:00",
-          daily_tokens: [{ date: "2026-05-29", tokens: tk(30), messages: 1 }]
-        })
-      ],
-      range
-    );
-    expect(b).toEqual([{ model: "Unknown", sessions: 1, tokens: 30, input: 30, output: 0 }]);
-  });
-
-  it("uses windowTotals accounting: out-of-window tokens excluded, started_at gates the session count", () => {
-    const b = modelBreakdown(
-      [
-        mk({
-          source: "Claude",
-          model: "claude-opus-4-7",
-          started_at: "2026-05-01T10:00:00", // before window → not counted as a session
-          daily_tokens: [
-            { date: "2026-05-01", tokens: tk(9999), messages: 9 }, // out of window
-            { date: "2026-05-29", tokens: tk(20), messages: 1 } // in window
-          ]
-        })
-      ],
-      range
-    );
-    expect(b).toEqual([{ model: "claude-opus-4-7", sessions: 0, tokens: 20, input: 20, output: 0 }]);
-  });
-
   it("ignores Memory / Skill items", () => {
-    expect(
-      modelBreakdown(
-        [
-          mk({
-            source: "Memory",
-            model: "x",
-            started_at: "2026-05-29T10:00:00"
-          })
-        ],
-        range
-      )
-    ).toEqual([]);
+    const memory = [
+      mk({ source: "Memory", model: "x", started_at: "2026-05-29T10:00:00" })
+    ];
+    expect(dailyModelTokens(memory, range).legend).toEqual([]);
+    expect(overviewKpis(memory, range).favoriteModel).toBeNull();
   });
 });
 
@@ -610,84 +585,66 @@ describe("dailyModelTokens", () => {
   });
 });
 
-describe("displayModelName", () => {
-  it("prettifies the Claude family", () => {
-    expect(displayModelName("claude-opus-4-8")).toBe("Opus 4.8");
-    expect(displayModelName("claude-fable-5")).toBe("Fable 5");
-    expect(displayModelName("claude-sonnet-4-6")).toBe("Sonnet 4.6");
-    // Version-prefix form with a trailing DATE segment.
-    expect(displayModelName("claude-3-5-haiku-20241022")).toBe("Haiku 3.5");
-    // Vendor-prefixed ids.
-    expect(displayModelName("anthropic/claude-sonnet-4-6")).toBe("Sonnet 4.6");
-  });
-  it("passes non-Claude ids and Unknown through unchanged", () => {
-    expect(displayModelName("gpt-5")).toBe("gpt-5");
-    expect(displayModelName("gemini-2.5-pro")).toBe("gemini-2.5-pro");
-    expect(displayModelName("Unknown")).toBe("Unknown");
-  });
-});
+// `displayModelName` was removed — model ids now render as-is (no name
+// conversion). `calendarWeeks` (heatmap grid reshape) and `niceMax` (chart
+// Y-axis bound) are now component-local rendering helpers in
+// OverviewSection / TokensChart, exercised by StatsPage.test.tsx.
 
-describe("calendarWeeks", () => {
-  const day = (date: string, messages: number, total: number) => ({
-    date,
-    messages,
-    total,
-    input: 0,
-    output: 0,
-    cached: 0,
-    reasoning: 0
+describe("dailyActivity", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-29T12:00:00"));
   });
+  afterEach(() => vi.useRealTimers());
 
-  it("pads the first week to Sunday and chunks by 7", () => {
-    // 2026-05-28 is a Thursday (weekday 4).
-    const weeks = calendarWeeks([
-      day("2026-05-28", 1, 10),
-      day("2026-05-29", 0, 0),
-      day("2026-05-30", 2, 20)
+  it("spans a fixed full-history window (365 days ending today), no range condition", () => {
+    const out = dailyActivity([
+      mk({
+        source: "Claude",
+        started_at: "2026-05-28T10:00:00",
+        daily_tokens: [
+          {
+            date: "2026-05-28",
+            tokens: { input: 10, output: 5, cached: 0, reasoning: 0, total: 15 },
+            messages: 3
+          },
+          // ~11 months back — still inside the 365-day window.
+          {
+            date: "2025-07-01",
+            tokens: { input: 1, output: 0, cached: 0, reasoning: 0, total: 1 },
+            messages: 1
+          }
+        ]
+      })
     ]);
-    expect(weeks).toHaveLength(1);
-    expect(weeks[0]).toHaveLength(7);
-    expect(weeks[0].slice(0, 4)).toEqual([null, null, null, null]);
-    expect(weeks[0][4]?.date).toBe("2026-05-28");
-    expect(weeks[0][6]?.date).toBe("2026-05-30");
+    expect(out).toHaveLength(365);
+    expect(out[out.length - 1].date).toBe("2026-05-29"); // today
+    expect(out.find((d) => d.date === "2026-05-28")).toEqual({
+      date: "2026-05-28",
+      messages: 3,
+      tokens: 15
+    });
+    expect(out.find((d) => d.date === "2025-07-01")).toEqual({
+      date: "2025-07-01",
+      messages: 1,
+      tokens: 1
+    });
   });
 
-  it("starts a new column when the range crosses into the next week", () => {
-    const weeks = calendarWeeks([
-      day("2026-05-30", 1, 10), // Saturday
-      day("2026-05-31", 2, 20) // Sunday → next week column
+  it("ignores Memory / Skill items", () => {
+    const out = dailyActivity([
+      mk({
+        source: "Memory",
+        started_at: "2026-05-28T10:00:00",
+        daily_tokens: [
+          {
+            date: "2026-05-28",
+            tokens: { input: 9, output: 0, cached: 0, reasoning: 0, total: 9 },
+            messages: 9
+          }
+        ]
+      })
     ]);
-    expect(weeks).toHaveLength(2);
-    expect(weeks[0][6]?.date).toBe("2026-05-30");
-    expect(weeks[1][0]?.date).toBe("2026-05-31");
-    expect(weeks[1].slice(1)).toEqual([null, null, null, null, null, null]);
-  });
-
-  it("returns an empty grid for no days", () => {
-    expect(calendarWeeks([])).toEqual([]);
-  });
-});
-
-describe("niceMax", () => {
-  it("rounds up to a clean 1 / 2 / 2.5 / 5 × 10ⁿ bound", () => {
-    expect(niceMax(1)).toBe(1);
-    expect(niceMax(1.1)).toBe(2);
-    expect(niceMax(2)).toBe(2);
-    expect(niceMax(2.1)).toBe(2.5);
-    expect(niceMax(2.5)).toBe(2.5);
-    expect(niceMax(3)).toBe(5);
-    expect(niceMax(5)).toBe(5);
-    expect(niceMax(6)).toBe(10);
-  });
-
-  it("scales across magnitudes (K → B)", () => {
-    expect(niceMax(50_000)).toBe(50_000);
-    expect(niceMax(1_800_000_000)).toBe(2_000_000_000);
-    expect(niceMax(2_100_000_000)).toBe(2_500_000_000);
-  });
-
-  it("returns 1 for non-positive input (empty axis)", () => {
-    expect(niceMax(0)).toBe(1);
-    expect(niceMax(-5)).toBe(1);
+    expect(out.every((d) => d.messages === 0 && d.tokens === 0)).toBe(true);
   });
 });

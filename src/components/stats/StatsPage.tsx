@@ -10,13 +10,12 @@ import {
   type DateRange,
   type DateRangePreset,
   type SourceFilter,
+  dailyActivity,
   dailyModelTokens,
   dailyTokens,
   filterSessions,
-  modelBreakdown,
   overviewKpis,
   resolveRange,
-  windowTotals,
 } from "@/lib/stats-utils";
 import { OverviewSection } from "./OverviewSection";
 import { TokensChart, type TokensGroupBy } from "./TokensChart";
@@ -65,19 +64,15 @@ export function StatsPage({
     () => filterSessions(sessions, resolved, source),
     [sessions, resolved, source],
   );
-  const totals = React.useMemo(
-    () => windowTotals(filtered, resolved),
+  // Module 1 — every KPI card value (sessions/messages/tokens + streaks +
+  // peak hour + favorite model) from one function, range-scoped.
+  const kpis = React.useMemo(
+    () => overviewKpis(filtered, resolved),
     [filtered, resolved],
   );
-  const models = React.useMemo(
-    () => modelBreakdown(filtered, resolved),
-    [filtered, resolved],
-  );
-  // The calendar heatmap is a GitHub-style contribution graph: a FIXED
-  // grid of the last 52 weeks (today back to ~1 year), generated the
-  // same regardless of how much data exists — every day is a cell, data
-  // just fills them in. It follows the source filter but NOT the
-  // All/30d/7d range (which scopes only the KPIs + Tokens chart).
+  // Module 2 — the activity heatmap follows the source filter but NOT the
+  // All/30d/7d range: it's always the full history, so it's fed by
+  // source-filtered sessions and builds its own fixed window internally.
   const sourceFiltered = React.useMemo(
     () =>
       source === "All"
@@ -85,39 +80,34 @@ export function StatsPage({
         : sessions.filter((s) => s.source.toLowerCase() === source),
     [sessions, source],
   );
-  // Stable model color rank: all-time usage WITHIN the current source
-  // filter, ignoring the All/30d/7d range preset — so a model's TokensChart
-  // color doesn't repaint just because the range toggle changed the
-  // window's relative ranking (only a source-filter change can reorder it).
-  const globalModelRank = React.useMemo(() => {
-    const allTime = resolveRange({ preset: "all" }, sourceFiltered);
-    return modelBreakdown(sourceFiltered, allTime)
-      .filter((u) => u.model !== "Unknown")
-      .map((u) => u.model);
-  }, [sourceFiltered]);
-  const heatmapDaily = React.useMemo(() => {
-    const to = new Date();
-    to.setHours(23, 59, 59, 999);
-    const from = new Date();
-    from.setDate(from.getDate() - 364); // fixed 365-day window
-    from.setHours(0, 0, 0, 0);
-    // dailyTokens generates a bucket per day across the fixed window;
-    // it already skips non-session items.
-    return dailyTokens(sourceFiltered, { from, to });
-  }, [sourceFiltered]);
-  const kpis = React.useMemo(
-    () => overviewKpis(filtered, resolved),
+  const activity = React.useMemo(
+    () => dailyActivity(sourceFiltered),
+    [sourceFiltered],
+  );
+  // Module 3 — per-day tokens by type (input/output/cached/reasoning),
+  // range-scoped.
+  const tokensDaily = React.useMemo(
+    () => dailyTokens(filtered, resolved),
     [filtered, resolved],
   );
+  // Module 4 — per-day tokens by model (stacked series + legend),
+  // range-scoped.
   const modelDaily = React.useMemo(
     () => dailyModelTokens(filtered, resolved),
     [filtered, resolved],
   );
-  // Per-day token rollups for the Tokens chart's type mode — follows the range.
-  const rangeDaily = React.useMemo(
-    () => dailyTokens(filtered, resolved),
-    [filtered, resolved],
-  );
+  // Stable model color rank: all-time usage WITHIN the current source
+  // filter, ignoring the range preset — so a model's TokensChart color
+  // doesn't repaint just because the range toggle changed the window's
+  // relative ranking (only a source-filter change can reorder it). Reuses
+  // module 4's aggregator over an all-time window; `models` is already
+  // sorted by token total desc.
+  const globalModelRank = React.useMemo(() => {
+    const allTime = resolveRange({ preset: "all" }, sourceFiltered);
+    return dailyModelTokens(sourceFiltered, allTime).models.filter(
+      (m) => m !== "Unknown",
+    );
+  }, [sourceFiltered]);
   return (
     <div className="flex-1 min-h-0 flex flex-col">
       {/* Fixed header (outside the scroll area, like the Providers page):
@@ -185,14 +175,7 @@ export function StatsPage({
       </div>
       <div className="flex-1 min-h-0 overflow-auto px-3 pb-0">
         <div className="flex flex-col gap-4">
-          <OverviewSection
-            totals={totals}
-            kpis={kpis}
-            favoriteModel={
-              models.find((m) => m.model !== "Unknown")?.model ?? null
-            }
-            daily={heatmapDaily}
-          />
+          <OverviewSection kpis={kpis} activity={activity} />
           {/* Tokens — one chart, toggled between token-type and model
               breakdown (both sum to the same per-day total). "Tokens"
               title on the left, the type/model toggle on the right. */}
@@ -217,9 +200,8 @@ export function StatsPage({
             </div>
             <TokensChart
               groupBy={groupBy}
-              daily={rangeDaily}
+              daily={tokensDaily}
               modelData={modelDaily}
-              usage={models}
               globalModelRank={globalModelRank}
             />
           </div>

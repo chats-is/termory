@@ -227,7 +227,7 @@ Recent searches are remembered; clear them under **Settings → Search history**
 **Tokens** — one stacked bar chart of daily tokens, with a **Type / Model** toggle (top-left):
 
 - **Type** — split by token kind: Input / Output / Cached / Reasoning.
-- **Model** — split by model. Every Claude model is a shade of clay, every Gemini a shade of blue, every OpenAI a shade of teal — so a model always reads as its provider; other (custom / gateway) models get their own distinct colors. The top models each get a bar, the rest fold into "Others"; the legend lists each model with its input/output tokens and share of the window's usage.
+- **Model** — split by model, colored by provider family: every model of a vendor is a shade of that vendor's hue — Claude clay, Gemini blue, OpenAI teal, Mistral gold, DeepSeek violet, Qwen magenta, xAI/Grok crimson, GLM indigo, MiniMax rose — so a model always reads as its provider (the most-used model is the boldest shade). Models from other (custom / gateway) providers get their own distinct colors. The top models each get a bar, the rest fold into "Others"; the legend lists each model with its input/output tokens and share of the window's usage.
 
 > Both breakdowns add up to the same daily total. Model attribution is per-session (each session is attributed to its one recorded model); sessions with no recorded model are hidden from the KPIs/legend but still counted in the totals.
 

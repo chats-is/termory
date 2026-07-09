@@ -126,16 +126,64 @@ describe("StatsPage", () => {
     fireEvent.mouseDown(screen.getByRole("tab", { name: "Model" }), {
       button: 0
     });
-    // "Opus 4.8" also appears as the "Favorite model" KPI value — scope to
-    // the legend row (a <span>, not the KPI card's <div>).
+    // The raw id "claude-opus-4-8" also appears as the "Favorite model" KPI
+    // value — scope to the legend row (a <span>, not the KPI card's <div>).
     const legendLabel = screen
-      .getAllByText("Opus 4.8")
+      .getAllByText("claude-opus-4-8")
       .find((el) => el.tagName === "SPAN");
     const dot = legendLabel?.closest("div")?.querySelector("span[aria-hidden]");
     // The rank-1 clay shade (claude-opus-4-8 is the Claude group's #2
     // all-time model) — NOT the rank-0 anchor, which the window-local rank
     // would assign since claude-opus-4-8 is alone in the current 30d window.
     expect(dot).toHaveStyle({ background: "var(--stat-claude-1)" });
+  });
+
+  it("recognizes newly-added mainstream vendors (DeepSeek / Mistral / Qwen / Grok / GLM / MiniMax) as their own family, not the custom pool", () => {
+    // One model per newly-added vendor (incl. a gateway `vendor/` prefix and
+    // the Mistral `codestral` / Qwen `qwq` / GLM `chatglm` / MiniMax `abab`
+    // family aliases), each the sole model of its provider → rank 0 → the
+    // provider's anchor shade.
+    const cases: { model: string; anchor: string }[] = [
+      { model: "deepseek-v3", anchor: "var(--stat-deepseek-0)" },
+      { model: "mistralai/codestral-latest", anchor: "var(--stat-mistral-0)" },
+      { model: "qwq-32b", anchor: "var(--stat-qwen-0)" },
+      { model: "grok-4", anchor: "var(--stat-grok-0)" },
+      { model: "chatglm-4", anchor: "var(--stat-glm-0)" },
+      { model: "abab6.5s", anchor: "var(--stat-minimax-0)" }
+    ];
+    const sessions = cases.map((c, i) =>
+      mk({
+        id: c.model,
+        source: "Codex",
+        model: c.model,
+        daily_tokens: [
+          {
+            date: "2026-07-01",
+            tokens: {
+              input: 10,
+              output: 10,
+              cached: 0,
+              reasoning: 0,
+              total: (cases.length - i) * 100
+            },
+            messages: 1
+          }
+        ]
+      })
+    );
+    render(
+      <StatsPage sessions={sessions} onRefresh={() => {}} refreshing={false} />
+    );
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Model" }), {
+      button: 0
+    });
+    for (const c of cases) {
+      const label = screen
+        .getAllByText(c.model)
+        .find((el) => el.tagName === "SPAN");
+      const dot = label?.closest("div")?.querySelector("span[aria-hidden]");
+      expect(dot).toHaveStyle({ background: c.anchor });
+    }
   });
 
   it("model-mode legend mirrors the chart 1:1 — one Others row, percentages sum to 100%", () => {

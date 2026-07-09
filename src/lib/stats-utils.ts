@@ -16,19 +16,6 @@ export type DateRange = { preset: DateRangePreset };
 export type SourceFilter = "All" | CliApp;
 
 /**
- * Parse `updated_at` (preferred) or `started_at`. Sessions where
- * neither field is a valid ISO timestamp get dropped — they can't be
- * placed on any time chart.
- */
-export function sessionTimestamp(session: AppSession): Date | null {
-  const raw = session.updated_at ?? session.started_at;
-  if (!raw) return null;
-  const d = new Date(raw);
-  if (Number.isNaN(d.getTime())) return null;
-  return d;
-}
-
-/**
  * Resolve a date range preset to a concrete `{from, to}` window.
  *
  * `from` is the start of the day N days before now in the user's
@@ -133,37 +120,71 @@ export function localDateKey(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
-/**
- * Headline KPI numbers for the window. EVERY field is window-accurate:
- *  - sessions: count where `started_at` falls in window
- *  - messages: sum of `daily_tokens[date in window].messages`
- *  - tokens:   sum of `daily_tokens[date in window].tokens`
- *  - projects: unique projects of sessions that contributed any of
- *              the above
- *
- * No lifetime-of-touched-session totals (which would over-report) and
- * no even-distribution estimates (which would fabricate per-day
- * numbers). Sessions without recoverable `daily_tokens` contribute
- * zero to messages / tokens — Termory shows the real activity in the
- * window, nothing else.
- */
-export type WindowTotals = {
+// ─── Module 1 · KPI cards ─────────────────────────────────────────────────────
+//
+// One statistics function per Stats UI module (4 modules → 4 functions).
+// `overviewKpis` produces EVERY value the 8 KPI cards show, in one pass —
+// it folds together what used to be three separate helpers (window totals,
+// streak/peak KPIs, and the top-model pick). EVERY field is window-accurate:
+//  - sessions: count where `started_at` falls in the window
+//  - messages / tokens: sum of in-window `daily_tokens` (no lifetime totals,
+//    no even-distribution smearing — sessions without `daily_tokens` add zero)
+//  - activeDays / streaks: consecutive in-window days with any activity
+//  - peakHour: local hour (0-23) with the most in-window messages
+//  - favoriteModel: the model with the most in-window tokens (skipping the
+//    "Unknown" bucket); session-level attribution (one model per session)
+
+export type OverviewKpis = {
   sessions: number;
   messages: number;
   tokens: TokenStats;
-  projects: number;
+  /** Days in the window with any activity (messages or tokens). */
+  activeDays: number;
+  /** Consecutive active days ending at the window's last day — with a
+   * one-day grace: a not-yet-active today counts back from yesterday. */
+  currentStreak: number;
+  /** Longest run of consecutive active days in the window. */
+  longestStreak: number;
+  /** Local hour (0-23) with the most messages; null with no activity. */
+  peakHour: number | null;
+  /** Model id with the most in-window tokens, skipping "Unknown"; null
+   * when nothing datable is in the window. */
+  favoriteModel: string | null;
 };
 
-export function windowTotals(
+export function overviewKpis(
   sessions: AppSession[],
   range: { from: Date; to: Date }
-): WindowTotals {
+): OverviewKpis {
   const fromKey = localDateKey(range.from);
   const toKey = localDateKey(range.to);
   const inRange = (date: string) => date >= fromKey && date <= toKey;
 
+  // Per-day activity across the window drives activeDays + the streaks.
+  const daily = dailyTokens(sessions, range);
+  const active = daily.map((d) => d.messages > 0 || d.total > 0);
+
+  let activeDays = 0;
+  let longestStreak = 0;
+  let run = 0;
+  for (const a of active) {
+    if (a) {
+      activeDays += 1;
+      run += 1;
+      if (run > longestStreak) longestStreak = run;
+    } else {
+      run = 0;
+    }
+  }
+  let currentStreak = 0;
+  let i = active.length - 1;
+  if (i >= 0 && !active[i]) i -= 1; // today not active yet → from yesterday
+  for (; i >= 0 && active[i]; i -= 1) currentStreak += 1;
+
+  // Single session pass for the totals, per-hour messages, and per-model
+  // tokens (favorite model).
   let sessionCount = 0;
-  let messageCount = 0;
+  let messages = 0;
   const tokens: TokenStats = {
     input: 0,
     output: 0,
@@ -171,92 +192,8 @@ export function windowTotals(
     reasoning: 0,
     total: 0
   };
-  const projects = new Set<string>();
-  for (const s of sessions) {
-    if (!isSessionItem(s)) continue;
-
-    let contributed = false;
-
-    // Sessions: started_at in window.
-    if (s.started_at) {
-      const startTs = new Date(s.started_at);
-      if (!Number.isNaN(startTs.getTime()) && inRange(localDateKey(startTs))) {
-        sessionCount += 1;
-        contributed = true;
-      }
-    }
-
-    // Messages + tokens: only count in-range daily_tokens entries.
-    if (s.daily_tokens) {
-      for (const entry of s.daily_tokens) {
-        if (!inRange(entry.date)) continue;
-        tokens.input += entry.tokens.input;
-        tokens.output += entry.tokens.output;
-        tokens.cached += entry.tokens.cached;
-        tokens.reasoning += entry.tokens.reasoning;
-        tokens.total += entry.tokens.total;
-        messageCount += entry.messages ?? 0;
-        contributed = true;
-      }
-    }
-
-    if (contributed && s.project && s.project.trim()) {
-      projects.add(s.project);
-    }
-  }
-  return {
-    sessions: sessionCount,
-    messages: messageCount,
-    tokens,
-    projects: projects.size
-  };
-}
-
-/** Per-model rollup row. `model` is `"Unknown"` for sessions whose
- * source didn't record one. */
-export type ModelUsage = {
-  model: string;
-  sessions: number;
-  tokens: number;
-  /** In-window input / output token sums (same per-entry date check as
-   * `tokens`) — the Models-tab legend renders "{in} in · {out} out". */
-  input: number;
-  output: number;
-};
-
-/**
- * Group the in-window usage by `session.model`, window-accurate with
- * the SAME accounting as `windowTotals`:
- *   - `sessions` counts sessions whose `started_at` falls in the window
- *   - `tokens`   sums only in-window `daily_tokens` totals
- *
- * `model` is session-level (one best-guess id per session), so a
- * session that switched models mid-run lands entirely under its single
- * recorded model — this is an approximation, not a per-message split.
- * Sessions with no recorded model bucket under `"Unknown"`. Rows are
- * sorted by tokens desc, then sessions desc, then name.
- */
-export function modelBreakdown(
-  sessions: AppSession[],
-  range: { from: Date; to: Date }
-): ModelUsage[] {
-  const fromKey = localDateKey(range.from);
-  const toKey = localDateKey(range.to);
-  const inRange = (date: string) => date >= fromKey && date <= toKey;
-
-  const map = new Map<
-    string,
-    { sessions: number; tokens: number; input: number; output: number }
-  >();
-  const bucket = (model: string) => {
-    let b = map.get(model);
-    if (!b) {
-      b = { sessions: 0, tokens: 0, input: 0, output: 0 };
-      map.set(model, b);
-    }
-    return b;
-  };
-
+  const hourMessages = new Array<number>(24).fill(0);
+  const modelTokens = new Map<string, number>();
   for (const s of sessions) {
     if (!isSessionItem(s)) continue;
     const model = s.model && s.model.trim() ? s.model : "Unknown";
@@ -264,39 +201,102 @@ export function modelBreakdown(
     if (s.started_at) {
       const startTs = new Date(s.started_at);
       if (!Number.isNaN(startTs.getTime()) && inRange(localDateKey(startTs))) {
-        bucket(model).sessions += 1;
+        sessionCount += 1;
       }
     }
-
-    if (s.daily_tokens) {
-      for (const entry of s.daily_tokens) {
-        if (!inRange(entry.date)) continue;
-        const b = bucket(model);
-        b.tokens += entry.tokens.total;
-        b.input += entry.tokens.input;
-        b.output += entry.tokens.output;
+    if (!s.daily_tokens) continue;
+    for (const entry of s.daily_tokens) {
+      if (!inRange(entry.date)) continue;
+      tokens.input += entry.tokens.input;
+      tokens.output += entry.tokens.output;
+      tokens.cached += entry.tokens.cached;
+      tokens.reasoning += entry.tokens.reasoning;
+      tokens.total += entry.tokens.total;
+      messages += entry.messages ?? 0;
+      if (model !== "Unknown") {
+        modelTokens.set(model, (modelTokens.get(model) ?? 0) + entry.tokens.total);
+      }
+      if (entry.hours && entry.hours.length === 24) {
+        for (let h = 0; h < 24; h++) hourMessages[h] += entry.hours[h];
       }
     }
   }
 
-  return Array.from(map, ([model, v]) => ({ model, ...v })).sort(
-    (a, b) =>
-      b.tokens - a.tokens ||
-      b.sessions - a.sessions ||
-      a.model.localeCompare(b.model)
-  );
+  let peakHour: number | null = null;
+  let bestHour = 0;
+  for (let h = 0; h < 24; h++) {
+    if (hourMessages[h] > bestHour) {
+      bestHour = hourMessages[h];
+      peakHour = h;
+    }
+  }
+
+  let favoriteModel: string | null = null;
+  let bestModel = 0;
+  for (const [model, tok] of modelTokens) {
+    if (tok > bestModel) {
+      bestModel = tok;
+      favoriteModel = model;
+    }
+  }
+
+  return {
+    sessions: sessionCount,
+    messages,
+    tokens,
+    activeDays,
+    currentStreak,
+    longestStreak,
+    peakHour,
+    favoriteModel
+  };
 }
+
+// ─── Module 2 · Activity calendar heatmap ─────────────────────────────────────
+//
+// The heatmap follows the SOURCE filter but NOT the All/30d/7d range — it is
+// always the full history (a GitHub-style contribution graph). So this
+// function takes source-filtered sessions and builds its OWN fixed window
+// (365 days back → today) internally; it never sees `resolveRange`'s output.
+// That "no date-range condition" is exactly why it's a separate module from
+// the range-scoped Tokens chart.
+
+export type DailyActivity = { date: string; messages: number; tokens: number };
+
+export function dailyActivity(sessions: AppSession[]): DailyActivity[] {
+  const to = new Date();
+  to.setHours(0, 0, 0, 0);
+  const cursor = new Date();
+  cursor.setDate(cursor.getDate() - 364); // fixed 365-day window
+  cursor.setHours(0, 0, 0, 0);
+  const buckets = new Map<string, DailyActivity>();
+  while (cursor.getTime() <= to.getTime()) {
+    const key = localDateKey(cursor);
+    buckets.set(key, { date: key, messages: 0, tokens: 0 });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  for (const s of sessions) {
+    if (!isSessionItem(s) || !s.daily_tokens) continue;
+    for (const entry of s.daily_tokens) {
+      const bucket = buckets.get(entry.date);
+      if (!bucket) continue;
+      bucket.messages += entry.messages ?? 0;
+      bucket.tokens += entry.tokens.total;
+    }
+  }
+  return Array.from(buckets.values());
+}
+
+// ─── Module 3 · Tokens by type ────────────────────────────────────────────────
 
 export type DailyTokens = {
   date: string; // YYYY-MM-DD (local)
   /** Number of AI interactions on this date (sum of
-   * `daily_tokens[date].messages`). Drives the in-range messages KPI
-   * via `windowTotals`. */
+   * `daily_tokens[date].messages`). */
   messages: number;
-  /** Total tokens that day. Matches the "Total" row in the
-   * DailyTokensChart tooltip. Named `total` (not `tokens`) so it
-   * aligns with `TokenStats.total` and avoids collision with the
-   * TokenStats *object* called `tokens` on AppSession. */
+  /** Total tokens that day. Named `total` (not `tokens`) so it aligns
+   * with `TokenStats.total` and avoids collision with the TokenStats
+   * *object* called `tokens` on AppSession. */
   total: number;
   input: number;
   output: number;
@@ -305,29 +305,15 @@ export type DailyTokens = {
 };
 
 /**
- * Round a value up to a clean axis bound (1 / 2 / 2.5 / 5 × 10ⁿ). Used by the
- * DailyTokensChart to pin its sticky Y-axis chart and its scrollable plot to
- * the SAME domain — the axis-only chart has no data series, so it can't derive
- * `"auto"` and needs an explicit shared max.
- */
-export function niceMax(v: number): number {
-  if (v <= 0) return 1;
-  const base = 10 ** Math.floor(Math.log10(v));
-  const f = v / base;
-  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * base;
-}
-
-/**
- * Per-day token rollups for the daily-usage chart.
+ * Per-day token rollups split by kind (input/output/cached/reasoning),
+ * scoped to the given range — the "Type" mode of the Tokens chart.
  *
  * Source: each session's `daily_tokens` array (produced by the four
- * scanners when underlying records carry timestamps). Sessions
- * without `daily_tokens` contribute zero — Termory does NOT smear
- * lifetime totals across the date range, because that would
- * fabricate per-day numbers that look identical to real data.
- *
- * Days outside the chart's range are silently dropped. Session counts
- * live on `DailyActivities` (heatmap matrix), not here.
+ * scanners when underlying records carry timestamps). Sessions without
+ * `daily_tokens` contribute zero — Termory does NOT smear lifetime
+ * totals across the date range, because that would fabricate per-day
+ * numbers that look identical to real data. Days outside the range are
+ * dropped.
  */
 export function dailyTokens(
   sessions: AppSession[],
@@ -368,88 +354,38 @@ export function dailyTokens(
   return Array.from(buckets.values());
 }
 
-// ─── Overview KPIs ────────────────────────────────────────────────────────────
+// ─── Module 4 · Tokens by model ───────────────────────────────────────────────
 
-export type OverviewKpis = {
-  /** Days in the window with any activity (messages or tokens). */
-  activeDays: number;
-  /** Consecutive active days ending at the window\'s last day — with a
-   * one-day grace: a not-yet-active today counts back from yesterday. */
-  currentStreak: number;
-  /** Longest run of consecutive active days in the window. */
-  longestStreak: number;
-  /** Local hour (0-23) with the most messages; null with no activity. */
-  peakHour: number | null;
+/** One legend row for the model chart: window totals for a single model
+ * (input/output split + total). `model` is `"Unknown"` for sessions whose
+ * source didn't record one. */
+export type ModelLegendRow = {
+  model: string;
+  tokens: number;
+  input: number;
+  output: number;
 };
-
-/** Streak / activity KPIs — window-accurate with the same accounting
- * as `windowTotals` (per-entry date checks, no smearing). */
-export function overviewKpis(
-  sessions: AppSession[],
-  range: { from: Date; to: Date }
-): OverviewKpis {
-  const daily = dailyTokens(sessions, range);
-  const active = daily.map((d) => d.messages > 0 || d.total > 0);
-
-  let activeDays = 0;
-  let longestStreak = 0;
-  let run = 0;
-  for (const a of active) {
-    if (a) {
-      activeDays += 1;
-      run += 1;
-      if (run > longestStreak) longestStreak = run;
-    } else {
-      run = 0;
-    }
-  }
-
-  let currentStreak = 0;
-  let i = active.length - 1;
-  if (i >= 0 && !active[i]) i -= 1; // today not active yet → from yesterday
-  for (; i >= 0 && active[i]; i -= 1) currentStreak += 1;
-
-  // Per-hour message totals across the window (same in-range per-entry
-  // check the other aggregators use).
-  const fromKey = localDateKey(range.from);
-  const toKey = localDateKey(range.to);
-  const hourMessages = new Array<number>(24).fill(0);
-  for (const s of sessions) {
-    if (!isSessionItem(s) || !s.daily_tokens) continue;
-    for (const entry of s.daily_tokens) {
-      if (entry.date < fromKey || entry.date > toKey) continue;
-      if (!entry.hours || entry.hours.length !== 24) continue;
-      for (let h = 0; h < 24; h++) hourMessages[h] += entry.hours[h];
-    }
-  }
-  let peakHour: number | null = null;
-  let best = 0;
-  for (let h = 0; h < 24; h++) {
-    if (hourMessages[h] > best) {
-      best = hourMessages[h];
-      peakHour = h;
-    }
-  }
-
-  return { activeDays, currentStreak, longestStreak, peakHour };
-}
-
-// ─── Per-day per-model tokens (Models tab) ────────────────────────────────────
 
 export type DailyModelTokens = {
   /** Every date in the window (same axis as `dailyTokens`). */
   dates: string[];
-  /** Models sorted by window token total desc (then name). */
+  /** Models sorted by window token total desc (then name); includes
+   * "Unknown". */
   models: string[];
   /** Per-model daily totals, aligned with `dates`. */
   series: Record<string, number[]>;
+  /** Per-model window totals for the legend, same order as `models`
+   * (folds in what used to be a separate `modelBreakdown`). */
+  legend: ModelLegendRow[];
 };
 
 /**
- * Stacked-bar data: per-day token totals split by model. Attribution
- * is SESSION-level (one best-guess model per session — the documented
- * approximation shared with `modelBreakdown`), so summing every
- * model\'s series for a date equals that date\'s `dailyTokens[].total`.
+ * The "Model" mode of the Tokens chart: per-day token totals split by
+ * model (stacked series) PLUS the per-model legend totals — one function
+ * for the whole module. Attribution is SESSION-level (one best-guess model
+ * per session), so summing every model's series for a date equals that
+ * date's `dailyTokens[].total`, and the legend totals reconcile with the
+ * Type mode's window total.
  */
 export function dailyModelTokens(
   sessions: AppSession[],
@@ -468,7 +404,7 @@ export function dailyModelTokens(
   dates.forEach((d, i) => dateIndex.set(d, i));
 
   const series: Record<string, number[]> = {};
-  const totals = new Map<string, number>();
+  const legendMap = new Map<string, ModelLegendRow>();
   for (const s of sessions) {
     if (!isSessionItem(s) || !s.daily_tokens) continue;
     const model = s.model && s.model.trim() ? s.model : "Unknown";
@@ -481,69 +417,19 @@ export function dailyModelTokens(
         series[model] = row;
       }
       row[di] += entry.tokens.total;
-      totals.set(model, (totals.get(model) ?? 0) + entry.tokens.total);
+      let leg = legendMap.get(model);
+      if (!leg) {
+        leg = { model, tokens: 0, input: 0, output: 0 };
+        legendMap.set(model, leg);
+      }
+      leg.tokens += entry.tokens.total;
+      leg.input += entry.tokens.input;
+      leg.output += entry.tokens.output;
     }
   }
-  const models = Array.from(totals.keys()).sort(
-    (a, b) => (totals.get(b) ?? 0) - (totals.get(a) ?? 0) || a.localeCompare(b)
+  const legend = Array.from(legendMap.values()).sort(
+    (a, b) => b.tokens - a.tokens || a.model.localeCompare(b.model)
   );
-  return { dates, models, series };
-}
-
-// ─── Model display names ──────────────────────────────────────────────────────
-
-/**
- * Friendly model name for the Claude family — "claude-opus-4-8" →
- * "Opus 4.8", "claude-3-5-haiku-20241022" → "Haiku 3.5",
- * "anthropic/claude-fable-5" → "Fable 5". Non-Claude ids (gpt-5,
- * gemini-2.5-pro, …) pass through unchanged, as does "Unknown".
- */
-export function displayModelName(id: string): string {
-  const m =
-    /(?:^|\/)claude-(?:(\d+)-(\d+)-)?(opus|sonnet|haiku|fable)(?:-(\d+(?:-\d+)*))?/i.exec(
-      id
-    );
-  if (!m) return id;
-  const role = m[3][0].toUpperCase() + m[3].slice(1).toLowerCase();
-  // Version prefix form ("claude-3-5-sonnet-…") or suffix form
-  // ("claude-opus-4-8"); a trailing 8-digit segment is a DATE, not a
-  // version ("…-haiku-20241022").
-  let version = "";
-  if (m[1]) {
-    version = `${m[1]}.${m[2]}`;
-  } else if (m[4]) {
-    const parts = m[4].split("-").filter((p) => p.length < 8);
-    version = parts.join(".");
-  }
-  return version ? `${role} ${version}` : role;
-}
-
-// ─── Calendar heatmap grid ────────────────────────────────────────────────────
-
-export type DayCell = { date: string; messages: number; tokens: number };
-
-/**
- * GitHub-style week columns for the Overview heatmap: each column is
- * one week (rows Sun→Sat), the first/last columns padded with null so
- * every column is exactly 7 cells. Input is `dailyTokens` output (one
- * entry per day, already date-ordered).
- */
-export function calendarWeeks(daily: DailyTokens[]): (DayCell | null)[][] {
-  if (daily.length === 0) return [];
-  const cells: (DayCell | null)[] = daily.map((d) => ({
-    date: d.date,
-    messages: d.messages,
-    tokens: d.total
-  }));
-  // Parse the first date key as LOCAL (new Date("YYYY-MM-DD") is UTC).
-  const [y, m, d] = daily[0].date.split("-").map(Number);
-  const firstWeekday = new Date(y, m - 1, d).getDay();
-  const padded: (DayCell | null)[] = [
-    ...Array.from({ length: firstWeekday }, () => null),
-    ...cells
-  ];
-  while (padded.length % 7 !== 0) padded.push(null);
-  const weeks: (DayCell | null)[][] = [];
-  for (let i = 0; i < padded.length; i += 7) weeks.push(padded.slice(i, i + 7));
-  return weeks;
+  const models = legend.map((l) => l.model);
+  return { dates, models, series, legend };
 }

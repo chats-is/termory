@@ -6,14 +6,32 @@ import {
 } from "@/components/ui/hover-card";
 import { formatCompact, formatFullNumber, getFormatLocale } from "@/lib/format";
 import { useT, type MessageKey } from "@/i18n";
-import {
-  type DailyTokens,
-  type OverviewKpis,
-  type WindowTotals,
-  calendarWeeks,
-  displayModelName
-} from "@/lib/stats-utils";
+import { type DailyActivity, type OverviewKpis } from "@/lib/stats-utils";
 import { EMPTY_CELL, intensity, tierClass } from "./heatmap-shared";
+
+/**
+ * Reshape the flat per-day activity list into GitHub-style week columns
+ * (each column one week, rows Sun→Sat), padding the first/last columns
+ * with null so every column is exactly 7 cells. This is a rendering
+ * layout for the heatmap — not a statistic — so it lives with the
+ * component, not in stats-utils.
+ */
+function calendarWeeks(
+  activity: DailyActivity[]
+): (DailyActivity | null)[][] {
+  if (activity.length === 0) return [];
+  // Parse the first date key as LOCAL (new Date("YYYY-MM-DD") is UTC).
+  const [y, m, d] = activity[0].date.split("-").map(Number);
+  const firstWeekday = new Date(y, m - 1, d).getDay();
+  const padded: (DailyActivity | null)[] = [
+    ...Array.from({ length: firstWeekday }, () => null),
+    ...activity
+  ];
+  while (padded.length % 7 !== 0) padded.push(null);
+  const weeks: (DailyActivity | null)[][] = [];
+  for (let i = 0; i < padded.length; i += 7) weeks.push(padded.slice(i, i + 7));
+  return weeks;
+}
 
 function KpiCard({ label, value }: { label: string; value: string }) {
   return (
@@ -29,18 +47,18 @@ const parseDateKey = (key: string): Date => {
   return new Date(y, m - 1, d);
 };
 
-function CalendarHeatmap({ daily }: { daily: DailyTokens[] }) {
+function CalendarHeatmap({ activity }: { activity: DailyActivity[] }) {
   const t = useT();
-  const weeks = React.useMemo(() => calendarWeeks(daily), [daily]);
+  const weeks = React.useMemo(() => calendarWeeks(activity), [activity]);
   const { maxMsg, maxTok } = React.useMemo(() => {
     let maxMsg = 0;
     let maxTok = 0;
-    for (const d of daily) {
+    for (const d of activity) {
       if (d.messages > maxMsg) maxMsg = d.messages;
-      if (d.total > maxTok) maxTok = d.total;
+      if (d.tokens > maxTok) maxTok = d.tokens;
     }
     return { maxMsg, maxTok };
-  }, [daily]);
+  }, [activity]);
   const dateFmt = React.useMemo(
     () =>
       new Intl.DateTimeFormat(getFormatLocale(), {
@@ -170,15 +188,11 @@ function CalendarHeatmap({ daily }: { daily: DailyTokens[] }) {
 }
 
 export function OverviewSection({
-  totals,
   kpis,
-  favoriteModel,
-  daily
+  activity
 }: {
-  totals: WindowTotals;
   kpis: OverviewKpis;
-  favoriteModel: string | null;
-  daily: DailyTokens[];
+  activity: DailyActivity[];
 }) {
   const t = useT();
   const hourFmt = React.useMemo(
@@ -191,9 +205,9 @@ export function OverviewSection({
       : hourFmt.format(new Date(2000, 0, 1, kpis.peakHour));
 
   const cards: { labelKey: MessageKey; value: string }[] = [
-    { labelKey: "stats.kpi.sessions", value: formatFullNumber(totals.sessions) },
-    { labelKey: "stats.kpi.messages", value: formatFullNumber(totals.messages) },
-    { labelKey: "stats.kpi.totalTokens", value: formatCompact(totals.tokens.total) },
+    { labelKey: "stats.kpi.sessions", value: formatFullNumber(kpis.sessions) },
+    { labelKey: "stats.kpi.messages", value: formatFullNumber(kpis.messages) },
+    { labelKey: "stats.kpi.totalTokens", value: formatCompact(kpis.tokens.total) },
     { labelKey: "stats.kpi.activeDays", value: formatFullNumber(kpis.activeDays) },
     {
       labelKey: "stats.kpi.currentStreak",
@@ -206,7 +220,7 @@ export function OverviewSection({
     { labelKey: "stats.kpi.peakHour", value: peakHour },
     {
       labelKey: "stats.kpi.favoriteModel",
-      value: favoriteModel ? displayModelName(favoriteModel) : "—"
+      value: kpis.favoriteModel ?? "—"
     }
   ];
 
@@ -222,7 +236,7 @@ export function OverviewSection({
         <div className="text-xs text-muted-foreground">
           {t("stats.activity")}
         </div>
-        <CalendarHeatmap daily={daily} />
+        <CalendarHeatmap activity={activity} />
       </div>
     </div>
   );

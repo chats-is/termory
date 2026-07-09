@@ -10,13 +10,19 @@ import {
 } from "recharts";
 import { formatCompact, getFormatLocale } from "@/lib/format";
 import { useT, type MessageKey } from "@/i18n";
-import {
-  type DailyModelTokens,
-  type DailyTokens,
-  type ModelUsage,
-  displayModelName,
-  niceMax
-} from "@/lib/stats-utils";
+import { type DailyModelTokens, type DailyTokens } from "@/lib/stats-utils";
+
+/**
+ * Round a value up to a clean axis bound (1 / 2 / 2.5 / 5 × 10ⁿ) — the
+ * Tokens chart's Y-axis domain, kept fixed across the Type/Model toggle so
+ * it never jumps. A layout helper for this chart, not a statistic.
+ */
+function niceMax(v: number): number {
+  if (v <= 0) return 1;
+  const base = 10 ** Math.floor(Math.log10(v));
+  const f = v / base;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * base;
+}
 
 export type TokensGroupBy = "type" | "model";
 
@@ -43,44 +49,66 @@ const TYPE_SERIES: {
 ];
 
 // Model identity colors — grouped by PROVIDER FAMILY. Every model of a
-// provider wears a SHADE of that provider's brand hue: all Claude models
-// are clay, all Gemini blue, all OpenAI teal — so a model always reads as
+// provider wears a SHADE of that provider's hue, so a model always reads as
 // its provider (a Claude model never looks "custom"). Same-provider models
 // are told apart by lightness, assigned by all-time usage rank: step 0 is
-// the exact brand anchor (the most-used model, boldest), then progressively
+// the brand anchor (the most-used model, boldest), then progressively
 // LIGHTER shades as usage drops. The ramps are CSS vars validated as
-// ordinal scales (see globals.css `--stat-<provider>-N`).
-// Claude and Gemini reuse Termory's OWN brand colors (BrandIcon); OpenAI
-// has no color elsewhere in this project, so its official brand teal
-// (#10a37f) anchors its ramp.
-type Provider = "claude" | "gemini" | "openai" | "other";
+// ordinal scales, and the seven anchors validated as a categorical set
+// (see globals.css `--stat-<provider>-N` for the full rationale + the CVD
+// numbers). Recognized vendors + their hue: claude=clay, gemini=blue,
+// openai=teal, mistral=gold, deepseek=violet, qwen=magenta, grok=crimson,
+// glm=indigo, minimax=rose.
+type Provider =
+  | "claude"
+  | "gemini"
+  | "openai"
+  | "mistral"
+  | "deepseek"
+  | "qwen"
+  | "grok"
+  | "glm"
+  | "minimax"
+  | "other";
 function inferProvider(model: string): Provider {
   // Strip a leading `vendor/` prefix (e.g. `anthropic/claude-fable-5` from a
-  // gateway) before matching — mirrors displayModelName's `(?:^|\/)` handling.
+  // gateway) before matching the model family.
   const m = model.toLowerCase().replace(/^[a-z0-9._-]+\//, "");
   if (m.startsWith("claude")) return "claude";
   if (m.startsWith("gemini")) return "gemini";
   if (/^(gpt|o1|o3|o4|chatgpt)/.test(m)) return "openai";
+  // Mistral's whole model family (le Chat / API): mistral, mixtral, and the
+  // codestral / magistral / ministral / pixtral / devstral lines.
+  if (/^(mistral|mixtral|codestral|magistral|ministral|pixtral|devstral)/.test(m))
+    return "mistral";
+  if (m.startsWith("deepseek")) return "deepseek";
+  // Alibaba Qwen family: qwen / qwen2 / qwen3 / qwq / qvq.
+  if (/^(qwen|qwq|qvq)/.test(m)) return "qwen";
+  if (m.startsWith("grok")) return "grok";
+  // Zhipu GLM family: glm-4 / glm-4.6 / chatglm / codegeex.
+  if (/^(glm|chatglm|codegeex)/.test(m)) return "glm";
+  // MiniMax: the MiniMax-* line + the older `abab` models (e.g. abab6.5s).
+  if (/^(minimax|abab)/.test(m)) return "minimax";
   return "other";
 }
-// Provider brand-family ramps (mode-aware — resolved from globals.css). A
-// model gets the step at its rank WITHIN its provider, clamped to the last.
+// Provider brand-family ramps (resolved from globals.css — one set of
+// values for both themes). A model gets the step at its rank WITHIN its
+// provider, clamped to the last.
 const RAMP_STEPS = 5;
-const providerRamp = (p: "claude" | "gemini" | "openai", rank: number): string =>
-  `var(--stat-${p}-${Math.min(rank, RAMP_STEPS - 1)})`;
-// Neutral pool for models whose provider can't be inferred (custom / gateway
-// ids — Termory lets any CLI point at any model, so this is common, not an
-// edge case). Kept CLEAR of the three brand hues: every hue is ≥ ΔE 40 from
-// all anchors (normal vision), so a pool model can't be mistaken for a
-// branded one. Identity within the pool leans on the legend's direct labels
-// (a fixed teal anchor structurally collapses against magenta under CVD —
-// the method's sanctioned mitigation for brand-anchored entity color).
+const providerRamp = (
+  p: Exclude<Provider, "other">,
+  rank: number
+): string => `var(--stat-${p}-${Math.min(rank, RAMP_STEPS - 1)})`;
+// Neutral pool for models whose provider can't be inferred (an exotic custom
+// / gateway id — now that the seven mainstream vendors above are recognized,
+// this is a rare fallback, not the common case). The seven brand families
+// fill most of the CVD-distinct hue space, leaving only these two hues that
+// stay ≥ ΔE 8 from every anchor (validated --pairs all) — so a pool model
+// still can't be mistaken for a branded one. Beyond two distinct customs
+// they share the Others grey; identity leans on the legend's direct labels.
 const EXTRA_MODEL_COLORS = [
-  "#7c3aed", // violet-600
-  "#eab308", // yellow-500
-  "#84cc16", // lime-500
-  "#d946ef", // fuchsia-500
-  "#ec4899" // pink-500
+  "#0891b2", // cyan-600
+  "#64748b" // slate-500
 ] as const;
 // Neutral "Others" bucket (models beyond the extra-pool slots above, or
 // beyond the top-6-in-window cap) — reuses the app's own muted-foreground
@@ -130,13 +158,11 @@ export function TokensChart({
   groupBy,
   daily,
   modelData,
-  usage,
   globalModelRank
 }: {
   groupBy: TokensGroupBy;
   daily: DailyTokens[];
   modelData: DailyModelTokens;
-  usage: ModelUsage[];
   /** Model names ranked by ALL-TIME usage (not the current window) —
    * drives color assignment so a model's color is stable across
    * source/range filter changes. See StatsPage's `globalModelRank`. */
@@ -216,7 +242,7 @@ export function TokensChart({
     ...stackedModels.map((m) => ({
       key: m,
       color: colorOfModel(m),
-      label: displayModelName(m)
+      label: m
     })),
     ...(foldModels.length > 0
       ? [{ key: othersKey, color: OTHERS_COLOR, label: t("stats.othersBucket") }]
@@ -235,8 +261,11 @@ export function TokensChart({
     [daily]
   );
   const grandTotal = daily.reduce((sum, d) => sum + d.total, 0);
-  // Includes Unknown — the Others legend row below folds it in, so the
-  // shown percentages always sum to exactly 100%.
+  // Per-model window totals for the legend (in/out/share) — module 4's
+  // aggregator returns them alongside the stacked series. Includes Unknown:
+  // the Others legend row below folds it in, so the shown percentages
+  // always sum to exactly 100%.
+  const usage = modelData.legend;
   const totalTokens = usage.reduce((sum, u) => sum + u.tokens, 0);
   const usageByModel = new Map(usage.map((u) => [u.model, u]));
   // The Others row's aggregate in/out/tokens (models beyond the top 6 +
@@ -386,9 +415,7 @@ export function TokensChart({
                   className="inline-block size-2.5 rounded-[3px] shrink-0"
                   style={{ background: colorOfModel(m) }}
                 />
-                <span className="font-medium truncate">
-                  {displayModelName(m)}
-                </span>
+                <span className="font-medium truncate">{m}</span>
                 <span className="ml-auto pl-3 text-muted-foreground whitespace-nowrap">
                   {t("stats.inOut", {
                     in: formatCompact(u?.input ?? 0),
