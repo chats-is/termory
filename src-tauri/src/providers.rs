@@ -199,17 +199,13 @@ fn cli_search_paths(tool: &str) -> Vec<std::path::PathBuf> {
                 }
             }
         }
-        // NVM: every installed node version gets its own bin dir.
-        let nvm_base = home.join(".nvm/versions/node");
-        if nvm_base.exists() {
-            if let Ok(entries) = std::fs::read_dir(&nvm_base) {
-                for entry in entries.flatten() {
-                    let bin = entry.path().join("bin");
-                    if bin.exists() {
-                        push_unique(&mut paths, bin);
-                    }
-                }
-            }
+        // NVM: every installed node version gets its own bin dir, each
+        // potentially holding a stale copy of an npm-installed CLI.
+        let default_alias = std::fs::read_to_string(home.join(".nvm/alias/default"))
+            .ok()
+            .map(|s| s.trim().to_string());
+        for bin in nvm_node_bin_dirs(&home.join(".nvm/versions/node"), default_alias.as_deref()) {
+            push_unique(&mut paths, bin);
         }
     }
 
@@ -334,6 +330,64 @@ fn extend_mise_node_search_paths(paths: &mut Vec<std::path::PathBuf>, home: &std
             }
         }
     }
+}
+
+/// Enumerate NVM's `<base>/<version>/bin` dirs in probe order:
+/// the `~/.nvm/alias/default` version first (what a fresh shell's PATH
+/// resolves to), then the rest newest-first. `read_dir` order is
+/// arbitrary, so without this a stale CLI copy left in an OLD node
+/// version could win [`find_cli_binary`]'s first-match probe over the
+/// binary the user's terminal actually runs. Alias matching tolerates
+/// a missing/extra `v` prefix (`22.21.1` vs `v22.21.1`); chained
+/// aliases (`lts/*`, `node`) don't name a version dir and fall through
+/// to the newest-first order.
+#[cfg(unix)]
+fn nvm_node_bin_dirs(
+    base: &std::path::Path,
+    default_alias: Option<&str>,
+) -> Vec<std::path::PathBuf> {
+    let entries = match std::fs::read_dir(base) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    let mut versions: Vec<(String, std::path::PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let bin = entry.path().join("bin");
+            if !bin.exists() {
+                return None;
+            }
+            Some((entry.file_name().to_string_lossy().into_owned(), bin))
+        })
+        .collect();
+    versions.sort_by(|a, b| node_version_sort_key(&b.0).cmp(&node_version_sort_key(&a.0)));
+    if let Some(alias) = default_alias {
+        let alias = alias.trim_start_matches('v');
+        if let Some(idx) = versions
+            .iter()
+            .position(|(name, _)| name.trim_start_matches('v') == alias)
+        {
+            let default = versions.remove(idx);
+            versions.insert(0, default);
+        }
+    }
+    versions.into_iter().map(|(_, bin)| bin).collect()
+}
+
+/// Numeric sort key for a `vX.Y.Z` node version dir name, so `v9.1.0`
+/// orders below `v22.21.1` (lexicographic comparison would not).
+#[cfg(unix)]
+fn node_version_sort_key(name: &str) -> Vec<u64> {
+    name.trim_start_matches('v')
+        .split('.')
+        .map(|part| {
+            part.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0)
+        })
+        .collect()
 }
 
 /// Per-platform executable-name candidates for `tool` inside `dir`.
@@ -3226,6 +3280,48 @@ mod tests {
         assert_eq!(parse_version("something with no version"), None);
         // Empty
         assert_eq!(parse_version(""), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nvm_node_bin_dirs_orders_default_alias_first_then_newest() {
+        let base = tempdir("nvm-order");
+        // v9 pins the numeric (not lexicographic) sort; a bin-less dir
+        // and a stray file must both be skipped.
+        for v in ["v9.1.0", "v20.19.4", "v22.21.1"] {
+            fs::create_dir_all(base.join(v).join("bin")).unwrap();
+        }
+        fs::create_dir_all(base.join("v18.0.0")).unwrap(); // no bin/
+        fs::write(base.join(".DS_Store"), b"").unwrap();
+
+        // No alias → newest first.
+        let dirs = nvm_node_bin_dirs(&base, None);
+        assert_eq!(
+            dirs,
+            vec![
+                base.join("v22.21.1/bin"),
+                base.join("v20.19.4/bin"),
+                base.join("v9.1.0/bin"),
+            ]
+        );
+
+        // Default alias promotes its version to the front; a missing
+        // `v` prefix in the alias file still matches.
+        let dirs = nvm_node_bin_dirs(&base, Some("20.19.4"));
+        assert_eq!(
+            dirs,
+            vec![
+                base.join("v20.19.4/bin"),
+                base.join("v22.21.1/bin"),
+                base.join("v9.1.0/bin"),
+            ]
+        );
+
+        // A chained alias (`lts/*`) names no version dir → newest first.
+        let dirs = nvm_node_bin_dirs(&base, Some("lts/*"));
+        assert_eq!(dirs[0], base.join("v22.21.1/bin"));
+
+        fs::remove_dir_all(&base).unwrap();
     }
 
     fn tempdir(tag: &str) -> PathBuf {
