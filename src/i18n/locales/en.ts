@@ -313,7 +313,14 @@ export const en = {
   "providers.thisGateway": "this AI Gateway",
   "providers.accountsEmpty": "No saved accounts yet — save the current login to switch back to it later.",
   "providers.accountAdd": "Add account",
+  "providers.accountAddNeedsCli":
+    "Adding an account requires the Codex CLI — install it first.",
   "providers.accountAdding": "Waiting for browser login…",
+  // Codex install-form labels on the Official card's version line.
+  // Deliberately kept English in all locales (product-form nouns,
+  // like "Base URL" / "AI SDK").
+  "providers.codexVersionCli": "CLI",
+  "providers.codexVersionApp": "App",
   "providers.accountNeedsRelogin": "Needs re-login",
   "providers.accountRelogin": "Re-login",
   "providers.accountSaveCurrent": "Save current",

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   appProtocols,
   blankProvider,
+  codexVersionText,
   isClaudeSafeModelId,
   isManagedOptionKey,
   isProviderList,
@@ -15,7 +16,16 @@ import {
   resolveActiveProviderId,
   gatewayBaseForProtocol
 } from "./provider-utils";
-import type { ActiveState, Gateway, GatewayCapabilities } from "../types";
+import type {
+  ActiveState,
+  CodexInstalls,
+  Gateway,
+  GatewayCapabilities
+} from "../types";
+import type { MessageKey } from "@/i18n";
+import { en } from "@/i18n/locales/en";
+
+const tEn = (key: MessageKey) => en[key];
 
 // `isManagedOptionKey` MUST mirror `override_key_is_managed` in
 // `src-tauri/src/providers.rs`. These cases pin the frontend side; if the
@@ -434,5 +444,44 @@ describe("resolveActiveProviderId", () => {
   it("falls back when the marker id isn't among the candidates", () => {
     const state = stateFor("b", "https://x", "sk-aaaaaaaaaaaa");
     expect(resolveActiveProviderId(state, "zzz", candidates)).toBe("b");
+  });
+});
+
+describe("codexVersionText", () => {
+  const installs = (
+    cli: boolean,
+    app: boolean,
+    appVersion?: string | null
+  ): CodexInstalls => ({ cli, app, appVersion });
+
+  it("shows both forms labeled when CLI and app are installed", () => {
+    expect(
+      codexVersionText("0.142.5", installs(true, true, "26.707.31428"), tEn)
+    ).toBe("v0.142.5 (CLI) · v26.707.31428 (App)");
+  });
+
+  it("shows only the installed form", () => {
+    expect(codexVersionText("0.142.5", installs(true, false), tEn)).toBe(
+      "v0.142.5 (CLI)"
+    );
+    expect(
+      codexVersionText(null, installs(false, true, "26.707.31428"), tEn)
+    ).toBe("v26.707.31428 (App)");
+  });
+
+  it("dashes a form whose version probe failed", () => {
+    expect(codexVersionText(null, installs(true, false), tEn)).toBe("— (CLI)");
+    expect(codexVersionText(null, installs(false, true, null), tEn)).toBe(
+      "— (App)"
+    );
+  });
+
+  it("returns null when neither is installed", () => {
+    expect(codexVersionText(null, installs(false, false), tEn)).toBeNull();
+  });
+
+  it("falls back to the plain CLI form before detection resolves", () => {
+    expect(codexVersionText("0.142.5", null, tEn)).toBe("v0.142.5");
+    expect(codexVersionText(null, null, tEn)).toBeNull();
   });
 });

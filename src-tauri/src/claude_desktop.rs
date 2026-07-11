@@ -151,8 +151,16 @@ fn macos_app_bundles() -> Vec<PathBuf> {
 /// the `<string>` immediately following its `<key>`.
 #[cfg(target_os = "macos")]
 fn plist_short_version(xml: &str) -> Option<String> {
-    const KEY: &str = "<key>CFBundleShortVersionString</key>";
-    let rest = &xml[xml.find(KEY)? + KEY.len()..];
+    plist_string_value(xml, "CFBundleShortVersionString")
+}
+
+/// Pull a `<key>{key}</key><string>…</string>` value out of an XML
+/// Info.plist (plain string scan, no plist crate). Shared with the
+/// Codex desktop-app detection in providers.rs.
+#[cfg(target_os = "macos")]
+pub(crate) fn plist_string_value(xml: &str, key: &str) -> Option<String> {
+    let tag = format!("<key>{key}</key>");
+    let rest = &xml[xml.find(&tag)? + tag.len()..];
     let start = rest.find("<string>")? + "<string>".len();
     let end = rest[start..].find("</string>")?;
     let v = rest[start..start + end].trim();

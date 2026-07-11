@@ -135,8 +135,25 @@ export const CLI_INSTALL: Record<
     binary: "codex",
     url: "https://github.com/openai/codex",
     methods: [
+      // Official standalone installer (chatgpt.com domain, redirects to
+      // the GitHub release install.sh) — installs a native CLI to
+      // ~/.local/bin/codex, already covered by cli_search_paths.
+      {
+        id: "curl",
+        label: "curl",
+        command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
+      },
+      { id: "brew", label: "brew", command: "brew install --cask codex" },
       { id: "npm", label: "npm", command: "npm install -g @openai/codex" },
-      { id: "brew", label: "brew", command: "brew install --cask codex" }
+      // The merged ChatGPT/Codex desktop app (2026-07: the Codex app IS
+      // the new unified ChatGPT app) — an app-only install is fully
+      // supported (shared ~/.codex/, bundled-CLI fallback), so it's a
+      // legitimate install method here, same pattern as claude-desktop.
+      {
+        id: "app",
+        label: "App",
+        command: "https://chatgpt.com/download"
+      }
     ]
   },
   gemini: {

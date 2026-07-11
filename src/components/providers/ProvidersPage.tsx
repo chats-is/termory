@@ -16,6 +16,11 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from "@/components/ui/tooltip";
+import {
   ACTIVE_STATE_REFRESH_EVENT,
   CLI_APPS,
   CLI_APP_LABEL,
@@ -24,6 +29,7 @@ import {
 } from "@/constants";
 import {
   blankProvider,
+  codexVersionText,
   providerFromBinding,
   resolveActiveProviderId
 } from "@/lib/provider-utils";
@@ -31,6 +37,7 @@ import { mergeQuotaResult } from "@/lib/quota-utils";
 import type {
   ActiveState,
   CliApp,
+  CodexInstalls,
   Provider,
   Gateway,
   SubscriptionQuota,
@@ -119,6 +126,11 @@ let cachedVersions: Record<CliApp, string | null> = {
   opencode: null
 };
 let cachedVersionsLoading = true;
+// Codex's two install forms (CLI binary vs the merged ChatGPT/Codex
+// desktop app). Null until the first `detect_codex_installs` resolves;
+// cached like the maps above so route remounts don't flash the
+// Add-account gate / version line.
+let cachedCodexInstalls: CodexInstalls | null = null;
 // True once the first `refreshVersions()` of the app lifetime has
 // resolved. Used to keep the version skeleton from flashing on every
 // route remount — after the first detect, subsequent route entries
@@ -231,6 +243,9 @@ export function ProvidersPage({
   const [versionsLoading, setVersionsLoading] = React.useState(
     cachedVersionsLoading
   );
+  const [codexInstalls, setCodexInstalls] = React.useState<CodexInstalls | null>(
+    cachedCodexInstalls
+  );
 
   // Mirror state into the module-level cache on every change so the
   // next mount has the fresh truth as its initial value.
@@ -243,6 +258,9 @@ export function ProvidersPage({
   React.useEffect(() => {
     cachedVersionsLoading = versionsLoading;
   }, [versionsLoading]);
+  React.useEffect(() => {
+    cachedCodexInstalls = codexInstalls;
+  }, [codexInstalls]);
   const [toggling, setToggling] = React.useState<string | null>(null);
   const [testing, setTesting] = React.useState<string | null>(null);
   const [settingDefault, setSettingDefault] = React.useState<string | null>(null);
@@ -360,6 +378,14 @@ export function ProvidersPage({
   const quotaInCooldown =
     !!quotaQueriedAt && Date.now() - quotaQueriedAt < quotaCooldownMs;
 
+  // Codex is "installed" with just the desktop app (shared ~/.codex).
+  // Account add / re-login spawn `codex login` — they need EITHER the
+  // standalone CLI or the app's bundled copy (the backend spawn falls
+  // back to it). Null (not yet detected) stays permissive; the login
+  // handler re-checks and toasts.
+  const codexCliMissing =
+    codexInstalls != null && !codexInstalls.cli && !codexInstalls.bundledCli;
+
   const refreshInstalled = React.useCallback(async () => {
     try {
       const map = await invoke<Record<string, boolean>>("detect_clis");
@@ -384,10 +410,14 @@ export function ProvidersPage({
       setVersionsLoading(true);
     }
     try {
-      const map = await invoke<Record<string, string | null>>(
-        "detect_cli_versions_cmd"
-      );
+      // The codex cli/app split rides along — same triggers (cold
+      // start, Recheck, install change), one skeleton cycle.
+      const [map, codex] = await Promise.all([
+        invoke<Record<string, string | null>>("detect_cli_versions_cmd"),
+        invoke<CodexInstalls>("detect_codex_installs")
+      ]);
       setVersions(cliVersionRecord(map));
+      setCodexInstalls(codex);
     } catch {
       /* leave previous state on error */
     } finally {
@@ -965,6 +995,12 @@ export function ProvidersPage({
   // enforced by the codexLoggingIn guard so both buttons share one lock.
   const handleCodexLogin = async (reloginId?: string) => {
     if (codexLoggingIn) return;
+    // Login spawns a codex binary (standalone CLI or the desktop app's
+    // bundled copy) — bail only when neither exists.
+    if (codexCliMissing) {
+      toast.error(t("providers.accountAddNeedsCli"));
+      return;
+    }
     setCodexLoggingIn(true);
     setActiveReloginId(reloginId ?? null);
     setCodexLoginUrl(null);
@@ -1109,7 +1145,13 @@ export function ProvidersPage({
                     app={app}
                     isInUse={activeState?.kind === "official"}
                     settingDefault={settingDefault === "__official__"}
-                    version={versions[app]}
+                    version={
+                      app === "codex"
+                        ? codexVersionText(versions.codex, codexInstalls, t)
+                        : versions[app]
+                          ? `v${versions[app]}`
+                          : null
+                    }
                     versionLoading={versionsLoading}
                     actions={app === "codex" ? (
                       codexLoggingIn ? (
@@ -1125,6 +1167,29 @@ export function ProvidersPage({
                             {t("common.cancel")}
                           </Button>
                         </div>
+                      ) : codexCliMissing ? (
+                        // App-only install — `codex login` can't spawn.
+                        // Disabled buttons don't fire hover events, so
+                        // the Tooltip anchors on a wrapping span.
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="inline-flex shrink-0">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled
+                                className="gap-1.5"
+                              >
+                                <UserPlus className="size-3.5" />
+                                {t("providers.accountAdd")}
+                              </Button>
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            {t("providers.accountAddNeedsCli")}
+                          </TooltipContent>
+                        </Tooltip>
                       ) : (
                         <Button
                           type="button"
@@ -1156,6 +1221,7 @@ export function ProvidersPage({
                     loginInProgress={app === "codex" ? codexLoggingIn : undefined}
                     activeReloginId={app === "codex" ? activeReloginId : undefined}
                     onRelogin={app === "codex" ? (id) => void handleCodexLogin(id) : undefined}
+                    reloginUnavailable={app === "codex" ? codexCliMissing : undefined}
                   />
                 )}
               </div>

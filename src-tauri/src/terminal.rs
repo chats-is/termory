@@ -61,6 +61,10 @@ fn spawn(mut c: Command) -> Result<(), String> {
 /// session id is charset-guarded (`[A-Za-z0-9._-]`) before being interpolated
 /// into the shell command (injection defense). `None` for unknown sources.
 fn session_launch_command(source: &str, id: &str) -> Option<String> {
+    session_launch_command_with(source, id, &codex_shell_invocation())
+}
+
+fn session_launch_command_with(source: &str, id: &str, codex: &str) -> Option<String> {
     if id.is_empty()
         || !id
             .chars()
@@ -70,11 +74,31 @@ fn session_launch_command(source: &str, id: &str) -> Option<String> {
     }
     Some(match source {
         "Claude" => format!("claude --resume {id}"),
-        "Codex" => format!("codex resume {id}"),
+        "Codex" => format!("{codex} resume {id}"),
         "OpenCode" => format!("opencode --session {id}"),
         "Gemini" => format!("gemini --resume {id}"),
         _ => return None,
     })
+}
+
+/// The shell text that invokes the codex CLI in the user's terminal:
+/// bare `codex` when the standalone CLI is installed (the login shell
+/// resolves it from PATH), else the desktop app's bundled binary by
+/// single-quoted absolute path (app-only installs have nothing on
+/// PATH). Neither present → bare `codex` (the shell will report the
+/// real "command not found" instead of us guessing). The bundled
+/// branch is macOS-only because `codex_bundled_cli` statically returns
+/// None everywhere else — no Windows quoting path exists (or is
+/// needed) here.
+fn codex_shell_invocation() -> String {
+    if crate::providers::find_cli_binary("codex").is_some() {
+        return "codex".to_string();
+    }
+    #[cfg(not(target_os = "windows"))]
+    if let Some(path) = crate::providers::codex_bundled_cli() {
+        return shell_quote(&path.to_string_lossy());
+    }
+    "codex".to_string()
 }
 
 /// The user's Settings → Terminal choice (`terminal` config key);
@@ -107,14 +131,19 @@ pub fn resume_session(source: &str, id: &str, project: Option<&str>) -> Result<(
     open_in_project(project, &cmd)
 }
 
-/// The bare CLI invocation that starts a NEW session — just the binary
-/// name. `None` for unknown sources.
-fn new_session_command(source: &str) -> Option<&'static str> {
+/// The bare CLI invocation that starts a NEW session — the binary name
+/// (or, for an app-only Codex install, the bundled binary's quoted
+/// path). `None` for unknown sources.
+fn new_session_command(source: &str) -> Option<String> {
+    new_session_command_with(source, &codex_shell_invocation())
+}
+
+fn new_session_command_with(source: &str, codex: &str) -> Option<String> {
     Some(match source {
-        "Claude" => "claude",
-        "Codex" => "codex",
-        "OpenCode" => "opencode",
-        "Gemini" => "gemini",
+        "Claude" => "claude".to_string(),
+        "Codex" => codex.to_string(),
+        "OpenCode" => "opencode".to_string(),
+        "Gemini" => "gemini".to_string(),
         _ => return None,
     })
 }
@@ -126,7 +155,7 @@ pub fn new_session(source: &str, project: Option<&str>) -> Result<(), String> {
     let Some(cmd) = new_session_command(source) else {
         return Err("unknown source".to_string());
     };
-    open_in_project(project, cmd)
+    open_in_project(project, &cmd)
 }
 
 // ===================================================================
@@ -611,42 +640,81 @@ mod tests {
         );
     }
 
+    // The `_with` variants take the codex invocation explicitly so the
+    // asserts don't depend on what's installed on the test machine
+    // (the public fns resolve it live via `codex_shell_invocation`).
     #[test]
     fn session_launch_command_per_source() {
         assert_eq!(
-            session_launch_command("Claude", "u-1").as_deref(),
+            session_launch_command_with("Claude", "u-1", "codex").as_deref(),
             Some("claude --resume u-1")
         );
         assert_eq!(
-            session_launch_command("Codex", "t-2").as_deref(),
+            session_launch_command_with("Codex", "t-2", "codex").as_deref(),
             Some("codex resume t-2")
         );
         assert_eq!(
-            session_launch_command("OpenCode", "s-3").as_deref(),
+            session_launch_command_with("OpenCode", "s-3", "codex").as_deref(),
             Some("opencode --session s-3")
         );
         assert_eq!(
-            session_launch_command("Gemini", "g-4").as_deref(),
+            session_launch_command_with("Gemini", "g-4", "codex").as_deref(),
             Some("gemini --resume g-4")
         );
-        assert_eq!(session_launch_command("Memory", "x"), None);
-        assert_eq!(session_launch_command("whatever", "x"), None);
+        assert_eq!(session_launch_command_with("Memory", "x", "codex"), None);
+        assert_eq!(session_launch_command_with("whatever", "x", "codex"), None);
+        // App-only Codex install — the bundled binary's quoted path is
+        // the invocation; only the Codex arm uses it.
+        let bundled = "'/Applications/ChatGPT.app/Contents/Resources/codex'";
+        assert_eq!(
+            session_launch_command_with("Codex", "t-2", bundled).as_deref(),
+            Some("'/Applications/ChatGPT.app/Contents/Resources/codex' resume t-2")
+        );
+        assert_eq!(
+            session_launch_command_with("Claude", "u-1", bundled).as_deref(),
+            Some("claude --resume u-1")
+        );
     }
 
     #[test]
     fn new_session_command_per_source() {
-        assert_eq!(new_session_command("Claude"), Some("claude"));
-        assert_eq!(new_session_command("Codex"), Some("codex"));
-        assert_eq!(new_session_command("OpenCode"), Some("opencode"));
-        assert_eq!(new_session_command("Gemini"), Some("gemini"));
-        assert_eq!(new_session_command("Memory"), None);
+        assert_eq!(
+            new_session_command_with("Claude", "codex").as_deref(),
+            Some("claude")
+        );
+        assert_eq!(
+            new_session_command_with("Codex", "codex").as_deref(),
+            Some("codex")
+        );
+        assert_eq!(
+            new_session_command_with("OpenCode", "codex").as_deref(),
+            Some("opencode")
+        );
+        assert_eq!(
+            new_session_command_with("Gemini", "codex").as_deref(),
+            Some("gemini")
+        );
+        assert_eq!(new_session_command_with("Memory", "codex"), None);
+        assert_eq!(
+            new_session_command_with("Codex", "'/x/y z/codex'").as_deref(),
+            Some("'/x/y z/codex'")
+        );
     }
 
     #[test]
     fn session_launch_command_rejects_unsafe_ids() {
         for bad in ["a; rm -rf ~", "a b", "$(whoami)", "a`id`", "a|b", ""] {
-            assert_eq!(session_launch_command("Claude", bad), None, "id={bad:?}");
+            assert_eq!(
+                session_launch_command_with("Claude", bad, "codex"),
+                None,
+                "id={bad:?}"
+            );
         }
-        assert!(session_launch_command("Claude", "a1b2c3d4-e5f6-7890-abcd-ef1234567890").is_some());
+        assert!(session_launch_command_with(
+            "Claude",
+            "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "codex"
+        )
+        .is_some());
     }
 }

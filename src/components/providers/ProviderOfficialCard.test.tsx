@@ -8,7 +8,7 @@ const baseProps = {
   app: "claude" as const,
   isInUse: false,
   settingDefault: false,
-  version: "2.0.0",
+  version: "v2.0.0",
   onSetDefault: vi.fn()
 };
 

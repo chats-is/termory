@@ -31,8 +31,8 @@
 
 use crate::config;
 use crate::providers::{
-    activate, deactivate, detect_installed_clis, gateway_providers, read_active_state,
-    set_opencode_default, CliApp, Provider,
+    activate, deactivate, detect_install_snapshot, gateway_providers, read_active_state,
+    set_opencode_default, CliApp, InstallSnapshot, Provider,
 };
 use crate::sessions::{AppSession, ClaudeWorkStatus};
 use std::collections::HashMap;
@@ -149,21 +149,24 @@ const REGION_START: usize = 2;
 /// macOS, while in-place splicing updates it live.
 static RECENT_REGION: Mutex<Option<(Menu<Wry>, usize)>> = Mutex::new(None);
 
-/// The installed-CLI map the VISIBLE menu reflects. Stored only AFTER
-/// a successful `set_menu` (`do_rebuild_menu_with`) / tray `install` —
-/// storing earlier would let a failed rebuild claim the new set and
-/// permanently defeat the staleness check below. Refresh paths compare
-/// a fresh probe against it: a difference means a CLI was
-/// installed/removed since the menu was built, so the per-CLI provider
-/// submenus (and the New Session rows) are stale — only a full rebuild
-/// refreshes those (the in-place splice covers just the recent
+/// The install snapshot the VISIBLE menu reflects (per-app installed
+/// map + the codex-terminal bool — see `providers::InstallSnapshot`).
+/// Stored only AFTER a successful `set_menu` (`do_rebuild_menu_with`) /
+/// tray `install` — storing earlier would let a failed rebuild claim
+/// the new set and permanently defeat the staleness check below.
+/// Refresh paths compare a fresh probe against it: a difference means
+/// a CLI was installed/removed (or codex's terminal capability
+/// flipped, e.g. the standalone CLI was installed while the desktop
+/// app was already present) since the menu was built, so the per-CLI
+/// provider submenus / New Session rows are stale — only a full
+/// rebuild refreshes those (the in-place splice covers just the recent
 /// region). `None` until the first build.
-static INSTALLED: Mutex<Option<HashMap<CliApp, bool>>> = Mutex::new(None);
+static INSTALLED: Mutex<Option<InstallSnapshot>> = Mutex::new(None);
 
-/// Whether the visible menu was built with a DIFFERENT installed set
-/// than `current`. Main-thread only (reads the cache the main-thread
-/// builds).
-fn menu_installed_stale(current: &HashMap<CliApp, bool>) -> bool {
+/// Whether the visible menu was built with a DIFFERENT install
+/// snapshot than `current`. Main-thread only (reads the cache the
+/// main-thread builds).
+fn menu_installed_stale(current: &InstallSnapshot) -> bool {
     INSTALLED
         .lock()
         .map(|g| g.as_ref() != Some(current))
@@ -176,7 +179,7 @@ fn menu_installed_stale(current: &HashMap<CliApp, bool>) -> bool {
 /// next refresh retries). MUST run on the main thread. The single
 /// owner of the "menu reflects the installed set" invariant — both
 /// `commit_recent` and `refresh_installed_with` route through here.
-fn rebuild_if_installed_stale(app: &AppHandle, installed: &HashMap<CliApp, bool>) -> bool {
+fn rebuild_if_installed_stale(app: &AppHandle, installed: &InstallSnapshot) -> bool {
     if !menu_installed_stale(installed) {
         return false;
     }
@@ -293,7 +296,7 @@ const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
 
 /// Install the tray icon. Called once from `setup()`.
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
-    let installed = detect_installed_clis();
+    let installed = detect_install_snapshot();
     let menu = build_menu(app, &installed)?;
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
@@ -480,17 +483,17 @@ pub fn rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
 }
 
 fn do_rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
-    do_rebuild_menu_with(app, detect_installed_clis())
+    do_rebuild_menu_with(app, detect_install_snapshot())
 }
 
-/// Full rebuild from an already-probed installed map (callers that just
-/// paid for the probe pass it in, so the main thread doesn't re-probe —
-/// `detect_installed_clis` can spawn a shell per missing CLI). INSTALLED
-/// is stored only after `set_menu` succeeds: on any failure the cache
-/// keeps the OLD set, `menu_installed_stale` stays true, and the next
-/// refresh retries the rebuild instead of believing a menu that was
-/// never shown.
-fn do_rebuild_menu_with(app: &AppHandle, installed: HashMap<CliApp, bool>) -> tauri::Result<()> {
+/// Full rebuild from an already-probed install snapshot (callers that
+/// just paid for the probe pass it in, so the main thread doesn't
+/// re-probe — `detect_install_snapshot` can spawn a shell per missing
+/// CLI). INSTALLED is stored only after `set_menu` succeeds: on any
+/// failure the cache keeps the OLD set, `menu_installed_stale` stays
+/// true, and the next refresh retries the rebuild instead of believing
+/// a menu that was never shown.
+fn do_rebuild_menu_with(app: &AppHandle, installed: InstallSnapshot) -> tauri::Result<()> {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         let menu = build_menu(app, &installed)?;
         tray.set_menu(Some(menu))?;
@@ -506,19 +509,15 @@ fn do_rebuild_menu_with(app: &AppHandle, installed: HashMap<CliApp, bool>) -> ta
 /// (watcher / `scan_all_sessions`); skips the rebuild when nothing changed
 /// so active CLI use doesn't churn the menu on every file event.
 pub fn refresh_recent(app: &AppHandle, sessions: &[AppSession]) {
-    refresh_recent_with(app, sessions, detect_installed_clis());
+    refresh_recent_with(app, sessions, detect_install_snapshot());
 }
 
-/// `refresh_recent` from an already-probed installed map — the watcher's
-/// install branch just ran the probe via `refresh_installed`, so its
-/// fall-through rescan hands the result here instead of probing the
-/// same PATH (and possibly spawning the same fallback shells) twice in
-/// one burst.
-pub fn refresh_recent_with(
-    app: &AppHandle,
-    sessions: &[AppSession],
-    installed: HashMap<CliApp, bool>,
-) {
+/// `refresh_recent` from an already-probed install snapshot — the
+/// watcher's install branch just ran the probe via `refresh_installed`,
+/// so its fall-through rescan hands the result here instead of probing
+/// the same PATH (and possibly spawning the same fallback shells) twice
+/// in one burst.
+pub fn refresh_recent_with(app: &AppHandle, sessions: &[AppSession], installed: InstallSnapshot) {
     let mut recent = select_recent_state(sessions);
     // Join live Claude work-status onto the recent rows. The FS read
     // stays on the CALLER's thread (watcher / async runtime), like the
@@ -544,13 +543,26 @@ pub fn refresh_recent_with(
     }
 }
 
-/// The terminal-launchable subset of an installed map, for the recent
-/// region (recent-session resume, New Session) — excludes the Claude
-/// Desktop GUI app, which isn't terminal-launchable.
-fn terminal_clis(installed: &HashMap<CliApp, bool>) -> Vec<CliApp> {
+/// The terminal-launchable subset of an install snapshot, for the
+/// recent region (recent-session resume, New Session) — excludes the
+/// Claude Desktop GUI app, which isn't terminal-launchable.
+///
+/// Codex needs an extra gate: its installed-map entry is true when
+/// EITHER the CLI or the desktop app is present (they share `~/.codex`,
+/// so provider switching works with just the app), but terminal flows
+/// spawn a `codex` binary — the snapshot's `codex_terminal` (standalone
+/// CLI incl. the shell fallback, or the app's bundled binary) was
+/// probed on the CALLER's thread, so no filesystem work happens here
+/// on the main thread.
+fn terminal_clis(installed: &InstallSnapshot) -> Vec<CliApp> {
+    terminal_clis_in(&installed.map, installed.codex_terminal)
+}
+
+fn terminal_clis_in(installed: &HashMap<CliApp, bool>, codex_cli: bool) -> Vec<CliApp> {
     CliApp::all()
         .into_iter()
         .filter(|c| c.is_cli() && installed.get(c).copied().unwrap_or(false))
+        .filter(|c| *c != CliApp::Codex || codex_cli)
         .collect()
 }
 
@@ -560,7 +572,7 @@ fn terminal_clis(installed: &HashMap<CliApp, bool>) -> Vec<CliApp> {
 /// a FULL rebuild instead — the splice can't refresh the per-CLI
 /// provider submenus. MUST run on the main thread (queued like every
 /// other menu mutation, so concurrent refreshers serialize).
-fn commit_recent(app: &AppHandle, installed: &HashMap<CliApp, bool>, recent: RecentState) {
+fn commit_recent(app: &AppHandle, installed: &InstallSnapshot, recent: RecentState) {
     let recent_changed = match RECENT.lock() {
         Ok(mut guard) if *guard != recent => {
             *guard = recent.clone();
@@ -591,18 +603,18 @@ fn commit_recent(app: &AppHandle, installed: &HashMap<CliApp, bool>, recent: Rec
 /// thread, the compare + rebuild are queued on the main thread.
 /// Returns the probed map so the caller can reuse it (the watcher
 /// hands it to `refresh_recent_with` for the same burst's rescan).
-pub fn refresh_installed(app: &AppHandle) -> HashMap<CliApp, bool> {
-    let installed = detect_installed_clis();
+pub fn refresh_installed(app: &AppHandle) -> InstallSnapshot {
+    let installed = detect_install_snapshot();
     refresh_installed_with(app, installed.clone());
     installed
 }
 
-/// Compare an already-probed installed map against the menu and rebuild
-/// when stale — the entry point for callers that ran the probe
+/// Compare an already-probed install snapshot against the menu and
+/// rebuild when stale — the entry point for callers that ran the probe
 /// themselves (the `detect_clis` IPC hands its result over so a
 /// Providers-page Recheck also refreshes the tray, at no extra probe
 /// cost).
-pub fn refresh_installed_with(app: &AppHandle, installed: HashMap<CliApp, bool>) {
+pub fn refresh_installed_with(app: &AppHandle, installed: InstallSnapshot) {
     let handle = app.clone();
     let queued = app.run_on_main_thread(move || {
         rebuild_if_installed_stale(&handle, &installed);
@@ -623,7 +635,7 @@ pub fn refresh_installed_with(app: &AppHandle, installed: HashMap<CliApp, bool>)
 /// so the base list is never stale.
 pub fn refresh_work_status(app: &AppHandle) {
     let statuses = crate::sessions::claude_work_statuses();
-    let installed = detect_installed_clis();
+    let installed = detect_install_snapshot();
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let mut recent = match RECENT.lock() {
@@ -1106,7 +1118,7 @@ fn build_recent_region(
     Ok(region)
 }
 
-fn build_menu(app: &AppHandle, installed: &HashMap<CliApp, bool>) -> tauri::Result<Menu<Wry>> {
+fn build_menu(app: &AppHandle, installed: &InstallSnapshot) -> tauri::Result<Menu<Wry>> {
     let providers: Vec<Provider> = config::read_providers()
         .ok()
         .and_then(|v| serde_json::from_value(v).ok())
@@ -1124,8 +1136,8 @@ fn build_menu(app: &AppHandle, installed: &HashMap<CliApp, bool>) -> tauri::Resu
     menu = menu.item(&open).item(&PredefinedMenuItem::separator(app)?);
 
     // Only surface CLIs actually installed on this machine (`installed` is
-    // the caller's `detect_installed_clis()` probe — same one the Providers
-    // page uses, so the two agree). The CALLER stores it into INSTALLED
+    // the caller's `detect_install_snapshot()` probe — same one the
+    // Providers page uses, so the two agree). The CALLER stores it into INSTALLED
     // after `set_menu` succeeds; build_menu itself never touches the cache
     // (a build that fails or is never shown must not claim the new set).
     //
@@ -1147,7 +1159,7 @@ fn build_menu(app: &AppHandle, installed: &HashMap<CliApp, bool>) -> tauri::Resu
 
     let mut cli_rows: Vec<CliRow> = Vec::new();
     for cli in CliApp::all() {
-        if !installed.get(&cli).copied().unwrap_or(false) {
+        if !installed.map.get(&cli).copied().unwrap_or(false) {
             continue;
         }
         // The user's standalone providers PLUS this CLI's gateway bindings
@@ -1570,13 +1582,18 @@ mod tests {
         // Claude Desktop is installed but NOT a CLI — terminal flows
         // (recent-session resume, New Session) must exclude it.
         installed.insert(CliApp::ClaudeDesktop, true);
-        let got = terminal_clis(&installed);
+        let got = terminal_clis_in(&installed, true);
         assert_eq!(got, vec![CliApp::Claude]);
         // Order follows CliApp::all(), not map iteration order.
         installed.insert(CliApp::Codex, true);
         installed.insert(CliApp::Opencode, true);
-        let got = terminal_clis(&installed);
+        let got = terminal_clis_in(&installed, true);
         assert_eq!(got, vec![CliApp::Claude, CliApp::Codex, CliApp::Opencode]);
+        // Codex installed via the DESKTOP APP only (map says true, no
+        // CLI binary) — terminal flows can't spawn `codex`, so it must
+        // be excluded even though the installed map includes it.
+        let got = terminal_clis_in(&installed, false);
+        assert_eq!(got, vec![CliApp::Claude, CliApp::Opencode]);
     }
 
     #[test]

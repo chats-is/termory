@@ -563,6 +563,178 @@ fn shell_version_fallback(_tool: &str) -> Option<String> {
     None
 }
 
+/// Whether the Codex CLI binary is installed (path scan + shell
+/// fallback). Split out from [`detect_install_snapshot`] because Codex
+/// alone has TWO install forms — this CLI and the desktop app — and
+/// some features (account add via `codex login`, terminal resume /
+/// New Session) need the binary specifically.
+pub fn codex_cli_installed() -> bool {
+    find_cli_binary("codex").is_some() || shell_version_fallback("codex").is_some()
+}
+
+/// The Codex DESKTOP app's bundle id. Since 2026-07-09 the Codex app
+/// IS the new unified ChatGPT desktop app (Chat / Work / Codex modes;
+/// the old ChatGPT app became "ChatGPT Classic") — existing installs
+/// updated IN PLACE, so the `.app` NAME is unreliable (`Codex.app` or
+/// `ChatGPT.app` depending on install date). The bundle id is the
+/// stable identity; detect by it, never by name.
+#[cfg(target_os = "macos")]
+const CODEX_APP_BUNDLE_ID: &str = "com.openai.codex";
+
+/// Everything Termory reads off the installed Codex desktop app,
+/// resolved in ONE pass: locating the bundle already reads its
+/// Info.plist (to match `CFBundleIdentifier`), so the version and the
+/// bundled CLI are derived from that same read instead of re-resolving
+/// per fact.
+///
+/// `bundled_cli` is the codex CLI shipped INSIDE the app —
+/// `<bundle>/Contents/Resources/codex`, a self-contained native binary
+/// (verified runnable: `--version` reports `codex-cli <ver>`; the
+/// app's Codex mode runs on it). Fallback seam for app-only installs.
+/// Caveats: it rides the app's release channel (alpha builds) and the
+/// path is an app implementation detail — the standalone CLI always
+/// wins when present ([`codex_binary`]).
+#[cfg(target_os = "macos")]
+struct CodexAppInfo {
+    version: Option<String>,
+    bundled_cli: Option<std::path::PathBuf>,
+}
+
+/// Locate the Codex desktop app under `parents` by bundle id and read
+/// its facts. Known names (`Codex.app`, `ChatGPT.app`) are checked
+/// first so the common case is one or two plist reads; a full `*.app`
+/// scan of each parent is the fallback for renamed bundles.
+#[cfg(target_os = "macos")]
+fn codex_app_info_in(parents: &[std::path::PathBuf]) -> Option<CodexAppInfo> {
+    let info_of = |bundle: &std::path::Path| -> Option<CodexAppInfo> {
+        let xml = std::fs::read_to_string(bundle.join("Contents").join("Info.plist")).ok()?;
+        if crate::claude_desktop::plist_string_value(&xml, "CFBundleIdentifier")?
+            != CODEX_APP_BUNDLE_ID
+        {
+            return None;
+        }
+        let bin = bundle.join("Contents").join("Resources").join("codex");
+        Some(CodexAppInfo {
+            version: crate::claude_desktop::plist_string_value(&xml, "CFBundleShortVersionString"),
+            bundled_cli: bin.is_file().then_some(bin),
+        })
+    };
+    for parent in parents {
+        for name in ["Codex.app", "ChatGPT.app"] {
+            if let Some(info) = info_of(&parent.join(name)) {
+                return Some(info);
+            }
+        }
+    }
+    for parent in parents {
+        let entries = match std::fs::read_dir(parent) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let bundle = entry.path();
+            if bundle.extension().is_some_and(|ext| ext == "app") {
+                if let Some(info) = info_of(&bundle) {
+                    return Some(info);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn codex_app_parents() -> Vec<std::path::PathBuf> {
+    let mut parents = vec![std::path::PathBuf::from("/Applications")];
+    if let Some(home) = crate::home_dir() {
+        parents.push(home.join("Applications"));
+    }
+    parents
+}
+
+#[cfg(target_os = "macos")]
+fn codex_app_info() -> Option<CodexAppInfo> {
+    codex_app_info_in(&codex_app_parents())
+}
+
+/// The desktop app's bundled codex CLI, when the app is installed and
+/// ships one. macOS-only (like the app detection itself).
+pub fn codex_bundled_cli() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        codex_app_info().and_then(|info| info.bundled_cli)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// Resolve a RUNNABLE codex binary: the standalone CLI first, else the
+/// desktop app's bundled copy. Every codex spawn/launch seam (account
+/// login, terminal resume / new-session, tray terminal gating) routes
+/// through this, so an app-only install still gets CLI-backed features.
+/// Stat + plist reads only — no shell fallback (callers that also want
+/// the interactive-shell probe use [`codex_cli_installed`] for the
+/// standalone half).
+pub fn codex_binary() -> Option<std::path::PathBuf> {
+    find_cli_binary("codex").or_else(codex_bundled_cli)
+}
+
+/// Codex's install forms, probed in ONE pass (a single bundle
+/// resolution feeds `app` / `app_version` / `bundled_cli`; `cli` is
+/// the standalone binary via path scan + interactive-shell fallback).
+/// Serialized camelCase — this is the `detect_codex_installs` IPC's
+/// wire shape (frontend `CodexInstalls` in src/types.ts).
+#[derive(Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexInstalls {
+    pub cli: bool,
+    pub app: bool,
+    pub app_version: Option<String>,
+    pub bundled_cli: bool,
+}
+
+pub fn probe_codex_installs() -> CodexInstalls {
+    let cli = codex_cli_installed();
+    #[cfg(target_os = "macos")]
+    {
+        let info = codex_app_info();
+        CodexInstalls {
+            cli,
+            app: info.is_some(),
+            app_version: info.as_ref().and_then(|i| i.version.clone()),
+            bundled_cli: info.as_ref().is_some_and(|i| i.bundled_cli.is_some()),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        CodexInstalls {
+            cli,
+            app: false,
+            app_version: None,
+            bundled_cli: false,
+        }
+    }
+}
+
+/// One probe pass for everything the tray and the `detect_clis` IPC
+/// need: the per-app installed map PLUS whether a terminal-runnable
+/// codex exists. The two answer different questions for Codex — the
+/// map says "provider management usable" (CLI or desktop app, shared
+/// `~/.codex/`), `codex_terminal` says "a `codex` invocation can run
+/// in a terminal" (standalone CLI — including the shell fallback,
+/// since the user's login shell resolves what our fixed-dir scan may
+/// miss — or the app's bundled binary). Probing them together keeps
+/// one pass over the disk, and the tray stores the WHOLE snapshot in
+/// its staleness compare so a codex-terminal flip (CLI installed
+/// while the app was already present) rebuilds the menu.
+#[derive(Clone, PartialEq)]
+pub struct InstallSnapshot {
+    pub map: std::collections::HashMap<CliApp, bool>,
+    pub codex_terminal: bool,
+}
+
 /// Report whether each supported CLI is installed. Path-only scan
 /// when the binary lives anywhere reachable via [`cli_search_paths`];
 /// falls back to spawning an interactive shell only when the scan
@@ -572,25 +744,41 @@ fn shell_version_fallback(_tool: &str) -> Option<String> {
 /// We check the binary, not config files — every CLI creates its
 /// config dir lazily (only after first run / login), so config-file
 /// presence is a poor proxy for "is this installed".
-pub fn detect_installed_clis() -> std::collections::HashMap<CliApp, bool> {
-    let mut out = std::collections::HashMap::new();
+///
+/// Codex counts as installed when EITHER the CLI binary OR the desktop
+/// app is present (see [`InstallSnapshot`] for the codex_terminal
+/// split); account add / re-login gate on the `detect_codex_installs`
+/// IPC frontend-side.
+pub fn detect_install_snapshot() -> InstallSnapshot {
+    let codex = probe_codex_installs();
+    let mut map = std::collections::HashMap::new();
     for app in CliApp::all() {
-        // Claude Desktop is a GUI app with no CLI binary — detect it by
-        // its on-disk config dir (and platform support) instead.
-        let installed = if app.is_cli() {
-            find_cli_binary(app.bin_name()).is_some()
-                || shell_version_fallback(app.bin_name()).is_some()
-        } else {
-            crate::claude_desktop::is_installed()
+        let installed = match app {
+            CliApp::Codex => codex.cli || codex.app,
+            // Claude Desktop is a GUI app with no CLI binary — detect it
+            // by its on-disk config dir (and platform support) instead.
+            CliApp::ClaudeDesktop => crate::claude_desktop::is_installed(),
+            _ => {
+                find_cli_binary(app.bin_name()).is_some()
+                    || shell_version_fallback(app.bin_name()).is_some()
+            }
         };
-        out.insert(app, installed);
+        map.insert(app, installed);
     }
-    out
+    InstallSnapshot {
+        map,
+        codex_terminal: codex.cli || codex.bundled_cli,
+    }
 }
 
 /// Run each installed CLI with `--version` and return the parsed
 /// version string. Spawns one subprocess per CLI so the frontend
 /// calls this on page-load + Recheck only, never inside hot paths.
+///
+/// The Codex entry is the CLI binary's version ONLY (None when just
+/// the desktop app is installed) — the app's bundle version rides in
+/// the `detect_codex_installs` IPC, and the frontend composes the
+/// "CLI vX · App vY" display from both.
 pub fn detect_cli_versions() -> std::collections::HashMap<CliApp, Option<String>> {
     let mut out = std::collections::HashMap::new();
     for app in CliApp::all() {
@@ -3280,6 +3468,69 @@ mod tests {
         assert_eq!(parse_version("something with no version"), None);
         // Empty
         assert_eq!(parse_version(""), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn codex_app_info_in_matches_by_bundle_id_not_name() {
+        let parent = tempdir("codex-app");
+        // Distinct versions identify WHICH bundle matched (the info
+        // struct no longer carries the bundle path).
+        let write_app = |name: &str, bundle_id: &str, version: &str| {
+            let contents = parent.join(name).join("Contents");
+            fs::create_dir_all(&contents).unwrap();
+            fs::write(
+                contents.join("Info.plist"),
+                format!(
+                    r#"<?xml version="1.0"?><plist><dict>
+                        <key>CFBundleIdentifier</key><string>{bundle_id}</string>
+                        <key>CFBundleShortVersionString</key><string>{version}</string>
+                    </dict></plist>"#
+                ),
+            )
+            .unwrap();
+        };
+
+        // No apps at all → None.
+        assert!(codex_app_info_in(&[parent.clone()]).is_none());
+
+        // An unrelated app whose NAME doesn't match and id isn't codex.
+        write_app("Slack.app", "com.tinyspeck.slackmacgap", "1.0.0");
+        assert!(codex_app_info_in(&[parent.clone()]).is_none());
+
+        // The merged desktop app kept bundle id com.openai.codex but is
+        // NAMED ChatGPT.app (in-place update from the old Codex app) —
+        // the id, not the name, must decide. Version comes from the
+        // SAME plist read that matched the id.
+        write_app("ChatGPT.app", CODEX_APP_BUNDLE_ID, "26.707.31428");
+        let info = codex_app_info_in(&[parent.clone()]).unwrap();
+        assert_eq!(info.version.as_deref(), Some("26.707.31428"));
+        // No Contents/Resources/codex file yet → no bundled CLI.
+        assert_eq!(info.bundled_cli, None);
+
+        // A renamed bundle (neither known name) is still found by the
+        // full scan.
+        fs::rename(parent.join("ChatGPT.app"), parent.join("Renamed.app")).unwrap();
+        let info = codex_app_info_in(&[parent.clone()]).unwrap();
+        assert_eq!(info.version.as_deref(), Some("26.707.31428"));
+
+        // ChatGPT Classic (the old chat app, id com.openai.chat) must
+        // NOT count as the Codex app even under the ChatGPT.app name.
+        fs::remove_dir_all(parent.join("Renamed.app")).unwrap();
+        write_app("ChatGPT.app", "com.openai.chat", "1.2026.100");
+        assert!(codex_app_info_in(&[parent.clone()]).is_none());
+
+        // Bundled CLI: reported only when the app ships an actual
+        // Contents/Resources/codex file.
+        fs::remove_dir_all(parent.join("ChatGPT.app")).unwrap();
+        write_app("ChatGPT.app", CODEX_APP_BUNDLE_ID, "26.707.31428");
+        let resources = parent.join("ChatGPT.app/Contents/Resources");
+        fs::create_dir_all(&resources).unwrap();
+        fs::write(resources.join("codex"), b"#!/bin/sh\n").unwrap();
+        let info = codex_app_info_in(&[parent.clone()]).unwrap();
+        assert_eq!(info.bundled_cli, Some(resources.join("codex")));
+
+        fs::remove_dir_all(&parent).unwrap();
     }
 
     #[cfg(unix)]

@@ -106,7 +106,7 @@ pub(crate) fn home_dir() -> Option<std::path::PathBuf> {
 
 use providers::{
     activate, deactivate, delete_provider_traces, detect_cli_versions,
-    detect_gateway_apis as providers_detect_gateway_apis, detect_installed_clis,
+    detect_gateway_apis as providers_detect_gateway_apis, detect_install_snapshot,
     fetch_favicon as providers_fetch_favicon, fetch_models, read_active_state,
     set_opencode_default, test_provider, ActiveState, CliApp, GatewayCapabilities, ModelListResult,
     Provider, TestResult,
@@ -171,12 +171,14 @@ async fn detect_clis(
     app: tauri::AppHandle,
 ) -> Result<std::collections::HashMap<String, bool>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let map = detect_installed_clis();
-        // The page just paid for a fresh probe — hand it to the tray so a
-        // Providers-page Recheck also updates the menu (compare + rebuild
-        // only when the installed set actually changed).
-        tray::refresh_installed_with(&app, map.clone());
-        let serialized = map
+        let snapshot = detect_install_snapshot();
+        // The page just paid for a fresh probe — hand the WHOLE snapshot
+        // to the tray so a Providers-page Recheck also updates the menu
+        // (compare + rebuild only when the install state actually
+        // changed, including codex's terminal capability).
+        tray::refresh_installed_with(&app, snapshot.clone());
+        let serialized = snapshot
+            .map
             .into_iter()
             .map(|(cli, installed)| (cli_app_key(cli).to_string(), installed))
             .collect();
@@ -437,6 +439,23 @@ async fn detect_cli_versions_cmd(
     })
     .await
     .map_err(|err| err.to_string())?
+}
+
+/// Codex's install forms, split for the Providers page: `cli` is the
+/// standalone binary; `app` is the desktop app (macOS bundle id
+/// `com.openai.codex` — the merged ChatGPT/Codex desktop app);
+/// `bundled_cli` is the runnable codex CLI shipped INSIDE the app
+/// (`Contents/Resources/codex`) — the fallback that keeps account add /
+/// re-login working on app-only installs. Provider management needs
+/// any of them (shared `~/.codex/`), which is what `detect_clis`'
+/// codex entry says; the frontend disables login flows only when BOTH
+/// `cli` and `bundled_cli` are false. One probe pass backend-side
+/// (`providers::probe_codex_installs` — single bundle resolution).
+#[tauri::command]
+async fn detect_codex_installs() -> Result<providers::CodexInstalls, String> {
+    tauri::async_runtime::spawn_blocking(|| Ok(providers::probe_codex_installs()))
+        .await
+        .map_err(|err| err.to_string())?
 }
 
 fn cli_app_key(app: CliApp) -> &'static str {
@@ -865,6 +884,7 @@ pub fn run() {
             claude_project_registered,
             set_tray_labels,
             detect_cli_versions_cmd,
+            detect_codex_installs,
             provider_active_state,
             provider_active_states,
             activate_provider,

@@ -34,7 +34,7 @@ Two cross-cutting topics — **[Privacy & your data](#privacy--your-data)** and 
 
 Click **Official** to go back to your native login at any time.
 
-Two app-scoping notes: switching **Codex** applies to the Codex CLI and the Codex app together (they share one config and login), while **Claude Desktop** is its own tab with its own provider library — managed entirely separately from Claude Code.
+Two app-scoping notes: switching **Codex** applies to the Codex CLI and the Codex desktop app together — since mid-2026 that app is the unified **ChatGPT** desktop app (Chat / Work / Codex), and the two share one config and login. Either install alone is enough: the Codex tab works with just the desktop app, and the Official card's version line shows what's present (e.g. `v0.142.5 (CLI) · v26.707.31428 (App)`). **Claude Desktop** is its own tab with its own provider library — managed entirely separately from Claude Code.
 
 ### Adding or editing a provider
 
@@ -148,7 +148,7 @@ For a CLI logged in with an official subscription, the card shows your usage as 
 
 ### Official accounts (Codex multi-account)
 
-On the **Codex** tab, the Official card also manages multiple ChatGPT logins. **Save current** snapshots the live login; **Add account** starts a fresh `codex login` in your browser (cancellable — if you cancel or it fails, your previous login is restored). Each saved row shows the account's email, plan, and when its tokens were last refreshed. **Switch** restores a snapshot — Termory refreshes its tokens first, and an account whose login has expired is flagged **Re-login** instead of being written broken. Snapshots live in `~/.termory/accounts.json` (owner-only file permissions); Codex's own `auth.json` is only touched when you switch or add. For **Claude Code** and **Gemini** the card just shows which official account is currently logged in — saving and switching is Codex-only.
+On the **Codex** tab, the Official card also manages multiple ChatGPT logins. **Save current** snapshots the live login; **Add account** starts a fresh `codex login` in your browser (cancellable — if you cancel or it fails, your previous login is restored). This works with just the desktop app installed too — Termory runs the CLI bundled inside the app for the login. Each saved row shows the account's email, plan, and when its tokens were last refreshed. **Switch** restores a snapshot — Termory refreshes its tokens first, and an account whose login has expired is flagged **Re-login** instead of being written broken. Snapshots live in `~/.termory/accounts.json` (owner-only file permissions); Codex's own `auth.json` is only touched when you switch or add. For **Claude Code** and **Gemini** the card just shows which official account is currently logged in — saving and switching is Codex-only.
 
 ---
 

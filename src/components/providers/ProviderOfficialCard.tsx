@@ -20,6 +20,8 @@ export function ProviderOfficialCard({
   app: CliApp;
   isInUse: boolean;
   settingDefault: boolean;
+  /** Preformatted version text (e.g. "v2.0.0", or Codex's composed
+   *  "v0.142.5 (CLI) · v26.707.31428 (App)") — rendered verbatim. */
   version?: string | null;
   versionLoading?: boolean;
   /** Optional slot rendered between the info block and the Activate button. */
@@ -54,7 +56,7 @@ export function ProviderOfficialCard({
             {versionLoading ? (
               <span className="inline-block w-12 h-3 align-middle rounded bg-muted-foreground/15 animate-pulse" />
             ) : version ? (
-              <span className="font-mono">v{version}</span>
+              <span className="font-mono">{version}</span>
             ) : (
               <span className="font-mono">—</span>
             )}

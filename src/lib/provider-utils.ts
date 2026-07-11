@@ -1,6 +1,7 @@
 import type {
   ActiveState,
   CliApp,
+  CodexInstalls,
   Provider,
   Gateway,
   GatewayBinding,
@@ -12,6 +13,33 @@ import type { MessageKey } from "@/i18n";
 /** Translator passed into the per-CLI help builders so their copy
  * renders in the active locale (the functions are pure / outside React). */
 type Translate = (key: MessageKey, params?: Record<string, string | number>) => string;
+
+/** Compose the Codex Official card's version line from its two install
+ * forms — "v0.142.5 (CLI) · v26.707.31428 (App)" (whichever are
+ * present). Falls back to the plain CLI form while
+ * `detect_codex_installs` hasn't resolved yet; null when neither is
+ * installed. */
+export function codexVersionText(
+  cliVersion: string | null | undefined,
+  installs: CodexInstalls | null,
+  t: Translate
+): string | null {
+  if (!installs) return cliVersion ? `v${cliVersion}` : null;
+  const parts: string[] = [];
+  if (installs.cli) {
+    parts.push(
+      `${cliVersion ? `v${cliVersion}` : "—"} (${t("providers.codexVersionCli")})`
+    );
+  }
+  if (installs.app) {
+    parts.push(
+      `${installs.appVersion ? `v${installs.appVersion}` : "—"} (${t(
+        "providers.codexVersionApp"
+      )})`
+    );
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
 
 export function newProviderId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {

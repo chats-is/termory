@@ -190,7 +190,8 @@ export function OfficialAccountsSection({
   externalTrigger,
   loginInProgress = false,
   activeReloginId = null,
-  onRelogin
+  onRelogin,
+  reloginUnavailable = false
 }: {
   app: CliApp;
   onSwitched?: () => void;
@@ -206,6 +207,9 @@ export function OfficialAccountsSection({
   activeReloginId?: string | null;
   /** Called when the user clicks Re-login on a row. ProvidersPage handles the flow. */
   onRelogin?: (id: string) => void;
+  /** True when re-login can't run (Codex desktop-app-only install —
+   * no `codex` binary to spawn). Disables the Re-login buttons. */
+  reloginUnavailable?: boolean;
 }) {
   const t = useT();
   const [state, setState] = React.useState<AccountsState | null>(null);
@@ -496,7 +500,7 @@ export function OfficialAccountsSection({
                     type="button"
                     variant="outline"
                     size="sm"
-                    disabled={loginInProgress || rowBusy}
+                    disabled={loginInProgress || rowBusy || reloginUnavailable}
                     onClick={() => onRelogin?.(row.key)}
                     className="shrink-0 gap-1.5 text-destructive border-destructive/40 hover:bg-destructive/10"
                   >

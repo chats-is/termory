@@ -177,8 +177,9 @@ pub async fn login_and_save_codex_account(
     // NotFound. An explicit path ending in `.cmd` goes through the
     // runtime's hardened cmd.exe routing instead; PATH is augmented with
     // the binary's dir so the shim finds its node (same as the version
-    // probes).
-    let resolved = crate::providers::find_cli_binary("codex");
+    // probes). `codex_binary` falls back to the desktop app's bundled
+    // CLI, so an app-only install can still add accounts.
+    let resolved = crate::providers::codex_binary();
     let program: std::ffi::OsString = resolved
         .as_deref()
         .map(|p| p.as_os_str().to_os_string())

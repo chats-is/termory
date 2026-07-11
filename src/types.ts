@@ -314,6 +314,23 @@ export type CurrentAccount = {
   saved: boolean;
 };
 
+/** Result of `detect_codex_installs` — Codex's two install forms.
+ * `cli` gates account add / re-login (they spawn `codex login`);
+ * `app` is the desktop app (the merged ChatGPT/Codex app, detected by
+ * bundle id `com.openai.codex` — the .app name is unreliable since the
+ * 2026-07 merge). Provider management works with EITHER (shared
+ * `~/.codex/`), which is what `detect_clis`' codex entry reports. */
+export type CodexInstalls = {
+  cli: boolean;
+  app: boolean;
+  appVersion?: string | null;
+  /** The runnable codex CLI bundled inside the desktop app
+   * (`Contents/Resources/codex`) — login/terminal fallback for
+   * app-only installs. Login flows disable only when BOTH `cli` and
+   * this are false. */
+  bundledCli?: boolean;
+};
+
 /** Result of `list_accounts` for one CLI. */
 export type AccountsState = {
   current?: CurrentAccount | null;
