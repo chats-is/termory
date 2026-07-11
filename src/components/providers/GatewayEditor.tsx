@@ -92,12 +92,17 @@ export function GatewayEditor({
   gateway,
   isNew,
   installed,
+  visibleApps = CLI_APPS,
   onSave,
   onClose
 }: {
   gateway: Gateway;
   isNew: boolean;
   installed: Record<CliApp, boolean>;
+  /** Apps to LIST as binding rows (Settings → Tools filters disabled
+   *  ones out entirely; an installed-but-unbindable app still shows,
+   *  dimmed — that's the install gate, not the tool toggle). */
+  visibleApps?: readonly CliApp[];
   onSave: (r: Gateway) => void;
   onClose: () => void;
 }) {
@@ -276,8 +281,19 @@ export function GatewayEditor({
 
   const handleSave = async () => {
     if (!canSave || saving) return;
+    // Rows HIDDEN by Settings → Tools were never rendered, so their
+    // drafts can't have been edited — carry the existing bindings over
+    // VERBATIM. Rebuilding them from `binds`/`protocols` would drop
+    // them (protocols is zeroed for non-bindable apps), silently
+    // deleting a disabled tool's binding on any unrelated save.
+    const hiddenBindings = gateway.bindings.filter(
+      (b) => !visibleApps.includes(b.app)
+    );
     const bindings: GatewayBinding[] = CLI_APPS.filter(
-      (app) => binds[app].checked && protocols[app].length > 0
+      (app) =>
+        visibleApps.includes(app) &&
+        binds[app].checked &&
+        protocols[app].length > 0
     ).map((app) => {
       const d = binds[app];
       // A binding is a provider minus the gateway's common fields, WITH
@@ -347,7 +363,7 @@ export function GatewayEditor({
       // store (no per-mode model lists).
       capabilities: caps,
       favicon,
-      bindings
+      bindings: [...bindings, ...hiddenBindings]
     });
   };
 
@@ -474,7 +490,7 @@ export function GatewayEditor({
                   <Loader2 className="size-5 animate-spin text-muted-foreground" />
                 </div>
               )}
-              {CLI_APPS.map((app) => {
+              {visibleApps.map((app) => {
                 const allowed = protocols[app];
                 const bindable = allowed.length > 0;
                 const draft = binds[app];

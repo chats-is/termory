@@ -30,6 +30,7 @@ import {
 import {
   blankProvider,
   codexVersionText,
+  isToolEnabled,
   providerFromBinding,
   resolveActiveProviderId
 } from "@/lib/provider-utils";
@@ -189,7 +190,8 @@ export function ProvidersPage({
   activeProviderIds,
   setActiveProviderIds,
   app,
-  setApp
+  setApp,
+  sourceToggles = {}
 }: {
   providers: Provider[];
   setProviders: React.Dispatch<React.SetStateAction<Provider[]>>;
@@ -201,6 +203,9 @@ export function ProvidersPage({
   >;
   app: CliApp;
   setApp: (next: CliApp) => void;
+  /** Settings → Tools map (absent key = enabled); disabled apps lose
+   *  their tab (App.tsx guards the active tab back to an enabled one). */
+  sourceToggles?: Partial<Record<CliApp, boolean>>;
 }) {
   const t = useT();
   // Record / clear the "last activated" marker for a CLI (see
@@ -377,6 +382,23 @@ export function ProvidersPage({
   }, [quotaQueriedAt, quotaCooldownMs]);
   const quotaInCooldown =
     !!quotaQueriedAt && Date.now() - quotaQueriedAt < quotaCooldownMs;
+
+  // Gateway-binding gate = installed AND enabled (Settings → Tools): a
+  // disabled tool must not be offered as a binding target, mirroring its
+  // hidden provider tab. GatewaysPage threads this into GatewayEditor.
+  const bindableInstalled = React.useMemo(
+    () =>
+      Object.fromEntries(
+        CLI_APPS.map((a) => [a, installed[a] && isToolEnabled(sourceToggles, a)])
+      ) as Record<CliApp, boolean>,
+    [installed, sourceToggles]
+  );
+  // Binding rows LISTED in the GatewayEditor — a disabled tool's row is
+  // hidden entirely (vs installed-gating, which only dims it).
+  const enabledApps = React.useMemo(
+    () => CLI_APPS.filter((a) => isToolEnabled(sourceToggles, a)),
+    [sourceToggles]
+  );
 
   // Codex is "installed" with just the desktop app (shared ~/.codex).
   // Account add / re-login spawn `codex login` — they need EITHER the
@@ -1060,7 +1082,7 @@ export function ProvidersPage({
               }}
             >
               <TabsList className="w-full justify-start gap-1 bg-transparent p-0 [&>button]:flex-none [&>button]:rounded-md [&>button]:px-3">
-                {CLI_APPS.map((id) => (
+                {CLI_APPS.filter((id) => isToolEnabled(sourceToggles, id)).map((id) => (
                   <TabsTrigger key={id} value={id}>
                     <BrandIcon source={CLI_APP_SOURCE_BADGE[id]} />
                     <span>{CLI_APP_LABEL[id]}</span>
@@ -1098,7 +1120,8 @@ export function ProvidersPage({
             addSignal={gatewayAddSignal}
             markActive={markActive}
             activeProviderIds={activeProviderIds}
-            installed={installed}
+            installed={bindableInstalled}
+            visibleApps={enabledApps}
             codexFollowForBinding={codexFollowForBinding}
           />
         </React.Suspense>

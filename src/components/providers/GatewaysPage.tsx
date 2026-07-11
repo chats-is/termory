@@ -51,6 +51,7 @@ export function GatewaysPage({
   markActive,
   activeProviderIds,
   installed,
+  visibleApps,
   codexFollowForBinding
 }: {
   gateways: Gateway[];
@@ -67,6 +68,9 @@ export function GatewaysPage({
   /** Per-CLI install map — an app is only offered as a gateway-binding
    * target when it's installed (mirrors the Providers tab's install gate). */
   installed: Record<CliApp, boolean>;
+  /** Apps listed as binding rows in the editor (Settings → Tools hides
+   * disabled ones entirely). */
+  visibleApps?: readonly CliApp[];
   /** Run a Codex binding switch through the "follow sessions?" prompt (owned by
    * ProvidersPage, which renders the dialog). `direction` is the bucket the
    * switch lands on: `"toCustom"` (activate, official→custom) or `"toOfficial"`
@@ -96,6 +100,22 @@ export function GatewaysPage({
   const synthProviders = React.useMemo(
     () => gateways.flatMap((r) => r.bindings.map((b) => providerFromBinding(r, b))),
     [gateways]
+  );
+
+  // Settings → Tools: binding rows LISTED per gateway card (a disabled
+  // tool's binding is hidden; the binding itself survives in
+  // providers.json and delete-cleanup still iterates the full list).
+  // Computed once here so the empty-state check and the row render
+  // can't drift.
+  const visibleBindingsByGateway = React.useMemo(
+    () =>
+      new Map(
+        gateways.map((g) => [
+          g.id,
+          g.bindings.filter((b) => !visibleApps || visibleApps.includes(b.app))
+        ])
+      ),
+    [gateways, visibleApps]
   );
 
   const refreshActive = React.useCallback(async () => {
@@ -443,14 +463,15 @@ export function GatewaysPage({
                   </div>
                 </div>
 
-                {/* Bindings. */}
-                {gateway.bindings.length === 0 ? (
+                {/* Bindings (visibleBindingsByGateway — Tools-filtered). */}
+                {(visibleBindingsByGateway.get(gateway.id) ?? []).length === 0 ? (
                   <p className="text-xs text-muted-foreground">
                     {t("providers.noBindings")}
                   </p>
                 ) : (
                   <div className="flex flex-col gap-1.5 pt-1">
-                    {gateway.bindings.map((b) => {
+                    {(visibleBindingsByGateway.get(gateway.id) ?? [])
+                      .map((b) => {
                       const state = activeStates[b.app];
                       const isOpencode = b.app === "opencode";
                       // OpenCode has two independent states: the slot exists
@@ -573,6 +594,7 @@ export function GatewaysPage({
             gateway={editing}
             isNew={editingIsNew}
             installed={installed}
+            visibleApps={visibleApps}
             onSave={saveGateway}
             onClose={closeEditor}
           />

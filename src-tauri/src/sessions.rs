@@ -794,9 +794,65 @@ pub fn scan_sessions() -> Result<ScanResult, Box<dyn Error>> {
     projects.extend(opencode_empty_projects());
     add_record_projects(&mut projects, &records);
 
+    // Path index BEFORE the tool-toggle filter: `load_session` resolves
+    // by (source, id) through this index, and Favorites' "Open original"
+    // must keep working for a snapshot whose source is currently toggled
+    // off (the toggle hides listings, it doesn't revoke access to data
+    // that a stored favorite legitimately references). The index is
+    // still bounded to scan-discovered files — never frontend paths.
     refresh_session_path_index(&records);
+
+    // Tool toggles (Settings → Tools; config.json `sources` map, absent
+    // key = enabled) — ONE post-pass filters everything scan-derived, so
+    // every consumer (Records, Search, Stats, the tray's recent list)
+    // follows the setting automatically.
+    apply_source_toggles(
+        &mut projects,
+        &mut records,
+        &crate::config::disabled_sources(),
+    );
+
     evict_stale_scan_cache();
     Ok(ScanResult { projects, records })
+}
+
+/// Drop scan output belonging to DISABLED sources (`disabled` holds CLI
+/// keys — "codex" / "claude" / "gemini" / "opencode"). Session records
+/// and projects match by their source name lowercased; Memory/Skill
+/// records are multi-tagged (`preview` = "codex,opencode"), so only the
+/// disabled tags are removed and the record drops when none remain.
+///
+/// CONVENTION (test-pinned): every session source name lowercases
+/// EXACTLY to its cli key ("OpenCode" → "opencode"). The one hyphenated
+/// key, "claude-desktop", has NO session source (the GUI app keeps no
+/// history), so it never needs to survive this mapping — a future
+/// source whose name doesn't lowercase to its key must switch this to
+/// an explicit match.
+fn apply_source_toggles(
+    projects: &mut Vec<Project>,
+    records: &mut Vec<AppSession>,
+    disabled: &HashSet<String>,
+) {
+    if disabled.is_empty() {
+        return;
+    }
+    projects.retain(|p| !disabled.contains(&p.source.to_ascii_lowercase()));
+    records.retain_mut(|r| match r.source.as_str() {
+        "Memory" | "Skill" => {
+            let kept: Vec<&str> = r
+                .preview
+                .split(',')
+                .map(str::trim)
+                .filter(|tag| !tag.is_empty() && !disabled.contains(*tag))
+                .collect();
+            if kept.is_empty() {
+                return false;
+            }
+            r.preview = kept.join(",");
+            true
+        }
+        source => !disabled.contains(&source.to_ascii_lowercase()),
+    });
 }
 
 /// Enumerate the project FOLDERS each folder-based CLI keeps on disk — the
@@ -16475,5 +16531,60 @@ mod tests {
             !cache.contains_key(&doomed),
             "deleted file entry must be evicted"
         );
+    }
+
+    #[test]
+    fn apply_source_toggles_filters_sessions_projects_and_tags() {
+        let mk = |source: &str, preview: &str| AppSession {
+            source: source.to_string(),
+            preview: preview.to_string(),
+            ..Default::default()
+        };
+        let mut records = vec![
+            mk("Codex", ""),
+            mk("Claude", ""),
+            // Multi-tagged memory: the disabled tag drops, the record stays.
+            mk("Memory", "codex,opencode"),
+            // Single-tagged memory of a disabled source: whole record drops.
+            mk("Skill", "codex"),
+            mk("Memory", "claude,opencode"),
+        ];
+        let mut projects = vec![
+            Project {
+                source: "Codex".into(),
+                project: "/a".into(),
+            },
+            Project {
+                source: "Claude".into(),
+                project: "/b".into(),
+            },
+        ];
+        let disabled: HashSet<String> = ["codex".to_string()].into();
+        apply_source_toggles(&mut projects, &mut records, &disabled);
+
+        let sources: Vec<&str> = records.iter().map(|r| r.source.as_str()).collect();
+        assert_eq!(sources, vec!["Claude", "Memory", "Memory"]);
+        assert_eq!(records[1].preview, "opencode");
+        assert_eq!(records[2].preview, "claude,opencode");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].source, "Claude");
+
+        // Empty disabled set = untouched fast path.
+        let before = records.len();
+        apply_source_toggles(&mut projects, &mut records, &HashSet::new());
+        assert_eq!(records.len(), before);
+
+        // Convention pin: every session source name lowercases EXACTLY to
+        // its cli key — the mapping apply_source_toggles relies on.
+        // ("claude-desktop" has no session source, so the hyphenated key
+        // is deliberately absent here.)
+        for (source, key) in [
+            ("Codex", "codex"),
+            ("Claude", "claude"),
+            ("Gemini", "gemini"),
+            ("OpenCode", "opencode"),
+        ] {
+            assert_eq!(source.to_ascii_lowercase(), key);
+        }
     }
 }

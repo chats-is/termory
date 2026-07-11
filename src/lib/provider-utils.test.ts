@@ -5,6 +5,7 @@ import {
   codexVersionText,
   isClaudeSafeModelId,
   isManagedOptionKey,
+  isToolEnabled,
   isProviderList,
   isGatewayList,
   maskKey,
@@ -483,5 +484,24 @@ describe("codexVersionText", () => {
   it("falls back to the plain CLI form before detection resolves", () => {
     expect(codexVersionText("0.142.5", null, tEn)).toBe("v0.142.5");
     expect(codexVersionText(null, null, tEn)).toBeNull();
+  });
+});
+
+describe("isToolEnabled", () => {
+  it("treats an absent key (or absent map) as ENABLED — only explicit false disables", () => {
+    expect(isToolEnabled(undefined, "codex")).toBe(true);
+    expect(isToolEnabled({}, "codex")).toBe(true);
+    expect(isToolEnabled({ codex: true }, "codex")).toBe(true);
+    expect(isToolEnabled({ codex: false }, "codex")).toBe(false);
+    // Other apps' entries don't leak.
+    expect(isToolEnabled({ codex: false }, "claude")).toBe(true);
+  });
+
+  it("gemini is OFF by default (deprecated CLI) — explicit true re-enables", () => {
+    // MIRROR of DEFAULT_OFF_KEYS in src-tauri/src/config.rs.
+    expect(isToolEnabled(undefined, "gemini")).toBe(false);
+    expect(isToolEnabled({}, "gemini")).toBe(false);
+    expect(isToolEnabled({ gemini: true }, "gemini")).toBe(true);
+    expect(isToolEnabled({ gemini: false }, "gemini")).toBe(false);
   });
 });

@@ -335,6 +335,9 @@ export const zhHans: Record<MessageKey, string> = {
   "settings.language": "语言",
   "settings.language.desc": "应用界面使用的语言。",
 
+  "settings.sources": "工具",
+  "settings.sources.desc":
+    "关闭某个工具后,它在所有位置都会隐藏——供应商标签页、记录、搜索、统计和菜单栏。磁盘上的数据不受影响。",
   "settings.startup": "启动",
   "settings.startup.launchAtLogin": "开机自动启动",
   "settings.startup.desc": "登录系统时自动启动 Termory（仅驻菜单栏，不弹出窗口）。",

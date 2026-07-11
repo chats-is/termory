@@ -271,6 +271,19 @@ describe("StatsPage", () => {
     expect(codex.getAttribute("data-state")).toBe("active");
   });
 
+  it("hides a disabled tool's pill (Settings → Tools)", () => {
+    render(
+      <StatsPage
+        sessions={[mk({}), mk({ source: "Codex", model: "gpt-5", id: "y" })]}
+        onRefresh={() => {}}
+        refreshing={false}
+        sourceToggles={{ codex: false }}
+      />
+    );
+    expect(screen.queryByRole("tab", { name: /Codex/ })).toBeNull();
+    expect(screen.getByRole("tab", { name: /Claude/ })).toBeInTheDocument();
+  });
+
   it("wires the refresh button", () => {
     const onRefresh = vi.fn();
     render(

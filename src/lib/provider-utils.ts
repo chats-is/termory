@@ -14,6 +14,27 @@ import type { MessageKey } from "@/i18n";
  * renders in the active locale (the functions are pure / outside React). */
 type Translate = (key: MessageKey, params?: Record<string, string | number>) => string;
 
+/** Tools OFF BY DEFAULT — hidden until the user flips their Settings →
+ * Tools switch to an explicit `true`. Gemini CLI was deprecated by
+ * Google on 2026-06-18 (individual accounts; replaced by Antigravity
+ * CLI). MIRROR of `DEFAULT_OFF_KEYS` in src-tauri/src/config.rs — keep
+ * the two in sync. */
+const DEFAULT_OFF_TOOLS: ReadonlySet<CliApp> = new Set(["gemini"]);
+
+/** Settings → Tools: is `app` enabled under `toggles`? Absent key =
+ * enabled (only an explicit `false` disables — a truthiness check would
+ * wrongly treat never-persisted tools as off), EXCEPT the
+ * `DEFAULT_OFF_TOOLS`, which need an explicit `true`. Every frontend
+ * gate on the toggles must go through this helper. */
+export function isToolEnabled(
+  toggles: Partial<Record<CliApp, boolean>> | undefined,
+  app: CliApp
+): boolean {
+  const value = toggles?.[app];
+  if (value === undefined) return !DEFAULT_OFF_TOOLS.has(app);
+  return value !== false;
+}
+
 /** Compose the Codex Official card's version line from its two install
  * forms — "v0.142.5 (CLI) · v26.707.31428 (App)" (whichever are
  * present). Falls back to the plain CLI form while

@@ -354,6 +354,9 @@ export const en = {
   "settings.language.desc": "The language used across the app.",
 
   // Terminal
+  "settings.sources": "Tools",
+  "settings.sources.desc":
+    "Turn a tool off to hide it everywhere — provider tabs, records, search, stats, and the menu bar. Its data on disk is untouched.",
   "settings.startup": "Startup",
   "settings.startup.launchAtLogin": "Launch at login",
   "settings.startup.desc": "Start Termory automatically when you log in — tray only, no window.",

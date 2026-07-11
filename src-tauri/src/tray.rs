@@ -416,7 +416,13 @@ fn spawn_quota_fetch(app: &AppHandle, cli: CliApp) {
 /// `quota::SUPPORTED`. Used by the menu-open (tray click) hook and the
 /// one-shot warm-up at startup.
 pub fn trigger_quota_refresh(app: &AppHandle) {
+    // Settings → Tools: don't fetch quota for a disabled tool — its CLI
+    // row (where the numbers would show) is hidden anyway.
+    let disabled = crate::config::disabled_sources();
     for &cli in crate::quota::SUPPORTED {
+        if disabled.contains(cli_key(cli)) {
+            continue;
+        }
         {
             let Ok(guard) = QUOTA_LAST_FETCH.lock() else {
                 continue;
@@ -448,6 +454,11 @@ const QUOTA_FORCE_FLOOR: std::time::Duration = std::time::Duration::from_secs(10
 /// limits. Called from the filesystem watcher.
 pub fn force_quota_refresh(app: &AppHandle, cli: CliApp) {
     if !crate::quota::supports_quota(cli) {
+        return;
+    }
+    // Settings → Tools: a disabled tool's credential churn shouldn't
+    // trigger fetches (its tray row is hidden).
+    if crate::config::disabled_sources().contains(cli_key(cli)) {
         return;
     }
     {
@@ -555,7 +566,13 @@ pub fn refresh_recent_with(app: &AppHandle, sessions: &[AppSession], installed: 
 /// probed on the CALLER's thread, so no filesystem work happens here
 /// on the main thread.
 fn terminal_clis(installed: &InstallSnapshot) -> Vec<CliApp> {
-    terminal_clis_in(&installed.map, installed.codex_terminal)
+    // Settings → Tools: a disabled tool gets no terminal rows either.
+    // The disabled set rides in the snapshot (probed on the caller's
+    // thread) — no config-file I/O here on the main thread; the recent
+    // SESSION rows are already filtered upstream by scan_sessions.
+    let mut clis = terminal_clis_in(&installed.map, installed.codex_terminal);
+    clis.retain(|c| !installed.disabled.contains(cli_key(*c)));
+    clis
 }
 
 fn terminal_clis_in(installed: &HashMap<CliApp, bool>, codex_cli: bool) -> Vec<CliApp> {
@@ -1157,9 +1174,13 @@ fn build_menu(app: &AppHandle, installed: &InstallSnapshot) -> tauri::Result<Men
     // (Uninstalled CLIs get no provider submenu — nothing to switch.)
     let gateways = gateway_providers();
 
+    // Settings → Tools: disabled tools get no provider-switch submenu
+    // (the disabled set rides in the snapshot — no config I/O here).
     let mut cli_rows: Vec<CliRow> = Vec::new();
     for cli in CliApp::all() {
-        if !installed.map.get(&cli).copied().unwrap_or(false) {
+        if !installed.map.get(&cli).copied().unwrap_or(false)
+            || installed.disabled.contains(cli_key(cli))
+        {
             continue;
         }
         // The user's standalone providers PLUS this CLI's gateway bindings

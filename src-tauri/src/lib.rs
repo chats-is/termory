@@ -650,9 +650,49 @@ async fn read_app_config() -> Result<serde_json::Value, String> {
 
 /// Atomically write ~/.termory/config.json with file mode 0600 (Unix).
 #[tauri::command]
-async fn write_app_config(value: serde_json::Value) -> Result<(), String> {
+async fn write_app_config(app: tauri::AppHandle, value: serde_json::Value) -> Result<(), String> {
+    // Last-written `sources` value, so the change detection below doesn't
+    // re-read + re-parse config.json on EVERY config write (this IPC also
+    // carries hot-path keys like recent_searches). Outer None = not yet
+    // initialized this process; inner Option mirrors the key's presence.
+    static LAST_SOURCES: std::sync::Mutex<Option<Option<serde_json::Value>>> =
+        std::sync::Mutex::new(None);
     tauri::async_runtime::spawn_blocking(move || {
-        config::write_config(&value).map_err(|e| e.to_string())
+        // A change to the `sources` key (Settings → Tools toggles) must
+        // propagate everywhere scan output flows: re-scan (the filter lives
+        // in scan_sessions), push the result to the frontend via the same
+        // event the watcher uses, refresh the tray's recent rows, and do a
+        // full menu rebuild (per-CLI provider submenus gate on the setting).
+        let sources_before = {
+            let mut guard = LAST_SOURCES.lock().unwrap_or_else(|e| e.into_inner());
+            guard
+                .get_or_insert_with(|| {
+                    // One disk read per process to seed the cache.
+                    config::read_config()
+                        .ok()
+                        .and_then(|c| c.get("sources").cloned())
+                })
+                .clone()
+        };
+        config::write_config(&value).map_err(|e| e.to_string())?;
+        let sources_after = value.get("sources").cloned();
+        if let Ok(mut guard) = LAST_SOURCES.lock() {
+            *guard = Some(sources_after.clone());
+        }
+        if sources_after != sources_before {
+            use tauri::Emitter as _;
+            match scan_sessions() {
+                Ok(result) => {
+                    tray::refresh_recent(&app, &result.records);
+                    if let Err(err) = app.emit(watcher::SOURCES_CHANGED_EVENT, &result) {
+                        log::warn!("sources-toggle emit failed: {err}");
+                    }
+                }
+                Err(err) => log::warn!("sources-toggle rescan failed: {err}"),
+            }
+            let _ = tray::rebuild_menu(&app);
+        }
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?

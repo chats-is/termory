@@ -50,6 +50,8 @@ Termory brings **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode** toge
 
 Claude Desktop is the GUI app (no terminal history), so it's **provider-switching only** — point it at a third-party Anthropic-compatible provider and back to Official. macOS and Windows only.
 
+Don't use one of these tools? Turn it off in **Settings → Tools** and it disappears everywhere — provider tabs, records, search, stats, and the menu bar. Data on disk is untouched, and everything comes back when you re-enable it.
+
 ## Switch providers in a click
 
 Every CLI keeps its own library of named API profiles — your OpenRouter key, a local model, an alternate gateway, or the official login. Pick the one you want and Termory sets it up for that CLI; the next launch just uses it. Switch from the app or straight from the macOS menu bar. Switching **Codex** covers the Codex CLI and the Codex desktop app at once — they share one config and login — and either install alone is enough: with just the desktop app (now the unified **ChatGPT** app), everything from provider switching to adding accounts still works. **Claude Desktop** is a provider here too — Termory writes its native third-party (3P) config, so you can switch the desktop app just like a CLI; it's managed as its own app, entirely separate from Claude Code.

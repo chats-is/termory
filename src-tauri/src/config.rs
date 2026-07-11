@@ -117,6 +117,48 @@ pub fn read_config() -> Result<JsonValue, Box<dyn Error>> {
     read_json(&config_path()?, JsonValue::Object(Map::new()))
 }
 
+/// Tools OFF BY DEFAULT — hidden until the user flips their Settings →
+/// Tools switch to an explicit `true`. Gemini CLI was deprecated by
+/// Google on 2026-06-18 (individual accounts get HTTP 410; replaced by
+/// Antigravity CLI), so it no longer earns a default slot. MIRROR of
+/// `DEFAULT_OFF_TOOLS` in src/lib/provider-utils.ts — keep in sync.
+const DEFAULT_OFF_KEYS: &[&str] = &["gemini"];
+
+/// CLI keys ("codex" / "claude" / …) the user has switched OFF in
+/// Settings → Tools, read from config.json's `sources` map. An absent
+/// key means ENABLED — except the `DEFAULT_OFF_KEYS` tools, which need
+/// an explicit `true` to show.
+pub fn disabled_sources() -> std::collections::HashSet<String> {
+    let map = read_config()
+        .ok()
+        .and_then(|c| c.get("sources").cloned())
+        .and_then(|v| match v {
+            JsonValue::Object(map) => Some(map),
+            _ => None,
+        });
+    disabled_sources_from(map.as_ref())
+}
+
+fn disabled_sources_from(
+    map: Option<&Map<String, JsonValue>>,
+) -> std::collections::HashSet<String> {
+    let mut out: std::collections::HashSet<String> = map
+        .map(|m| {
+            m.iter()
+                .filter(|(_, v)| v.as_bool() == Some(false))
+                .map(|(k, _)| k.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    for key in DEFAULT_OFF_KEYS {
+        let explicitly_on = map.and_then(|m| m.get(*key)).and_then(|v| v.as_bool()) == Some(true);
+        if !explicitly_on {
+            out.insert((*key).to_string());
+        }
+    }
+    out
+}
+
 /// Atomically write `~/.termory/config.json` (chmod 0600 on Unix).
 pub fn write_config(value: &JsonValue) -> Result<(), Box<dyn Error>> {
     write_json_atomic_0600(&config_path()?, value)
@@ -508,5 +550,31 @@ mod tests {
         assert_eq!(names.len(), 2, "no .tmp leftovers: {names:?}");
         assert!(names.contains(&"config.json".to_string()));
         assert!(names.contains(&"providers.json".to_string()));
+    }
+
+    #[test]
+    fn disabled_sources_from_defaults_gemini_off_until_explicit_true() {
+        use serde_json::json;
+        let obj = |v: serde_json::Value| v.as_object().cloned().unwrap();
+
+        // No config / no sources key → only the default-off tools.
+        let d = disabled_sources_from(None);
+        assert!(d.contains("gemini"));
+        assert_eq!(d.len(), 1);
+
+        // Explicit false stays disabled; unrelated keys unaffected.
+        let m = obj(json!({ "codex": false }));
+        let d = disabled_sources_from(Some(&m));
+        assert!(d.contains("codex"));
+        assert!(d.contains("gemini"));
+
+        // Explicit true OVERRIDES the default-off.
+        let m = obj(json!({ "gemini": true }));
+        let d = disabled_sources_from(Some(&m));
+        assert!(!d.contains("gemini"));
+
+        // Explicit false for a default-off tool is still disabled.
+        let m = obj(json!({ "gemini": false }));
+        assert!(disabled_sources_from(Some(&m)).contains("gemini"));
     }
 }

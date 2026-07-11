@@ -3,6 +3,7 @@ import { Layers, RefreshCw } from "lucide-react";
 import { BrandIcon } from "@/components/BrandIcon";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CLI_APP_LABEL, CLI_APP_SOURCE_BADGE } from "@/constants";
+import { isToolEnabled } from "@/lib/provider-utils";
 import { cn } from "@/lib/utils";
 import { useT, type MessageKey } from "@/i18n";
 import type { AppSession, CliApp } from "@/types";
@@ -46,14 +47,25 @@ export function StatsPage({
   sessions,
   onRefresh,
   refreshing,
+  sourceToggles = {},
 }: {
   sessions: AppSession[];
   onRefresh: () => void;
   refreshing: boolean;
+  /** Settings → Tools map (absent key = enabled); disabled sources
+   *  lose their filter pill (their data is already gone backend-side). */
+  sourceToggles?: Partial<Record<CliApp, boolean>>;
 }) {
   const t = useT();
   const [range, setRange] = React.useState<DateRange>({ preset: "30d" });
   const [source, setSource] = React.useState<SourceFilter>("All");
+  const visibleSources = SOURCES.filter(
+    (s) => s === "All" || isToolEnabled(sourceToggles, s)
+  );
+  // A source disabled while selected falls back to All.
+  React.useEffect(() => {
+    if (source !== "All" && !isToolEnabled(sourceToggles, source)) setSource("All");
+  }, [source, sourceToggles]);
   const [groupBy, setGroupBy] = React.useState<TokensGroupBy>("type");
 
   const resolved = React.useMemo(
@@ -125,7 +137,7 @@ export function StatsPage({
                 aria-label={t("stats.sourceFilter")}
                 className="w-full justify-start gap-1 bg-transparent p-0 [&>button]:flex-none [&>button]:rounded-md [&>button]:px-3"
               >
-                {SOURCES.map((s) => (
+                {visibleSources.map((s) => (
                   <TabsTrigger key={s} value={s}>
                     {s === "All" ? (
                       <Layers className="size-4 shrink-0" aria-hidden />

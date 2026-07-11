@@ -12,6 +12,10 @@ import {
 } from "@tauri-apps/plugin-autostart";
 import { Folder, FolderOpen, Monitor, Moon, RefreshCw, Sun, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { BrandIcon } from "@/components/BrandIcon";
+import { CLI_APPS, CLI_APP_LABEL, CLI_APP_SOURCE_BADGE } from "@/constants";
+import { isToolEnabled } from "@/lib/provider-utils";
+import type { CliApp } from "@/types";
 import { Card, CardContent } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -45,7 +49,9 @@ export function SettingsPage({
   autoCheckUpdates,
   onAutoCheckUpdatesChange,
   appVersion,
-  onUpdateFound
+  onUpdateFound,
+  sourceToggles = {},
+  onSourceTogglesChange
 }: {
   recentSearches: string[];
   onClearRecent: () => void;
@@ -53,6 +59,12 @@ export function SettingsPage({
   onAutoCheckUpdatesChange: (next: boolean) => void;
   appVersion: string;
   onUpdateFound: (update: Update) => void;
+  /** Settings → Tools map (absent key = enabled). Persisting it makes
+   *  the backend re-scan + re-filter everything source-derived. */
+  sourceToggles?: Partial<Record<CliApp, boolean>>;
+  onSourceTogglesChange?: (
+    next: React.SetStateAction<Partial<Record<CliApp, boolean>>>
+  ) => void;
 }) {
   const { t, locale, setLocale } = useI18n();
   const { theme, setTheme } = useTheme();
@@ -160,6 +172,62 @@ export function SettingsPage({
               </div>
           </SettingsSection>
 
+          <SettingsSection title={t("settings.sources")}>
+            <div className="flex flex-col gap-3">
+              <div className="text-xs text-muted-foreground">
+                {t("settings.sources.desc")}
+              </div>
+              {CLI_APPS.map((app) => {
+                const enabled = isToolEnabled(sourceToggles, app);
+                // The LAST enabled tool can't be turned off — an
+                // all-disabled state would leave Providers with no tab
+                // to fall back to (and an app showing nothing at all).
+                const lastEnabled =
+                  enabled &&
+                  CLI_APPS.filter((a) => isToolEnabled(sourceToggles, a))
+                    .length === 1;
+                return (
+                  <div
+                    key={app}
+                    className="flex items-center justify-between gap-3"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <BrandIcon
+                        source={CLI_APP_SOURCE_BADGE[app]}
+                        className="size-4 shrink-0"
+                      />
+                      <span className="text-sm">{CLI_APP_LABEL[app]}</span>
+                    </div>
+                    <Switch
+                      checked={enabled}
+                      disabled={lastEnabled}
+                      onCheckedChange={(v) =>
+                        onSourceTogglesChange?.((prev) => ({ ...prev, [app]: v }))
+                      }
+                      aria-label={CLI_APP_LABEL[app]}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          </SettingsSection>
+
+          <SettingsSection title={t("settings.startup")}>
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-col gap-0.5 min-w-0">
+                <div className="text-sm">{t("settings.startup.launchAtLogin")}</div>
+                <div className="text-xs text-muted-foreground">
+                  {t("settings.startup.desc")}
+                </div>
+              </div>
+              <Switch
+                checked={autostart}
+                onCheckedChange={(v) => void toggleAutostart(v)}
+                aria-label={t("settings.startup.launchAtLogin")}
+              />
+            </div>
+          </SettingsSection>
+
           <SettingsSection title={t("settings.language")}>
             <div className="flex flex-col gap-2">
               <div className="text-xs text-muted-foreground">
@@ -177,22 +245,6 @@ export function SettingsPage({
                   ))}
                 </SelectContent>
               </Select>
-            </div>
-          </SettingsSection>
-
-          <SettingsSection title={t("settings.startup")}>
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex flex-col gap-0.5 min-w-0">
-                <div className="text-sm">{t("settings.startup.launchAtLogin")}</div>
-                <div className="text-xs text-muted-foreground">
-                  {t("settings.startup.desc")}
-                </div>
-              </div>
-              <Switch
-                checked={autostart}
-                onCheckedChange={(v) => void toggleAutostart(v)}
-                aria-label={t("settings.startup.launchAtLogin")}
-              />
             </div>
           </SettingsSection>
 

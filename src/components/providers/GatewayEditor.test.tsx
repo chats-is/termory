@@ -65,7 +65,8 @@ const ALL_INSTALLED: Record<CliApp, boolean> = {
 function setup(
   overrides?: Partial<Gateway>,
   isNew = true,
-  installed: Record<CliApp, boolean> = ALL_INSTALLED
+  installed: Record<CliApp, boolean> = ALL_INSTALLED,
+  visibleApps?: readonly CliApp[]
 ) {
   const onSave = vi.fn();
   const onClose = vi.fn();
@@ -74,6 +75,7 @@ function setup(
       gateway={{ ...blankGateway(), ...overrides }}
       isNew={isNew}
       installed={installed}
+      visibleApps={visibleApps}
       onSave={onSave}
       onClose={onClose}
     />
@@ -233,5 +235,45 @@ describe("GatewayEditor — close", () => {
     const { onClose } = setup();
     fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("hides a disabled tool's binding row entirely (visibleApps)", async () => {
+    setup(undefined, true, ALL_INSTALLED, [
+      "claude",
+      "claude-desktop",
+      "gemini",
+      "opencode"
+    ]);
+    await fillCredsAndDetect();
+    expect(screen.getByLabelText("Apply Claude Code")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Apply Codex")).toBeNull();
+  });
+
+  it("save preserves a hidden tool's existing binding verbatim", async () => {
+    // A gateway already bound to Codex, edited while Codex is toggled off
+    // (visibleApps excludes it). Saving must carry the binding over — the
+    // regression was handleSave dropping it (protocols zeroed for
+    // non-visible apps), which then deactivated the live config too.
+    const { onSave } = setup(
+      {
+        name: "GW",
+        baseUrl: "https://gw.example.com",
+        apiKey: "sk-x",
+        capabilities: ALL_CAPS,
+        bindings: [{ id: "b-codex", app: "codex", model: "gpt-5" }]
+      },
+      true,
+      ALL_INSTALLED,
+      ["claude", "claude-desktop", "gemini", "opencode"]
+    );
+    await waitFor(() =>
+      expect(screen.getByLabelText("Apply Claude Code")).not.toBeDisabled()
+    );
+    fireEvent.click(createBtn());
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    const saved: Gateway = onSave.mock.calls[0][0];
+    expect(saved.bindings).toEqual([
+      { id: "b-codex", app: "codex", model: "gpt-5" }
+    ]);
   });
 });

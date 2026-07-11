@@ -15,7 +15,7 @@ Termory has six destinations on the left activity rail (`⌘1`–`⌘6`), plus a
 | 3 | **[Favorites](#3-favorites)** | Messages you've starred, saved as snapshots. |
 | 4 | **[Search](#4-search)** | Full-text search across all history, plus a `⌘K` quick-search palette. |
 | 5 | **[Stats](#5-stats)** | Overview KPIs + calendar heatmap and a token chart split by type / model over All / 30d / 7d. |
-| 6 | **[Settings](#6-settings)** | Appearance, language, startup, terminal, storage, search history, shortcuts, updates. |
+| 6 | **[Settings](#6-settings)** | Appearance, tool toggles, startup, language, terminal, storage, search history, shortcuts, updates. |
 | — | **[Menu-bar tray](#menu-bar-tray-macos)** | Resume a session, start a new one, or switch providers without opening the window. |
 
 Two cross-cutting topics — **[Privacy & your data](#privacy--your-data)** and **[Installation & updates](#installation--updates)** — are covered at the end.
@@ -240,8 +240,9 @@ The Settings page (`⌘6`) has these sections:
 | Section | What it does |
 |---------|--------------|
 | **Appearance** | Theme — System / Light / Dark. |
-| **Language** | English / 简体中文 / 繁體中文. Changes apply immediately. |
+| **Tools** | Turn each tool (Claude Code / Claude Desktop / Codex / Gemini / OpenCode) on or off. A disabled tool disappears everywhere — provider tabs, records, search, stats, and the menu bar — the moment you toggle it; its data on disk is untouched and everything comes back when you re-enable it. The last enabled tool can't be turned off. **Gemini is off by default** (Google deprecated Gemini CLI for individual accounts in June 2026) — flip it on if you still use it or want to browse its history. |
 | **Startup** | **Launch at login** — start Termory automatically when you log in (tray only, no window). |
+| **Language** | English / 简体中文 / 繁體中文. Changes apply immediately. |
 | **Terminal** | Which terminal opens when you resume a session. Only terminals found on this machine are listed; "auto" uses your OS default. |
 | **Storage** | Shows the `~/.termory/` data directory with an **Open** button. |
 | **Search history** | How many recent searches are stored, with a **Clear** button. |

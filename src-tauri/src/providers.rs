@@ -733,6 +733,13 @@ pub fn probe_codex_installs() -> CodexInstalls {
 pub struct InstallSnapshot {
     pub map: std::collections::HashMap<CliApp, bool>,
     pub codex_terminal: bool,
+    /// Settings → Tools: cli keys toggled OFF, read once per probe pass
+    /// (caller's thread) so the tray's main-thread consumers
+    /// (`build_menu`, `terminal_clis`) do zero config-file I/O. Also
+    /// participates in the tray's staleness compare, so a toggle change
+    /// self-heals on the next menu open even without the explicit
+    /// rebuild the toggle write triggers.
+    pub disabled: std::collections::HashSet<String>,
 }
 
 /// Report whether each supported CLI is installed. Path-only scan
@@ -768,6 +775,7 @@ pub fn detect_install_snapshot() -> InstallSnapshot {
     InstallSnapshot {
         map,
         codex_terminal: codex.cli || codex.bundled_cli,
+        disabled: crate::config::disabled_sources(),
     }
 }
 
