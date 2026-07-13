@@ -61,6 +61,9 @@ export const en = {
   "tray.chooseFolder": "Choose Folder…",
   "tray.statusBusy": "Working",
   "tray.statusWaiting": "Needs input",
+  "tray.quotaFiveHour": "5h",
+  "tray.quotaWeekly": "W",
+  "tray.quotaMonthly": "M",
 
   // Stats
   "stats.kpi.sessions": "Sessions",

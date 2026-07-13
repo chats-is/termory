@@ -237,8 +237,8 @@ impl Default for TrayLabels {
             official: "Official".to_string(),
             exit: "Exit".to_string(),
             five_hour: "5h".to_string(),
-            weekly: "Weekly".to_string(),
-            monthly: "Monthly".to_string(),
+            weekly: "W".to_string(),
+            monthly: "M".to_string(),
             new_session: "New Session".to_string(),
             choose_folder: "Choose Folder…".to_string(),
             status_busy: "Working".to_string(),
@@ -1450,17 +1450,14 @@ mod tests {
         };
         assert_eq!(
             quota_label(&both, &labels).as_deref(),
-            Some("🟢 12% 5h · 🟡 78% Weekly")
+            Some("🟢 12% 5h · 🟡 78% W")
         );
-        // Codex free plan: a single generated 30-day window → "30d".
+        // Codex free plan: a single 30-day window → the "M" default label.
         let monthly = TrayQuota {
             tiers: vec![("30_day".into(), 9.0)],
             plan: None,
         };
-        assert_eq!(
-            quota_label(&monthly, &labels).as_deref(),
-            Some("🟢 9% Monthly")
-        );
+        assert_eq!(quota_label(&monthly, &labels).as_deref(), Some("🟢 9% M"));
         // Truly unknown ids pass through raw.
         let odd = TrayQuota {
             tiers: vec![("mystery_window".into(), 99.6)],
@@ -1481,9 +1478,9 @@ mod tests {
     fn tray_tier_label_humanizes_generated_ids() {
         let labels = TrayLabels::default();
         assert_eq!(tray_tier_label("five_hour", &labels), "5h");
-        assert_eq!(tray_tier_label("seven_day", &labels), "Weekly");
+        assert_eq!(tray_tier_label("seven_day", &labels), "W");
         assert_eq!(tray_tier_label("3_hour", &labels), "3h");
-        assert_eq!(tray_tier_label("30_day", &labels), "Monthly");
+        assert_eq!(tray_tier_label("30_day", &labels), "M");
         assert_eq!(tray_tier_label("14_day", &labels), "14d");
         assert_eq!(tray_tier_label("gemini_pro", &labels), "Pro");
         assert_eq!(tray_tier_label("gemini_flash_lite", &labels), "Lite");

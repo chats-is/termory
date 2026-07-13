@@ -55,6 +55,9 @@ export const zhHant: Record<MessageKey, string> = {
   "tray.chooseFolder": "選擇資料夾…",
   "tray.statusBusy": "工作中",
   "tray.statusWaiting": "需要輸入",
+  "tray.quotaFiveHour": "5h",
+  "tray.quotaWeekly": "週",
+  "tray.quotaMonthly": "月",
 
   "stats.kpi.sessions": "會話",
   "stats.kpi.messages": "訊息",

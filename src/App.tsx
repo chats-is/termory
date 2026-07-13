@@ -173,10 +173,11 @@ export function App() {
       open: t("tray.open"),
       official: t("tray.official"),
       exit: t("tray.exit"),
-      // Quota window labels on the CLI rows (5h / Weekly / Monthly).
-      fiveHour: t("providers.quotaFiveHourShort"),
-      weekly: t("providers.quotaSevenDayShort"),
-      monthly: t("providers.quotaMonthlyShort"),
+      // Quota window labels on the CLI rows — tray-specific abbreviations
+      // (5h / W / M), shorter than the Providers card rings' quotaXShort.
+      fiveHour: t("tray.quotaFiveHour"),
+      weekly: t("tray.quotaWeekly"),
+      monthly: t("tray.quotaMonthly"),
       // "New Session" submenu title + its "Choose Folder…" tail.
       newSession: t("tray.newSession"),
       chooseFolder: t("tray.chooseFolder"),
