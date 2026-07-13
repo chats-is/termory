@@ -1060,14 +1060,15 @@ export function App() {
                             </span>
                           </div>
                         );
-                        // Claude / Gemini / Codex / OpenCode project rows get a
-                        // right-click menu. Delete is available for all four;
-                        // whole-project migration is Claude-only for now.
+                        // Claude / Gemini / Codex / OpenCode / Grok project rows
+                        // get a right-click menu. Delete is available for all;
+                        // whole-project migration is Claude + Codex only for now.
                         rows.push(
                           group.source === "Claude" ||
                           group.source === "Gemini" ||
                           group.source === "Codex" ||
-                          group.source === "OpenCode" ? (
+                          group.source === "OpenCode" ||
+                          group.source === "Grok" ? (
                             <ContextMenu key={projKey}>
                               <ContextMenuTrigger asChild>
                                 {projRow}
@@ -1179,7 +1180,9 @@ export function App() {
                                           ? "delete_codex_project"
                                           : group.source === "OpenCode"
                                             ? "delete_opencode_project"
-                                            : "delete_claude_project",
+                                            : group.source === "Grok"
+                                              ? "delete_grok_project"
+                                              : "delete_claude_project",
                                       { project: projectName },
                                       projectDisplayName(projectName),
                                       t,

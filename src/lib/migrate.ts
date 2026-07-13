@@ -150,7 +150,9 @@ type DeleteCommand =
   | "delete_codex_project"
   | "delete_codex_memory"
   | "delete_opencode_session"
-  | "delete_opencode_project";
+  | "delete_opencode_project"
+  | "delete_grok_session"
+  | "delete_grok_project";
 
 /**
  * Shared flow for the delete entry points (whole project / single session /
@@ -179,7 +181,9 @@ export async function runRecordDelete(
       ? "Codex"
       : command.startsWith("delete_opencode")
         ? "OpenCode"
-        : "Claude Code";
+        : command.startsWith("delete_grok")
+          ? "Grok Build"
+          : "Claude Code";
   const confirmed = await ask(
     `${t(confirmKey, { name })}\n\n${t("menu.exitCliHint", { app })}`,
     {

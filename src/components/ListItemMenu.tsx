@@ -93,6 +93,8 @@ export function ListItemMenu({
   // Codex / OpenCode: delete only (sqlite rows, removed by id — see backend).
   const isCodexSession = source === "Codex" && !!id;
   const isOpencodeSession = source === "OpenCode" && !!id;
+  // Grok: delete only (removes the session dir; migration not built yet).
+  const isGrokSession = source === "Grok" && !!id;
   const isCodexAutoMemory =
     !id && path.includes("/.codex/memories/") && path.endsWith(".md");
   // Codex memory rel = the path under ~/.codex/memories/ (backend bounds it).
@@ -288,6 +290,25 @@ export function ListItemMenu({
               onSelect={() =>
                 void runRecordDelete(
                   "delete_opencode_session",
+                  { id: id! },
+                  id ?? basename(path),
+                  t,
+                  onLocalDelete
+                )
+              }
+            >
+              {t("menu.deleteSession")}
+            </ContextMenuItem>
+          </>
+        )}
+        {!hideSessionOps && isGrokSession && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              variant="destructive"
+              onSelect={() =>
+                void runRecordDelete(
+                  "delete_grok_session",
                   { id: id! },
                   id ?? basename(path),
                   t,

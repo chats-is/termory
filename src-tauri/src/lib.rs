@@ -330,6 +330,24 @@ async fn delete_codex_project(project: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?
 }
 
+/// Permanently delete one Grok session (its `<grok-home>/sessions/<cwd>/<id>/`
+/// dir). Migration of grok sessions is intentionally not built yet.
+#[tauri::command]
+async fn delete_grok_session(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::delete_grok_session(&id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Permanently delete every Grok session under a project cwd (its encoded-cwd
+/// session dirs).
+#[tauri::command]
+async fn delete_grok_project(project: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::delete_grok_project(&project))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Permanently delete one Codex auto-memory (.md under ~/.codex/memories/).
 #[tauri::command]
 async fn delete_codex_memory(rel: String) -> Result<(), String> {
@@ -917,6 +935,8 @@ pub fn run() {
             delete_gemini_memory,
             delete_codex_session,
             delete_codex_project,
+            delete_grok_session,
+            delete_grok_project,
             delete_codex_memory,
             migrate_codex_session,
             migrate_codex_project,

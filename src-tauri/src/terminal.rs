@@ -146,6 +146,7 @@ fn new_session_command_with(source: &str, codex: &str) -> Option<String> {
         "Codex" => codex.to_string(),
         "OpenCode" => "opencode".to_string(),
         "Gemini" => "gemini".to_string(),
+        "Grok" => "grok".to_string(),
         _ => return None,
     })
 }
@@ -695,6 +696,10 @@ mod tests {
         assert_eq!(
             new_session_command_with("Gemini", "codex").as_deref(),
             Some("gemini")
+        );
+        assert_eq!(
+            new_session_command_with("Grok", "codex").as_deref(),
+            Some("grok")
         );
         assert_eq!(new_session_command_with("Memory", "codex"), None);
         assert_eq!(

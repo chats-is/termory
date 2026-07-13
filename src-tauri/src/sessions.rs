@@ -1088,10 +1088,29 @@ fn grok_session_from_summary(session_dir: &Path) -> Option<AppSession> {
     let summary: Value =
         serde_json::from_str(&fs::read_to_string(session_dir.join("summary.json")).ok()?).ok()?;
     let id = summary.get("info")?.get("id")?.as_str()?.to_string();
+    // Message log: the interactive TUI writes `chat_history.jsonl` (current
+    // grok — universal), headless `grok -p` ALSO writes the legacy
+    // `updates.jsonl` ACP stream. Prefer chat_history.jsonl (present in every
+    // session), fall back to updates.jsonl for very old sessions.
+    let chat = session_dir.join("chat_history.jsonl");
     let updates = session_dir.join("updates.jsonl");
-    if !updates.is_file() {
+    let log = if chat.is_file() {
+        // Grok opens a NEW session dir every time the CLI is entered, so most
+        // dirs are empty shells: only the `system` prompt + a synthetic
+        // `system_reminder` user turn, no real conversation. Skip those — a
+        // session counts only when it has a real user turn or any assistant
+        // reply (`grok_chat_has_content`).
+        if !grok_chat_has_content(&chat) {
+            return None;
+        }
+        chat
+    } else if updates.is_file() {
+        // Legacy ACP log — only written by headless `grok -p`, which always
+        // has real activity, so no emptiness check needed.
+        updates
+    } else {
         return None;
-    }
+    };
     let str_of = |key: &str| {
         summary
             .get(key)
@@ -1103,7 +1122,7 @@ fn grok_session_from_summary(session_dir: &Path) -> Option<AppSession> {
         source: "Grok".to_string(),
         title: str_of("session_summary").unwrap_or_default(),
         project: summary["info"]["cwd"].as_str().unwrap_or("").to_string(),
-        path: updates.to_string_lossy().into_owned(),
+        path: log.to_string_lossy().into_owned(),
         started_at: str_of("created_at"),
         updated_at: str_of("updated_at"),
         message_count: summary
@@ -1113,6 +1132,64 @@ fn grok_session_from_summary(session_dir: &Path) -> Option<AppSession> {
         model: str_of("current_model_id"),
         ..Default::default()
     })
+}
+
+/// Read a grok session dir's cwd from its `summary.json` (`info.cwd`).
+fn grok_session_cwd(session_dir: &Path) -> Option<String> {
+    let summary: Value =
+        serde_json::from_str(&fs::read_to_string(session_dir.join("summary.json")).ok()?).ok()?;
+    summary
+        .get("info")?
+        .get("cwd")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Delete ONE grok session — its `<grok-home>/sessions/<cwd>/<uuid>/` dir.
+/// Resolved from the scan path index (`updates.jsonl` → its parent dir), and
+/// bounded to the grok sessions root so nothing outside it can be removed.
+pub fn delete_grok_session(id: &str) -> Result<(), String> {
+    let updates = lookup_session_path("Grok", id).ok_or("grok session not found")?;
+    let session_dir = updates
+        .parent()
+        .ok_or("invalid grok session path")?
+        .to_path_buf();
+    let root = grok_sessions_root().ok_or("grok home unavailable")?;
+    if !session_dir.starts_with(&root) {
+        return Err("refusing to delete outside the grok sessions dir".into());
+    }
+    fs::remove_dir_all(&session_dir).map_err(|e| e.to_string())
+}
+
+/// Delete a whole grok "project" (a cwd): remove every
+/// `<grok-home>/sessions/<encoded-cwd>/` dir whose sessions record that cwd.
+/// The percent-encoded dir name is never decoded — we match by reading a
+/// session's `info.cwd` (authoritative), like the scanner does.
+pub fn delete_grok_project(project: &str) -> Result<(), String> {
+    let Some(root) = grok_sessions_root() else {
+        return Ok(());
+    };
+    if !root.is_dir() {
+        return Ok(());
+    }
+    for cwd_entry in fs::read_dir(&root).map_err(|e| e.to_string())?.flatten() {
+        let cwd_dir = cwd_entry.path();
+        if !cwd_dir.is_dir() {
+            continue;
+        }
+        // A single encoded-cwd dir holds only ONE cwd's sessions — match on
+        // the first session that carries a cwd.
+        let belongs = fs::read_dir(&cwd_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|s| s.path().is_dir())
+            .any(|s| grok_session_cwd(&s.path()).as_deref() == Some(project));
+        if belongs {
+            fs::remove_dir_all(&cwd_dir).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 /// Grok's own per-tool display label + the rawInput arg worth showing —
@@ -1190,7 +1267,221 @@ fn grok_output_text(raw: &Value) -> Option<String> {
 /// `⏺`/`✗` marker + fenced output. `plan` renders as a GFM task list.
 /// Intermediate tool updates, `retry_state` and `turn_completed` are
 /// transport bookkeeping with no conversation content — skipped.
+/// Grok's tool NAME → display label, for `chat_history.jsonl` (which carries
+/// only the raw `name`, unlike the ACP stream's `_meta` label). Mirrors the
+/// labels grok's own TUI renders (observed on real data). Falls back to the
+/// raw name for anything unmapped.
+fn grok_tool_label(name: &str) -> String {
+    match name {
+        "read_file" => "Read",
+        "grep" => "Search",
+        "run_terminal_command" => "Run Command",
+        "search_replace" => "Edit",
+        "write_file" | "create_file" => "Write",
+        "list_dir" => "List Files",
+        "todo_write" => "Plan",
+        "web_search" => "Web Search",
+        "web_fetch" => "Fetch",
+        other => other,
+    }
+    .to_string()
+}
+
+/// Flatten a `chat_history.jsonl` `content` field (a bare string, or an
+/// array of `{type:"text", text}` parts) into plain text.
+fn grok_chat_content_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    }
+}
+
+/// Does a `chat_history.jsonl` hold a real conversation? A freshly-entered grok
+/// CLI writes only the `system` prompt + a synthetic `user` turn carrying the
+/// injected `system_reminder` (`synthetic_reason == "system_reminder"`) — that's
+/// an empty shell. A session counts when it has ANY assistant message OR a user
+/// turn that isn't synthetic. Streams line-by-line, early-returning on the first
+/// real message (empty shells are 2 lines).
+fn grok_chat_has_content(path: &Path) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let reader = std::io::BufReader::with_capacity(64 * 1024, file);
+    for line in std::io::BufRead::lines(reader) {
+        let Ok(line) = line else { continue };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("assistant") => return true,
+            Some("user") if v.get("synthetic_reason").is_none() => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Parse the CURRENT grok transcript format (`chat_history.jsonl`): one JSON
+/// object per line, `{type, content}`. `system` → a system-prompt notice;
+/// `user` → user text; `reasoning` → the `summary[].text` as a `> *…*`
+/// blockquote; `assistant` → text + a `**Label**(arg)` card per `tool_calls`
+/// entry; `tool_result` folds its output (4-backtick fence) into the matching
+/// card by `tool_call_id`. Follows the unified tool-message shape.
+fn parse_grok_chat_history(path: &Path) -> Result<SessionDetail, Box<dyn Error>> {
+    let file = fs::File::open(path)?;
+    let reader = std::io::BufReader::with_capacity(256 * 1024, file);
+    let mut messages: Vec<SessionMessage> = Vec::new();
+    let mut tool_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    for line in std::io::BufRead::lines(reader) {
+        let Ok(line) = line else { continue };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        match msg.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "system" => {
+                let text = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                if !text.trim().is_empty() {
+                    messages.push(SessionMessage {
+                        role: "system".to_string(),
+                        text: format!("*[System prompt]*\n\n{}", text.trim_end()),
+                        kind: "text".to_string(),
+                        ..Default::default()
+                    });
+                }
+            }
+            "user" => {
+                let text = grok_chat_content_text(msg.get("content"));
+                if !text.trim().is_empty() {
+                    messages.push(SessionMessage {
+                        role: "user".to_string(),
+                        text,
+                        kind: "text".to_string(),
+                        ..Default::default()
+                    });
+                }
+            }
+            "reasoning" => {
+                let text = msg
+                    .get("summary")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|s| s.get("text").and_then(|v| v.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
+                if !text.trim().is_empty() {
+                    messages.push(SessionMessage {
+                        role: "assistant".to_string(),
+                        text: format_reasoning_body(&text),
+                        kind: "reasoning".to_string(),
+                        ..Default::default()
+                    });
+                }
+            }
+            "assistant" => {
+                let text = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                if !text.trim().is_empty() {
+                    messages.push(SessionMessage {
+                        role: "assistant".to_string(),
+                        text: text.to_string(),
+                        kind: "text".to_string(),
+                        ..Default::default()
+                    });
+                }
+                if let Some(calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
+                    for call in calls {
+                        let id = call.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        let name = call.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                        // `arguments` is a JSON-encoded STRING.
+                        let args: Value = call
+                            .get("arguments")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| serde_json::from_str(s).ok())
+                            .unwrap_or(Value::Null);
+                        let label = grok_tool_label(name);
+                        let arg = grok_tool_arg(name, &args);
+                        let header = if arg.is_empty() {
+                            format!("⏺ **{label}**")
+                        } else {
+                            format!("⏺ **{label}**({})", wrap_inline_code(&arg))
+                        };
+                        if !id.is_empty() {
+                            tool_index.insert(id.to_string(), messages.len());
+                        }
+                        messages.push(SessionMessage {
+                            // Tool cards use role "tool" everywhere (Claude /
+                            // Codex / the ACP grok path) so the tool color bar
+                            // applies — not the assistant bar.
+                            role: "tool".to_string(),
+                            text: header,
+                            kind: "tool_use".to_string(),
+                            tool_use_id: (!id.is_empty()).then(|| id.to_string()),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+            "tool_result" => {
+                let id = msg
+                    .get("tool_call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                match tool_index.get(id) {
+                    // Fold the output into the matching tool card.
+                    Some(&idx) if !content.trim().is_empty() => {
+                        messages[idx]
+                            .text
+                            .push_str(&format!("\n\n````\n{}\n````", content.trim_end()));
+                    }
+                    Some(_) => {}
+                    // Orphan result (no matching call) — surface standalone.
+                    None if !content.trim().is_empty() => messages.push(SessionMessage {
+                        role: "tool".to_string(),
+                        text: format!("````\n{}\n````", content.trim_end()),
+                        kind: "tool_result".to_string(),
+                        ..Default::default()
+                    }),
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let session =
+        grok_session_from_summary(path.parent().unwrap_or(Path::new(""))).unwrap_or_else(|| {
+            AppSession {
+                source: "Grok".to_string(),
+                path: path.to_string_lossy().into_owned(),
+                ..Default::default()
+            }
+        });
+    Ok(SessionDetail { session, messages })
+}
+
 fn parse_grok_session(path: &Path) -> Result<SessionDetail, Box<dyn Error>> {
+    // Current grok stores the transcript in `chat_history.jsonl`
+    // (`{type, content}` messages); the legacy `updates.jsonl` ACP stream is
+    // still written by headless `grok -p`. Dispatch by which file the scan
+    // pointed at.
+    if path.file_name().and_then(|f| f.to_str()) == Some("chat_history.jsonl") {
+        return parse_grok_chat_history(path);
+    }
     let file = fs::File::open(path)?;
     let reader = std::io::BufReader::with_capacity(256 * 1024, file);
 
@@ -16947,6 +17238,124 @@ mod tests {
         ] {
             assert_eq!(source.to_ascii_lowercase(), key);
         }
+    }
+
+    #[test]
+    fn grok_delete_session_and_project_scoped() {
+        let _g = crate::testutils::lock_home();
+        let tmp = TestDir::new("grok-delete");
+        let _home = crate::testutils::override_home(tmp.path());
+        let root = tmp.path().join(".grok/sessions");
+        let mk = |enc: &str, uuid: &str, cwd: &str| {
+            let d = root.join(enc).join(uuid);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(
+                d.join("summary.json"),
+                format!(r#"{{"info":{{"id":"{uuid}","cwd":"{cwd}"}},"session_summary":"t"}}"#),
+            )
+            .unwrap();
+            fs::write(d.join("updates.jsonl"), b"{}").unwrap();
+            d
+        };
+        let a1 = mk("%2Fwork%2Fa", "u-a1", "/work/a");
+        let a2 = mk("%2Fwork%2Fa", "u-a2", "/work/a");
+        let b1 = mk("%2Fwork%2Fb", "u-b1", "/work/b");
+
+        // Populate the path index that delete_grok_session resolves through.
+        let sessions = scan_grok_sessions_in(&root).unwrap();
+        refresh_session_path_index(&sessions);
+
+        // Delete ONE session → only its dir goes; siblings stay.
+        delete_grok_session("u-a1").unwrap();
+        assert!(!a1.exists());
+        assert!(a2.exists() && b1.exists());
+
+        // Delete the /work/a PROJECT → its whole encoded-cwd dir goes; /work/b
+        // is untouched (scoped by the session's recorded cwd).
+        delete_grok_project("/work/a").unwrap();
+        assert!(!root.join("%2Fwork%2Fa").exists());
+        assert!(b1.exists());
+    }
+
+    #[test]
+    fn grok_parse_chat_history_new_format() {
+        // The CURRENT grok transcript format (interactive TUI writes only
+        // chat_history.jsonl — no updates.jsonl). The scanner must accept it
+        // and the parser map every message type.
+        let dir = std::env::temp_dir().join(format!(
+            "termory-grok-chat-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let sess = dir.join("%2Fwork%2Fapp").join("uuid-1");
+        fs::create_dir_all(&sess).unwrap();
+        fs::write(
+            sess.join("summary.json"),
+            r#"{"info":{"id":"uuid-1","cwd":"/work/app"},"session_summary":"Fix it",
+                "num_chat_messages":6,"current_model_id":"grok-4.5"}"#,
+        )
+        .unwrap();
+        // No updates.jsonl — only the new chat_history.jsonl.
+        let chat = [
+            r#"{"type":"system","content":"You are Grok."}"#,
+            r#"{"type":"user","content":[{"type":"text","text":"fix the bug"}]}"#,
+            r#"{"type":"reasoning","summary":[{"type":"summary_text","text":"Look at the file first."}]}"#,
+            r#"{"type":"assistant","content":"On it.","tool_calls":[{"id":"c1","name":"read_file","arguments":"{\"target_file\":\"src/a.rs\"}"}]}"#,
+            r#"{"type":"tool_result","tool_call_id":"c1","content":"fn main() {}"}"#,
+            r#"{"type":"assistant","content":"Done."}"#,
+        ]
+        .join("\n");
+        fs::write(sess.join("chat_history.jsonl"), chat).unwrap();
+
+        // An EMPTY shell: grok opens a new dir on every CLI entry with only the
+        // system prompt + a synthetic system_reminder user turn — must be
+        // skipped so the sidebar isn't flooded with blank sessions.
+        let empty = dir.join("%2Fwork%2Fapp").join("uuid-empty");
+        fs::create_dir_all(&empty).unwrap();
+        fs::write(
+            empty.join("summary.json"),
+            r#"{"info":{"id":"uuid-empty","cwd":"/work/app"},"session_summary":"",
+                "num_chat_messages":2}"#,
+        )
+        .unwrap();
+        fs::write(
+            empty.join("chat_history.jsonl"),
+            [
+                r#"{"type":"system","content":"You are Grok."}"#,
+                r#"{"type":"user","content":[{"type":"text","text":"<system-reminder>skills…</system-reminder>"}],"synthetic_reason":"system_reminder"}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        // Scanner accepts the real one, drops the empty shell.
+        let scanned = scan_grok_sessions_in(&dir).unwrap();
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].id, "uuid-1");
+        assert!(scanned[0].path.ends_with("chat_history.jsonl"));
+
+        // Parser maps every type.
+        let detail = parse_grok_session(&sess.join("chat_history.jsonl")).unwrap();
+        let joined: String = detail
+            .messages
+            .iter()
+            .map(|m| format!("[{}/{}] {}", m.role, m.kind, m.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("[system/text] *[System prompt]*"));
+        assert!(joined.contains("[user/text] fix the bug"));
+        assert!(joined.contains("> *Look at the file first.*"));
+        assert!(joined.contains("[assistant/text] On it."));
+        // Tool card: role "tool" (color bar), label mapped (read_file→Read),
+        // arg + folded output fence.
+        assert!(joined.contains("[tool/tool_use] ⏺ **Read**"));
+        assert!(joined.contains("src/a.rs"));
+        assert!(joined.contains("fn main() {}"));
+        assert!(joined.contains("[assistant/text] Done."));
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
