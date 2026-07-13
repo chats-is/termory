@@ -1151,10 +1151,8 @@ fn build_recent_region(
 }
 
 fn build_menu(app: &AppHandle, installed: &InstallSnapshot) -> tauri::Result<Menu<Wry>> {
-    let providers: Vec<Provider> = config::read_providers()
-        .ok()
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
+    let providers: Vec<Provider> =
+        crate::providers::providers_from_json(config::read_providers().unwrap_or_default());
 
     let labels = tray_labels();
     let mut menu = MenuBuilder::new(app);
@@ -1369,8 +1367,8 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         return;
     };
 
-    let providers_value = config::read_providers().unwrap_or_default();
-    let providers: Vec<Provider> = serde_json::from_value(providers_value).unwrap_or_default();
+    let providers: Vec<Provider> =
+        crate::providers::providers_from_json(config::read_providers().unwrap_or_default());
     // Standalone providers + this CLI's gateway bindings, so a click on a
     // gateway row resolves to its synthesized provider and activates via the
     // same path.

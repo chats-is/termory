@@ -109,7 +109,7 @@ use providers::{
     detect_gateway_apis as providers_detect_gateway_apis, detect_install_snapshot,
     fetch_favicon as providers_fetch_favicon, fetch_models, read_active_state,
     set_opencode_default, test_provider, ActiveState, CliApp, GatewayCapabilities, ModelListResult,
-    Provider, TestResult,
+    Provider, ProviderList, TestResult,
 };
 use sessions::{get_session, scan_sessions, search_sessions, SearchHit, SessionDetail};
 use tauri::Manager;
@@ -493,8 +493,9 @@ fn cli_app_key(app: CliApp) -> &'static str {
 #[tauri::command]
 async fn provider_active_state(
     app: String,
-    providers: Vec<Provider>,
+    providers: ProviderList,
 ) -> Result<ActiveState, String> {
+    let providers = providers.0;
     tauri::async_runtime::spawn_blocking(move || {
         let cli = CliApp::parse(&app).ok_or_else(|| format!("unknown app: {app}"))?;
         read_active_state(cli, &providers).map_err(|e| e.to_string())
@@ -505,7 +506,8 @@ async fn provider_active_state(
 
 /// Reverse-derive active state for all four CLIs in one call.
 #[tauri::command]
-async fn provider_active_states(providers: Vec<Provider>) -> Result<Vec<ActiveState>, String> {
+async fn provider_active_states(providers: ProviderList) -> Result<Vec<ActiveState>, String> {
+    let providers = providers.0;
     tauri::async_runtime::spawn_blocking(move || {
         let mut out = Vec::with_capacity(CliApp::all().len());
         for app in CliApp::all() {
@@ -527,8 +529,9 @@ async fn provider_active_states(providers: Vec<Provider>) -> Result<Vec<ActiveSt
 async fn activate_provider(
     app: tauri::AppHandle,
     provider: Provider,
-    providers_for_app: Vec<Provider>,
+    providers_for_app: ProviderList,
 ) -> Result<(), String> {
+    let providers_for_app = providers_for_app.0;
     tauri::async_runtime::spawn_blocking(move || {
         activate(&provider, &providers_for_app).map_err(|e| e.to_string())
     })
@@ -610,8 +613,9 @@ async fn delete_provider(app: tauri::AppHandle, provider: Provider) -> Result<()
 async fn deactivate_provider(
     handle: tauri::AppHandle,
     app: String,
-    providers_for_app: Vec<Provider>,
+    providers_for_app: ProviderList,
 ) -> Result<(), String> {
+    let providers_for_app = providers_for_app.0;
     tauri::async_runtime::spawn_blocking(move || {
         let cli = CliApp::parse(&app).ok_or_else(|| format!("unknown app: {app}"))?;
         deactivate(cli, &providers_for_app).map_err(|e| e.to_string())

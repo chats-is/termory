@@ -1006,7 +1006,11 @@ pub struct Gateway {
     pub base_url: String,
     #[serde(default)]
     pub api_key: String,
-    #[serde(default)]
+    // Per-binding lenient: a binding for an app this build doesn't know (e.g. a
+    // `grok` binding read by an older version) is dropped, but the gateway and
+    // its other bindings survive — the unknown feature is just absent from the
+    // UI. See the "Lenient config parsing" note above `providers_from_json`.
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub bindings: Vec<GatewayBinding>,
     #[serde(default)]
     pub favicon: Option<String>,
@@ -1113,14 +1117,95 @@ fn provider_from_binding(g: &Gateway, b: &GatewayBinding) -> Provider {
 /// Callers filter by `app` (the tray reads this once and groups per CLI
 /// rather than re-reading the file per CLI).
 pub fn gateway_providers() -> Vec<Provider> {
-    let gateways: Vec<Gateway> = crate::config::read_gateways()
-        .ok()
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-    gateways
+    gateways_from_json(crate::config::read_gateways().unwrap_or_default())
         .iter()
         .flat_map(|g| g.bindings.iter().map(|b| provider_from_binding(g, b)))
         .collect()
+}
+
+// ── Lenient config parsing (LOCKED) ──────────────────────────────────────────
+// Config content that is valid JSON must NEVER make the code error. An entry
+// this build doesn't recognize — the canonical case is an OLDER binary reading
+// a NEWER version's file after a downgrade, e.g. a `grok` provider/binding for
+// an app this build has no feature for — is Termory's OWN legitimate data from
+// another version, so it is simply SKIPPED (not shown in this version's UI),
+// and everything else keeps working. Only a real JSON *syntax* error may fail.
+// This is NOT a license to accept arbitrary foreign junk — it's version-skew
+// tolerance for the project's own data.
+
+/// Parse a JSON array of provider entries into typed `Provider`s, skipping any
+/// single entry the build can't deserialize (unknown `app`/`kind`, corrupt
+/// row). One bad entry never empties the whole list.
+pub fn providers_from_json(value: JsonValue) -> Vec<Provider> {
+    let JsonValue::Array(arr) = value else {
+        return Vec::new();
+    };
+    arr.into_iter()
+        .filter_map(|e| match serde_json::from_value::<Provider>(e) {
+            Ok(p) => Some(p),
+            Err(err) => {
+                log::warn!("Skipping unrecognized provider entry: {err}");
+                None
+            }
+        })
+        .collect()
+}
+
+/// Same per-entry tolerance for the gateway list. Note a gateway's *bindings*
+/// are ALSO parsed leniently (see `lenient_vec` on `Gateway.bindings`), so an
+/// unknown-app binding drops just that binding, not the whole gateway.
+pub fn gateways_from_json(value: JsonValue) -> Vec<Gateway> {
+    let JsonValue::Array(arr) = value else {
+        return Vec::new();
+    };
+    arr.into_iter()
+        .filter_map(|e| match serde_json::from_value::<Gateway>(e) {
+            Ok(g) => Some(g),
+            Err(err) => {
+                log::warn!("Skipping unrecognized gateway entry: {err}");
+                None
+            }
+        })
+        .collect()
+}
+
+/// `#[serde(deserialize_with)]` helper: deserialize a `Vec<T>` element-by-
+/// element, dropping (with a warn) any element that fails to parse — so one
+/// unrecognized item in a list FIELD (e.g. a gateway binding for an app this
+/// build doesn't know) doesn't fail the whole containing struct.
+fn lenient_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let raw = Vec::<JsonValue>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|v| match serde_json::from_value::<T>(v) {
+            Ok(x) => Some(x),
+            Err(err) => {
+                log::warn!("Skipping unrecognized list entry: {err}");
+                None
+            }
+        })
+        .collect())
+}
+
+/// Tauri command-argument wrapper for a providers array that deserializes
+/// LENIENTLY (via `providers_from_json`): an entry the build can't parse is
+/// dropped instead of failing the whole command at Tauri's arg-binding layer,
+/// BEFORE the handler runs. Without it, one unknown provider in providers.json
+/// makes `provider_active_states` (and the other list-arg commands) fail
+/// outright — the `unknown variant 'grok'` bug.
+#[derive(Debug, Default, Clone)]
+pub struct ProviderList(pub Vec<Provider>);
+
+impl<'de> Deserialize<'de> for ProviderList {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(ProviderList(providers_from_json(JsonValue::deserialize(
+            deserializer,
+        )?)))
+    }
 }
 
 /// Reverse-derived active state for a single CLI.
@@ -5401,6 +5486,59 @@ base_url = "https://x.io/v1"
         assert!(reject_duplicate_model_ids(&[m("a", ""), m("b", ""), m("  ", "")], "X").is_ok());
         // A repeated id (whitespace-normalized) → error.
         assert!(reject_duplicate_model_ids(&[m("a", ""), m(" a ", "x")], "X").is_err());
+    }
+
+    #[test]
+    fn providers_from_json_skips_unrecognized_entries_keeps_the_rest() {
+        // The downgrade case: an OLDER binary reads a providers.json that a
+        // NEWER version wrote, containing a provider for an app this build has
+        // no feature for (`future-cli` stands in for what `grok` WAS to a
+        // pre-grok build — using a real-but-newer name here would be a known
+        // variant and wouldn't exercise the skip) plus a corrupt row. The
+        // unknown/corrupt entries are skipped (absent from this version's UI);
+        // the entries this build DOES know survive. One bad entry must NEVER
+        // empty or fail the whole list.
+        let value = serde_json::json!([
+            { "id": "a", "app": "claude",     "kind": "custom", "name": "A" },
+            { "id": "b", "app": "future-cli", "kind": "custom", "name": "unknown app" },
+            { "id": "c", "app": "codex",      "kind": "custom", "name": "C" },
+            { "id": "d", "app": 12345,        "kind": "custom", "name": "corrupt app type" },
+        ]);
+        let parsed = providers_from_json(value.clone());
+        let ids: Vec<&str> = parsed.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "c"], "keep only what this build understands");
+
+        // The Tauri-arg newtype deserializes with the same tolerance, so an IPC
+        // call carrying an unknown provider doesn't fail at arg-binding.
+        let list: ProviderList = serde_json::from_value(value).unwrap();
+        assert_eq!(list.0.len(), 2);
+    }
+
+    #[test]
+    fn gateway_with_unknown_binding_survives_keeping_known_bindings() {
+        // A gateway whose bindings include one for an app this build doesn't
+        // know (`future-cli` stands in for what `grok` was to a pre-grok
+        // build) must still load — the gateway and its recognized bindings
+        // survive; only the unknown binding is dropped (its feature is just
+        // absent from this version's UI). It must NOT take down the whole
+        // gateway.
+        let value = serde_json::json!([{
+            "kind": "gateway", "id": "gw1", "name": "GW",
+            "baseUrl": "https://gw.example", "apiKey": "sk-x",
+            "bindings": [
+                { "id": "x", "app": "claude" },
+                { "id": "y", "app": "future-cli" },
+                { "id": "z", "app": "codex" },
+            ],
+        }]);
+        let gateways = gateways_from_json(value);
+        assert_eq!(gateways.len(), 1, "the gateway itself survives");
+        let apps: Vec<CliApp> = gateways[0].bindings.iter().map(|b| b.app).collect();
+        assert_eq!(
+            apps,
+            vec![CliApp::Claude, CliApp::Codex],
+            "unknown-app binding dropped, known ones kept"
+        );
     }
 
     #[test]
