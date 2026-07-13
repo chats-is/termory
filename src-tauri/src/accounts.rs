@@ -122,9 +122,13 @@ pub async fn switch_account(id: String) -> Result<(), Box<dyn Error>> {
         .iter()
         .find(|e| str_field(e, "id") == Some(id.as_str()))
         .ok_or("Account not found")?;
-    let payload = str_field(entry, "payload").ok_or("Saved account has no credential payload")?;
-    match str_field(entry, "app") {
-        Some("codex") => switch_codex(payload).await,
+    let payload = entry
+        .get("payload")
+        .cloned()
+        .ok_or("Saved account has no credential payload")?;
+    let app = str_field(entry, "app").map(String::from);
+    match app.as_deref() {
+        Some("codex") => switch_codex(&payload).await,
         other => Err(format!("Unsupported account app: {}", other.unwrap_or("?")).into()),
     }
 }
@@ -321,7 +325,7 @@ fn auto_save_unsaved_live_codex_account() -> Result<Option<String>, Box<dyn Erro
     let entry = serde_json::json!({
         "id": id, "app": "codex",
         "name": live.name, "email": live.email, "plan": live.plan,
-        "payload": live.raw, "savedAt": now_rfc3339(),
+        "payload": live.doc, "savedAt": now_rfc3339(),
     });
     store.push(entry);
     write_store(store)?;
@@ -367,7 +371,7 @@ pub fn delete_account(id: String) -> Result<(), Box<dyn Error>> {
 /// Schema version stamped into accounts.json. Bump when the on-disk shape
 /// changes in a backward-incompatible way and add a migration arm to
 /// `migrate_account_entries`. v1 is the current baseline.
-pub const ACCOUNTS_SCHEMA_VERSION: u64 = 1;
+pub const ACCOUNTS_SCHEMA_VERSION: u64 = 2;
 
 fn read_store() -> Result<Vec<JsonValue>, Box<dyn Error>> {
     let raw = crate::config::read_accounts()?;
@@ -383,13 +387,42 @@ fn read_store() -> Result<Vec<JsonValue>, Box<dyn Error>> {
         Some(JsonValue::Array(a)) => a.clone(),
         _ => Vec::new(),
     };
-    Ok(migrate_account_entries(version, entries))
+    let migrated = migrate_account_entries(version, entries);
+    // Persist the upgrade once so historical data on disk is actually rewritten
+    // to the new shape, not just fixed in memory on every read. After the first
+    // write the file carries the current version, so this stops firing.
+    // BEST-EFFORT: a read must still return its data if the write-back fails
+    // (disk full / read-only fs) — the in-memory migration already made the
+    // data correct, and the next successful write will re-attempt the upgrade.
+    if version < ACCOUNTS_SCHEMA_VERSION {
+        if let Err(e) = write_store(migrated.clone()) {
+            log::warn!("Failed to persist accounts.json schema upgrade: {e}");
+        }
+    }
+    Ok(migrated)
 }
 
 /// Upgrade account entries written by an older schema version to the
 /// current shape. Add an arm when bumping `ACCOUNTS_SCHEMA_VERSION`.
-fn migrate_account_entries(_version: u64, entries: Vec<JsonValue>) -> Vec<JsonValue> {
-    // e.g. `if _version < 2 { entries = entries.into_iter().map(...).collect() }`
+fn migrate_account_entries(version: u64, entries: Vec<JsonValue>) -> Vec<JsonValue> {
+    if version < 2 {
+        // v1 stored `payload` as a JSON-ENCODED STRING; v2 stores the parsed
+        // object. Convert each historical entry in place (leaving already-object
+        // payloads untouched so the pass is idempotent).
+        return entries
+            .into_iter()
+            .map(|mut e| {
+                let parsed = e
+                    .get("payload")
+                    .and_then(|p| p.as_str())
+                    .and_then(|s| serde_json::from_str::<JsonValue>(s).ok());
+                if let Some(obj) = parsed {
+                    e["payload"] = obj;
+                }
+                e
+            })
+            .collect();
+    }
     entries
 }
 
@@ -420,8 +453,9 @@ struct CodexLive {
     name: Option<String>,
     email: Option<String>,
     plan: Option<String>,
-    /// Full auth.json content, stored verbatim as the snapshot payload.
-    raw: String,
+    /// Full parsed auth.json, stored as the snapshot payload (a JSON object,
+    /// NOT a JSON-encoded string).
+    doc: JsonValue,
 }
 
 // ===================================================================
@@ -630,7 +664,7 @@ fn read_codex_live() -> Result<Option<CodexLive>, Box<dyn Error>> {
         name,
         email,
         plan,
-        raw,
+        doc,
     }))
 }
 
@@ -691,7 +725,7 @@ fn save_codex_account() -> Result<(), Box<dyn Error>> {
         "name": live.name,
         "email": live.email,
         "plan": live.plan,
-        "payload": live.raw,
+        "payload": live.doc,
         "savedAt": now_rfc3339(),
     });
 
@@ -837,9 +871,15 @@ async fn refresh_doc_tokens(doc: &mut JsonValue) -> Result<(), RefreshError> {
 
 /// Validate/refresh tokens in memory first, then write to auth.json.
 /// If refresh fails auth.json is left untouched and Err is returned.
-async fn switch_codex(payload: &str) -> Result<(), Box<dyn Error>> {
-    let mut doc: JsonValue = serde_json::from_str(payload)
-        .map_err(|e| format!("Saved Codex credential is corrupt: {e}"))?;
+async fn switch_codex(payload: &JsonValue) -> Result<(), Box<dyn Error>> {
+    // Payload is the parsed auth.json object (current schema). Tolerate the
+    // legacy JSON-encoded-string form too, in case an un-migrated entry slips
+    // through — the on-load migration normally converts it first.
+    let mut doc: JsonValue = match payload {
+        JsonValue::String(s) => serde_json::from_str(s)
+            .map_err(|e| format!("Saved Codex credential is corrupt: {e}"))?,
+        obj => obj.clone(),
+    };
 
     // Always attempt a token refresh to validate the credential is still valid
     // server-side. A 401 (token_revoked — user logged out of Codex since the
@@ -1133,6 +1173,81 @@ mod tests {
                 .is_some(),
             "accounts.json must have an 'accounts' array"
         );
+    }
+
+    #[test]
+    fn saved_payload_is_a_json_object_not_a_string() {
+        let _g = lock_home();
+        let tmp = tempdir("payload-object");
+        let _h = override_home(&tmp);
+
+        write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
+        save_current_account(CliApp::Codex).unwrap();
+
+        let path = tmp.join(".termory/accounts.json");
+        let raw: JsonValue = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let payload = raw.pointer("/accounts/0/payload").unwrap();
+        assert!(
+            payload.is_object(),
+            "payload must be a JSON object, not a stringified one: {payload:?}"
+        );
+        // The auth.json contents live inside the object verbatim.
+        assert_eq!(
+            payload
+                .pointer("/tokens/account_id")
+                .and_then(|v| v.as_str()),
+            Some("acct-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn migrates_v1_string_payload_to_object_and_persists() {
+        let _g = lock_home();
+        let tmp = tempdir("migrate-payload");
+        let _h = override_home(&tmp);
+
+        // Hand-write a v1 store whose `payload` is a JSON-ENCODED STRING (the
+        // old shape) so the on-load migration has something to upgrade.
+        write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
+        let auth = std::fs::read_to_string(tmp.join(".codex/auth.json")).unwrap();
+        let store_dir = tmp.join(".termory");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        let v1 = json!({
+            "version": 1,
+            "accounts": [{
+                "id": "acct-a", "app": "codex",
+                "name": "A", "email": "a@example.com", "plan": "Pro",
+                "payload": auth,            // <-- a STRING, the legacy shape
+                "savedAt": "2026-06-27T00:00:00Z",
+            }],
+        });
+        let store_path = store_dir.join("accounts.json");
+        std::fs::write(&store_path, serde_json::to_string_pretty(&v1).unwrap()).unwrap();
+
+        // A plain read migrates in memory AND rewrites the file to v2 + object.
+        let entries = read_store().unwrap();
+        assert!(
+            entries[0]["payload"].is_object(),
+            "in-memory payload upgraded"
+        );
+
+        let on_disk: JsonValue =
+            serde_json::from_slice(&std::fs::read(&store_path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk.pointer("/version").and_then(|v| v.as_u64()),
+            Some(2),
+            "historical file stamped to v2"
+        );
+        assert!(
+            on_disk.pointer("/accounts/0/payload").unwrap().is_object(),
+            "historical payload rewritten as an object on disk"
+        );
+
+        // The migrated snapshot still switches correctly (writes auth.json back).
+        std::fs::remove_file(tmp.join(".codex/auth.json")).unwrap();
+        switch_account("acct-a".to_string()).await.unwrap();
+        let restored = std::fs::read_to_string(tmp.join(".codex/auth.json")).unwrap();
+        assert_eq!(restored, auth, "switch restores the exact auth.json");
     }
 
     #[test]
