@@ -308,21 +308,31 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     {
         builder = builder.show_menu_on_left_click(false);
     }
-    // Prefer the dedicated monochrome menu-bar glyph; fall back to the
-    // app window icon if it somehow fails to decode.
+    // macOS menu bar: the dedicated MONOCHROME glyph, marked as a template
+    // so macOS themes it for light / dark bars. Fall back to the window icon
+    // if it somehow fails to decode.
+    #[cfg(target_os = "macos")]
     match tauri::image::Image::from_bytes(TRAY_ICON_PNG) {
         Ok(icon) => {
-            builder = builder.icon(icon);
-            #[cfg(target_os = "macos")]
-            {
-                builder = builder.icon_as_template(true);
-            }
+            builder = builder.icon(icon).icon_as_template(true);
         }
         Err(err) => {
             log::error!("tray icon decode failed, using window icon: {err}");
             if let Some(icon) = app.default_window_icon() {
                 builder = builder.icon(icon.clone());
             }
+        }
+    }
+    // Windows / Linux system tray: the COLORED app icon (like most apps
+    // there). The macOS monochrome template would render as a black blob —
+    // those trays don't do menu-bar theming. Fall back to the embedded
+    // glyph only if the window icon is somehow unavailable.
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(icon) = app.default_window_icon() {
+            builder = builder.icon(icon.clone());
+        } else if let Ok(icon) = tauri::image::Image::from_bytes(TRAY_ICON_PNG) {
+            builder = builder.icon(icon);
         }
     }
     builder
@@ -973,6 +983,7 @@ fn cli_source(cli: CliApp) -> &'static str {
         CliApp::Codex => "Codex",
         CliApp::Gemini => "Gemini",
         CliApp::Opencode => "OpenCode",
+        CliApp::Grok => "Grok",
         // Claude Desktop has no terminal sessions, so this is never used
         // for resume/new dispatch — present only to keep the match total.
         CliApp::ClaudeDesktop => "ClaudeDesktop",
@@ -1037,13 +1048,17 @@ fn work_status_label(status: Option<ClaudeWorkStatus>, labels: &TrayLabels) -> O
     }
 }
 
+/// Max chars for a recent-session menu label before it's truncated with an
+/// ellipsis — keeps the menu bar narrow.
+const RECENT_LABEL_MAX: usize = 24;
+
 /// Menu label for a recent session: title, else snippet, else "(untitled)",
 /// truncated so the menu stays narrow.
 fn recent_label(title: &str, snippet: &str) -> String {
     let raw = label_text(title, snippet);
     let raw = if raw.is_empty() { "(untitled)" } else { raw };
-    let mut out: String = raw.chars().take(44).collect();
-    if raw.chars().count() > 44 {
+    let mut out: String = raw.chars().take(RECENT_LABEL_MAX).collect();
+    if raw.chars().count() > RECENT_LABEL_MAX {
         out.push('…');
     }
     out
@@ -1409,6 +1424,7 @@ fn cli_label(cli: CliApp) -> &'static str {
         CliApp::Gemini => "Gemini",
         CliApp::Opencode => "OpenCode",
         CliApp::ClaudeDesktop => "Claude Desktop",
+        CliApp::Grok => "Grok Build",
     }
 }
 
@@ -1419,6 +1435,7 @@ fn cli_key(cli: CliApp) -> &'static str {
         CliApp::Gemini => "gemini",
         CliApp::Opencode => "opencode",
         CliApp::ClaudeDesktop => "claude-desktop",
+        CliApp::Grok => "grok",
     }
 }
 
@@ -1493,9 +1510,9 @@ mod tests {
         assert_eq!(recent_label("   ", "  the snippet  "), "the snippet");
         // Both blank → placeholder.
         assert_eq!(recent_label("", ""), "(untitled)");
-        // Over-long titles truncate to 44 chars + an ellipsis.
+        // Over-long titles truncate to RECENT_LABEL_MAX chars + an ellipsis.
         let out = recent_label(&"x".repeat(60), "");
-        assert_eq!(out.chars().count(), 45);
+        assert_eq!(out.chars().count(), RECENT_LABEL_MAX + 1);
         assert!(out.ends_with('…'));
     }
 

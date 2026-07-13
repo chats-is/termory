@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   appProtocols,
+  orderSources,
+  visibleSources,
   blankProvider,
   codexVersionText,
   isClaudeSafeModelId,
   isManagedOptionKey,
-  isToolEnabled,
+  isSourceEnabled,
   isProviderList,
   isGatewayList,
   maskKey,
@@ -57,6 +59,22 @@ describe("isManagedOptionKey", () => {
     expect(isManagedOptionKey("gemini", "GEMINI_API_KEY")).toBe(true);
     expect(isManagedOptionKey("gemini", "GEMINI_MODEL")).toBe(true);
     expect(isManagedOptionKey("gemini", "GOOGLE_CLOUD_PROJECT")).toBe(false);
+  });
+
+  it("grok — models.default + any entry's owned fields are managed", () => {
+    expect(isManagedOptionKey("grok", "models.default")).toBe(true);
+    expect(isManagedOptionKey("grok", "model.grok-4.5.api_key")).toBe(true);
+    expect(isManagedOptionKey("grok", "model.grok-4.5.base_url")).toBe(true);
+    expect(isManagedOptionKey("grok", "model.grok-4.5.description")).toBe(true);
+    // api_backend is owned by the dedicated dropdown, so it's managed too.
+    expect(isManagedOptionKey("grok", "model.grok-4.5.api_backend")).toBe(true);
+    // Other per-entry keys are legit Advanced settings
+    // (docs.x.ai/build/settings/reference: context_window, extra_headers…).
+    expect(isManagedOptionKey("grok", "model.grok-4.5.context_window")).toBe(false);
+    // The rule is dynamic over ANY entry key (the key IS the model id),
+    // so owned fields are managed regardless of which entry they're on.
+    expect(isManagedOptionKey("grok", "model.my-own.api_key")).toBe(true);
+    expect(isManagedOptionKey("grok", "ui.compact_mode")).toBe(false);
   });
 
   it("opencode — baseURL / apiKey only (keys are relative to `options`)", () => {
@@ -123,6 +141,7 @@ describe("blankProvider", () => {
       "https://generativelanguage.googleapis.com"
     );
     expect(blankProvider("opencode").baseUrl).toBe("https://api.anthropic.com");
+    expect(blankProvider("grok").baseUrl).toBe("https://api.x.ai/v1");
     // Claude Desktop is Anthropic-format, same default endpoint as Claude Code.
     expect(blankProvider("claude-desktop").baseUrl).toBe(
       "https://api.anthropic.com"
@@ -487,21 +506,71 @@ describe("codexVersionText", () => {
   });
 });
 
-describe("isToolEnabled", () => {
+describe("isSourceEnabled", () => {
   it("treats an absent key (or absent map) as ENABLED — only explicit false disables", () => {
-    expect(isToolEnabled(undefined, "codex")).toBe(true);
-    expect(isToolEnabled({}, "codex")).toBe(true);
-    expect(isToolEnabled({ codex: true }, "codex")).toBe(true);
-    expect(isToolEnabled({ codex: false }, "codex")).toBe(false);
+    expect(isSourceEnabled(undefined, "codex")).toBe(true);
+    expect(isSourceEnabled({}, "codex")).toBe(true);
+    expect(isSourceEnabled({ codex: true }, "codex")).toBe(true);
+    expect(isSourceEnabled({ codex: false }, "codex")).toBe(false);
     // Other apps' entries don't leak.
-    expect(isToolEnabled({ codex: false }, "claude")).toBe(true);
+    expect(isSourceEnabled({ codex: false }, "claude")).toBe(true);
   });
 
   it("gemini is OFF by default (deprecated CLI) — explicit true re-enables", () => {
     // MIRROR of DEFAULT_OFF_KEYS in src-tauri/src/config.rs.
-    expect(isToolEnabled(undefined, "gemini")).toBe(false);
-    expect(isToolEnabled({}, "gemini")).toBe(false);
-    expect(isToolEnabled({ gemini: true }, "gemini")).toBe(true);
-    expect(isToolEnabled({ gemini: false }, "gemini")).toBe(false);
+    expect(isSourceEnabled(undefined, "gemini")).toBe(false);
+    expect(isSourceEnabled({}, "gemini")).toBe(false);
+    expect(isSourceEnabled({ gemini: true }, "gemini")).toBe(true);
+    expect(isSourceEnabled({ gemini: false }, "gemini")).toBe(false);
+  });
+});
+
+describe("orderSources", () => {
+  it("returns the default order for absent/empty saved order", () => {
+    expect(orderSources(undefined)).toEqual([
+      "claude",
+      "claude-desktop",
+      "codex",
+      "gemini",
+      "opencode",
+      "grok"
+    ]);
+    expect(orderSources([])).toEqual(orderSources(undefined));
+  });
+
+  it("puts saved entries first and appends unknown-to-the-save tools", () => {
+    expect(orderSources(["grok", "codex"])).toEqual([
+      "grok",
+      "codex",
+      "claude",
+      "claude-desktop",
+      "gemini",
+      "opencode"
+    ]);
+  });
+
+  it("drops duplicates and ids that are no longer tools", () => {
+    expect(
+      orderSources(["codex", "codex", "nope" as never, "claude"])[0]
+    ).toBe("codex");
+    expect(orderSources(["codex", "codex"]).length).toBe(6);
+  });
+});
+
+describe("visibleSources / isGatewayBindableApp", () => {
+  it("filters disabled tools and (recordsOnly) claude-desktop", () => {
+    const order = orderSources(undefined);
+    expect(visibleSources(order, { codex: false }, { recordsOnly: true })).toEqual(
+      ["claude", "opencode", "grok"]
+    );
+    // Provider surfaces keep claude-desktop.
+    expect(visibleSources(order, { codex: false })).toContain("claude-desktop");
+  });
+
+  it("grok binds via openai-compatible when the gateway speaks it", () => {
+    expect(appProtocols(caps({ openaiCompatible: true })).grok).toEqual([
+      "openai-compatible"
+    ]);
+    expect(appProtocols(caps({ openai: true })).grok).toEqual([]);
   });
 });

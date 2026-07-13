@@ -46,9 +46,10 @@ Termory brings **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode** toge
 | Claude Code | ✅ | ✅ | ✅ | ✅ |
 | Gemini CLI | ✅ | ✅ | ✅ | ✅ |
 | OpenCode | ✅ | ✅ | ✅ | ✅ |
+| Grok Build | ✅ | — | ✅ | ✅ |
 | Claude Desktop | — | — | — | ✅ |
 
-Claude Desktop is the GUI app (no terminal history), so it's **provider-switching only** — point it at a third-party Anthropic-compatible provider and back to Official. macOS and Windows only.
+Grok Build (xAI) covers sessions, skills, and provider switching (via xAI's official custom-model mechanism — `[model."<id>"]` entries in `~/.grok/config.toml`; the auth.x.ai login is never touched). Claude Desktop is the GUI app (no terminal history), so it's **provider-switching only** — point it at a third-party Anthropic-compatible provider and back to Official. macOS and Windows only.
 
 Don't use one of these tools? Turn it off in **Settings → Tools** and it disappears everywhere — provider tabs, records, search, stats, and the menu bar. Data on disk is untouched, and everything comes back when you re-enable it.
 

@@ -175,6 +175,7 @@ pub fn apply(provider: &Provider) -> Result<(), Box<dyn Error>> {
     if base_url.is_empty() {
         return Err("Claude Desktop provider is missing a Base URL".into());
     }
+    crate::providers::reject_duplicate_model_ids(&provider.models, "Claude Desktop")?;
     let paths = current_paths()?;
     let profile = build_profile(provider);
     with_rollback(&paths, |paths| apply_to_paths(paths, &profile))
@@ -890,6 +891,7 @@ mod tests {
             models: Vec::new(),
             options: Vec::new(),
             favicon: None,
+            api_backend: None,
         }
     }
 

@@ -30,7 +30,7 @@ import {
 import {
   blankProvider,
   codexVersionText,
-  isToolEnabled,
+  isSourceEnabled,
   providerFromBinding,
   resolveActiveProviderId
 } from "@/lib/provider-utils";
@@ -117,14 +117,16 @@ let cachedInstalled: Record<CliApp, boolean> = {
   "claude-desktop": true,
   codex: true,
   gemini: true,
-  opencode: true
+  opencode: true,
+  grok: true
 };
 let cachedVersions: Record<CliApp, string | null> = {
   claude: null,
   "claude-desktop": null,
   codex: null,
   gemini: null,
-  opencode: null
+  opencode: null,
+  grok: null
 };
 let cachedVersionsLoading = true;
 // Codex's two install forms (CLI binary vs the merged ChatGPT/Codex
@@ -148,6 +150,15 @@ const QUOTA_SUPPORTED: ReadonlySet<CliApp> = new Set([
   "claude",
   "codex",
   "gemini"
+]);
+
+// CLIs whose Official card shows the logged-in account. Superset of
+// QUOTA_SUPPORTED: Grok Build has no quota endpoint but its auth.json
+// carries plain email/first_name/last_name (display-only, like
+// Claude/Gemini — backend `list_grok_accounts`).
+const ACCOUNT_SUPPORTED: ReadonlySet<CliApp> = new Set([
+  ...QUOTA_SUPPORTED,
+  "grok"
 ]);
 // Quota results survive route remounts (like cachedVersions). An entry
 // older than QUOTA_STALE_MS is silently re-fetched on the next entry
@@ -182,6 +193,11 @@ function quotaErrorToast(error: string) {
   }
 }
 
+// OpenCode is MULTI-SLOT: several provider blocks coexist in opencode.json
+// and one is separately promoted to the top-level default. Every other CLI
+// (incl. Grok) is single-slot — activating replaces the previous one.
+const isMultiSlot = (a: CliApp): boolean => a === "opencode";
+
 export function ProvidersPage({
   providers,
   setProviders,
@@ -191,7 +207,8 @@ export function ProvidersPage({
   setActiveProviderIds,
   app,
   setApp,
-  sourceToggles = {}
+  sourceToggles = {},
+  sourceOrder
 }: {
   providers: Provider[];
   setProviders: React.Dispatch<React.SetStateAction<Provider[]>>;
@@ -206,6 +223,8 @@ export function ProvidersPage({
   /** Settings → Tools map (absent key = enabled); disabled apps lose
    *  their tab (App.tsx guards the active tab back to an enabled one). */
   sourceToggles?: Partial<Record<CliApp, boolean>>;
+  /** Tab order = the Settings → Tools drag order (App-resolved). */
+  sourceOrder?: readonly CliApp[];
 }) {
   const t = useT();
   // Record / clear the "last activated" marker for a CLI (see
@@ -235,7 +254,8 @@ export function ProvidersPage({
     "claude-desktop": null,
     codex: null,
     gemini: null,
-    opencode: null
+    opencode: null,
+    grok: null
   });
   // Initialize from the module-level cache so a remount (route
   // switch) renders with the last-known truth, not the optimistic
@@ -389,14 +409,14 @@ export function ProvidersPage({
   const bindableInstalled = React.useMemo(
     () =>
       Object.fromEntries(
-        CLI_APPS.map((a) => [a, installed[a] && isToolEnabled(sourceToggles, a)])
+        CLI_APPS.map((a) => [a, installed[a] && isSourceEnabled(sourceToggles, a)])
       ) as Record<CliApp, boolean>,
     [installed, sourceToggles]
   );
   // Binding rows LISTED in the GatewayEditor — a disabled tool's row is
   // hidden entirely (vs installed-gating, which only dims it).
   const enabledApps = React.useMemo(
-    () => CLI_APPS.filter((a) => isToolEnabled(sourceToggles, a)),
+    () => CLI_APPS.filter((a) => isSourceEnabled(sourceToggles, a)),
     [sourceToggles]
   );
 
@@ -508,7 +528,8 @@ export function ProvidersPage({
         "claude-desktop": null,
         codex: null,
         gemini: null,
-        opencode: null
+        opencode: null,
+    grok: null
       };
       for (const s of states) next[s.app] = s;
       setActiveStates(next);
@@ -651,7 +672,7 @@ export function ProvidersPage({
   // standalone provider and a gateway binding that share creds.
   const effectiveActiveId = React.useMemo(
     () =>
-      app === "opencode"
+      isMultiSlot(app)
         ? (activeState?.matchedProviderId ?? null)
         : resolveActiveProviderId(activeState, activeProviderIds[app], [
             ...customProviders,
@@ -671,7 +692,7 @@ export function ProvidersPage({
         provider: synth,
         providersForApp: [synth]
       });
-      if (synth.app === "opencode") {
+      if (isMultiSlot(synth.app)) {
         await invoke("set_opencode_default_provider", { provider: synth });
       }
       markActive(synth.app, synth.id);
@@ -702,9 +723,9 @@ export function ProvidersPage({
   };
 
   const toggleGatewayEnabled = async (synth: Provider) => {
-    if (synth.app !== "opencode") return;
+    if (!isMultiSlot(synth.app)) return;
     if (!(await ensureCliInstalled(synth.app))) return;
-    const enabled = (activeStates.opencode?.configuredProviderIds ?? []).includes(
+    const enabled = (activeStates[synth.app]?.configuredProviderIds ?? []).includes(
       synth.id
     );
     setToggling(synth.id);
@@ -754,7 +775,7 @@ export function ProvidersPage({
     // provider don't touch any live config.
     const state = activeStates[next.app];
     const isLive =
-      next.app === "opencode"
+      isMultiSlot(next.app)
         ? (state?.configuredProviderIds ?? []).includes(next.id)
         : state?.matchedProviderId === next.id;
     if (next.kind !== "custom" || !isLive) return;
@@ -773,9 +794,9 @@ export function ProvidersPage({
         provider: next,
         providersForApp: stripSet
       });
-      if (next.app === "opencode") {
-        // Re-affirm the startup default ONLY if it was ALREADY the default.
-        // Saving an enabled-but-not-default slot just re-applies its block —
+      if (isMultiSlot(next.app)) {
+        // Re-affirm the picker default ONLY if it was ALREADY the default.
+        // Saving an enabled-but-not-default slot just re-applies its entries —
         // it must NOT be promoted to default (and the marker stays put).
         if (state?.matchedProviderId === next.id) {
           await invoke("set_opencode_default_provider", { provider: next });
@@ -813,10 +834,10 @@ export function ProvidersPage({
     if (!confirmed) return;
     const isInUse = activeStates[target.app]?.matchedProviderId === id;
     try {
-      if (target.app === "opencode") {
-        // OpenCode is multi-slot — delete only this provider's slot
-        // from opencode.json (and the top-level model if it pointed
-        // at this provider). Other Termory slots stay intact.
+      if (isMultiSlot(target.app)) {
+        // Multi-slot (OpenCode / Grok) — delete only THIS provider's
+        // entries (and the default pointer if it referenced them).
+        // Other Termory slots stay intact.
         await invoke("delete_provider", { provider: target });
       } else if (isInUse) {
         // Single-slot CLIs — when the deleted one is the live record,
@@ -840,7 +861,7 @@ export function ProvidersPage({
   // Enabled means the slot exists (multi-slot coexist). Other CLIs
   // don't have this concept — they only have "Set as default".
   const toggleEnabled = async (target: Provider) => {
-    if (target.app !== "opencode") return;
+    if (!isMultiSlot(target.app)) return;
     if (!(await ensureCliInstalled(target.app))) return;
     const state = activeStates[target.app];
     const enabled = (state?.configuredProviderIds ?? []).includes(target.id);
@@ -877,7 +898,7 @@ export function ProvidersPage({
       // hit "Set as default" on a not-yet-enabled provider, and
       // set_opencode_default errors on a missing slot. Single-slot CLIs:
       // activating IS setting the default.
-      if (target.app === "opencode") {
+      if (isMultiSlot(target.app)) {
         await invoke("activate_provider", {
           provider: target,
           providersForApp
@@ -1082,7 +1103,7 @@ export function ProvidersPage({
               }}
             >
               <TabsList className="w-full justify-start gap-1 bg-transparent p-0 [&>button]:flex-none [&>button]:rounded-md [&>button]:px-3">
-                {CLI_APPS.filter((id) => isToolEnabled(sourceToggles, id)).map((id) => (
+                {(sourceOrder ?? CLI_APPS).filter((id) => isSourceEnabled(sourceToggles, id)).map((id) => (
                   <TabsTrigger key={id} value={id}>
                     <BrandIcon source={CLI_APP_SOURCE_BADGE[id]} />
                     <span>{CLI_APP_LABEL[id]}</span>
@@ -1229,7 +1250,7 @@ export function ProvidersPage({
                     onSetDefault={() => void setOfficialAsDefault()}
                   />
                 </div>
-                {QUOTA_SUPPORTED.has(app) && (
+                {ACCOUNT_SUPPORTED.has(app) && (
                   <OfficialAccountsSection
                     app={app}
                     onSwitched={() => {
@@ -1239,7 +1260,11 @@ export function ProvidersPage({
                     quota={quotas[app] ?? null}
                     quotaLoading={quotaLoading === app}
                     quotaCooldown={quotaInCooldown}
-                    onRefreshQuota={() => void refreshQuota(app, true)}
+                    onRefreshQuota={
+                      QUOTA_SUPPORTED.has(app)
+                        ? () => void refreshQuota(app, true)
+                        : undefined
+                    }
                     externalTrigger={app === "codex" ? codexAccountTrigger : undefined}
                     loginInProgress={app === "codex" ? codexLoggingIn : undefined}
                     activeReloginId={app === "codex" ? activeReloginId : undefined}
@@ -1253,8 +1278,8 @@ export function ProvidersPage({
             {customProviders.map((p) => {
               const configuredIds = activeState?.configuredProviderIds ?? [];
               const matchedId = effectiveActiveId;
-              const isOpencode = p.app === "opencode";
-              const isConfigured = isOpencode
+              const isMulti = isMultiSlot(p.app);
+              const isConfigured = isMulti
                 ? configuredIds.includes(p.id)
                 : matchedId === p.id;
               const isInUse = matchedId === p.id;
@@ -1268,7 +1293,7 @@ export function ProvidersPage({
                   settingDefault={settingDefault === p.id}
                   testing={testing === p.id}
                   activatable={installed[app]}
-                  onToggleEnabled={isOpencode ? () => void toggleEnabled(p) : undefined}
+                  onToggleEnabled={isMulti ? () => void toggleEnabled(p) : undefined}
                   onSetDefault={() => void setAsDefault(p)}
                   onEdit={() => startEdit(p)}
                   onDelete={() => deleteProvider(p.id)}
@@ -1280,8 +1305,8 @@ export function ProvidersPage({
             {gatewayBoundForApp.map(({ gateway, synth }) => {
               const configuredIds = activeState?.configuredProviderIds ?? [];
               const matchedId = effectiveActiveId;
-              const isOpencode = synth.app === "opencode";
-              const isConfigured = isOpencode
+              const isMulti = isMultiSlot(synth.app);
+              const isConfigured = isMulti
                 ? configuredIds.includes(synth.id)
                 : matchedId === synth.id;
               const isInUse = matchedId === synth.id;
@@ -1297,7 +1322,7 @@ export function ProvidersPage({
                   testing={testing === synth.id}
                   activatable={installed[app]}
                   onToggleEnabled={
-                    isOpencode ? () => void toggleGatewayEnabled(synth) : undefined
+                    isMulti ? () => void toggleGatewayEnabled(synth) : undefined
                   }
                   onSetDefault={() => void activateGateway(synth)}
                   onTest={() => void testOne(synth)}

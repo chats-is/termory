@@ -59,7 +59,8 @@ const ALL_INSTALLED: Record<CliApp, boolean> = {
   "claude-desktop": true,
   codex: true,
   gemini: true,
-  opencode: true
+  opencode: true,
+  grok: true
 };
 
 function setup(
@@ -247,6 +248,35 @@ describe("GatewayEditor — close", () => {
     await fillCredsAndDetect();
     expect(screen.getByLabelText("Apply Claude Code")).toBeInTheDocument();
     expect(screen.queryByLabelText("Apply Codex")).toBeNull();
+  });
+
+  it("REPRO: editing an existing gateway, checking Grok with empty model blocks save", async () => {
+    setup(
+      {
+        name: "GW",
+        baseUrl: "https://gw.example.com",
+        apiKey: "sk-x",
+        capabilities: ALL_CAPS
+      },
+      false
+    );
+    // Saved caps render immediately; check Grok before any re-detect.
+    await waitFor(() =>
+      expect(screen.getByLabelText("Apply Grok Build")).not.toBeDisabled()
+    );
+    fireEvent.click(screen.getByLabelText("Apply Grok Build"));
+    expect(
+      screen.getByRole("button", { name: /^save$/i })
+    ).toBeDisabled();
+  });
+
+  it("a checked Grok Build binding requires a model before save", async () => {
+    setup();
+    await fillCredsAndDetect();
+    // ALL_CAPS includes openaiCompatible → grok is bindable.
+    fireEvent.click(screen.getByLabelText("Apply Grok Build"));
+    // No model yet → save blocked (grok's api_key is stored per-model).
+    expect(createBtn()).toBeDisabled();
   });
 
   it("save preserves a hidden tool's existing binding verbatim", async () => {

@@ -81,6 +81,7 @@ type BindDraft = {
   npm: string; // OpenCode AI SDK package ("" → default for supported mode)
   models: ModelRow[]; // OpenCode extra models
   options: KV[]; // advanced settings (Claude: per-size routing keys)
+  apiBackend: string; // grok wire API ("" → "responses")
 };
 
 /**
@@ -151,7 +152,8 @@ export function GatewayEditor({
         model: existing?.model ?? "",
         npm: existing?.npm ?? "",
         models: existing?.models ?? [],
-        options: existing?.options ?? []
+        options: existing?.options ?? [],
+        apiBackend: existing?.apiBackend ?? ""
       };
     }
     return out;
@@ -272,11 +274,35 @@ export function GatewayEditor({
     protocols["claude-desktop"].length > 0 &&
     binds["claude-desktop"].models.some((m) => !isClaudeSafeModelId(m.id));
 
+  // Grok is MULTI-model: a checked binding needs a models LIST (each row →
+  // one flat entry); the default (`model`) is optional but must be one of
+  // the listed models.
+  const grokBound = binds.grok.checked && protocols.grok.length > 0;
+  const grokModelIds = binds.grok.models.map((m) => m.id.trim()).filter(Boolean);
+  const grokMissingModels = grokBound && grokModelIds.length === 0;
+  const grokDefaultInvalid =
+    grokBound &&
+    binds.grok.model.trim().length > 0 &&
+    !grokModelIds.includes(binds.grok.model.trim());
+  // No duplicate model ids within ANY binding's models list (a repeat would
+  // silently override — grok's `[model."<id>-<model>"]`, OpenCode's `models`
+  // map, Claude Desktop's `inferenceModels`). Applies to every list-carrying
+  // app, consistent with the per-provider editor.
+  const bindingModelsDup = (app: CliApp): boolean => {
+    if (!binds[app].checked || protocols[app].length === 0) return false;
+    const ids = binds[app].models.map((m) => m.id.trim()).filter(Boolean);
+    return new Set(ids).size !== ids.length;
+  };
+  const anyBindingDupModels = CLI_APPS.some(bindingModelsDup);
+
   const canSave =
     name.trim().length > 0 &&
     baseUrl.trim().length > 0 &&
     // A gateway with no bindings is allowed (detect now, bind later).
     !opencodeMissingModel &&
+    !grokMissingModels &&
+    !grokDefaultInvalid &&
+    !anyBindingDupModels &&
     !cdBindingInvalidModel;
 
   const handleSave = async () => {
@@ -315,14 +341,15 @@ export function GatewayEditor({
           d.npm.trim() ||
           npmForProtocol(protocols[app][0] ?? "openai");
       }
-      // Models list — OpenCode's extra models AND Claude Desktop's
-      // inferenceModels (drop blank-id rows).
-      if (app === "opencode" || app === "claude-desktop") {
+      // Models list — OpenCode's extra models, Claude Desktop's
+      // inferenceModels, AND grok's required model list (drop blank-id rows).
+      if (app === "opencode" || app === "claude-desktop" || app === "grok") {
         const models = d.models
           .map((m) => ({ id: m.id.trim(), name: m.name.trim() }))
           .filter((m) => m.id);
         if (models.length) b.models = models;
       }
+      if (app === "grok" && d.apiBackend.trim()) b.apiBackend = d.apiBackend.trim();
       return b;
     });
 
@@ -571,26 +598,77 @@ export function GatewayEditor({
                             </Select>
                           </>
                         )}
+                        {/* Grok: api_backend (default responses) — before the model. */}
+                        {app === "grok" && (
+                          <>
+                            <Label className="text-xs">
+                              {t("providers.apiBackend")}
+                            </Label>
+                            <Select
+                              value={draft.apiBackend || "responses"}
+                              onValueChange={(v) =>
+                                setBind(app, { apiBackend: v })
+                              }
+                            >
+                              <SelectTrigger className="w-full">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="responses">
+                                  responses
+                                </SelectItem>
+                                <SelectItem value="chat_completions">
+                                  chat_completions
+                                </SelectItem>
+                                <SelectItem value="messages">messages</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </>
+                        )}
+
                         {/* Claude Desktop has no single primary model — its
                             picker is driven by the model list below. */}
                         {app !== "claude-desktop" && (
                           <>
                             <Label className="text-xs">
-                              {app === "opencode" ? `${t("providers.model")} *` : t("providers.model")}
+                              {app === "opencode"
+                                ? `${t("providers.model")} *`
+                                : app === "grok"
+                                  ? t("providers.defaultModel")
+                                  : t("providers.model")}
                             </Label>
                             <ModelCombobox
-                              ariaLabel={app === "opencode" ? `${t("providers.model")} *` : t("providers.model")}
+                              ariaLabel={
+                                app === "opencode"
+                                  ? `${t("providers.model")} *`
+                                  : app === "grok"
+                                    ? t("providers.defaultModel")
+                                    : t("providers.model")
+                              }
                               value={draft.model}
                               onValueChange={(v) => setBind(app, { model: v })}
-                              options={models}
-                              loading={detecting}
+                              options={
+                                app === "grok"
+                                  ? draft.models
+                                      .map((m) => m.id.trim())
+                                      .filter(Boolean)
+                                  : models
+                              }
+                              loading={detecting && app !== "grok"}
                               ariaInvalid={
-                                app === "opencode" && !draft.model.trim()
+                                app === "opencode"
+                                  ? !draft.model.trim()
+                                  : app === "grok" && grokDefaultInvalid
                               }
                             />
                             {app === "opencode" && !draft.model.trim() && (
                               <p className="text-xs text-destructive">
                                 OpenCode requires a primary model id.
+                              </p>
+                            )}
+                            {app === "grok" && grokDefaultInvalid && (
+                              <p className="text-xs text-destructive">
+                                {t("help.grokDefaultInvalid")}
                               </p>
                             )}
                           </>
@@ -658,6 +736,19 @@ export function GatewayEditor({
                                 {t("help.cdModelInvalid")}
                               </p>
                             )}
+                            {bindingModelsDup(app) && (
+                              <p className="text-xs text-destructive">
+                                {t("help.duplicateModel", {
+                                  id:
+                                    modelRows
+                                      .map((m) => m.id.trim())
+                                      .filter(Boolean)
+                                      .find(
+                                        (id, i, a) => a.indexOf(id) !== i
+                                      ) ?? ""
+                                })}
+                              </p>
+                            )}
                             <Button
                               type="button"
                               variant="outline"
@@ -674,14 +765,15 @@ export function GatewayEditor({
                           </>
                         )}
 
-                        {/* OpenCode: extra models (AI SDK is shown first, above). */}
-                        {app === "opencode" && (
+                        {/* OpenCode extra models (AI SDK shown above) AND grok's
+                            REQUIRED model list (each row → one picker entry). */}
+                        {(app === "opencode" || app === "grok") && (
                           <>
                             <Label className="text-xs mt-1">
-                              {t("providers.modelList")}
+                              {`${t("providers.modelList")}${app === "grok" ? " *" : ""}`}
                             </Label>
                             <p className="text-xs text-muted-foreground">
-                              {t("help.extraModels")}
+                              {t(app === "grok" ? "help.grokModels" : "help.extraModels")}
                             </p>
                             {modelRows.map((m, i) => (
                               <div key={i} className="flex items-center gap-1.5">
@@ -728,6 +820,19 @@ export function GatewayEditor({
                                 </Button>
                               </div>
                             ))}
+                            {bindingModelsDup(app) && (
+                              <p className="text-xs text-destructive">
+                                {t("help.duplicateModel", {
+                                  id:
+                                    modelRows
+                                      .map((m) => m.id.trim())
+                                      .filter(Boolean)
+                                      .find(
+                                        (id, i, a) => a.indexOf(id) !== i
+                                      ) ?? ""
+                                })}
+                              </p>
+                            )}
                             <Button
                               type="button"
                               variant="outline"
@@ -743,6 +848,7 @@ export function GatewayEditor({
                             </Button>
                           </>
                         )}
+
 
                         {/* Advanced settings — same wording as ProviderEditor;
                             Claude seeds the per-size routing keys. */}

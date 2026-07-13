@@ -10,11 +10,26 @@ import {
   enable as autostartEnable,
   disable as autostartDisable
 } from "@tauri-apps/plugin-autostart";
-import { Folder, FolderOpen, Monitor, Moon, RefreshCw, Sun, Trash2 } from "lucide-react";
+import { Folder, FolderOpen, GripVertical, Monitor, Moon, RefreshCw, Sun, Trash2 } from "lucide-react";
+import {
+  DndContext,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  useSortable,
+  verticalListSortingStrategy
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { Button } from "@/components/ui/button";
 import { BrandIcon } from "@/components/BrandIcon";
 import { CLI_APPS, CLI_APP_LABEL, CLI_APP_SOURCE_BADGE } from "@/constants";
-import { isToolEnabled } from "@/lib/provider-utils";
+import { isSourceEnabled } from "@/lib/provider-utils";
 import type { CliApp } from "@/types";
 import { Card, CardContent } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
@@ -43,6 +58,54 @@ const SHORTCUTS: { keys: string[]; labelKey: MessageKey }[] = [
   { keys: ["Esc"], labelKey: "settings.shortcuts.closePalette" }
 ];
 
+/** One drag-sortable Settings → Tools row. dnd-kit's `useSortable`
+ * animates the transform while a sibling is dragged; only the grip icon
+ * gets the drag listeners so the Switch stays a plain click target. */
+function SortableSourceRow({
+  app,
+  children
+}: {
+  app: CliApp;
+  children: React.ReactNode;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging
+  } = useSortable({ id: app });
+  return (
+    <div
+      ref={setNodeRef}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition,
+        touchAction: "none"
+      }}
+      className={
+        "flex items-center gap-2 rounded-md -mx-1 px-1 py-0.5" +
+        (isDragging ? " relative z-10 bg-accent shadow-sm" : "")
+      }
+    >
+      <button
+        type="button"
+        {...attributes}
+        {...listeners}
+        aria-label={`Reorder ${app}`}
+        className={
+          "shrink-0 inline-flex items-center justify-center text-muted-foreground/50" +
+          (isDragging ? " cursor-grabbing" : " cursor-grab")
+        }
+      >
+        <GripVertical className="size-3.5" aria-hidden />
+      </button>
+      {children}
+    </div>
+  );
+}
+
 export function SettingsPage({
   recentSearches,
   onClearRecent,
@@ -51,7 +114,9 @@ export function SettingsPage({
   appVersion,
   onUpdateFound,
   sourceToggles = {},
-  onSourceTogglesChange
+  onSourceTogglesChange,
+  sourceOrder,
+  onToolOrderChange
 }: {
   recentSearches: string[];
   onClearRecent: () => void;
@@ -65,6 +130,10 @@ export function SettingsPage({
   onSourceTogglesChange?: (
     next: React.SetStateAction<Partial<Record<CliApp, boolean>>>
   ) => void;
+  /** Full tool list in the user's drag order (App resolves it via
+   * `orderSources`); dropping a row persists the new order. */
+  sourceOrder?: readonly CliApp[];
+  onToolOrderChange?: (next: CliApp[]) => void;
 }) {
   const { t, locale, setLocale } = useI18n();
   const { theme, setTheme } = useTheme();
@@ -144,6 +213,24 @@ export function SettingsPage({
     }
   };
 
+  // Settings → Tools drag-to-reorder — @dnd-kit/sortable (pointer-based,
+  // so WKWebView's HTML5-drag quirks don't apply; the vertical list
+  // strategy animates rows out of the way and supports every position
+  // including the end). The grip icon is the drag handle; a small
+  // activation distance keeps plain clicks from starting a drag.
+  const tools = sourceOrder ?? CLI_APPS;
+  const dndSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } })
+  );
+  const handleSourceDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const from = tools.indexOf(active.id as CliApp);
+    const to = tools.indexOf(over.id as CliApp);
+    if (from < 0 || to < 0) return;
+    onToolOrderChange?.(arrayMove([...tools], from, to));
+  };
+
   const current = (mounted ? (theme as ThemeChoice) : "system") ?? "system";
 
   return (
@@ -177,38 +264,49 @@ export function SettingsPage({
               <div className="text-xs text-muted-foreground">
                 {t("settings.sources.desc")}
               </div>
-              {CLI_APPS.map((app) => {
-                const enabled = isToolEnabled(sourceToggles, app);
-                // The LAST enabled tool can't be turned off — an
-                // all-disabled state would leave Providers with no tab
-                // to fall back to (and an app showing nothing at all).
-                const lastEnabled =
-                  enabled &&
-                  CLI_APPS.filter((a) => isToolEnabled(sourceToggles, a))
-                    .length === 1;
-                return (
-                  <div
-                    key={app}
-                    className="flex items-center justify-between gap-3"
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <BrandIcon
-                        source={CLI_APP_SOURCE_BADGE[app]}
-                        className="size-4 shrink-0"
-                      />
-                      <span className="text-sm">{CLI_APP_LABEL[app]}</span>
-                    </div>
-                    <Switch
-                      checked={enabled}
-                      disabled={lastEnabled}
-                      onCheckedChange={(v) =>
-                        onSourceTogglesChange?.((prev) => ({ ...prev, [app]: v }))
-                      }
-                      aria-label={CLI_APP_LABEL[app]}
-                    />
-                  </div>
-                );
-              })}
+              <DndContext
+                sensors={dndSensors}
+                collisionDetection={closestCenter}
+                onDragEnd={handleSourceDragEnd}
+              >
+                <SortableContext
+                  items={tools as CliApp[]}
+                  strategy={verticalListSortingStrategy}
+                >
+                  {tools.map((app) => {
+                    const enabled = isSourceEnabled(sourceToggles, app);
+                    // The LAST enabled tool can't be turned off — an
+                    // all-disabled state would leave Providers with no
+                    // tab to fall back to.
+                    const lastEnabled =
+                      enabled &&
+                      CLI_APPS.filter((a) => isSourceEnabled(sourceToggles, a))
+                        .length === 1;
+                    return (
+                      <SortableSourceRow key={app} app={app}>
+                        <BrandIcon
+                          source={CLI_APP_SOURCE_BADGE[app]}
+                          className="size-4 shrink-0"
+                        />
+                        <span className="text-sm select-none flex-1 min-w-0">
+                          {CLI_APP_LABEL[app]}
+                        </span>
+                        <Switch
+                          checked={enabled}
+                          disabled={lastEnabled}
+                          onCheckedChange={(v) =>
+                            onSourceTogglesChange?.((prev) => ({
+                              ...prev,
+                              [app]: v
+                            }))
+                          }
+                          aria-label={CLI_APP_LABEL[app]}
+                        />
+                      </SortableSourceRow>
+                    );
+                  })}
+                </SortableContext>
+              </DndContext>
             </div>
           </SettingsSection>
 

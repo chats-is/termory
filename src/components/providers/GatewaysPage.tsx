@@ -91,7 +91,8 @@ export function GatewaysPage({
     "claude-desktop": null,
     codex: null,
     gemini: null,
-    opencode: null
+    opencode: null,
+    grok: null
   });
   const [busy, setBusy] = React.useState<string | null>(null);
 
@@ -128,7 +129,8 @@ export function GatewaysPage({
         "claude-desktop": null,
         codex: null,
         gemini: null,
-        opencode: null
+        opencode: null,
+    grok: null
       };
       for (const s of states) next[s.app] = s;
       setActiveStates(next);

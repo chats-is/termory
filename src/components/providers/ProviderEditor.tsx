@@ -162,7 +162,26 @@ export function ProviderEditor({
   // key) — it has no per-CLI model field and no overrides, and its bearer
   // key is REQUIRED (the backend rejects an empty key).
   const isClaudeDesktop = draft.app === "claude-desktop";
+  // Grok is MULTI-model like OpenCode: its `models` LIST is required (each
+  // becomes one flat `[model.<id>-<model>]` picker entry), and the primary
+  // `model` is the OPTIONAL default — it must be one of the listed models.
+  const isGrok = draft.app === "grok";
+  // Only OpenCode requires a primary model; grok's primary is the optional
+  // default (validated against the list below).
   const modelRequired = isOpencode;
+  // The ids in the models list — grok's default must be picked from these.
+  const modelListIds = modelRows.map((m) => m.id.trim()).filter(Boolean);
+  const grokModelsValid = !isGrok || modelListIds.length > 0;
+  const grokDefault = (draft.model ?? "").trim();
+  const grokDefaultValid =
+    !isGrok || grokDefault.length === 0 || modelListIds.includes(grokDefault);
+  // No duplicate model ids in the list — a repeated id collides (OpenCode's
+  // `models` map key / grok's `[model."<id>-<model>"]` key), silently
+  // dropping one. Only meaningful for the list-carrying apps.
+  const duplicateModelIds = modelListIds.filter(
+    (id, i) => modelListIds.indexOf(id) !== i
+  );
+  const modelsUnique = duplicateModelIds.length === 0;
   // Claude Desktop rejects non-Claude model names in `inferenceModels`, so
   // block the save when any (non-blank) model id isn't claude-safe. Blank
   // rows pass (`isClaudeSafeModelId("")` is true) — they're dropped on save.
@@ -172,6 +191,9 @@ export function ProviderEditor({
     draft.name.trim().length > 0 &&
     (draft.baseUrl ?? "").trim().length > 0 &&
     (!modelRequired || (draft.model ?? "").trim().length > 0) &&
+    grokModelsValid &&
+    grokDefaultValid &&
+    modelsUnique &&
     cdModelsValid &&
     duplicateKeys.length === 0 &&
     managedKeys.length === 0;
@@ -367,42 +389,101 @@ export function ProviderEditor({
               </div>
             )}
 
-            {/* Claude Desktop direct mode has no per-CLI model field — its
-                gateway profile routes Claude Desktop's own model menu. */}
-            {!isClaudeDesktop && (
+            {/* Grok: the wire API each model entry declares (api_backend) —
+                shown BEFORE the model fields. Written into every [model.*]
+                entry; defaults to responses. */}
+            {isGrok && (
               <div className="grid gap-2 sm:col-span-2">
-                <Label>{`${t("providers.model")}${modelRequired ? " *" : ""}`}</Label>
-                <ModelCombobox
-                  ariaLabel={`Model${modelRequired ? " *" : ""}`}
-                  value={draft.model ?? ""}
-                  onValueChange={(v) => update("model", v)}
-                  options={modelOptions}
-                  loading={fetchingModels}
-                  ariaInvalid={modelRequired && !(draft.model ?? "").trim()}
-                />
-                {modelError && (
-                  <p className="text-xs text-destructive">{modelError}</p>
-                )}
-                {!modelError && (fetchingModels || modelOptions.length > 0) && (
-                  <p className="text-xs text-muted-foreground">
-                    {fetchingModels
-                      ? t("help.fetchingModels")
-                      : t("help.modelsAvailable", { n: modelOptions.length })}
-                  </p>
-                )}
+                <Label>{t("providers.apiBackend")}</Label>
+                <Select
+                  value={draft.apiBackend ?? "responses"}
+                  onValueChange={(v) => update("apiBackend", v)}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="responses">responses</SelectItem>
+                    <SelectItem value="chat_completions">
+                      chat_completions
+                    </SelectItem>
+                    <SelectItem value="messages">messages</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {t("help.grokApiBackend")}
+                </p>
               </div>
             )}
 
-            {/* Models list — OpenCode's extra-model picker AND Claude
-                Desktop's `inferenceModels` (which Claude id to show in its
-                picker; append [1m] for 1M context, optional display name). */}
-            {(isOpencode || isClaudeDesktop) && (
+            {/* Claude Desktop direct mode has no per-CLI model field — its
+                gateway profile routes Claude Desktop's own model menu. For
+                grok this field is the OPTIONAL default, chosen from the
+                models list below (not free-typed). */}
+            {!isClaudeDesktop && (
               <div className="grid gap-2 sm:col-span-2">
                 <Label>
-                  {t("providers.modelList")}
+                  {isGrok
+                    ? t("providers.defaultModel")
+                    : `${t("providers.model")}${modelRequired ? " *" : ""}`}
+                </Label>
+                <ModelCombobox
+                  ariaLabel={
+                    isGrok
+                      ? t("providers.defaultModel")
+                      : `Model${modelRequired ? " *" : ""}`
+                  }
+                  value={draft.model ?? ""}
+                  onValueChange={(v) => update("model", v)}
+                  options={isGrok ? modelListIds : modelOptions}
+                  loading={fetchingModels && !isGrok}
+                  ariaInvalid={
+                    isGrok
+                      ? !grokDefaultValid
+                      : modelRequired && !(draft.model ?? "").trim()
+                  }
+                />
+                {isGrok && !grokDefaultValid && (
+                  <p className="text-xs text-destructive">
+                    {t("help.grokDefaultInvalid")}
+                  </p>
+                )}
+                {isGrok && grokDefaultValid && (
+                  <p className="text-xs text-muted-foreground">
+                    {t("help.grokDefault")}
+                  </p>
+                )}
+                {!isGrok && modelError && (
+                  <p className="text-xs text-destructive">{modelError}</p>
+                )}
+                {!isGrok &&
+                  !modelError &&
+                  (fetchingModels || modelOptions.length > 0) && (
+                    <p className="text-xs text-muted-foreground">
+                      {fetchingModels
+                        ? t("help.fetchingModels")
+                        : t("help.modelsAvailable", { n: modelOptions.length })}
+                    </p>
+                  )}
+              </div>
+            )}
+
+            {/* Models list — OpenCode's extra-model picker, Claude Desktop's
+                `inferenceModels`, AND grok's REQUIRED model list (each row
+                becomes one picker entry). */}
+            {(isOpencode || isClaudeDesktop || isGrok) && (
+              <div className="grid gap-2 sm:col-span-2">
+                <Label>
+                  {`${t("providers.modelList")}${isGrok ? " *" : ""}`}
                 </Label>
                 <p className="text-xs text-muted-foreground">
-                  {t(isClaudeDesktop ? "help.cdModels" : "help.extraModels")}
+                  {t(
+                    isClaudeDesktop
+                      ? "help.cdModels"
+                      : isGrok
+                        ? "help.grokModels"
+                        : "help.extraModels"
+                  )}
                 </p>
                 <div className="flex flex-col gap-2">
                   {modelRows.map((m, i) => (
@@ -462,6 +543,11 @@ export function ProviderEditor({
                       {t("help.cdModelInvalid")}
                     </p>
                   )}
+                {!modelsUnique && (
+                  <p className="text-xs text-destructive">
+                    {t("help.duplicateModel", { id: duplicateModelIds[0] })}
+                  </p>
+                )}
                 <Button
                   type="button"
                   variant="outline"

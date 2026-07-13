@@ -21,6 +21,29 @@ function openAdvanced() {
 const saveBtn = () => screen.getByRole("button", { name: /^create$/i });
 
 describe("ProviderEditor — Advanced settings validation", () => {
+  it("grok requires a models LIST before save (multi-model, flat picker list)", () => {
+    render(
+      <ProviderEditor
+        provider={blankProvider("grok")}
+        isNew
+        onSave={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.change(screen.getByLabelText("Name *"), {
+      target: { value: "GW" }
+    });
+    // Name + Base URL (seeded by blankProvider) present, models list empty →
+    // save must stay disabled (grok's `models` is required; the primary
+    // `model` is only the OPTIONAL default).
+    expect(saveBtn()).toBeDisabled();
+    // Fill the first model-list row's id → the list is now non-empty.
+    fireEvent.change(screen.getAllByLabelText("Model ID")[0], {
+      target: { value: "grok-4.5" }
+    });
+    expect(saveBtn()).not.toBeDisabled();
+  });
+
   it("blocks save on duplicate option keys", () => {
     render(
       <ProviderEditor

@@ -95,6 +95,7 @@ pub fn list_accounts(app: CliApp) -> Result<AccountsState, Box<dyn Error>> {
         CliApp::Codex => list_codex_accounts(),
         CliApp::Claude => list_claude_accounts(),
         CliApp::Gemini => list_gemini_accounts(),
+        CliApp::Grok => list_grok_accounts(),
         _ => Ok(AccountsState {
             current: None,
             accounts: Vec::new(),
@@ -472,6 +473,69 @@ fn list_claude_accounts() -> Result<AccountsState, Box<dyn Error>> {
 // ===================================================================
 // Gemini account (display-only — decodes id_token from oauth_creds.json)
 // ===================================================================
+
+// ===================================================================
+// Grok Build account (display-only — plain fields in ~/.grok/auth.json)
+// ===================================================================
+
+/// Grok Build's auth.json stores the login as a scope-keyed object
+/// (`https://auth.x.ai::<uuid>`) with PLAIN `email` / `first_name` /
+/// `last_name` fields (verified on the real 0.2.93 install) — no JWT
+/// decode needed. Display-only, like Claude / Gemini.
+fn list_grok_accounts() -> Result<AccountsState, Box<dyn Error>> {
+    let empty = || AccountsState {
+        current: None,
+        accounts: Vec::new(),
+        storage_warning: None,
+    };
+    let Some(path) = crate::providers::grok_home_dir().map(|d| d.join("auth.json")) else {
+        return Ok(empty());
+    };
+    if !path.exists() {
+        return Ok(empty());
+    }
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path)?).unwrap_or(serde_json::Value::Null);
+    let Some(entries) = doc.as_object() else {
+        return Ok(empty());
+    };
+    // First auth.x.ai-scoped entry = the live login.
+    let Some(entry) = entries
+        .iter()
+        .find(|(k, _)| k.starts_with("https://auth.x.ai::"))
+        .map(|(_, v)| v)
+    else {
+        return Ok(empty());
+    };
+    let field = |k: &str| {
+        entry
+            .get(k)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
+    let email = field("email");
+    let name = match (field("first_name"), field("last_name")) {
+        (Some(f), Some(l)) => Some(format!("{f} {l}")),
+        (Some(f), None) => Some(f),
+        (None, Some(l)) => Some(l),
+        (None, None) => None,
+    };
+    if email.is_none() && name.is_none() {
+        return Ok(empty());
+    }
+    Ok(AccountsState {
+        current: Some(CurrentAccount {
+            name,
+            email,
+            plan: None,
+            saved: true,
+        }),
+        accounts: Vec::new(),
+        storage_warning: None,
+    })
+}
 
 fn list_gemini_accounts() -> Result<AccountsState, Box<dyn Error>> {
     let home = crate::home_dir().ok_or("home directory not available")?;

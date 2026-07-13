@@ -109,7 +109,7 @@ describe("makeFavorite", () => {
       mkMessage(),
       0
     );
-    expect(["Claude", "Codex", "Gemini", "OpenCode"]).toContain(fav.source);
+    expect(["Claude", "Codex", "Gemini", "OpenCode", "Grok"]).toContain(fav.source);
   });
   it("populates favorited_at with a parseable ISO timestamp", () => {
     const before = Date.now();

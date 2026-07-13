@@ -68,9 +68,9 @@ import {
   isFavoriteList,
   toggleFavoriteEntry
 } from "@/lib/favorites";
-import { isToolEnabled } from "@/lib/provider-utils";
+import { isSourceEnabled, orderSources, visibleSources } from "@/lib/provider-utils";
 import { addSetValue, toggleSetValue } from "@/lib/set-utils";
-import { CLI_APPS, RAIL_ROUTE_ORDER } from "@/constants";
+import { CLI_APPS, RAIL_ROUTE_ORDER, CLI_APP_SOURCE_BADGE } from "@/constants";
 import { usePersistentState } from "@/hooks/usePersistentState";
 import {
   ContextMenu,
@@ -246,6 +246,15 @@ export function App() {
   const [sourceToggles, setSourceToggles] = usePersistentState<
     Partial<Record<CliApp, boolean>>
   >("sources", {});
+  // Settings → Tools drag order (config `source_order`, same `source`
+  // family as the toggle key). `orderSources` resolves it to the full
+  // list; the order drives every tool-listed surface (Settings rows,
+  // Providers tabs, Records pills, Stats pills).
+  const [sourceOrder, setSourceOrder] = usePersistentState<CliApp[]>(
+    "source_order",
+    []
+  );
+  const orderedCliApps = React.useMemo(() => orderSources(sourceOrder), [sourceOrder]);
   const [providersApp, setProvidersApp] = usePersistentState<CliApp>(
     "providers_app",
     "claude",
@@ -800,10 +809,14 @@ export function App() {
     source !== "All" || project !== null || query.trim().length > 0;
 
   const sourceGroups = React.useMemo(() => {
-    const sources: string[] = ["All", "Codex", "Claude", "Gemini", "OpenCode"].filter(
-      (s) =>
-        s === "All" || isToolEnabled(sourceToggles, s.toLowerCase() as CliApp)
-    );
+    // Pill order follows the Settings → Tools drag order; Claude Desktop
+    // has no records source. CLI_APP_SOURCE_BADGE maps tool key → source name.
+    const sources: string[] = [
+      "All",
+      ...visibleSources(orderedCliApps, sourceToggles, { recordsOnly: true }).map(
+        (k) => CLI_APP_SOURCE_BADGE[k]
+      )
+    ];
     // Session count per (source, cwd) — empty projects simply get 0.
     const counts = new Map<string, number>();
     for (const session of sessionItems) {
@@ -839,24 +852,24 @@ export function App() {
         projects: projectList
       };
     });
-  }, [sessionItems, projects, sourceToggles]);
+  }, [sessionItems, projects, sourceToggles, orderedCliApps]);
 
   // Render-time clamp: a persisted providersApp that is currently
   // disabled would give Radix Tabs a value with no matching trigger for
   // one frame (the guard effect below only corrects post-render).
-  const effectiveProvidersApp = isToolEnabled(sourceToggles, providersApp)
+  const effectiveProvidersApp = isSourceEnabled(sourceToggles, providersApp)
     ? providersApp
-    : (CLI_APPS.find((a) => isToolEnabled(sourceToggles, a)) ?? providersApp);
+    : (CLI_APPS.find((a) => isSourceEnabled(sourceToggles, a)) ?? providersApp);
 
   // A source (or Providers tab) disabled while selected falls back to a
   // still-enabled choice.
   React.useEffect(() => {
-    if (source !== "All" && !isToolEnabled(sourceToggles, source.toLowerCase() as CliApp)) {
+    if (source !== "All" && !isSourceEnabled(sourceToggles, source.toLowerCase() as CliApp)) {
       setSource("All");
       setProject(null);
     }
-    if (!isToolEnabled(sourceToggles, providersApp)) {
-      const next = CLI_APPS.find((a) => isToolEnabled(sourceToggles, a));
+    if (!isSourceEnabled(sourceToggles, providersApp)) {
+      const next = CLI_APPS.find((a) => isSourceEnabled(sourceToggles, a));
       if (next) setProvidersApp(next);
     }
   }, [sourceToggles, source, providersApp, setProvidersApp]);
@@ -890,6 +903,7 @@ export function App() {
                 app={effectiveProvidersApp}
                 setApp={setProvidersApp}
                 sourceToggles={sourceToggles}
+                sourceOrder={orderedCliApps}
               />
             )}
             {route === "settings" && (
@@ -902,6 +916,8 @@ export function App() {
                 onUpdateFound={(update) => setPendingUpdate(update)}
                 sourceToggles={sourceToggles}
                 onSourceTogglesChange={setSourceToggles}
+                sourceOrder={orderedCliApps}
+                onToolOrderChange={setSourceOrder}
               />
             )}
             {route === "stats" && (
@@ -910,6 +926,7 @@ export function App() {
                 onRefresh={refresh}
                 refreshing={loading}
                 sourceToggles={sourceToggles}
+                sourceOrder={orderedCliApps}
               />
             )}
             {route === "favorites" && (

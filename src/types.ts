@@ -131,11 +131,13 @@ export type SearchHit = {
 /** Sources of parsed session transcripts. Capitalized form lives on
  * `AppSession.source` (Rust enum → string). Currently the same 4
  * values are also the legal `Favorite.source`. */
-export type SessionSource = "Claude" | "Codex" | "Gemini" | "OpenCode";
+export type SessionSource = "Claude" | "Codex" | "Gemini" | "OpenCode" | "Grok";
+
+
 
 export type MemoryTool = SessionSource | "Other";
 
-export type CliApp = "claude" | "claude-desktop" | "codex" | "gemini" | "opencode";
+export type CliApp = "claude" | "claude-desktop" | "codex" | "gemini" | "opencode" | "grok";
 
 export type ProviderKind = "official" | "custom";
 
@@ -168,6 +170,10 @@ export type Provider = {
   // `value` is type-inferred (bool/number/else string) for JSON/TOML
   // targets, verbatim for Gemini's `.env`.
   options?: { key: string; value: string }[];
+  // Grok-only: the wire API each `[model.*]` entry declares
+  // (api_backend = chat_completions | responses | messages). Defaults to
+  // "responses" when unset. Read ONLY by the grok activate path.
+  apiBackend?: string;
   // Cached favicon as a `data:image/...;base64,...` URL. Populated at
   // create / edit time by `invoke('fetch_provider_favicon')` so the
   // ProviderCard renders the brand mark locally without making a
@@ -228,6 +234,8 @@ export type GatewayBinding = {
    * `options`). For Claude this is also where the per-size routing keys
    * `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL` live. */
   options?: { key: string; value: string }[];
+  /** Grok-only: `api_backend` for each model entry (see Provider). */
+  apiBackend?: string;
 };
 
 /** A gateway entry, stored in the unified `providers` array of

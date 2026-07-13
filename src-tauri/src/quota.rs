@@ -1292,6 +1292,8 @@ pub async fn fetch_quota(app: CliApp) -> SubscriptionQuota {
         // OpenCode has no official subscription quota. bin_name
         // doubles as the frontend CliApp key.
         CliApp::Opencode => SubscriptionQuota::not_found(app.bin_name()),
+        // Grok Build has no official subscription-quota endpoint we can query.
+        CliApp::Grok => SubscriptionQuota::not_found(app.bin_name()),
         // Claude Desktop's quota would belong to its own claude.ai login,
         // which Termory doesn't read here — surface nothing.
         CliApp::ClaudeDesktop => SubscriptionQuota::not_found(app.bin_name()),

@@ -1,5 +1,5 @@
 import type { AppSession, MemoryTool, Route } from "../types";
-import { MEMORY_SOURCE, MEMORY_TOOL_ORDER, ROUTES, SKILL_SOURCE } from "../constants";
+import { CLI_APP_LABEL, MEMORY_SOURCE, MEMORY_TOOL_ORDER, ROUTES, SKILL_SOURCE } from "../constants";
 
 export function sessionKey(session: { source: string; path: string; id: string }): string {
   return `${session.source}:${session.path}:${session.id}`;
@@ -10,12 +10,12 @@ export function sessionKey(session: { source: string; path: string; id: string }
 // through this helper so Records and Providers show the same official
 // tool name ("Claude Code", "Gemini").
 export function sourceDisplayName(source: string): string {
-  switch (source) {
-    case "Claude":
-      return "Claude Code";
-    default:
-      return source;
-  }
+  // Session source names lowercase to their CliApp key (test-pinned
+  // convention), so the display name single-sources from CLI_APP_LABEL —
+  // Records / Search / Favorites always read the same as the Providers
+  // tab ("Claude" → "Claude Code", "Grok" → "Grok Build").
+  const label = (CLI_APP_LABEL as Record<string, string>)[source.toLowerCase()];
+  return label ?? source;
 }
 
 export function isMemoryItem(session: AppSession): boolean {
@@ -44,6 +44,7 @@ export function memoryToolsOf(session: AppSession): MemoryTool[] {
     else if (tag === "codex") set.add("Codex");
     else if (tag === "gemini") set.add("Gemini");
     else if (tag === "opencode") set.add("OpenCode");
+    else if (tag === "grok") set.add("Grok");
   }
   if (set.size === 0) return ["Other"];
   return MEMORY_TOOL_ORDER.filter((tool) => set.has(tool));
@@ -110,6 +111,8 @@ export function resumeCommandFor(source: string, id: string): string | null {
       return `opencode --session ${id}`;
     case "Gemini":
       return `gemini --resume ${id}`;
+    case "Grok":
+      return `grok --resume ${id}`;
     default:
       return null;
   }

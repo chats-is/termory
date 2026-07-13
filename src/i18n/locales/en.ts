@@ -99,7 +99,7 @@ export const en = {
   "records.archived": "Archived",
   "records.noSessions": "No sessions yet",
   "records.noSessionsDesc":
-    "Termory scans Codex, Claude Code, Gemini, and OpenCode for chat history. None of those tools have recorded sessions here yet.",
+    "Termory scans Codex, Claude Code, Gemini, OpenCode, and Grok Build for chat history. None of those tools have recorded sessions here yet.",
   "records.noSessionsMatch": "No sessions match",
   "records.noMemory": "No memory files yet",
   "records.noMemoryDesc":
@@ -107,7 +107,7 @@ export const en = {
   "records.noMemoryMatch": "No memory matches",
   "records.noSkills": "No skills yet",
   "records.noSkillsDesc":
-    "Termory scans ~/.claude/skills, ~/.codex/skills, ~/.gemini/skills, and ~/.agents/skills, plus project-local .agents/skills folders.",
+    "Termory scans ~/.claude/skills, ~/.codex/skills, ~/.gemini/skills, ~/.grok/skills, and ~/.agents/skills, plus project-local .agents/skills and .grok/skills folders.",
   "records.noSkillsMatch": "No skill matches",
   "records.tryFilters": "Try a different source, project, or query.",
   "records.nothingMatches": "Nothing matches your current view.",
@@ -218,6 +218,8 @@ export const en = {
   "providers.baseUrl": "Base URL",
   "providers.apiKey": "API key",
   "providers.model": "Model",
+  "providers.apiBackend": "API backend",
+  "providers.defaultModel": "Default model",
   "providers.aiSdk": "AI SDK",
   "providers.modelList": "Model list",
   "providers.advancedSettings": "Advanced settings",
@@ -246,6 +248,8 @@ export const en = {
   "help.baseUrl.anthropicNoV1": "Don't include /v1 — the Anthropic AI SDK appends it.",
   "help.baseUrl.googleBare": "Use the bare host — the Google AI SDK appends /v1beta.",
   "help.override.claude": "Map Claude Code's Sonnet / Opus / Haiku sizes to specific upstream models (the three rows below) — handy when your provider doesn't use Claude's native model names. Add [1m] after a model to use its 1M-token context. Other Claude Code preferences work here too.",
+  "help.override.grok":
+    "Merged into ~/.grok/config.toml. Dot-paths create nested TOML tables (e.g. ui.compact_mode).",
   "help.override.claudeDesktop": "Extra Claude Desktop profile keys merged into the 3P config — e.g. modelDiscoveryEnabled, inferenceCustomHeaders. Key is the profile field, value is its value.",
   "help.override.codex": "Tune how Codex behaves with this provider — for example its reasoning effort or approval policy.",
   "help.override.gemini": "Add environment variables Gemini CLI reads — for example to target a Google Cloud project or use Vertex AI instead of the public API.",
@@ -253,6 +257,11 @@ export const en = {
   "help.overrideIntro": "Extra settings merged into {app}'s config while this provider is active, and removed when you switch away.",
   "help.fetchingModels": "Fetching available models…",
   "help.modelsAvailable": "{n} models available",
+  "help.grokApiBackend": "The wire API each model entry uses — Grok's `api_backend` (responses is the default).",
+  "help.grokModels": "The models this provider adds to Grok's picker — each becomes one entry. ID is the model id sent upstream; name is the display label (defaults to the id).",
+  "help.grokDefault": "Optional — the model Grok defaults to. Pick one of the models above; leave blank to set no default.",
+  "help.duplicateModel": "Duplicate model id \"{id}\" — each model in the list must be unique.",
+  "help.grokDefaultInvalid": "The default must be one of the models listed below.",
   "help.extraModels": "Extra models surfaced in OpenCode's picker (the primary \"Model\" above is always included). ID is the model id; name is the display label (defaults to the id if left blank).",
   "help.cdModels": "Optional. The Claude models shown in Claude Desktop's picker — fill this only when the provider can't list its own models. Model ID is a Claude model the provider serves (append [1m] for the 1M-context variant); display name is optional.",
   "help.cdModelInvalid": "Only Claude model names are accepted (claude-… / anthropic/claude-…) — Claude Desktop rejects other names.",

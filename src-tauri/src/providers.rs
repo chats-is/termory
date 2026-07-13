@@ -66,6 +66,15 @@ pub enum CliApp {
     /// terminal-launchable, and only supported on macOS / Windows.
     #[serde(rename = "claude-desktop")]
     ClaudeDesktop,
+    /// xAI's Grok Build CLI. Provider switching via the OFFICIAL
+    /// custom-model mechanism in `~/.grok/config.toml` — a
+    /// `[model."<model-id>"]` entry (model/base_url/name/description/
+    /// api_key; the section key IS the model id, `description` carries
+    /// the provider name) + `models.default = "<model-id>"`; see
+    /// docs.x.ai/build/settings#example-configtoml, verified against the
+    /// real TUI. OAuth session lives in `~/.grok/auth.json`, never
+    /// touched.
+    Grok,
 }
 
 impl CliApp {
@@ -76,6 +85,7 @@ impl CliApp {
             "gemini" => Some(CliApp::Gemini),
             "opencode" => Some(CliApp::Opencode),
             "claude-desktop" => Some(CliApp::ClaudeDesktop),
+            "grok" => Some(CliApp::Grok),
             _ => None,
         }
     }
@@ -91,6 +101,7 @@ impl CliApp {
             CliApp::Gemini => "gemini",
             CliApp::Opencode => "opencode",
             CliApp::ClaudeDesktop => "claude-desktop",
+            CliApp::Grok => "grok",
         }
     }
 
@@ -102,16 +113,17 @@ impl CliApp {
         !matches!(self, CliApp::ClaudeDesktop)
     }
 
-    pub fn all() -> [CliApp; 5] {
+    pub fn all() -> [CliApp; 6] {
         // Order drives the tray submenu list — Claude Desktop sits right
         // after Claude Code, matching the Providers page tab order
-        // (`CLI_APPS` in constants.ts).
+        // (`CLI_APPS` in constants.ts). Grok Build sits last (newest).
         [
             CliApp::Claude,
             CliApp::ClaudeDesktop,
             CliApp::Codex,
             CliApp::Gemini,
             CliApp::Opencode,
+            CliApp::Grok,
         ]
     }
 }
@@ -266,6 +278,14 @@ fn cli_search_paths(tool: &str) -> Vec<std::path::PathBuf> {
             for p in std::env::split_paths(&raw) {
                 push_unique(&mut paths, p.join("bin"));
             }
+        }
+    }
+
+    // Grok Build's curl installer (x.ai/cli/install.sh) puts the binary
+    // at ~/.grok/bin (verified on the real install).
+    if tool == "grok" {
+        if !home.as_os_str().is_empty() {
+            push_unique(&mut paths, home.join(".grok/bin"));
         }
     }
 
@@ -905,6 +925,12 @@ pub struct Provider {
     /// did). `None` ⇒ fall back to the letter avatar in the UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub favicon: Option<String>,
+    /// Grok-only: the wire API each `[model.*]` entry declares
+    /// (`api_backend` = chat_completions | responses | messages). Defaults
+    /// to "responses" when unset/blank. Read ONLY by `activate_grok`; inert
+    /// storage for every other app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_backend: Option<String>,
 }
 
 /// One user-defined provider option ("Advanced settings" entry). `key`
@@ -965,6 +991,9 @@ pub struct GatewayBinding {
     pub models: Vec<ProviderModel>,
     #[serde(default)]
     pub options: Vec<ProviderOption>,
+    /// Grok-only: `api_backend` for each model entry (see `Provider`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_backend: Option<String>,
 }
 
 /// A gateway: one `{baseUrl, apiKey}` fanned out to several CLIs.
@@ -1011,6 +1040,8 @@ fn protocol_for_binding(b: &GatewayBinding) -> GatewayProtocol {
         CliApp::Codex => GatewayProtocol::Openai,
         CliApp::Gemini => GatewayProtocol::Gemini,
         CliApp::Opencode => protocol_for_npm(b.npm.as_deref().unwrap_or("")),
+        // xAI's API is OpenAI-compatible chat completions.
+        CliApp::Grok => GatewayProtocol::OpenaiCompatible,
         // Claude Desktop binds Anthropic-capable gateways (its 3P gateway
         // speaks the Anthropic Messages format) — same as Claude Code.
         CliApp::ClaudeDesktop => GatewayProtocol::Anthropic,
@@ -1060,14 +1091,19 @@ fn provider_from_binding(g: &Gateway, b: &GatewayBinding) -> Provider {
         } else {
             None
         },
-        // Models list — OpenCode extra models AND Claude Desktop inferenceModels.
-        models: if matches!(b.app, CliApp::Opencode | CliApp::ClaudeDesktop) {
+        // Models list — OpenCode extra models, Claude Desktop inferenceModels,
+        // AND grok's required model list.
+        models: if matches!(
+            b.app,
+            CliApp::Opencode | CliApp::ClaudeDesktop | CliApp::Grok
+        ) {
             b.models.clone()
         } else {
             Vec::new()
         },
         options: b.options.clone(),
         favicon: g.favicon.clone(),
+        api_backend: b.api_backend.clone(),
     }
 }
 
@@ -1197,6 +1233,7 @@ pub fn activate(provider: &Provider, providers_for_app: &[Provider]) -> Result<(
         CliApp::Codex => activate_codex(provider, providers_for_app),
         CliApp::Gemini => activate_gemini(provider, providers_for_app),
         CliApp::Opencode => activate_opencode(provider, providers_for_app),
+        CliApp::Grok => activate_grok(provider, providers_for_app),
         CliApp::ClaudeDesktop => crate::claude_desktop::apply(provider),
     }
 }
@@ -1209,6 +1246,7 @@ pub fn deactivate(app: CliApp, providers_for_app: &[Provider]) -> Result<(), Box
         CliApp::Codex => deactivate_codex(providers_for_app),
         CliApp::Gemini => deactivate_gemini(providers_for_app),
         CliApp::Opencode => deactivate_opencode(providers_for_app),
+        CliApp::Grok => deactivate_grok(providers_for_app),
         CliApp::ClaudeDesktop => crate::claude_desktop::restore_official(),
     }
 }
@@ -1230,6 +1268,9 @@ pub fn delete_provider_traces(provider: &Provider) -> Result<(), Box<dyn Error>>
         // when the provider being removed is the one in use.
         CliApp::Claude | CliApp::Codex | CliApp::Gemini | CliApp::ClaudeDesktop => Ok(()),
         CliApp::Opencode => delete_opencode_provider_entry(provider),
+        // Single-slot — deleting a LIBRARY entry is a no-op on live config
+        // (the delete flow deactivates separately when it was in use).
+        CliApp::Grok => Ok(()),
     }
 }
 
@@ -1246,6 +1287,7 @@ pub fn read_active_state(
         CliApp::Codex => read_active_codex(providers_for_app),
         CliApp::Gemini => read_active_gemini(providers_for_app),
         CliApp::Opencode => read_active_opencode(providers_for_app),
+        CliApp::Grok => read_active_grok(providers_for_app),
         CliApp::ClaudeDesktop => crate::claude_desktop::read_active(providers_for_app),
     }
 }
@@ -1548,6 +1590,10 @@ fn activate_codex(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>> 
         let providers_table = doc["model_providers"]
             .as_table_mut()
             .ok_or("model_providers must be a TOML table")?;
+        // `[model_providers]` only holds `[model_providers.<id>]` sub-tables —
+        // implicit so toml_edit never emits a bare empty `[model_providers]`
+        // header above them (same fix as grok's `[model]`).
+        providers_table.set_implicit(true);
         if !providers_table.contains_key(&provider_id) {
             providers_table[&provider_id] = toml_edit::table();
         }
@@ -1767,6 +1813,267 @@ fn read_codex_auth_key() -> Result<Option<String>, Box<dyn Error>> {
 }
 
 // ===================================================================
+// Grok Build (xAI)
+// ===================================================================
+//
+// File: ~/.grok/config.toml (merge, atomic write). Grok's `[model.*]` is a
+// FLAT model list — each `[model.<key>]` is one entry in the TUI picker
+// (docs.x.ai/build/settings#example-configtoml). MULTI-SLOT, like OpenCode:
+// a Termory provider carries a `models` list (each → one entry) + an
+// optional default (`p.model`). Each model is written as:
+//
+//   [model."<provider-id>-<model-id>"]   ← key = provider id + model id
+//   model = "<model-id>"                 ← id sent to the API
+//   base_url = "https://…/v1"            ← provider endpoint
+//   name = "<model name | id>"           ← shown in the model picker
+//   description = "<provider>"           ← Termory writes the provider NAME
+//   api_key = "…"                        ← direct key (docs prefer env_key,
+//                                          but an env var can't be
+//                                          guaranteed — same call as Codex)
+//   [models] default = "<provider-id>-<model-id>"   ← OPTIONAL
+//
+// The provider-id prefix keeps entries unique so several providers' models
+// coexist in one flat list. Activate rewrites ONLY the activating
+// provider's entries; "Set Official" clears just `models.default`; deleting
+// a provider removes only its entries. ~/.grok/auth.json is NEVER touched.
+
+/// The per-entry fields Termory writes — the dynamic managed-key rule
+/// (`override_key_is_managed`) recognizes `model.<key>.<field>` for these.
+const GROK_ENTRY_FIELDS: [&str; 6] = [
+    "model",
+    "base_url",
+    "name",
+    "description",
+    "api_key",
+    "api_backend",
+];
+
+fn grok_config_path() -> Result<PathBuf, Box<dyn Error>> {
+    grok_home_dir()
+        .map(|d| d.join("config.toml"))
+        .ok_or_else(|| "home directory not available".into())
+}
+
+/// Grok Build's data dir — honors `$GROK_HOME` (documented relocation
+/// knob, docs.x.ai/build/settings), else `~/.grok`. Mirrors how the
+/// Claude scanner honors CLAUDE_CONFIG_DIR.
+pub(crate) fn grok_home_dir() -> Option<PathBuf> {
+    if let Some(custom) = std::env::var_os("GROK_HOME") {
+        if !custom.is_empty() {
+            return Some(PathBuf::from(custom));
+        }
+    }
+    crate::home_dir().map(|h| h.join(".grok"))
+}
+
+/// The flat model-list key for one of a provider's models:
+/// `<provider-id>-<model-id>` (the provider-id prefix keeps a provider's
+/// own models distinct; grok TUI-quotes keys that contain a `.`).
+fn grok_entry_key(provider_id: &str, model_id: &str) -> String {
+    format!("{provider_id}-{model_id}")
+}
+
+/// True when `entry`'s api_key equals one of the library providers' keys —
+/// the only values Termory ever writes (ownership by VALUE), so a user's own
+/// `[model.*]` entry is never mistaken for ours.
+fn grok_entry_is_ours(entry: &Item, all: &[Provider]) -> bool {
+    entry
+        .get("api_key")
+        .and_then(|i| i.as_str())
+        .is_some_and(|k| all.iter().any(|p| !p.api_key.is_empty() && p.api_key == k))
+}
+
+/// Remove every `[model.<key>]` entry Termory wrote (ownership by api_key
+/// value), returning the removed keys so deactivate can drop a
+/// `models.default` that pointed at one. Grok is SINGLE-SLOT (one active
+/// provider), so activate/deactivate sweep ALL of Termory's entries.
+fn strip_grok_entries(doc: &mut DocumentMut, all: &[Provider]) -> Vec<String> {
+    let Some(entries) = doc.get_mut("model").and_then(|i| i.as_table_mut()) else {
+        return Vec::new();
+    };
+    let ours: Vec<String> = entries
+        .iter()
+        .filter(|(_, item)| grok_entry_is_ours(item, all))
+        .map(|(k, _)| k.to_string())
+        .collect();
+    for key in &ours {
+        entries.remove(key);
+    }
+    if entries.is_empty() {
+        doc.remove("model");
+    }
+    ours
+}
+
+/// Activate a grok provider: sweep Termory's previous entries (single-slot),
+/// then write THIS provider's `models` list — one flat `[model."<pid>-
+/// <model>"]` entry each — and, when the provider's optional default
+/// (`p.model`) is set, `models.default = "<pid>-<default>"` in the SAME
+/// action. `models` is required; the default (if set) must be one of them.
+fn activate_grok(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>> {
+    let base = p.base_url.trim();
+    if base.is_empty() {
+        return Err("Grok provider is missing a Base URL".into());
+    }
+    let pid = p.id.trim();
+    if pid.is_empty() {
+        return Err("Grok provider is missing an id".into());
+    }
+    let models: Vec<(&str, &str)> = p
+        .models
+        .iter()
+        .map(|m| (m.id.trim(), m.name.trim()))
+        .filter(|(id, _)| !id.is_empty())
+        .collect();
+    if models.is_empty() {
+        return Err("Grok provider requires at least one model.".into());
+    }
+    reject_duplicate_model_ids(&p.models, "Grok")?;
+    let default = p.model.trim();
+    if !default.is_empty() && !models.iter().any(|(id, _)| *id == default) {
+        return Err("Grok default model must be one of the provider's models.".into());
+    }
+
+    let path = grok_config_path()?;
+    let mut doc = load_toml_document(&path)?;
+    strip_grok_entries(&mut doc, all);
+
+    if doc.get("model").is_none() {
+        doc["model"] = toml_edit::table();
+    }
+    let entries = doc["model"]
+        .as_table_mut()
+        .ok_or("`model` must be a TOML table")?;
+    // `[model]` only holds `[model.<key>]` sub-tables — implicit so toml_edit
+    // never emits a bare empty `[model]` line above them.
+    entries.set_implicit(true);
+    for &(mid, mname) in &models {
+        let key = grok_entry_key(pid, mid);
+        entries.insert(&key, toml_edit::table());
+        let entry = &mut entries[&key];
+        entry["model"] = toml_value(mid);
+        entry["base_url"] = toml_value(base);
+        // `name` = picker display (model's name, else its id); `description`
+        // = the PROVIDER platform name.
+        entry["name"] = toml_value(if mname.is_empty() { mid } else { mname });
+        if p.name.trim().is_empty() {
+            if let Some(tbl) = entry.as_table_mut() {
+                tbl.remove("description");
+            }
+        } else {
+            entry["description"] = toml_value(p.name.trim());
+        }
+        entry["api_key"] = toml_value(p.api_key.as_str());
+        // Wire API for this entry (default "responses" when unset/blank).
+        entry["api_backend"] = toml_value(
+            p.api_backend
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("responses"),
+        );
+    }
+
+    // The optional default, set in the same action (no separate step).
+    if !default.is_empty() {
+        if doc.get("models").is_none() {
+            doc["models"] = toml_edit::table();
+        }
+        doc["models"]["default"] = toml_value(grok_entry_key(pid, default));
+    }
+
+    strip_toml_overrides(&mut doc, &override_keys(all, CliApp::Grok));
+    apply_toml_overrides(&mut doc, p);
+    atomic_write(&path, doc.to_string().as_bytes())
+}
+
+/// "Set Official" — sweep Termory's entries and clear a `models.default`
+/// that pointed at one, returning grok to its factory (no `[model]`/default)
+/// shape while leaving the user's own config intact.
+fn deactivate_grok(all: &[Provider]) -> Result<(), Box<dyn Error>> {
+    let path = grok_config_path()?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut doc = load_toml_document(&path)?;
+    let swept = strip_grok_entries(&mut doc, all);
+    let points_at_ours = doc
+        .get("models")
+        .and_then(|i| i.get("default"))
+        .and_then(|i| i.as_str())
+        .is_some_and(|d| swept.iter().any(|k| k == d));
+    if points_at_ours {
+        if let Some(models) = doc.get_mut("models").and_then(|i| i.as_table_mut()) {
+            models.remove("default");
+            if models.is_empty() {
+                doc.remove("models");
+            }
+        }
+    }
+    strip_toml_overrides(&mut doc, &override_keys(all, CliApp::Grok));
+    atomic_write(&path, doc.to_string().as_bytes())
+}
+
+fn read_active_grok(providers: &[Provider]) -> Result<ActiveState, Box<dyn Error>> {
+    let path = grok_config_path()?;
+    let live_path = path.display().to_string();
+    let official = |live_path: String| ActiveState {
+        app: CliApp::Grok,
+        kind: ActiveKind::Official,
+        matched_provider_id: None,
+        live_snapshot: None,
+        live_path,
+        configured_provider_ids: Vec::new(),
+    };
+    if !path.exists() {
+        return Ok(official(live_path));
+    }
+    let doc = fs::read_to_string(&path)?.parse::<DocumentMut>()?;
+    // Single-slot: active iff `models.default` names an existing entry we
+    // own, matched by that entry's base_url + api_key.
+    let Some(default) = doc
+        .get("models")
+        .and_then(|i| i.get("default"))
+        .and_then(|i| i.as_str())
+    else {
+        return Ok(official(live_path));
+    };
+    let Some(entry) = doc.get("model").and_then(|i| i.get(default)) else {
+        return Ok(official(live_path));
+    };
+    let get = |k: &str| entry.get(k).and_then(|i| i.as_str()).unwrap_or("");
+    let base_url = get("base_url").to_string();
+    let api_key = get("api_key");
+    let model = get("model");
+    let matched = providers.iter().find(|p| {
+        // Scope to GROK providers — otherwise a same-creds provider on
+        // another CLI (very common: one gateway key reused across apps)
+        // matches first, so the reverse-derived "active" id points at the
+        // wrong app and editing the grok provider never re-applies.
+        p.app == CliApp::Grok
+            && p.kind == ProviderKind::Custom
+            && string_match(&p.base_url, Some(base_url.as_str()))
+            && p.api_key == api_key
+    });
+    Ok(ActiveState {
+        app: CliApp::Grok,
+        kind: if matched.is_some() {
+            ActiveKind::Custom
+        } else {
+            ActiveKind::Unmanaged
+        },
+        matched_provider_id: matched.map(|p| p.id.clone()),
+        live_snapshot: Some(LiveSnapshot {
+            base_url: (!base_url.is_empty()).then_some(base_url),
+            api_key_masked: (!api_key.is_empty()).then(|| mask_secret(api_key)),
+            model: (!model.is_empty()).then(|| model.to_string()),
+        }),
+        live_path,
+        configured_provider_ids: Vec::new(),
+    })
+}
+
+// ===================================================================
 // Gemini CLI
 // ===================================================================
 //
@@ -1939,6 +2246,7 @@ fn activate_opencode(p: &Provider, _all: &[Provider]) -> Result<(), Box<dyn Erro
     if p.model.trim().is_empty() {
         return Err("OpenCode provider requires a primary model id.".into());
     }
+    reject_duplicate_model_ids(&p.models, "OpenCode")?;
 
     let termory_id = opencode_termory_id(p);
     let npm = p.opencode_npm();
@@ -2857,6 +3165,18 @@ pub(crate) fn override_key_is_managed(app: CliApp, key: &str) -> bool {
                 | "disableDeploymentModeChooser"
                 | "coworkEgressAllowedHosts"
         ),
+        CliApp::Grok => {
+            // Owned by the dedicated fields: the default pointer and the
+            // five entry fields Termory writes (entry key = model id).
+            // Other per-entry keys (api_backend, context_window,
+            // extra_headers, … — docs.x.ai/build/settings/reference)
+            // pass through as Advanced settings.
+            k == "models.default"
+                || (k.starts_with("model.")
+                    && GROK_ENTRY_FIELDS
+                        .iter()
+                        .any(|f| k.ends_with(&format!(".{f}"))))
+        }
     }
 }
 
@@ -2998,12 +3318,21 @@ fn apply_toml_overrides(doc: &mut DocumentMut, p: &Provider) {
             continue;
         };
         let mut tbl = doc.as_table_mut();
-        for seg in parents {
+        let n = parents.len();
+        for (i, seg) in parents.iter().enumerate() {
+            let existed = tbl.get(seg).map(|e| e.is_table()).unwrap_or(false);
             let entry = tbl.entry(seg).or_insert(toml_edit::table());
             if !entry.is_table() {
                 *entry = toml_edit::table();
             }
-            tbl = entry.as_table_mut().expect("ensured table");
+            let t = entry.as_table_mut().expect("ensured table");
+            // A NEWLY-created intermediate parent (not the one that holds
+            // the leaf key) contains only a sub-table → mark it implicit so
+            // toml_edit emits no bare `[parent]` header above the sub-table.
+            if !existed && i + 1 < n {
+                t.set_implicit(true);
+            }
+            tbl = t;
         }
         tbl.insert(last, infer_toml_item(&o.value));
     }
@@ -3115,6 +3444,24 @@ pub(crate) fn string_match(provider_value: &str, live_value: Option<&str>) -> bo
     provider_value.trim() == live.trim()
 }
 
+/// Reject a models LIST that repeats a model id. A duplicate would silently
+/// override wherever the target keys by id — grok's
+/// `[model."<pid>-<id>"]`, OpenCode's `models` map, Claude Desktop's
+/// `inferenceModels`. Blank ids are ignored (dropped at write time).
+pub(crate) fn reject_duplicate_model_ids(
+    models: &[ProviderModel],
+    app: &str,
+) -> Result<(), Box<dyn Error>> {
+    let mut seen = std::collections::HashSet::new();
+    for m in models {
+        let id = m.id.trim();
+        if !id.is_empty() && !seen.insert(id) {
+            return Err(format!("Duplicate {app} model id: {id}").into());
+        }
+    }
+    Ok(())
+}
+
 // ===================================================================
 // Tests
 // ===================================================================
@@ -3175,6 +3522,7 @@ mod tests {
             npm: npm.map(str::to_string),
             models: vec![],
             options: vec![],
+            api_backend: None,
         }
     }
 
@@ -3607,6 +3955,7 @@ mod tests {
             models: Vec::new(),
             favicon: None,
             options: Vec::new(),
+            api_backend: None,
         }
     }
 
@@ -3725,11 +4074,21 @@ mod tests {
                 key: "tools.web_search".into(),
                 value: "true".into(),
             },
+            // A 3-level dotted key: the intermediate parent `[sandbox]`
+            // must NOT be emitted as a bare empty header.
+            ProviderOption {
+                key: "sandbox.network.enabled".into(),
+                value: "true".into(),
+            },
         ];
         let all = vec![p.clone()];
 
         activate(&p, &all).unwrap();
         let txt = fs::read_to_string(tmp.join(".codex/config.toml")).unwrap();
+        assert!(
+            !txt.contains("[sandbox]\n"),
+            "no bare `[sandbox]` header: {txt}"
+        );
         let doc: toml::Value = toml::from_str(&txt).unwrap();
         assert_eq!(
             doc.get("model_reasoning_effort").and_then(|v| v.as_str()),
@@ -3741,6 +4100,14 @@ mod tests {
                 .and_then(|v| v.as_bool()),
             Some(true),
             "nested tools.web_search must be a real bool, not the string \"true\""
+        );
+        assert_eq!(
+            doc.get("sandbox")
+                .and_then(|s| s.get("network"))
+                .and_then(|n| n.get("enabled"))
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "deep dotted key must round-trip"
         );
 
         deactivate(CliApp::Codex, &all).unwrap();
@@ -4123,6 +4490,8 @@ command = "npx"
         assert!(txt.contains("model_providers.openai"));
         // termory block written.
         assert!(txt.contains("[model_providers.termory]"));
+        // ...with NO bare empty `[model_providers]` header above the blocks.
+        assert!(!txt.contains("[model_providers]\n"));
         assert!(txt.contains("https://codex.x.io/v1"));
 
         let state = read_active_state(CliApp::Codex, &[p.clone()]).unwrap();
@@ -4391,6 +4760,166 @@ base_url = "https://x.io/v1"
         .unwrap();
         let state = read_active_state(CliApp::Codex, &[]).unwrap();
         assert_eq!(state.kind, ActiveKind::Official);
+    }
+
+    #[test]
+    fn grok_activate_roundtrip_preserves_config_and_auth() {
+        let _g = lock_home();
+        let tmp = tempdir("grok-rt");
+        let _home = override_home(&tmp);
+        let grok = tmp.join(".grok");
+        fs::create_dir_all(&grok).unwrap();
+        // Prior OAuth login + a FACTORY config: the official baseline has NO
+        // `models.default` and NO `[model]` entries (verified on a real
+        // install) — just grok's own settings.
+        fs::write(
+            grok.join("auth.json"),
+            r#"{"https://auth.x.ai::abc":{"token":"secret"}}"#,
+        )
+        .unwrap();
+        fs::write(grok.join("config.toml"), "[ui]\nyolo = false\n").unwrap();
+        let auth_before = fs::read(grok.join("auth.json")).unwrap();
+
+        // A grok provider carries a `models` LIST (required) + an optional
+        // default (`model`, must be one of the models). id = "test-x-third".
+        let mut p = make_provider(CliApp::Grok, "x-third", "https://gw.example/v1", "xai-sk");
+        p.model = "grok-4.5".into();
+        p.models = vec![
+            ProviderModel {
+                id: "grok-4.5".into(),
+                name: String::new(),
+            },
+            ProviderModel {
+                id: "grok-3".into(),
+                name: "Grok 3".into(),
+            },
+        ];
+        // ONE action: activate writes every model entry AND sets the default.
+        activate(&p, &[p.clone()]).unwrap();
+        let text = fs::read_to_string(grok.join("config.toml")).unwrap();
+        // One flat entry per model, keyed by `<provider-id>-<model-id>` (a
+        // key with a `.` like grok-4.5 gets TOML-quoted, so match the key
+        // substring rather than the exact header form).
+        assert!(text.contains("test-x-third-grok-4.5"));
+        assert!(text.contains("test-x-third-grok-3"));
+        // ...and NO bare empty `[model]` header above the sub-tables.
+        assert!(!text.contains("[model]\n"));
+        // `model` field = upstream id; `name` = display (id when blank, else
+        // the model's name); `description` = provider name.
+        assert!(text.contains("model = \"grok-4.5\""));
+        assert!(text.contains("model = \"grok-3\""));
+        assert!(text.contains("name = \"grok-4.5\""));
+        assert!(text.contains("name = \"Grok 3\""));
+        assert!(text.contains("description = \"x-third\""));
+        assert!(text.contains("api_key = \"xai-sk\""));
+        // api_backend defaults to "responses" on every entry.
+        assert!(text.contains("api_backend = \"responses\""));
+        // Default points at the chosen model's entry key (set by activate).
+        assert!(text.contains("default = \"test-x-third-grok-4.5\""));
+        assert!(!text.contains("termory"));
+        assert!(text.contains("yolo = false"));
+
+        let state = read_active_state(CliApp::Grok, &[p.clone()]).unwrap();
+        assert_eq!(state.kind, ActiveKind::Custom);
+        assert_eq!(state.matched_provider_id.as_deref(), Some("test-x-third"));
+        assert_eq!(
+            state
+                .live_snapshot
+                .as_ref()
+                .and_then(|s| s.model.as_deref()),
+            Some("grok-4.5")
+        );
+
+        // "Set Official" sweeps our entries + default → back to factory.
+        deactivate(CliApp::Grok, &[p.clone()]).unwrap();
+        let text2 = fs::read_to_string(grok.join("config.toml")).unwrap();
+        assert!(!text2.contains("test-x-third"));
+        assert!(!text2.contains("[model]"));
+        assert!(!text2.contains("default ="));
+        assert!(text2.contains("yolo = false"));
+        let state2 = read_active_state(CliApp::Grok, &[p.clone()]).unwrap();
+        assert_eq!(state2.kind, ActiveKind::Official);
+
+        // The OAuth session file is byte-identical across the round-trip.
+        assert_eq!(fs::read(grok.join("auth.json")).unwrap(), auth_before);
+    }
+
+    #[test]
+    fn grok_single_slot_activate_replaces_previous_provider() {
+        let _g = lock_home();
+        let tmp = tempdir("grok-single-slot");
+        let _home = override_home(&tmp);
+        let grok = tmp.join(".grok");
+        fs::create_dir_all(&grok).unwrap();
+        fs::write(grok.join("config.toml"), "[ui]\nyolo = false\n").unwrap();
+
+        let mut a = make_provider(CliApp::Grok, "aaa", "https://a.example/v1", "key-a");
+        a.model = "grok-4.5".into();
+        a.models = vec![ProviderModel {
+            id: "grok-4.5".into(),
+            name: String::new(),
+        }];
+        let mut b = make_provider(CliApp::Grok, "bbb", "https://b.example/v1", "key-b");
+        b.model = "grok-3".into();
+        b.models = vec![ProviderModel {
+            id: "grok-3".into(),
+            name: String::new(),
+        }];
+        let all = [a.clone(), b.clone()];
+
+        // Single-slot: activating B replaces A's entries (only one active).
+        activate(&a, &all).unwrap();
+        activate(&b, &all).unwrap();
+        let text = fs::read_to_string(grok.join("config.toml")).unwrap();
+        assert!(!text.contains("test-aaa"));
+        assert!(text.contains("test-bbb-grok-3"));
+        assert!(text.contains("default = \"test-bbb-grok-3\""));
+
+        let state = read_active_state(CliApp::Grok, &all).unwrap();
+        assert_eq!(state.matched_provider_id.as_deref(), Some("test-bbb"));
+
+        // Duplicate model ids in the list are rejected (would collide on
+        // the `[model."<pid>-<id>"]` key).
+        let mut dup = make_provider(CliApp::Grok, "dup", "https://d.example/v1", "key-d");
+        dup.model = String::new();
+        dup.models = vec![
+            ProviderModel {
+                id: "grok-4.5".into(),
+                name: String::new(),
+            },
+            ProviderModel {
+                id: "grok-4.5".into(),
+                name: "again".into(),
+            },
+        ];
+        assert!(activate(&dup, &[dup.clone()]).is_err());
+    }
+
+    #[test]
+    fn grok_read_active_matches_grok_provider_not_a_same_creds_other_cli() {
+        let _g = lock_home();
+        let tmp = tempdir("grok-cross-app");
+        let _home = override_home(&tmp);
+        let grok = tmp.join(".grok");
+        fs::create_dir_all(&grok).unwrap();
+
+        // The SAME gateway key reused across CLIs (common). Activate the grok
+        // provider; read_active must return the GROK provider's id — a codex
+        // provider sharing the creds (listed FIRST) must not be matched, or
+        // the frontend's `isLive` check fails and editing never re-applies.
+        let mut g = make_provider(CliApp::Grok, "g", "https://gw.example/v1", "shared-key");
+        g.model = "grok-4.5".into();
+        g.models = vec![ProviderModel {
+            id: "grok-4.5".into(),
+            name: String::new(),
+        }];
+        let codex_same = make_provider(CliApp::Codex, "c", "https://gw.example/v1", "shared-key");
+
+        activate(&g, &[g.clone()]).unwrap();
+        // Codex provider listed BEFORE the grok one (would win without the
+        // app filter).
+        let state = read_active_state(CliApp::Grok, &[codex_same, g.clone()]).unwrap();
+        assert_eq!(state.matched_provider_id.as_deref(), Some("test-g"));
     }
 
     #[test]
@@ -4860,6 +5389,64 @@ base_url = "https://x.io/v1"
             !tmp.join(".config/opencode/opencode.json").exists(),
             "no partial opencode.json on model-missing failure"
         );
+    }
+
+    #[test]
+    fn reject_duplicate_model_ids_flags_repeats_ignores_blanks() {
+        let m = |id: &str, name: &str| ProviderModel {
+            id: id.into(),
+            name: name.into(),
+        };
+        // Unique + blanks → ok.
+        assert!(reject_duplicate_model_ids(&[m("a", ""), m("b", ""), m("  ", "")], "X").is_ok());
+        // A repeated id (whitespace-normalized) → error.
+        assert!(reject_duplicate_model_ids(&[m("a", ""), m(" a ", "x")], "X").is_err());
+    }
+
+    #[test]
+    fn opencode_activate_rejects_duplicate_models() {
+        let _g = lock_home();
+        let tmp = tempdir("opencode-dup");
+        let _home = override_home(&tmp);
+        let mut p = make_provider(CliApp::Opencode, "dup", "https://x.io", "sk-x");
+        // TWO identical entries in the LIST → a real duplicate, rejected.
+        p.models = vec![
+            ProviderModel {
+                id: "gpt-5".into(),
+                name: String::new(),
+            },
+            ProviderModel {
+                id: "gpt-5".into(),
+                name: "again".into(),
+            },
+        ];
+        assert!(activate(&p, &[p.clone()]).is_err());
+        assert!(!tmp.join(".config/opencode/opencode.json").exists());
+    }
+
+    #[test]
+    fn opencode_dedup_allows_primary_redeclared_in_list() {
+        // BOUNDARY: the dedup guard checks the models LIST internally, NOT
+        // against the primary. So re-declaring the primary ONCE in the list
+        // (OpenCode's intentional "give the primary a custom name" case) is
+        // allowed even though `model` and a list id coincide.
+        let _g = lock_home();
+        let tmp = tempdir("opencode-primary-redeclare");
+        let _home = override_home(&tmp);
+        let mut p = make_provider(CliApp::Opencode, "redeclare", "https://x.io", "sk-x");
+        p.model = "gpt-5".into();
+        p.models = vec![
+            ProviderModel {
+                id: "gpt-5".into(),
+                name: "GPT-5 Custom".into(),
+            },
+            ProviderModel {
+                id: "gpt-5-mini".into(),
+                name: String::new(),
+            },
+        ];
+        // Not a LIST-internal duplicate → activation succeeds.
+        assert!(activate(&p, &[p.clone()]).is_ok());
     }
 
     #[test]

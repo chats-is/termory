@@ -397,6 +397,7 @@ fn event_has_relevant_path(event: &notify::Event, ignore_children_of: &[PathBuf]
 ///   * `~/.gemini/` — chats / memory / skills under tmp/
 ///   * `~/.config/opencode/` — AGENTS.md, skills
 ///   * `~/.local/share/opencode/` — sqlite DB, storage compat layout
+///   * `~/.grok/` — Grok Build sessions (summary.json/updates.jsonl) + skills
 ///   * `~/.agents/` — tool-neutral global skills
 ///
 /// Dynamic watches (project cwds derived from session metadata) are
@@ -412,6 +413,7 @@ fn watch_targets() -> Vec<PathBuf> {
         home.join(".gemini"),
         crate::sessions::opencode_config_dir(&home),
         crate::sessions::opencode_data_dir(&home),
+        crate::providers::grok_home_dir().unwrap_or_else(|| home.join(".grok")),
         home.join(".agents"),
     ]
 }

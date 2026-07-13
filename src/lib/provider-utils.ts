@@ -9,6 +9,7 @@ import type {
   GatewayProtocol
 } from "../types";
 import type { MessageKey } from "@/i18n";
+import { CLI_APPS } from "../constants";
 
 /** Translator passed into the per-CLI help builders so their copy
  * renders in the active locale (the functions are pure / outside React). */
@@ -19,20 +20,54 @@ type Translate = (key: MessageKey, params?: Record<string, string | number>) => 
  * Google on 2026-06-18 (individual accounts; replaced by Antigravity
  * CLI). MIRROR of `DEFAULT_OFF_KEYS` in src-tauri/src/config.rs — keep
  * the two in sync. */
-const DEFAULT_OFF_TOOLS: ReadonlySet<CliApp> = new Set(["gemini"]);
+const DEFAULT_OFF_SOURCES: ReadonlySet<CliApp> = new Set(["gemini"]);
+
+/** Resolve the user's Settings → Tools drag order (config `source_order`)
+ * into the full tool list: saved entries first (unknown/duplicate ids
+ * dropped), then any tool the saved list doesn't know yet (new tools
+ * added in an update) in default order. Empty/absent → default order. */
+export function orderSources(saved: readonly CliApp[] | undefined): CliApp[] {
+  const seen = new Set<CliApp>();
+  const out: CliApp[] = [];
+  for (const key of saved ?? []) {
+    if (CLI_APPS.includes(key) && !seen.has(key)) {
+      seen.add(key);
+      out.push(key);
+    }
+  }
+  for (const key of CLI_APPS) {
+    if (!seen.has(key)) out.push(key);
+  }
+  return out;
+}
 
 /** Settings → Tools: is `app` enabled under `toggles`? Absent key =
  * enabled (only an explicit `false` disables — a truthiness check would
  * wrongly treat never-persisted tools as off), EXCEPT the
- * `DEFAULT_OFF_TOOLS`, which need an explicit `true`. Every frontend
+ * `DEFAULT_OFF_SOURCES`, which need an explicit `true`. Every frontend
  * gate on the toggles must go through this helper. */
-export function isToolEnabled(
+export function isSourceEnabled(
   toggles: Partial<Record<CliApp, boolean>> | undefined,
   app: CliApp
 ): boolean {
   const value = toggles?.[app];
-  if (value === undefined) return !DEFAULT_OFF_TOOLS.has(app);
+  if (value === undefined) return !DEFAULT_OFF_SOURCES.has(app);
   return value !== false;
+}
+
+/** The single "which tools show on a record/pill surface" selector:
+ * drag order ∩ enabled, optionally excluding tools with no records
+ * source (Claude Desktop keeps no terminal history). App sidebar and
+ * Stats pills share this so the two can't drift. */
+export function visibleSources(
+  ordered: readonly CliApp[],
+  toggles: Partial<Record<CliApp, boolean>> | undefined,
+  opts?: { recordsOnly?: boolean }
+): CliApp[] {
+  return ordered.filter(
+    (k) =>
+      (!opts?.recordsOnly || k !== "claude-desktop") && isSourceEnabled(toggles, k)
+  );
 }
 
 /** Compose the Codex Official card's version line from its two install
@@ -87,6 +122,9 @@ export function blankProvider(app: CliApp): Provider {
     base.baseUrl = "https://generativelanguage.googleapis.com";
   } else if (app === "opencode") {
     base.baseUrl = "https://api.anthropic.com";
+  } else if (app === "grok") {
+    // docs.x.ai custom-model example: base_url INCLUDES /v1.
+    base.baseUrl = "https://api.x.ai/v1";
   }
   return base;
 }
@@ -141,7 +179,8 @@ export function isProviderList(raw: unknown): raw is Provider[] {
       p.app !== "claude-desktop" &&
       p.app !== "codex" &&
       p.app !== "gemini" &&
-      p.app !== "opencode"
+      p.app !== "opencode" &&
+      p.app !== "grok"
     ) {
       return false;
     }
@@ -155,6 +194,8 @@ export function baseUrlPlaceholder(app: CliApp, npm?: string): string {
     case "claude":
     case "claude-desktop":
       return "https://api.anthropic.com";
+    case "grok":
+      return "https://api.x.ai/v1";
     case "codex":
       return "https://api.openai.com/v1";
     case "gemini":
@@ -178,6 +219,9 @@ export function baseUrlHelp(app: CliApp, npm: string | undefined, t: Translate):
   switch (app) {
     case "claude":
       return t("help.baseUrl.claudeNoV1");
+    case "grok":
+      // The custom-model base_url includes /v1 (docs.x.ai example).
+      return t("help.baseUrl.includeV1");
     case "claude-desktop":
       return t("help.baseUrl.claudeDesktop");
     case "codex":
@@ -213,6 +257,8 @@ export function overrideHelpFor(app: CliApp, t: Translate): string {
       return t("help.override.opencode");
     case "claude-desktop":
       return t("help.override.claudeDesktop");
+    case "grok":
+      return t("help.override.grok");
   }
 }
 
@@ -287,6 +333,12 @@ export function appProtocols(
     "claude-desktop": caps?.anthropic ? ["anthropic"] : [],
     codex: caps?.openai ? ["openai"] : [], // Codex needs Responses
     gemini: caps?.gemini ? ["gemini"] : [],
+    // xAI's API is OpenAI-compatible chat completions. Like every other
+    // binding this is best-effort (the probe can't prove Grok Build's
+    // full runtime works against the gateway — same documented caveat
+    // as the rest); the binding additionally REQUIRES a model, since
+    // grok's api_key is stored per-model (GatewayEditor validates).
+    grok: caps?.openaiCompatible ? ["openai-compatible"] : [],
     opencode
   };
 }
@@ -332,6 +384,9 @@ export function protocolForBinding(binding: {
       return "openai";
     case "gemini":
       return "gemini";
+    // xAI's API is OpenAI-compatible chat completions.
+    case "grok":
+      return "openai-compatible";
     case "opencode":
       return protocolForNpm(binding.npm ?? "");
     // Claude Desktop binds Anthropic-capable gateways (see appProtocols);
@@ -359,13 +414,18 @@ export function providerFromBinding(gateway: Gateway, binding: GatewayBinding): 
   if (binding.app === "opencode") {
     provider.npm = binding.npm ?? npmForProtocol(protocol);
   }
-  // Models list — OpenCode's extra models AND Claude Desktop's inferenceModels.
+  // Models list — OpenCode's extra models, Claude Desktop's inferenceModels,
+  // AND grok's required model list.
   if (
     binding.models?.length &&
-    (binding.app === "opencode" || binding.app === "claude-desktop")
+    (binding.app === "opencode" ||
+      binding.app === "claude-desktop" ||
+      binding.app === "grok")
   ) {
     provider.models = binding.models;
   }
+  if (binding.app === "grok" && binding.apiBackend)
+    provider.apiBackend = binding.apiBackend;
   if (binding.options?.length) provider.options = binding.options;
   return provider;
 }
@@ -418,6 +478,19 @@ export function isManagedOptionKey(app: CliApp, key: string): boolean {
       // Options nest under the provider's own `options` bag; keys are
       // relative to it, and baseURL/apiKey come from the dedicated fields.
       return k === "baseURL" || k === "apiKey";
+    case "grok":
+      // MIRROR of the Rust `override_key_is_managed` Grok arm: the
+      // default pointer + the five owned fields of ANY `[model.<id>]`
+      // entry (the entry key is the model id). Other per-entry keys
+      // (api_backend, context_window, …) pass through as Advanced
+      // settings.
+      return (
+        k === "models.default" ||
+        (k.startsWith("model.") &&
+          ["model", "base_url", "name", "description", "api_key", "api_backend"].some((f) =>
+            k.endsWith(`.${f}`)
+          ))
+      );
     // Claude Desktop: Advanced-settings options merge into the 3P gateway
     // profile JSON; the keys filled from dedicated fields (Base URL / API
     // key / models) are managed. MIRROR of `override_key_is_managed`'s

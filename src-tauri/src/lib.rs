@@ -465,6 +465,7 @@ fn cli_app_key(app: CliApp) -> &'static str {
         CliApp::Gemini => "gemini",
         CliApp::Opencode => "opencode",
         CliApp::ClaudeDesktop => "claude-desktop",
+        CliApp::Grok => "grok",
     }
 }
 
@@ -548,9 +549,12 @@ async fn follow_codex_sessions(
     .map_err(|err| err.to_string())?
 }
 
-/// Promote a Termory OpenCode provider to OpenCode's startup default
-/// by writing `model = "<termory-id>/<primary>"` at the top of
-/// opencode.json. The provider must already be activated.
+/// Promote an already-activated OpenCode provider to OpenCode's startup
+/// default by writing `model = "<termory-id>/<primary>"` at the top of
+/// opencode.json. The provider must already be activated (its slot exists).
+/// OpenCode-only: it's the one multi-slot CLI with a separate enable /
+/// set-default step (Grok is single-slot — activating already sets its
+/// default).
 #[tauri::command]
 async fn set_opencode_default_provider(
     app: tauri::AppHandle,
@@ -648,38 +652,35 @@ async fn read_app_config() -> Result<serde_json::Value, String> {
         .map_err(|e| e.to_string())?
 }
 
-/// Atomically write ~/.termory/config.json with file mode 0600 (Unix).
+/// Persist ONE config key: read the current ~/.termory/config.json, change
+/// only `key`, and write it back (mode 0600 on Unix). Every other key on
+/// disk — including keys the app doesn't recognize and backend-written
+/// `grok_prev_*` — is left exactly as it is. This is a per-key merge, never
+/// a whole-object overwrite of a stale in-memory cache, so orphaned/renamed
+/// keys don't ride along and an emptied file doesn't resurrect them.
 #[tauri::command]
-async fn write_app_config(app: tauri::AppHandle, value: serde_json::Value) -> Result<(), String> {
-    // Last-written `sources` value, so the change detection below doesn't
-    // re-read + re-parse config.json on EVERY config write (this IPC also
-    // carries hot-path keys like recent_searches). Outer None = not yet
-    // initialized this process; inner Option mirrors the key's presence.
-    static LAST_SOURCES: std::sync::Mutex<Option<Option<serde_json::Value>>> =
-        std::sync::Mutex::new(None);
+async fn write_app_config(
+    app: tauri::AppHandle,
+    key: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let mut cfg = config::read_config().map_err(|e| e.to_string())?;
+        let obj = cfg
+            .as_object_mut()
+            .ok_or_else(|| "config.json is not a JSON object".to_string())?;
+        // Did `sources` actually change? Compare the on-disk value to the
+        // incoming one before we overwrite it.
+        let sources_changed = key == "sources" && obj.get("sources") != Some(&value);
+        obj.insert(key, value);
+        config::write_config(&cfg).map_err(|e| e.to_string())?;
+
         // A change to the `sources` key (Settings → Tools toggles) must
         // propagate everywhere scan output flows: re-scan (the filter lives
         // in scan_sessions), push the result to the frontend via the same
         // event the watcher uses, refresh the tray's recent rows, and do a
         // full menu rebuild (per-CLI provider submenus gate on the setting).
-        let sources_before = {
-            let mut guard = LAST_SOURCES.lock().unwrap_or_else(|e| e.into_inner());
-            guard
-                .get_or_insert_with(|| {
-                    // One disk read per process to seed the cache.
-                    config::read_config()
-                        .ok()
-                        .and_then(|c| c.get("sources").cloned())
-                })
-                .clone()
-        };
-        config::write_config(&value).map_err(|e| e.to_string())?;
-        let sources_after = value.get("sources").cloned();
-        if let Ok(mut guard) = LAST_SOURCES.lock() {
-            *guard = Some(sources_after.clone());
-        }
-        if sources_after != sources_before {
+        if sources_changed {
             use tauri::Emitter as _;
             match scan_sessions() {
                 Ok(result) => {

@@ -65,6 +65,20 @@ export function BrandIcon({
       </svg>
     );
   }
+  if (source === "Grok") {
+    // xAI's Grok Build. xAI ships no open-source mark, so this is a
+    // neutral in-house glyph: the "𝕏"-style double stroke in the same
+    // dark ink as Codex/OpenCode (cards distinguish by shape, not
+    // color — see the BrandIcon color notes in CLAUDE.md).
+    return (
+      <svg className={cls} viewBox="0 0 24 24" aria-hidden="true">
+        <path
+          d="M4 4.5h4.1L12 10l3.9-5.5H20L14 12.9 20 19.5h-4.1L12 14.6l-3.9 4.9H4l6-6.6L4 4.5Z"
+          fill="#111827"
+        />
+      </svg>
+    );
+  }
   if (source === "Memory") {
     return <BookOpen className={cls} size={14} aria-hidden="true" />;
   }

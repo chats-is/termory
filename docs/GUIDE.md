@@ -2,7 +2,7 @@
 
 > 中文版见 [GUIDE.zh-CN.md](GUIDE.zh-CN.md)
 
-Termory brings the history your terminal AI coding tools — **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode** — already store on your machine (sessions, memory, skills) into one window to browse, with no import or setup (it just reads the tools' existing local data). On top of browsing history, it also lets you manage and switch each tool's API providers in a click — including **Claude Desktop**, the GUI app: it keeps no terminal history, but Termory switches it between its official login and third-party Anthropic-compatible providers the same way (macOS / Windows). For installation and downloads, see the [README](../README.md).
+Termory brings the history your terminal AI coding tools — **Codex**, **Claude Code**, **Gemini CLI**, **OpenCode**, and **Grok Build** — already store on your machine (sessions, memory, skills) into one window to browse, with no import or setup (it just reads the tools' existing local data). On top of browsing history, it also lets you manage and switch each tool's API providers in a click — including **Claude Desktop**, the GUI app: it keeps no terminal history, but Termory switches it between its official login and third-party Anthropic-compatible providers the same way (macOS / Windows). For installation and downloads, see the [README](../README.md).
 
 ## Feature map
 
@@ -28,7 +28,7 @@ Two cross-cutting topics — **[Privacy & your data](#privacy--your-data)** and 
 
 ### Switching the active provider
 
-1. Open **Providers** and pick the app's tab (Claude Code / Codex / Gemini / OpenCode / Claude Desktop).
+1. Open **Providers** and pick the app's tab (Claude Code / Codex / Gemini / OpenCode / Grok Build / Claude Desktop).
 2. Click **Activate** (or **Set as default**) on the provider you want.
 3. The next time you launch that CLI, it uses the new provider — no manual config editing.
 
@@ -57,6 +57,7 @@ This is the core guarantee: activating a provider **merges a few fields into you
 | Codex | `~/.codex/auth.json` + `~/.codex/config.toml` | the `tokens` inside `auth.json` (the ChatGPT login) |
 | Gemini CLI | `~/.gemini/.env` | `~/.gemini/oauth_creds.json` + `google_accounts.json` |
 | OpenCode | `~/.config/opencode/opencode.json` | `~/.local/share/opencode/auth.json` |
+| Grok Build | `~/.grok/config.toml` | `~/.grok/auth.json` (the auth.x.ai login) |
 | Claude Desktop | `…/Claude{,-3p}/claude_desktop_config.json` + a `Claude-3p/configLibrary/` profile | Claude Desktop's own claude.ai login |
 
 (Codex is the one case where config and a credential share a file — there Termory still *merges*: it sets `auth_mode` + the API key but leaves your `tokens` intact, so the ChatGPT login survives.)
@@ -65,7 +66,7 @@ This is the core guarantee: activating a provider **merges a few fields into you
 
 ### Claude Desktop (the GUI app)
 
-Besides the four CLIs, Termory can switch **Claude Desktop** — the desktop app — to a third-party provider, on **macOS and Windows** (its tab shows everywhere but only activates where the app can run). Claude Desktop has no terminal history, so it appears only on the **Providers** page and **AI Gateways**, never in Sessions/Memory/Skills.
+Besides the five CLIs, Termory can switch **Claude Desktop** — the desktop app — to a third-party provider, on **macOS and Windows** (its tab shows everywhere but only activates where the app can run). Claude Desktop has no terminal history, so it appears only on the **Providers** page and **AI Gateways**, never in Sessions/Memory/Skills.
 
 It uses Claude Desktop's own **third-party ("3P")** mechanism, not env vars: Termory flips `deploymentMode` to `3p` and writes a provider profile (your base URL + API key) into Claude Desktop's config library; "Official" flips it back to `1p` and removes the profile. Two specifics differ from the CLIs:
 
@@ -162,7 +163,7 @@ On the **Codex** tab, the Official card also manages multiple ChatGPT logins. **
 
 ### Browsing
 
-- **Source filter** (Codex / Claude / Gemini / OpenCode / All) in the sidebar narrows all three panes at once.
+- **Source filter** (Codex / Claude / Gemini / OpenCode / Grok Build / All) in the sidebar narrows all three panes at once.
 - The sidebar groups records by **project** (working directory).
 - Click any record to open it; the detail pane renders each message the way its own tool shows it (tool calls, diffs, reasoning, etc.).
 - Each message has a **copy** button (raw markdown) and a **star** (add to Favorites).

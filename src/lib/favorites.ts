@@ -13,7 +13,8 @@ const KNOWN_SOURCES: SessionSource[] = [
   "Claude",
   "Codex",
   "Gemini",
-  "OpenCode"
+  "OpenCode",
+  "Grok"
 ];
 
 /** Narrow `AppSession.source` (loose `string` for backend-compat) to

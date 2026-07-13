@@ -77,6 +77,8 @@ fn session_launch_command_with(source: &str, id: &str, codex: &str) -> Option<St
         "Codex" => format!("{codex} resume {id}"),
         "OpenCode" => format!("opencode --session {id}"),
         "Gemini" => format!("gemini --resume {id}"),
+        // Verified against `grok --help` (0.2.93): `-r, --resume [<SESSION_ID>]`.
+        "Grok" => format!("grok --resume {id}"),
         _ => return None,
     })
 }

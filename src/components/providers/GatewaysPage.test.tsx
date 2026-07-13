@@ -41,7 +41,8 @@ const ALL_INSTALLED: Record<CliApp, boolean> = {
   "claude-desktop": true,
   codex: true,
   gemini: true,
-  opencode: true
+  opencode: true,
+  grok: true
 };
 
 // A gateway with a single Codex binding. Base URL + key are fixed so the

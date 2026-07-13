@@ -771,6 +771,7 @@ pub fn scan_sessions() -> Result<ScanResult, Box<dyn Error>> {
     records.extend(scan_claude()?);
     records.extend(scan_gemini()?);
     records.extend(scan_opencode()?);
+    records.extend(scan_grok()?);
     let project_cwds: HashSet<String> = records
         .iter()
         .filter(|s| !s.project.is_empty() && Path::new(&s.project).is_absolute())
@@ -1029,6 +1030,322 @@ fn lookup_session_path(source: &str, id: &str) -> Option<std::path::PathBuf> {
         .cloned()
 }
 
+// ===================================================================
+// Grok Build (xAI) — sessions
+// ===================================================================
+//
+// xAI's Grok Build is NOT open source, so the on-disk layout itself is
+// the verified reference (surveyed on real data, grok 0.2.93):
+//
+//   ~/.grok/sessions/<percent-encoded-cwd>/<uuid>/summary.json
+//   ~/.grok/sessions/<percent-encoded-cwd>/<uuid>/updates.jsonl
+//
+// summary.json carries the LIST metadata verbatim (`info.id`,
+// `info.cwd`, `session_summary` title, `created_at`/`updated_at`,
+// `num_chat_messages`, `current_model_id`) — read as-is, no invented
+// fallbacks. updates.jsonl is an ACP (Agent Client Protocol)
+// `session/update` event stream; see `parse_grok_session`.
+
+fn grok_sessions_root() -> Option<PathBuf> {
+    // Honors $GROK_HOME (docs.x.ai/build/settings) like the rest of the
+    // grok paths.
+    crate::providers::grok_home_dir().map(|d| d.join("sessions"))
+}
+
+fn scan_grok() -> Result<Vec<AppSession>, Box<dyn Error>> {
+    match grok_sessions_root() {
+        Some(root) if root.is_dir() => scan_grok_sessions_in(&root),
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn scan_grok_sessions_in(root: &Path) -> Result<Vec<AppSession>, Box<dyn Error>> {
+    let mut out = Vec::new();
+    for cwd_entry in fs::read_dir(root)?.flatten() {
+        let cwd_dir = cwd_entry.path();
+        // Skips the sibling session_search.sqlite / lock files.
+        if !cwd_dir.is_dir() {
+            continue;
+        }
+        let Ok(sessions) = fs::read_dir(&cwd_dir) else {
+            continue;
+        };
+        for sess in sessions.flatten() {
+            let dir = sess.path();
+            // Skips per-project prompt_history.jsonl.
+            if !dir.is_dir() {
+                continue;
+            }
+            if let Some(app) = grok_session_from_summary(&dir) {
+                out.push(app);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn grok_session_from_summary(session_dir: &Path) -> Option<AppSession> {
+    let summary: Value =
+        serde_json::from_str(&fs::read_to_string(session_dir.join("summary.json")).ok()?).ok()?;
+    let id = summary.get("info")?.get("id")?.as_str()?.to_string();
+    let updates = session_dir.join("updates.jsonl");
+    if !updates.is_file() {
+        return None;
+    }
+    let str_of = |key: &str| {
+        summary
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    Some(AppSession {
+        id,
+        source: "Grok".to_string(),
+        title: str_of("session_summary").unwrap_or_default(),
+        project: summary["info"]["cwd"].as_str().unwrap_or("").to_string(),
+        path: updates.to_string_lossy().into_owned(),
+        started_at: str_of("created_at"),
+        updated_at: str_of("updated_at"),
+        message_count: summary
+            .get("num_chat_messages")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize,
+        model: str_of("current_model_id"),
+        ..Default::default()
+    })
+}
+
+/// Grok's own per-tool display label + the rawInput arg worth showing —
+/// both read from the RECORDED stream (`_meta["x.ai/tool"].label` is the
+/// label Grok Build itself renders; closed-source, so the recording is
+/// the reference). Observed labels: read_file→Read, grep→Search,
+/// run_terminal_command→Run Command, search_replace→Edit,
+/// list_dir→List Files, todo_write→Plan.
+fn grok_tool_arg(name: &str, input: &Value) -> String {
+    let s = |k: &str| input.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let first = |keys: &[&str]| {
+        keys.iter()
+            .map(|k| s(k))
+            .find(|v| !v.is_empty())
+            .unwrap_or("")
+            .to_string()
+    };
+    match name {
+        "read_file" => first(&["target_file"]),
+        "grep" => first(&["pattern"]),
+        "run_terminal_command" => first(&["command"]),
+        "search_replace" => first(&["file_path"]),
+        "list_dir" => first(&["target_directory"]),
+        "todo_write" => String::new(),
+        _ => {
+            // Unknown tool — a compact single-line JSON of the input,
+            // mirroring the Codex generic fallback.
+            let generic = first(&["path", "file_path", "command", "query", "pattern", "url"]);
+            if !generic.is_empty() {
+                generic
+            } else if input.is_null() {
+                String::new()
+            } else {
+                serde_json::to_string(input).unwrap_or_default()
+            }
+        }
+    }
+}
+
+/// Pull the human-readable body out of a Grok `tool_call_update`
+/// rawOutput. Shape observed on real data: either a plain string or a
+/// one-variant envelope `{"type": "<Variant>", "<Variant>": {"content":
+/// "…", …}}` (e.g. ListDir/Content). Falls back to pretty JSON so
+/// nothing recorded is dropped (LOCKED rule 7).
+fn grok_output_text(raw: &Value) -> Option<String> {
+    if let Some(s) = raw.as_str() {
+        return (!s.trim().is_empty()).then(|| s.to_string());
+    }
+    let obj = raw.as_object()?;
+    // Direct content field, or any variant object carrying one.
+    let content = obj
+        .get("content")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            obj.values().find_map(|v| {
+                v.get("content")
+                    .or_else(|| v.get("summary_for_prompt"))
+                    .and_then(|c| c.as_str())
+                    .map(str::to_string)
+            })
+        });
+    match content {
+        Some(c) if !c.trim().is_empty() => Some(c),
+        _ => serde_json::to_string_pretty(raw)
+            .ok()
+            .filter(|s| s != "null" && s != "{}"),
+    }
+}
+
+/// Parse a Grok Build `updates.jsonl` — an ACP `session/update` stream.
+/// Streaming `*_message_chunk` events of the same type merge into one
+/// message; `tool_call` opens a unified `**{Label}**(arg)` card that the
+/// terminal `tool_call_update` (`completed`/`failed`) finishes with the
+/// `⏺`/`✗` marker + fenced output. `plan` renders as a GFM task list.
+/// Intermediate tool updates, `retry_state` and `turn_completed` are
+/// transport bookkeeping with no conversation content — skipped.
+fn parse_grok_session(path: &Path) -> Result<SessionDetail, Box<dyn Error>> {
+    let file = fs::File::open(path)?;
+    let reader = std::io::BufReader::with_capacity(256 * 1024, file);
+
+    let mut messages: Vec<SessionMessage> = Vec::new();
+    // Open streaming-chunk accumulator: (kind, buffered text).
+    let mut open_chunk: Option<(String, String)> = None;
+    // toolCallId → messages index, for folding updates into the card.
+    let mut tool_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    fn flush(open: &mut Option<(String, String)>, messages: &mut Vec<SessionMessage>) {
+        let Some((kind, text)) = open.take() else {
+            return;
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+        let (role, kind_str, body) = match kind.as_str() {
+            "user_message_chunk" => ("user", "text", text),
+            "agent_thought_chunk" => ("assistant", "reasoning", format_reasoning_body(&text)),
+            _ => ("assistant", "text", text),
+        };
+        messages.push(SessionMessage {
+            role: role.to_string(),
+            text: body,
+            timestamp: None,
+            kind: kind_str.to_string(),
+            ..Default::default()
+        });
+    }
+
+    for line in std::io::BufRead::lines(reader) {
+        let Ok(line) = line else { continue };
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(update) = event.pointer("/params/update") else {
+            continue;
+        };
+        let kind = update
+            .get("sessionUpdate")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        match kind {
+            "user_message_chunk" | "agent_message_chunk" | "agent_thought_chunk" => {
+                let text = update
+                    .pointer("/content/text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                match &mut open_chunk {
+                    Some((open_kind, buf)) if open_kind == kind => buf.push_str(text),
+                    _ => {
+                        flush(&mut open_chunk, &mut messages);
+                        open_chunk = Some((kind.to_string(), text.to_string()));
+                    }
+                }
+            }
+            "tool_call" => {
+                flush(&mut open_chunk, &mut messages);
+                let meta = update.pointer("/_meta/x.ai~1tool");
+                // JSON pointer escapes '/' as ~1 — the meta key is
+                // literally "x.ai/tool".
+                let name = meta
+                    .and_then(|m| m.get("name"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| update.get("title").and_then(|v| v.as_str()))
+                    .unwrap_or("tool");
+                let label = meta
+                    .and_then(|m| m.get("label"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(name);
+                let arg = grok_tool_arg(name, update.get("rawInput").unwrap_or(&Value::Null));
+                let header = if arg.is_empty() {
+                    format!("**{label}**")
+                } else {
+                    format!("**{label}**({})", wrap_inline_code(&arg))
+                };
+                if let Some(id) = update.get("toolCallId").and_then(|v| v.as_str()) {
+                    tool_index.insert(id.to_string(), messages.len());
+                }
+                messages.push(SessionMessage {
+                    role: "tool".to_string(),
+                    text: format!("⏺ {header}"),
+                    timestamp: None,
+                    kind: "tool_use".to_string(),
+                    ..Default::default()
+                });
+            }
+            "tool_call_update" => {
+                let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                if status != "completed" && status != "failed" {
+                    continue; // intermediate progress — bookkeeping only
+                }
+                let Some(idx) = update
+                    .get("toolCallId")
+                    .and_then(|v| v.as_str())
+                    .and_then(|id| tool_index.get(id).copied())
+                else {
+                    continue;
+                };
+                let msg = &mut messages[idx];
+                if status == "failed" {
+                    msg.text = msg.text.replacen("⏺ ", "✗ ", 1);
+                    msg.kind = "tool_error".to_string();
+                }
+                if let Some(body) = update.get("rawOutput").and_then(|o| grok_output_text(o)) {
+                    msg.text
+                        .push_str(&format!("\n\n````\n{}\n````", body.trim_end()));
+                }
+            }
+            "plan" => {
+                flush(&mut open_chunk, &mut messages);
+                let entries = update
+                    .get("entries")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let mut body = String::from("**Plan**");
+                for e in &entries {
+                    let content = e.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                    let status = e.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                    let mark = match status {
+                        "completed" => "x",
+                        "in_progress" => "~",
+                        _ => " ",
+                    };
+                    body.push_str(&format!("\n- [{mark}] {content}"));
+                }
+                if !entries.is_empty() {
+                    messages.push(SessionMessage {
+                        role: "tool".to_string(),
+                        text: body,
+                        timestamp: None,
+                        kind: "plan".to_string(),
+                        ..Default::default()
+                    });
+                }
+            }
+            // retry_state / turn_completed / unknown — transport
+            // bookkeeping, no conversation content.
+            _ => {}
+        }
+    }
+    flush(&mut open_chunk, &mut messages);
+
+    let session =
+        grok_session_from_summary(path.parent().unwrap_or(Path::new(""))).unwrap_or_else(|| {
+            AppSession {
+                source: "Grok".to_string(),
+                path: path.to_string_lossy().into_owned(),
+                ..Default::default()
+            }
+        });
+    Ok(SessionDetail { session, messages })
+}
+
 pub fn get_session(source: &str, id: &str) -> Result<SessionDetail, Box<dyn Error>> {
     let path = lookup_session_path(source, id).ok_or_else(|| {
         format!("unknown session (call scan_all_sessions first): source={source} id={id}")
@@ -1038,6 +1355,7 @@ pub fn get_session(source: &str, id: &str) -> Result<SessionDetail, Box<dyn Erro
     match source {
         "Codex" => parse_codex_session(p, id),
         "Claude" => parse_claude_session(p),
+        "Grok" => parse_grok_session(p),
         "Memory" => parse_doc_file(p, "Memory"),
         "Skill" => parse_doc_file(p, "Skill"),
         "Gemini" if path_str.ends_with(".jsonl") => parse_gemini_jsonl_session(p),
@@ -1996,11 +2314,44 @@ fn scan_skills(project_cwds: &HashSet<String>) -> Result<Vec<AppSession>, Box<dy
     sessions.extend(scan_codex_skills(project_cwds));
     sessions.extend(scan_gemini_skills(project_cwds));
     sessions.extend(scan_opencode_skills(project_cwds));
+    sessions.extend(scan_grok_skills(project_cwds));
     sessions.extend(scan_agents_skills(project_cwds));
 
     let mut seen = HashSet::new();
     sessions.retain(|s| seen.insert(s.path.clone()));
     Ok(sessions)
+}
+
+/// Grok Build skills — `~/.grok/skills/<name>/SKILL.md` (verified on the
+/// real install, grok 0.2.93; closed-source, the on-disk layout is the
+/// reference). Only the global dir is scanned — no per-project skills
+/// convention has been observed for Grok Build yet.
+fn scan_grok_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
+    let mut sessions = Vec::new();
+    // Global: <grok-home>/skills ($GROK_HOME-aware). Official discovery
+    // paths: docs.x.ai/build/features/skills-plugins-marketplaces.
+    if let Some(global_dir) = crate::providers::grok_home_dir().map(|d| d.join("skills")) {
+        if global_dir.is_dir() {
+            push_doc_files_recursive(
+                &global_dir,
+                &global_dir,
+                &global_dir.to_string_lossy(),
+                "grok",
+                "Skill",
+                &[],
+                &mut sessions,
+            );
+        }
+    }
+    // Project: <cwd>/.grok/skills (the doc's "./.grok/skills/", scanned
+    // at cwd level like the other tools' project skill dirs).
+    for cwd in project_cwds {
+        let dir = Path::new(cwd).join(".grok").join("skills");
+        if dir.is_dir() {
+            push_doc_files_recursive(&dir, &dir, cwd, "grok", "Skill", &[], &mut sessions);
+        }
+    }
+    sessions
 }
 
 fn scan_claude_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
@@ -2009,9 +2360,12 @@ fn scan_claude_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
         return sessions;
     };
 
-    // OpenCode officially also reads .claude/skills/, so tag with both tools.
-    // (https://opencode.ai/docs/skills/)
-    let tag = "claude,opencode";
+    // OpenCode officially also reads .claude/skills/
+    // (https://opencode.ai/docs/skills/), and Grok Build reads skills
+    // from ~/.claude/ for Claude Code compatibility
+    // (docs.x.ai/build/features/skills-plugins-marketplaces) — tag all
+    // three.
+    let tag = "claude,opencode,grok";
 
     let claude_root = claude_config_root(&home);
     let global_dir = claude_root.join("skills");
@@ -2202,6 +2556,11 @@ fn scan_agents_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
     };
 
     let tag = "codex,gemini,opencode";
+    // Grok Build additionally discovers USER-level ~/.agents/skills
+    // (docs.x.ai/build/features/skills-plugins-marketplaces); it does
+    // not document the project-level .agents/skills, so only the global
+    // dir gets the grok tag.
+    let global_tag = "codex,gemini,opencode,grok";
 
     let global_dir = home.join(".agents").join("skills");
     if global_dir.is_dir() {
@@ -2209,7 +2568,7 @@ fn scan_agents_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
             &global_dir,
             &global_dir,
             "~/.agents/skills",
-            tag,
+            global_tag,
             "Skill",
             &[],
             &mut sessions,
@@ -15568,8 +15927,9 @@ mod tests {
             })
             .expect("project-level Claude skill should be picked up");
         assert_eq!(entry.source, "Skill");
-        // OpenCode also reads .claude/skills/, so the entry is tagged with both.
-        assert_eq!(entry.preview, "claude,opencode");
+        // OpenCode also reads .claude/skills/, and Grok Build reads
+        // ~/.claude/ skills for compatibility — tagged with all three.
+        assert_eq!(entry.preview, "claude,opencode,grok");
     }
 
     #[test]
@@ -16583,8 +16943,89 @@ mod tests {
             ("Claude", "claude"),
             ("Gemini", "gemini"),
             ("OpenCode", "opencode"),
+            ("Grok", "grok"),
         ] {
             assert_eq!(source.to_ascii_lowercase(), key);
         }
+    }
+
+    #[test]
+    fn grok_scan_and_parse_real_shaped_session() {
+        let dir = std::env::temp_dir().join(format!(
+            "termory-grok-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Layout: <root>/<encoded-cwd>/<uuid>/{summary.json, updates.jsonl}
+        let sess = dir.join("%2Fwork%2Fapp").join("019f-uuid");
+        fs::create_dir_all(&sess).unwrap();
+        fs::write(
+            sess.join("summary.json"),
+            r#"{"info":{"id":"019f-uuid","cwd":"/work/app"},
+                "session_summary":"Fix the bug",
+                "created_at":"2026-07-09T12:23:44.424534Z",
+                "updated_at":"2026-07-09T14:36:27.912118Z",
+                "num_messages":165,"num_chat_messages":70,
+                "current_model_id":"grok-4.5"}"#,
+        )
+        .unwrap();
+        // Chunked user + thought + agent text, a tool call with a
+        // completed envelope output, and a failed tool call.
+        let updates = [
+            r#"{"method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Fix "}}}}"#,
+            r#"{"method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"the bug"}}}}"#,
+            r#"{"method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Look first"}}}}"#,
+            r#"{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"read_file","rawInput":{"target_file":"src/a.rs","limit":100},"_meta":{"x.ai/tool":{"name":"read_file","label":"Read"}}}}}"#,
+            r#"{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"in_progress"}}}"#,
+            r#"{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"completed","rawOutput":{"type":"ReadFile","Content":{"content":"fn main() {}"}}}}}"#,
+            r#"{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"c2","title":"run_terminal_command","rawInput":{"command":"cargo test"},"_meta":{"x.ai/tool":{"name":"run_terminal_command","label":"Run Command"}}}}}"#,
+            r#"{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"c2","status":"failed","rawOutput":"error: it broke"}}}"#,
+            r#"{"method":"session/update","params":{"update":{"sessionUpdate":"plan","entries":[{"content":"step one","status":"completed"},{"content":"step two","status":"in_progress"}]}}}"#,
+            r#"{"method":"session/update","params":{"update":{"sessionUpdate":"turn_completed"}}}"#,
+            r#"{"method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done."}}}}"#,
+        ]
+        .join("\n");
+        fs::write(sess.join("updates.jsonl"), updates).unwrap();
+        // Noise the scanner must skip.
+        fs::write(dir.join("session_search.sqlite"), b"").unwrap();
+        fs::write(
+            dir.join("%2Fwork%2Fapp").join("prompt_history.jsonl"),
+            b"{}",
+        )
+        .unwrap();
+
+        // Scan: list metadata verbatim from summary.json.
+        let scanned = scan_grok_sessions_in(&dir).unwrap();
+        assert_eq!(scanned.len(), 1);
+        let s = &scanned[0];
+        assert_eq!(s.source, "Grok");
+        assert_eq!(s.id, "019f-uuid");
+        assert_eq!(s.title, "Fix the bug");
+        assert_eq!(s.project, "/work/app");
+        assert_eq!(s.message_count, 70);
+        assert_eq!(s.model.as_deref(), Some("grok-4.5"));
+        assert_eq!(s.started_at.as_deref(), Some("2026-07-09T12:23:44.424534Z"));
+
+        // Parse: chunk merging + unified tool cards.
+        let detail = parse_grok_session(&sess.join("updates.jsonl")).unwrap();
+        let texts: Vec<&str> = detail.messages.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts[0], "Fix the bug"); // merged user chunks
+        assert_eq!(texts[1], "> *Look first*"); // reasoning blockquote
+        assert_eq!(
+            texts[2],
+            "⏺ **Read**(`src/a.rs`)\n\n````\nfn main() {}\n````"
+        );
+        assert_eq!(
+            texts[3],
+            "✗ **Run Command**(`cargo test`)\n\n````\nerror: it broke\n````"
+        );
+        assert_eq!(detail.messages[3].kind, "tool_error");
+        assert_eq!(texts[4], "**Plan**\n- [x] step one\n- [~] step two");
+        assert_eq!(texts[5], "Done."); // turn_completed skipped
+        assert_eq!(detail.session.id, "019f-uuid");
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

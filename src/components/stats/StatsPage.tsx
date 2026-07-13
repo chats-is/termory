@@ -3,7 +3,7 @@ import { Layers, RefreshCw } from "lucide-react";
 import { BrandIcon } from "@/components/BrandIcon";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CLI_APP_LABEL, CLI_APP_SOURCE_BADGE } from "@/constants";
-import { isToolEnabled } from "@/lib/provider-utils";
+import { isSourceEnabled, visibleSources } from "@/lib/provider-utils";
 import { cn } from "@/lib/utils";
 import { useT, type MessageKey } from "@/i18n";
 import type { AppSession, CliApp } from "@/types";
@@ -34,6 +34,7 @@ const SOURCES: SourceFilter[] = [
   "codex",
   "gemini",
   "opencode",
+  "grok",
 ];
 
 /**
@@ -48,6 +49,7 @@ export function StatsPage({
   onRefresh,
   refreshing,
   sourceToggles = {},
+  sourceOrder,
 }: {
   sessions: AppSession[];
   onRefresh: () => void;
@@ -55,16 +57,23 @@ export function StatsPage({
   /** Settings → Tools map (absent key = enabled); disabled sources
    *  lose their filter pill (their data is already gone backend-side). */
   sourceToggles?: Partial<Record<CliApp, boolean>>;
+  /** Pill order = the Settings → Tools drag order (App-resolved). */
+  sourceOrder?: readonly CliApp[];
 }) {
   const t = useT();
   const [range, setRange] = React.useState<DateRange>({ preset: "30d" });
   const [source, setSource] = React.useState<SourceFilter>("All");
-  const visibleSources = SOURCES.filter(
-    (s) => s === "All" || isToolEnabled(sourceToggles, s)
-  );
+  // Pill order follows the Settings → Tools drag order; Claude Desktop
+  // has no session source, and SOURCES pins the toggle-less fallback.
+  const orderedKeys = (sourceOrder ?? SOURCES.filter((s) => s !== "All")) as CliApp[];
+  // Shares the `visibleSources` selector with the Records sidebar.
+  const sourceFilters: SourceFilter[] = [
+    "All",
+    ...visibleSources(orderedKeys, sourceToggles, { recordsOnly: true }),
+  ];
   // A source disabled while selected falls back to All.
   React.useEffect(() => {
-    if (source !== "All" && !isToolEnabled(sourceToggles, source)) setSource("All");
+    if (source !== "All" && !isSourceEnabled(sourceToggles, source)) setSource("All");
   }, [source, sourceToggles]);
   const [groupBy, setGroupBy] = React.useState<TokensGroupBy>("type");
 
@@ -137,7 +146,7 @@ export function StatsPage({
                 aria-label={t("stats.sourceFilter")}
                 className="w-full justify-start gap-1 bg-transparent p-0 [&>button]:flex-none [&>button]:rounded-md [&>button]:px-3"
               >
-                {visibleSources.map((s) => (
+                {sourceFilters.map((s) => (
                   <TabsTrigger key={s} value={s}>
                     {s === "All" ? (
                       <Layers className="size-4 shrink-0" aria-hidden />

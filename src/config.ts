@@ -63,10 +63,16 @@ function loadProviders(): Promise<unknown[]> {
   return providersPromise;
 }
 
-async function flushConfig(next: ConfigObject): Promise<void> {
-  configPromise = Promise.resolve(next);
+/// Persist ONE config key. The backend merges it into the CURRENT file on
+/// disk (read → change only this key → write), so we never round-trip the
+/// whole cached object — an orphaned/renamed key can't ride along and an
+/// externally-emptied file won't resurrect from a stale cache. The
+/// in-memory cache is updated too so readers see the new value immediately.
+async function writeConfigKey(key: string, value: unknown): Promise<void> {
+  const current = await loadConfig();
+  configPromise = Promise.resolve({ ...current, [key]: value });
   try {
-    await invoke("write_app_config", { value: next });
+    await invoke("write_app_config", { key, value });
   } catch (err) {
     warn("config: write_app_config failed", err);
   }
@@ -183,7 +189,5 @@ export async function setConfig<T>(key: string, value: T): Promise<void> {
     await flushFavorites(value as unknown[]);
     return;
   }
-  const current = await loadConfig();
-  const next: ConfigObject = { ...current, [key]: value as unknown };
-  await flushConfig(next);
+  await writeConfigKey(key, value as unknown);
 }

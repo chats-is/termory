@@ -8,6 +8,7 @@ export const MEMORY_TOOL_ORDER: MemoryTool[] = [
   "Codex",
   "Gemini",
   "OpenCode",
+  "Grok",
   "Other"
 ];
 
@@ -16,7 +17,8 @@ export const CLI_APPS: CliApp[] = [
   "claude-desktop",
   "codex",
   "gemini",
-  "opencode"
+  "opencode",
+  "grok"
 ];
 
 export const CLI_APP_LABEL: Record<CliApp, string> = {
@@ -24,8 +26,10 @@ export const CLI_APP_LABEL: Record<CliApp, string> = {
   "claude-desktop": "Claude Desktop",
   codex: "Codex",
   gemini: "Gemini",
-  opencode: "OpenCode"
+  opencode: "OpenCode",
+  grok: "Grok Build"
 };
+
 
 export const CLI_APP_SOURCE_BADGE: Record<CliApp, string> = {
   claude: "Claude",
@@ -33,8 +37,11 @@ export const CLI_APP_SOURCE_BADGE: Record<CliApp, string> = {
   "claude-desktop": "Claude",
   codex: "Codex",
   gemini: "Gemini",
-  opencode: "OpenCode"
+  opencode: "OpenCode",
+  grok: "Grok"
 };
+
+
 
 // OpenCode `provider.<id>.npm` options — the AI SDK package OpenCode
 // loads for the provider. `value` is the npm package written verbatim to
@@ -186,6 +193,17 @@ export const CLI_INSTALL: Record<
         command: "brew install anomalyco/tap/opencode"
       },
       { id: "paru", label: "paru", command: "paru -S opencode-bin" }
+    ]
+  },
+  grok: {
+    binary: "grok",
+    url: "https://docs.x.ai/build/overview",
+    methods: [
+      {
+        id: "curl",
+        label: "curl",
+        command: "curl -fsSL https://x.ai/cli/install.sh | bash"
+      }
     ]
   }
 };

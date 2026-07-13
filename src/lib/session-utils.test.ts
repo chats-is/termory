@@ -46,6 +46,10 @@ describe("sourceDisplayName", () => {
   it("expands Claude → Claude Code", () => {
     expect(sourceDisplayName("Claude")).toBe("Claude Code");
   });
+
+  it("expands Grok → Grok Build (mirror of CLI_APP_LABEL)", () => {
+    expect(sourceDisplayName("Grok")).toBe("Grok Build");
+  });
   it("passes other sources through verbatim", () => {
     // Gemini explicitly stays "Gemini" — we dropped "Gemini CLI".
     expect(sourceDisplayName("Gemini")).toBe("Gemini");

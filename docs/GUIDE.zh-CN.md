@@ -2,7 +2,7 @@
 
 > English version: [GUIDE.md](GUIDE.md)
 
-Termory 把你的终端 AI 编程工具——**Codex**、**Claude Code**、**Gemini CLI**、**OpenCode**——在本机已经存好的历史(会话、记忆、技能)汇总到一个窗口里浏览,无需导入或额外配置(它只是读取这些工具已有的本地数据)。除了浏览历史,它还能帮你管理并一键切换每个工具的 API 供应商——也包括 **Claude Desktop** 桌面应用:它没有终端历史,但 Termory 能以同样的方式把它在官方登录与第三方 Anthropic 兼容供应商之间切换(macOS / Windows)。安装与下载见 [README](../README.md)。
+Termory 把你的终端 AI 编程工具——**Codex**、**Claude Code**、**Gemini CLI**、**OpenCode**、**Grok Build**——在本机已经存好的历史(会话、记忆、技能)汇总到一个窗口里浏览,无需导入或额外配置(它只是读取这些工具已有的本地数据)。除了浏览历史,它还能帮你管理并一键切换每个工具的 API 供应商——也包括 **Claude Desktop** 桌面应用:它没有终端历史,但 Termory 能以同样的方式把它在官方登录与第三方 Anthropic 兼容供应商之间切换(macOS / Windows)。安装与下载见 [README](../README.md)。
 
 > 本文按应用**中文界面**编写,提到的按钮 / 标签即你在中文模式下实际看到的文案;品牌词(AI Gateway、Base URL、AI SDK、Tokens 等)按界面保留英文。
 
@@ -30,7 +30,7 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 
 ### 切换当前供应商
 
-1. 打开**供应商**页,选择应用的标签页(Claude Code / Codex / Gemini / OpenCode / Claude Desktop)。
+1. 打开**供应商**页,选择应用的标签页(Claude Code / Codex / Gemini / OpenCode / Grok Build / Claude Desktop)。
 2. 在想用的供应商上点**激活**(OpenCode 为**设为默认**)。
 3. 下次启动该 CLI 时就会使用新供应商——无需手动改配置。
 
@@ -59,6 +59,7 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 | Codex | `~/.codex/auth.json` + `~/.codex/config.toml` | `auth.json` 里的 `tokens`(即 ChatGPT 登录) |
 | Gemini CLI | `~/.gemini/.env` | `~/.gemini/oauth_creds.json` + `google_accounts.json` |
 | OpenCode | `~/.config/opencode/opencode.json` | `~/.local/share/opencode/auth.json` |
+| Grok Build | `~/.grok/config.toml` | `~/.grok/auth.json`(auth.x.ai 登录) |
 | Claude Desktop | `…/Claude{,-3p}/claude_desktop_config.json` + `Claude-3p/configLibrary/` 里的 profile | Claude Desktop 自己的 claude.ai 登录 |
 
 (Codex 是唯一一种配置与某个凭据共用一个文件的情况——即便如此 Termory 仍是**合并**:它设置 `auth_mode` 和 API 密钥,但保留你的 `tokens`,因此 ChatGPT 登录得以存活。)
@@ -67,7 +68,7 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 
 ### Claude Desktop(桌面 GUI 应用)
 
-除了四个 CLI,Termory 还能把 **Claude Desktop** 桌面应用切到第三方供应商,仅限 **macOS 和 Windows**(标签到处都显示,但只在能运行该应用的平台上才可激活)。Claude Desktop 没有终端历史,所以它只出现在 **Providers** 页和 **AI Gateway**,不出现在 会话/记忆/技能里。
+除了五个 CLI,Termory 还能把 **Claude Desktop** 桌面应用切到第三方供应商,仅限 **macOS 和 Windows**(标签到处都显示,但只在能运行该应用的平台上才可激活)。Claude Desktop 没有终端历史,所以它只出现在 **Providers** 页和 **AI Gateway**,不出现在 会话/记忆/技能里。
 
 它用的是 Claude Desktop 自带的**第三方("3P")**机制,不是环境变量:Termory 把 `deploymentMode` 翻成 `3p`,并往它的配置库写一份供应商 profile(你的 Base URL + API 密钥);"官方"则翻回 `1p` 并删除该 profile。和 CLI 有两点不同:
 
@@ -156,7 +157,7 @@ Codex 给每个会话打上创建时所用供应商的标记,而 `codex resume` 
 
 ## 2. Records(记录)
 
-**是什么。** **记录**是历史浏览器。三个面板——**会话**、**记忆**、**技能**——列出 Termory 在四个工具里找到的一切。
+**是什么。** **记录**是历史浏览器。三个面板——**会话**、**记忆**、**技能**——列出 Termory 在各个工具里找到的一切。
 
 - **会话** — 各 CLI 的聊天记录。
 - **记忆** — 本地的记忆 / 指令文件(`CLAUDE.md`、`AGENTS.md`、`GEMINI.md`、各项目的记忆文件夹等)。
@@ -164,7 +165,7 @@ Codex 给每个会话打上创建时所用供应商的标记,而 `codex resume` 
 
 ### 浏览
 
-- 侧边栏的**源过滤**(Codex / Claude / Gemini / OpenCode / 全部)会同时收窄三个面板。
+- 侧边栏的**源过滤**(Codex / Claude / Gemini / OpenCode / Grok Build / 全部)会同时收窄三个面板。
 - 侧边栏按**项目**(工作目录)分组。
 - 点任意记录即可打开;详情面板按该工具自己的方式渲染每条消息(工具调用、diff、推理等)。
 - 每条消息都有**复制**按钮(原始 markdown)和**星标**(加入收藏)。
