@@ -31,7 +31,7 @@ describe("InstallGuide", () => {
       <InstallGuide app="claude-desktop" rechecking={false} onRecheck={() => {}} />
     );
     // No tab button — the single method's command still renders.
-    expect(screen.queryByRole("button", { name: "Download" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "download" })).toBeNull();
     expect(screen.getByText("https://claude.ai/download")).toBeTruthy();
   });
 });

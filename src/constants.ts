@@ -133,7 +133,7 @@ export const CLI_INSTALL: Record<
     methods: [
       {
         id: "download",
-        label: "Download",
+        label: "download",
         command: "https://claude.ai/download"
       }
     ]
@@ -160,7 +160,7 @@ export const CLI_INSTALL: Record<
       // legitimate install method here, same pattern as claude-desktop.
       {
         id: "app",
-        label: "App",
+        label: "app",
         command: "https://chatgpt.com/download"
       }
     ]
