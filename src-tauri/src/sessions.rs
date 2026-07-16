@@ -1320,12 +1320,14 @@ pub fn delete_grok_project(project: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Grok's own per-tool display label + the rawInput arg worth showing —
-/// both read from the RECORDED stream (`_meta["x.ai/tool"].label` is the
-/// label Grok Build itself renders; closed-source, so the recording is
-/// the reference). Observed labels: read_file→Read, grep→Search,
-/// run_terminal_command→Run Command, search_replace→Edit,
-/// list_dir→List Files, todo_write→Plan.
+/// The argument text a grok tool card shows, composed the way the TUI's
+/// per-block headers do (xai-grok-pager/src/scrollback/blocks/tool/ — each
+/// branch cites its block below). Pairs with `grok_tool_label` (the TUI
+/// header verbs); both feed `grok_tool_card`. (An earlier closed-source-era
+/// note claimed the ACP `_meta["x.ai/tool"].label` was the rendered label —
+/// the open source disproved that: the pager renders block headers from the
+/// tool NAME/kind, and the `_meta` label is only the cross-harness taxonomy
+/// title.)
 fn grok_tool_arg(name: &str, input: &Value) -> String {
     let s = |k: &str| input.get(k).and_then(|v| v.as_str()).unwrap_or("");
     let first = |keys: &[&str]| {
@@ -1336,12 +1338,60 @@ fn grok_tool_arg(name: &str, input: &Value) -> String {
             .to_string()
     };
     match name {
-        "read_file" => first(&["target_file"]),
-        "grep" => first(&["pattern"]),
-        "run_terminal_command" => first(&["command"]),
-        "search_replace" => first(&["file_path"]),
-        "list_dir" => first(&["target_directory"]),
-        "todo_write" => String::new(),
+        // Read header: `Read {path} ({start}-{end})` — the TUI derives the
+        // range from the typed output (tracker.rs:1465: start = offset+1,
+        // end = offset+limit); the transcript only has the input, so the
+        // range shows when offset/limit were requested.
+        "read_file" | "hashline_read" | "read" => {
+            let path = first(&["target_file", "file_path", "path"]);
+            let offset = input.get("offset").and_then(Value::as_u64);
+            let limit = input.get("limit").and_then(Value::as_u64);
+            match (offset, limit) {
+                (o, Some(l)) => {
+                    let start = o.unwrap_or(0) + 1;
+                    format!("{path} ({start}-{})", o.unwrap_or(0) + l)
+                }
+                (Some(o), None) => format!("{path} ({}-)", o + 1),
+                (None, None) => path,
+            }
+        }
+        // Search header: `Search "{pattern}"[ in {glob}][ in {path}]`; a
+        // trivial pattern ("." / empty) promotes the glob to the search term
+        // — search.rs:225-280 (pattern quoted via `format!("{:?}")`).
+        "grep" | "hashline_grep" | "grep_files" | "glob" => {
+            let pattern = first(&["pattern", "glob_pattern"]);
+            let glob = s("glob");
+            let path = s("path");
+            let mut arg = if (pattern.is_empty() || pattern == ".") && !glob.is_empty() {
+                glob.to_string()
+            } else {
+                let mut a = format!("{pattern:?}");
+                if !glob.is_empty() {
+                    a.push_str(&format!(" in {glob}"));
+                }
+                a
+            };
+            if !path.is_empty() {
+                arg.push_str(&format!(" in {path}"));
+            }
+            arg
+        }
+        // Execute header (Label style): description when present, else the
+        // command — execute.rs:353 header_lines desc-first; the command then
+        // rides the body as a `$ …` line (see `grok_tool_card`).
+        "run_terminal_command" | "run_terminal_cmd" | "bash" => {
+            let desc = s("description");
+            if desc.is_empty() {
+                first(&["command"])
+            } else {
+                desc.to_string()
+            }
+        }
+        "search_replace" | "edit" | "hashline_edit" | "write" => {
+            first(&["file_path", "filePath", "target_file", "path"])
+        }
+        "list_dir" => first(&["target_directory", "path"]),
+        "todo_write" | "todowrite" => String::new(),
         _ => {
             // Unknown tool — a compact single-line JSON of the input,
             // mirroring the Codex generic fallback.
@@ -1355,6 +1405,73 @@ fn grok_tool_arg(name: &str, input: &Value) -> String {
             }
         }
     }
+}
+
+/// Build one grok tool card's header + optional leading body segment, shared
+/// by BOTH transcript formats (`chat_history.jsonl` tool_calls and the ACP
+/// `tool_call` updates) so the rendering matches grok's own TUI blocks:
+///
+/// * Execute with a description shows the description as the title and the
+///   command as a `$ …` line below it — execute.rs:353 (`header_lines`:
+///   "With description: … optionally `$ command` on the next line").
+/// * Edit/Creating shows the change as a diff — the TUI's edit block renders
+///   hunks (edit.rs `render_diff_lines`); the transcript carries only
+///   `old_string`/`new_string` (or the new `content` for write), so the diff
+///   is the plain -old/+new form.
+///
+/// Returns `(header_line_without_status, body_segments)`.
+fn grok_tool_card(name: &str, input: &Value) -> (String, Vec<String>) {
+    let label = grok_tool_label(name);
+    let arg = grok_tool_arg(name, input);
+    let header = if arg.is_empty() {
+        format!("**{label}**")
+    } else {
+        format!("**{label}**({})", wrap_inline_code(&arg))
+    };
+    let mut body = Vec::new();
+    let s = |k: &str| input.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    match name {
+        "run_terminal_command" | "run_terminal_cmd" | "bash" => {
+            // Description-first header → the command still shows, as the
+            // TUI's secondary shell-style line (execute.rs:469 "Secondary
+            // command line is always shell-style (`$ …`)").
+            let (desc, cmd) = (s("description"), s("command"));
+            if !desc.is_empty() && !cmd.is_empty() {
+                body.push(format!("````\n$ {}\n````", cmd.trim_end()));
+            }
+        }
+        "search_replace" | "edit" | "hashline_edit" => {
+            let (old, new) = (s("old_string"), s("new_string"));
+            if !old.is_empty() || !new.is_empty() {
+                let mut diff = String::new();
+                for l in old.lines() {
+                    diff.push_str(&format!("-{l}\n"));
+                }
+                for l in new.lines() {
+                    diff.push_str(&format!("+{l}\n"));
+                }
+                body.push(format!("```diff\n{}\n```", diff.trim_end()));
+            }
+        }
+        "write" => {
+            // The TUI renders a write as all-insert hunks (tracker.rs:1504
+            // Edit-kind block via `extract_edit_hunks`).
+            let content = input
+                .get("content")
+                .or_else(|| input.get("file_text"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !content.is_empty() {
+                let mut diff = String::new();
+                for l in content.lines() {
+                    diff.push_str(&format!("+{l}\n"));
+                }
+                body.push(format!("```diff\n{}\n```", diff.trim_end()));
+            }
+        }
+        _ => {}
+    }
+    (header, body)
 }
 
 /// Pull the human-readable body out of a Grok `tool_call_update`
@@ -1400,52 +1517,57 @@ fn grok_output_text(raw: &Value) -> Option<String> {
 /// labels grok's own TUI renders (observed on real data). Falls back to the
 /// raw name for anything unmapped.
 fn grok_tool_label(name: &str) -> String {
-    // NAME → display label, source-verified: each wire name (ToolId::new
-    // registrations + claude_alias.rs grok columns across the grok_build /
-    // concise / hashline / codex / opencode toolsets) maps to its ToolKind,
-    // whose label is `ToolKind::presentation_name()`
-    // (xai-grok-tools/src/tool_taxonomy.rs:37 — "harness-independent display
-    // label ... `read_file` and `Read` → `Read`"). Unknown names fall back to
-    // the raw name (more informative than the taxonomy's generic "Tool").
+    // NAME → the verb grok's OWN TUI renders, verified against the pager's
+    // per-tool blocks (xai-grok-pager/src/scrollback/blocks/tool/ + the
+    // block-construction dispatch in acp/tracker.rs `tool_call_to_block`).
+    // NOTE the pager does NOT render the `_meta["x.ai/tool"].label`
+    // (taxonomy `presentation_name()` — "Run Command"/"Web Fetch"/"List
+    // Files") in the transcript; each block has its own header verb, and
+    // that is what TUI parity means here (CLAUDE.md LOCKED rule: the TUI
+    // render wins over docs/metadata). Tools without a dedicated block
+    // render as OtherToolCallBlock titled by the taxonomy label, so those
+    // keep the taxonomy name. Unknown names fall back to the raw name.
     match name {
-        // Read
+        // ReadToolCallBlock: "Read " prefix — read.rs:184
         "read_file" | "hashline_read" | "read" => "Read",
-        // Edit
+        // EditToolCallBlock: default prefix "Edit " — edit.rs:729
         "search_replace" | "edit" | "hashline_edit" | "apply_patch" => "Edit",
-        // Write
-        "write" => "Write",
-        // Execute
-        "run_terminal_command" | "run_terminal_cmd" | "bash" => "Run Command",
-        // Search
-        "grep" | "hashline_grep" | "grep_files" => "Search",
-        // List
-        "list_dir" | "glob" => "List Files",
-        // Lsp
-        "lsp" => "Code Intelligence",
-        // Plan
-        "todo_write" | "todowrite" => "Plan",
-        // WebSearch / WebFetch
+        // The write tool renders through the SAME edit block with prefix
+        // "Creating " — tracker.rs:1530 `with_prefix("Creating ")`.
+        "write" => "Creating",
+        // ExecuteToolCallBlock, default Label style: "Run " prefix —
+        // execute.rs:306 label_title_line; default per
+        // pager-render/appearance/config.rs:699 (header_style: Label).
+        "run_terminal_command" | "run_terminal_cmd" | "bash" => "Run",
+        // SearchToolCallBlock: "Search " — search.rs:258
+        "grep" | "hashline_grep" | "grep_files" | "glob" => "Search",
+        // ListDirToolCallBlock: "List " — list_dir.rs:116
+        "list_dir" => "List",
+        // WebFetchToolCallBlock: "Fetch " — web_fetch.rs:128 (NOT the
+        // taxonomy's "Web Fetch")
+        "web_fetch" => "Fetch",
+        // WebSearchToolCallBlock: "Web Search " — web_search.rs:114
         "web_search" => "Web Search",
-        "web_fetch" => "Web Fetch",
-        // AskUser / plan-mode
+        // MemorySearchToolCallBlock: "Memory Search " — memory_search.rs:88
+        "memory_search" => "Memory Search",
+        // Skill: OtherToolCallBlock labelled "Skill[: name]" — tracker.rs:1841
+        "skill" => "Skill",
+        // ── No dedicated block: OtherToolCallBlock shows the tool's title
+        //    (the taxonomy label) — tracker.rs:1830 + tool_taxonomy.rs:37.
+        "lsp" => "Code Intelligence",
+        "todo_write" | "todowrite" => "Plan",
         "ask_user_question" => "Ask User",
         "enter_plan_mode" => "Enter Plan Mode",
         "exit_plan_mode" => "Exit Plan Mode",
-        // Task (subagents)
         "task" | "spawn_subagent" => "Subagent",
-        // Background tasks
         "get_task_output" | "get_terminal_command_output" | "get_command_or_subagent_output" => {
             "Background Task"
         }
         "wait_tasks" => "Wait for Tasks",
         "kill_task" | "kill_terminal_command" | "kill_command_or_subagent" => "Kill Task",
-        // Skill / memory / tool discovery
-        "skill" => "Skill",
-        "memory_search" => "Memory Search",
         "memory_get" => "Memory Read",
         "search_tool" => "Search Tools",
         "use_tool" => "Use Tool",
-        // Misc grok_build tools
         "monitor" => "Monitor",
         "image_gen" | "image_edit" => "Generate Image",
         "video_gen" | "image_to_video" | "reference_to_video" => "Generate Video",
@@ -1475,6 +1597,92 @@ fn grok_chat_content_text(content: Option<&Value>) -> String {
             .join(""),
         _ => String::new(),
     }
+}
+
+/// Split a grok `chat_history.jsonl` user text into its top-level
+/// `<tag>…</tag>` blocks plus plain segments. The LLM-facing prompt wraps
+/// content in XML-ish envelopes the TUI never displays raw: the real query
+/// rides `<user_query>…</user_query>` (the pager extracts the INNER text —
+/// app/effects/helpers.rs:376), the environment preamble is `<user_info>…`
+/// (never shown; the "marker-less non-synthetic" item, conversation.rs:2513),
+/// and runtime injections carry `<system-reminder>…` / `<skill_information>…`.
+/// Returns `(Some(tag), inner)` per recognized block and `(None, text)` for
+/// content outside any block.
+fn grok_split_tag_blocks(text: &str) -> Vec<(Option<String>, String)> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    // Scan offset within `rest`: a '<' that does NOT open a complete
+    // `<tag>…</tag>` block (math like `a<b`, an unterminated `<script>`)
+    // is ordinary text — the scan moves past it WITHOUT splitting, so plain
+    // segments stay contiguous (splitting them would corrupt the user's own
+    // text when the display joins parts with blank lines).
+    let mut from = 0usize;
+    while let Some(rel) = rest[from..].find('<') {
+        let start = from + rel;
+        let after = &rest[start + 1..];
+        // A tag name: alnum/_/- up to '>'; anything else is plain text.
+        let Some(gt) = after.find('>') else { break };
+        let name = &after[..gt];
+        let name_ok = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !name_ok {
+            from = start + 1;
+            continue;
+        }
+        let close = format!("</{name}>");
+        let body_start = start + 1 + gt + 1;
+        let Some(end) = rest[body_start..].find(&close) else {
+            // Unterminated — ordinary text; keep scanning after the '<'.
+            from = start + 1;
+            continue;
+        };
+        if start > 0 {
+            out.push((None, rest[..start].to_string()));
+        }
+        let inner = rest[body_start..body_start + end].trim().to_string();
+        out.push((Some(name.to_string()), inner));
+        rest = &rest[body_start + end + close.len()..];
+        from = 0;
+    }
+    if !rest.trim().is_empty() {
+        out.push((None, rest.to_string()));
+    }
+    // Drop whitespace-only plain segments (the '\n\n' between blocks).
+    out.retain(|(tag, s)| tag.is_some() || !s.trim().is_empty());
+    out
+}
+
+/// Render a grok user message the way the TUI presents it: the
+/// `<user_query>` inner text is the message (helpers.rs:376), every other
+/// envelope (`user_info` / `system-reminder` / `skill_information` / …)
+/// becomes an italic `*[tag]*` notice + unwrapped content — the TUI hides
+/// these entirely, Termory surfaces them per the never-hide rule (LOCKED
+/// rule 7). Returns `(text, is_injected)` — `is_injected` when the whole
+/// message is runtime-injected envelope content (no real user text), so the
+/// caller can use the "system" role like the Codex `<environment_context>` /
+/// Gemini `<session_context>` handling.
+fn grok_user_display_text(text: &str) -> (String, bool) {
+    let blocks = grok_split_tag_blocks(text);
+    if blocks.is_empty() {
+        return (text.trim().to_string(), false);
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut has_real_text = false;
+    for (tag, inner) in blocks {
+        match tag.as_deref() {
+            // The actual typed query — shown plain.
+            Some("user_query") | None => {
+                if !inner.trim().is_empty() {
+                    parts.push(inner.trim().to_string());
+                    has_real_text = true;
+                }
+            }
+            Some(t) => parts.push(format!("*[{t}]*\n\n{inner}")),
+        }
+    }
+    (parts.join("\n\n"), !has_real_text)
 }
 
 /// Italic notice for a `{type:"image", url}` content part. Data URIs (base64
@@ -1655,15 +1863,44 @@ fn parse_grok_chat_history(path: &Path) -> Result<SessionDetail, Box<dyn Error>>
                 }
             }
             "user" => {
-                let text = grok_chat_content_text(msg.get("content"));
-                if !text.trim().is_empty() {
-                    messages.push(SessionMessage {
-                        role: "user".to_string(),
-                        text,
-                        kind: "text".to_string(),
-                        ..Default::default()
-                    });
+                let raw = grok_chat_content_text(msg.get("content"));
+                if raw.trim().is_empty() {
+                    continue;
                 }
+                // Unwrap the LLM-prompt envelopes the TUI never shows raw
+                // (`grok_user_display_text`): `<user_query>` inner text IS the
+                // message; other tags become `*[tag]*` notices. A synthetic
+                // runtime injection (`synthetic_reason`, conversation.rs:77 —
+                // never real typed input) or an all-envelope message (the
+                // `<user_info>` preamble) uses the "system" role, matching the
+                // Codex `<environment_context>` / Gemini `<session_context>`
+                // treatment.
+                let synthetic = msg
+                    .get("synthetic_reason")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let (mut text, injected) = grok_user_display_text(&raw);
+                if text.trim().is_empty() {
+                    continue;
+                }
+                if let Some(reason) = &synthetic {
+                    // Label plain synthetic text (auto_continue etc.) that
+                    // didn't come with its own envelope tag.
+                    if !text.starts_with("*[") {
+                        text = format!("*[{reason}]*\n\n{text}");
+                    }
+                }
+                let role = if synthetic.is_some() || injected {
+                    "system"
+                } else {
+                    "user"
+                };
+                messages.push(SessionMessage {
+                    role: role.to_string(),
+                    text,
+                    kind: "text".to_string(),
+                    ..Default::default()
+                });
             }
             "reasoning" => {
                 let text = msg
@@ -1705,13 +1942,11 @@ fn parse_grok_chat_history(path: &Path) -> Result<SessionDetail, Box<dyn Error>>
                             .and_then(|v| v.as_str())
                             .and_then(|s| serde_json::from_str(s).ok())
                             .unwrap_or(Value::Null);
-                        let label = grok_tool_label(name);
-                        let arg = grok_tool_arg(name, &args);
-                        let header = if arg.is_empty() {
-                            format!("⏺ **{label}**")
-                        } else {
-                            format!("⏺ **{label}**({})", wrap_inline_code(&arg))
-                        };
+                        let (header, body) = grok_tool_card(name, &args);
+                        let mut text = format!("⏺ {header}");
+                        for seg in body {
+                            text.push_str(&format!("\n\n{seg}"));
+                        }
                         if !id.is_empty() {
                             tool_index.insert(id.to_string(), messages.len());
                         }
@@ -1720,7 +1955,7 @@ fn parse_grok_chat_history(path: &Path) -> Result<SessionDetail, Box<dyn Error>>
                             // Codex / the ACP grok path) so the tool color bar
                             // applies — not the assistant bar.
                             role: "tool".to_string(),
-                            text: header,
+                            text,
                             kind: "tool_use".to_string(),
                             tool_use_id: (!id.is_empty()).then(|| id.to_string()),
                             ..Default::default()
@@ -1782,32 +2017,67 @@ fn parse_grok_chat_history(path: &Path) -> Result<SessionDetail, Box<dyn Error>>
                     .get("tool_type")
                     .and_then(Value::as_str)
                     .unwrap_or("backend_tool");
-                // Verb per the pager's blocks: WebSearchToolCallBlock renders
-                // "Web Search" (X search shares the block with a label
-                // override); code interpreter gets its taxonomy-style label.
+                // Verb + detail per the pager's backend-search handling
+                // (acp/tracker.rs:1534-1670): WebSearchToolCallBlock renders
+                // "Web Search {query}" with per-action queries, X search the
+                // same block labelled "X Search" with `{short_type}({q})`.
+                let mut citations: Vec<String> = Vec::new();
                 let (label, detail) = match tool_type {
                     "web_search" => {
-                        // rs::WebSearchToolCall carries an `action` like
-                        // Codex's web_search: query / url / pattern.
+                        // Per-action query text — tracker.rs:1594-1636:
+                        // search → query; open_page → `open {url}`;
+                        // find → `find "{pattern}"`.
                         let action = kind.get("action").cloned().unwrap_or(Value::Null);
-                        let detail = action
-                            .get("query")
-                            .or_else(|| action.get("url"))
-                            .or_else(|| action.get("pattern"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
+                        let a = |k: &str| {
+                            action
+                                .get(k)
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string()
+                        };
+                        let detail = match action.get("type").and_then(Value::as_str).unwrap_or("")
+                        {
+                            "open_page" => format!("open {}", a("url")),
+                            "find" | "find_in_page" => format!("find {:?}", a("pattern")),
+                            _ => a("query"),
+                        };
+                        // Source URLs → numbered citations list, the block's
+                        // content body — tracker.rs:1641-1647.
+                        if let Some(arr) = action.get("sources").and_then(Value::as_array) {
+                            citations = arr
+                                .iter()
+                                .filter_map(|s| s.get("url").and_then(Value::as_str))
+                                .map(str::to_string)
+                                .collect();
+                        }
                         ("Web Search", detail)
                     }
                     "x_search" => {
-                        let detail = kind
+                        // `{short_type}({query})` — tracker.rs:1570-1590:
+                        // x_keyword_search→keyword, x_semantic_search→semantic,
+                        // x_user_search→users, x_thread_fetch→thread.
+                        let tool_name = kind
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("x_search");
+                        let short = match tool_name {
+                            "x_keyword_search" => "keyword",
+                            "x_semantic_search" => "semantic",
+                            "x_user_search" => "users",
+                            "x_thread_fetch" => "thread",
+                            other => other,
+                        };
+                        let query = kind
                             .get("input")
-                            .map(|v| {
-                                v.as_str()
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| v.to_string())
-                            })
-                            .unwrap_or_default();
+                            .and_then(Value::as_str)
+                            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                            .and_then(|v| {
+                                v.get("query").and_then(Value::as_str).map(str::to_string)
+                            });
+                        let detail = match query {
+                            Some(q) => format!("{short}({q})"),
+                            None => short.to_string(),
+                        };
                         ("X Search", detail)
                     }
                     "code_interpreter" => {
@@ -1820,11 +2090,19 @@ fn parse_grok_chat_history(path: &Path) -> Result<SessionDetail, Box<dyn Error>>
                     }
                     other => (other, String::new()),
                 };
-                let text = if detail.trim().is_empty() {
+                let mut text = if detail.trim().is_empty() {
                     format!("⏺ **{label}**")
                 } else {
                     format!("⏺ **{label}**({})", wrap_inline_code(detail.trim()))
                 };
+                if !citations.is_empty() {
+                    let list: Vec<String> = citations
+                        .iter()
+                        .enumerate()
+                        .map(|(i, url)| format!("{}. {url}", i + 1))
+                        .collect();
+                    text.push_str(&format!("\n\n````\n{}\n````", list.join("\n")));
+                }
                 messages.push(SessionMessage {
                     role: "tool".to_string(),
                     text,
@@ -1921,22 +2199,33 @@ fn parse_grok_session(path: &Path) -> Result<SessionDetail, Box<dyn Error>> {
                     .and_then(|v| v.as_str())
                     .or_else(|| update.get("title").and_then(|v| v.as_str()))
                     .unwrap_or("tool");
-                let label = meta
-                    .and_then(|m| m.get("label"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(name);
-                let arg = grok_tool_arg(name, update.get("rawInput").unwrap_or(&Value::Null));
-                let header = if arg.is_empty() {
-                    format!("**{label}**")
-                } else {
-                    format!("**{label}**({})", wrap_inline_code(&arg))
-                };
+                let input = update.get("rawInput").unwrap_or(&Value::Null);
+                // TUI-verb card first (`grok_tool_card` — the pager renders
+                // per-block headers, NOT the `_meta` label). For a name our
+                // table doesn't know, prefer the recorded `_meta` label over
+                // the raw name (it's the taxonomy title the pager's
+                // OtherToolCallBlock would show).
+                let (mut header, body) = grok_tool_card(name, input);
+                if header.starts_with(&format!("**{name}**")) {
+                    if let Some(label) = meta
+                        .and_then(|m| m.get("label"))
+                        .and_then(|v| v.as_str())
+                        .filter(|l| *l != name)
+                    {
+                        header =
+                            header.replacen(&format!("**{name}**"), &format!("**{label}**"), 1);
+                    }
+                }
+                let mut text = format!("⏺ {header}");
+                for seg in body {
+                    text.push_str(&format!("\n\n{seg}"));
+                }
                 if let Some(id) = update.get("toolCallId").and_then(|v| v.as_str()) {
                     tool_index.insert(id.to_string(), messages.len());
                 }
                 messages.push(SessionMessage {
                     role: "tool".to_string(),
-                    text: format!("⏺ {header}"),
+                    text,
                     timestamp: None,
                     kind: "tool_use".to_string(),
                     ..Default::default()
@@ -3014,10 +3303,11 @@ fn scan_skills(project_cwds: &HashSet<String>) -> Result<Vec<AppSession>, Box<dy
     Ok(sessions)
 }
 
-/// Grok Build skills — `~/.grok/skills/<name>/SKILL.md` (verified on the
-/// real install, grok 0.2.93; closed-source, the on-disk layout is the
-/// reference). Only the global dir is scanned — no per-project skills
-/// convention has been observed for Grok Build yet.
+/// Grok Build skills — `<grok-home>/skills/<name>/SKILL.md` + the cwd-level
+/// `.grok/skills` (source: `collect_skill_config_dirs`,
+/// xai-grok-agent/src/prompt/skills.rs — grok also walks cwd→git-root and
+/// reads `.agents`/`.claude`/`.cursor` dirs; those are covered by the other
+/// scanners' tags, see the Skills table in CLAUDE.md).
 fn scan_grok_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
     let mut sessions = Vec::new();
     // Global: <grok-home>/skills ($GROK_HOME-aware). Official discovery
@@ -17860,17 +18150,152 @@ mod tests {
     }
 
     #[test]
-    fn grok_tool_label_matches_official_presentation_names() {
-        // Spot-check the taxonomy mapping (tool_taxonomy.rs presentation_name):
-        // the web_fetch label is "Web Fetch" (NOT "Fetch"), write is `write`,
-        // and multi-toolset aliases collapse to one label.
+    fn grok_user_envelopes_unwrap_like_the_tui() {
+        // <user_query> inner text IS the message (helpers.rs:376).
+        let (t, injected) = grok_user_display_text("<user_query>\nfix the bug\n</user_query>");
+        assert_eq!(t, "fix the bug");
+        assert!(!injected);
+
+        // The <user_info> preamble is all-envelope → notice + injected
+        // ("marker-less non-synthetic", conversation.rs:2513).
+        let (t, injected) =
+            grok_user_display_text("<user_info>\nOS Version: macos\nShell: /bin/zsh\n</user_info>");
+        assert_eq!(t, "*[user_info]*\n\nOS Version: macos\nShell: /bin/zsh");
+        assert!(injected);
+
+        // Mixed: reminder envelope + real query → notice + plain, NOT injected.
+        let (t, injected) = grok_user_display_text(
+            "<system-reminder>\nskills are available\n</system-reminder>\n\n<user_query>hello</user_query>",
+        );
+        assert_eq!(t, "*[system-reminder]*\n\nskills are available\n\nhello");
+        assert!(!injected);
+
+        // Plain text (the ACP stream's raw form) passes through untouched.
+        let (t, injected) = grok_user_display_text("just a question");
+        assert_eq!(t, "just a question");
+        assert!(!injected);
+
+        // A '<' that isn't a wrapper tag must NOT split/alter the text —
+        // math comparisons and unterminated tag-ish content stay verbatim.
+        let (t, _) = grok_user_display_text("explain why a<b but x>y here");
+        assert_eq!(t, "explain why a<b but x>y here");
+        let (t, _) = grok_user_display_text("run <script> tags in html");
+        assert_eq!(t, "run <script> tags in html");
+        // …while a real envelope AFTER such text still parses.
+        let (t, _) = grok_user_display_text("a<b<user_query>show me</user_query>");
+        assert_eq!(t, "a<b\n\nshow me");
+
+        // Parse-level: synthetic system_reminder turns + the preamble render
+        // as SYSTEM notices; the wrapped query renders as the plain user text.
+        let dir = std::env::temp_dir().join(format!(
+            "termory-grok-env-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let sess = dir.join("%2Fwork").join("uuid-env");
+        fs::create_dir_all(&sess).unwrap();
+        fs::write(
+            sess.join("summary.json"),
+            r#"{"info":{"id":"uuid-env","cwd":"/work"},"session_summary":"t","num_messages":1}"#,
+        )
+        .unwrap();
+        let chat = [
+            r#"{"type":"user","content":[{"type":"text","text":"<user_info>\nOS Version: macos\n</user_info>"}]}"#,
+            r#"{"type":"user","content":[{"type":"text","text":"<system-reminder>\nskills…\n</system-reminder>"}],"synthetic_reason":"system_reminder"}"#,
+            r#"{"type":"user","content":[{"type":"text","text":"<user_query>\nhello\n</user_query>"}]}"#,
+            r#"{"type":"assistant","content":"Hello."}"#,
+        ]
+        .join("\n");
+        fs::write(sess.join("chat_history.jsonl"), chat).unwrap();
+        let detail = parse_grok_session(&sess.join("chat_history.jsonl")).unwrap();
+        let rows: Vec<String> = detail
+            .messages
+            .iter()
+            .map(|m| format!("[{}] {}", m.role, m.text.replace('\n', "¶")))
+            .collect();
+        assert_eq!(rows[0], "[system] *[user_info]*¶¶OS Version: macos");
+        assert_eq!(rows[1], "[system] *[system-reminder]*¶¶skills…");
+        assert_eq!(rows[2], "[user] hello");
+        assert_eq!(rows[3], "[assistant] Hello.");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn grok_tool_card_matches_tui_block_shapes() {
+        // Execute with a description: description-first header + the command
+        // as the secondary `$ …` line (execute.rs:353 header_lines).
+        let (h, b) = grok_tool_card(
+            "run_terminal_command",
+            &serde_json::json!({"command": "cargo test", "description": "Run the tests"}),
+        );
+        assert_eq!(h, "**Run**(`Run the tests`)");
+        assert_eq!(b, vec!["````\n$ cargo test\n````".to_string()]);
+
+        // Execute without a description: command IS the title, no `$` body.
+        let (h, b) = grok_tool_card(
+            "run_terminal_command",
+            &serde_json::json!({"command": "ls -la"}),
+        );
+        assert_eq!(h, "**Run**(`ls -la`)");
+        assert!(b.is_empty());
+
+        // Edit: old/new strings render as the diff the TUI's edit block
+        // shows as hunks (edit.rs render_diff_lines).
+        let (h, b) = grok_tool_card(
+            "search_replace",
+            &serde_json::json!({"file_path": "src/a.rs", "old_string": "let x = 1;", "new_string": "let x = 2;"}),
+        );
+        assert_eq!(h, "**Edit**(`src/a.rs`)");
+        assert_eq!(
+            b,
+            vec!["```diff\n-let x = 1;\n+let x = 2;\n```".to_string()]
+        );
+
+        // Write ("Creating" — tracker.rs:1530): all-insert diff.
+        let (h, b) = grok_tool_card(
+            "write",
+            &serde_json::json!({"file_path": "new.rs", "content": "fn a() {}\nfn b() {}"}),
+        );
+        assert_eq!(h, "**Creating**(`new.rs`)");
+        assert_eq!(b, vec!["```diff\n+fn a() {}\n+fn b() {}\n```".to_string()]);
+
+        // Search: quoted pattern + glob + path scopes (search.rs:225-280).
+        let (h, _) = grok_tool_card(
+            "grep",
+            &serde_json::json!({"pattern": "TODO", "glob": "*.rs", "path": "src"}),
+        );
+        assert_eq!(h, "**Search**(`\"TODO\" in *.rs in src`)");
+        // Trivial pattern promotes the glob to the search term (case 1).
+        let (h, _) = grok_tool_card("grep", &serde_json::json!({"pattern": ".", "glob": "*.md"}));
+        assert_eq!(h, "**Search**(`*.md`)");
+
+        // Read with offset+limit: `(start-end)` — tracker.rs:1465.
+        let (h, _) = grok_tool_card(
+            "read_file",
+            &serde_json::json!({"target_file": "src/a.rs", "offset": 10, "limit": 40}),
+        );
+        assert_eq!(h, "**Read**(`src/a.rs (11-50)`)");
+    }
+
+    #[test]
+    fn grok_tool_label_matches_official_tui_headers() {
+        // The verbs are the pager's per-block header prefixes (the TUI
+        // render — NOT the taxonomy presentation_name the _meta label
+        // carries): Run (execute.rs:306), Fetch (web_fetch.rs:128), List
+        // (list_dir.rs:116), Creating for write (tracker.rs:1530), Edit
+        // (edit.rs:729). Block-less tools keep their taxonomy title
+        // (OtherToolCallBlock shows it — tracker.rs:1830).
         for (name, label) in [
-            ("web_fetch", "Web Fetch"),
-            ("write", "Write"),
-            ("run_terminal_cmd", "Run Command"),
-            ("run_terminal_command", "Run Command"),
+            ("web_fetch", "Fetch"),
+            ("write", "Creating"),
+            ("run_terminal_cmd", "Run"),
+            ("run_terminal_command", "Run"),
+            ("bash", "Run"),
+            ("list_dir", "List"),
             ("hashline_edit", "Edit"),
-            ("glob", "List Files"),
+            ("glob", "Search"),
             ("lsp", "Code Intelligence"),
             ("task", "Subagent"),
             ("spawn_subagent", "Subagent"),
@@ -18119,11 +18544,11 @@ mod tests {
         assert_eq!(texts[1], "> *Look first*"); // reasoning blockquote
         assert_eq!(
             texts[2],
-            "⏺ **Read**(`src/a.rs`)\n\n````\nfn main() {}\n````"
+            "⏺ **Read**(`src/a.rs (1-100)`)\n\n````\nfn main() {}\n````"
         );
         assert_eq!(
             texts[3],
-            "✗ **Run Command**(`cargo test`)\n\n````\nerror: it broke\n````"
+            "✗ **Run**(`cargo test`)\n\n````\nerror: it broke\n````"
         );
         assert_eq!(detail.messages[3].kind, "tool_error");
         assert_eq!(texts[4], "**Plan**\n- [x] step one\n- [~] step two");

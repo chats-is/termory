@@ -131,16 +131,25 @@ function QuotaRing({ utilization }: { utilization: number }) {
 }
 
 function QuotaTierItem({
+  app,
   name,
   utilization,
   resetsAt
 }: {
+  app: CliApp;
   name: string;
   utilization: number;
   resetsAt?: string;
 }) {
   const t = useT();
-  const labels = tierLabels(name, t);
+  let labels = tierLabels(name, t);
+  // Grok reuses the seven_day/30_day window ids (so the tray "W"/"M"
+  // abbreviations and ring shorts apply), but the Claude-specific FULL
+  // labels ("Weekly (all models)") misdescribe grok's CREDIT window —
+  // the tooltip uses the plain short form there.
+  if (app === "grok") {
+    labels = { short: labels.short, full: labels.short };
+  }
   // Visible subline stays compact (no timezone); the hover tooltip
   // carries the full form with the IANA zone name.
   const notUsed =
@@ -461,6 +470,7 @@ export function OfficialAccountsSection({
                   quota!.tiers.map((tier) => (
                     <QuotaTierItem
                       key={tier.name}
+                      app={app}
                       name={tier.name}
                       utilization={tier.utilization}
                       resetsAt={tier.resetsAt}

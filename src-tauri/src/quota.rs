@@ -20,7 +20,7 @@ use crate::providers::CliApp;
 /// consumer (tray submenu, tray refresh trigger) keys off. Add the
 /// CLI here when its `fetch_quota` arm lands. Frontend mirror:
 /// `QUOTA_SUPPORTED` in ProvidersPage.tsx.
-pub const SUPPORTED: &[CliApp] = &[CliApp::Claude, CliApp::Codex, CliApp::Gemini];
+pub const SUPPORTED: &[CliApp] = &[CliApp::Claude, CliApp::Codex, CliApp::Gemini, CliApp::Grok];
 
 pub fn supports_quota(app: CliApp) -> bool {
     SUPPORTED.contains(&app)
@@ -53,11 +53,17 @@ pub fn credential_cli_for_path(path: &std::path::Path) -> Option<CliApp> {
         Some(v) if !v.is_empty() => path.parent() == Some(std::path::Path::new(&v)),
         _ => false,
     };
+    // A relocated `GROK_HOME` — same story as CODEX_HOME above.
+    let parent_is_grok_home = || match std::env::var_os("GROK_HOME") {
+        Some(v) if !v.is_empty() => path.parent() == Some(std::path::Path::new(&v)),
+        _ => false,
+    };
     match path.file_name().and_then(|n| n.to_str())? {
         ".credentials.json" => Some(CliApp::Claude),
         // The parent check excludes OpenCode's unrelated
         // ~/.local/share/opencode/auth.json.
         "auth.json" if parent_is(".codex") || parent_is_codex_home() => Some(CliApp::Codex),
+        "auth.json" if parent_is(".grok") || parent_is_grok_home() => Some(CliApp::Grok),
         "oauth_creds.json" if parent_is(".gemini") => Some(CliApp::Gemini),
         _ => None,
     }
@@ -1250,6 +1256,219 @@ async fn query_gemini_quota(access_token: &str) -> SubscriptionQuota {
 }
 
 // ===================================================================
+// Grok Build credentials + billing
+// ===================================================================
+//
+// Grok Build is CREDIT-based. The TUI's `/usage` data comes from the
+// `x.ai/billing` extension (grok-build
+// `xai-grok-shell/src/extensions/billing.rs` — open source), whose
+// `handle_get_billing` fetches `GET {proxy}/billing?format=credits` off the
+// CLI chat proxy (`CLI_CHAT_PROXY_BASE_URL_DEFAULT =
+// "https://cli-chat-proxy.grok.com/v1"`, agent/config.rs:46) with the
+// auth.json bearer + `X-XAI-Token-Auth: xai-grok-cli` (auth/config.rs:288)
+// + `x-userid`. VERIFIED live against a real account (2026-07-16): 200 with
+// `config.currentPeriod` (weekly window) / `creditUsagePercent` /
+// on-demand / prepaid fields.
+//
+// The stored `key` is a SHORT-LIVED (~1 day) OIDC access token.
+// **Termory deliberately does NOT refresh it** (LOCKED — learned the hard
+// way, 2026-07-16): auth.x.ai issues ROTATING refresh tokens with reuse
+// detection — a refresh both rotates the RT server-side and, on reuse of a
+// stale RT, revokes the whole token family. grok itself persists the
+// rotated RT back to auth.json under a file lock (manager.rs:64 "hold the
+// file lock across the IdP call to prevent refresh-token races"); a second
+// client that refreshes WITHOUT persisting (Termory's never-write-
+// credentials rule) leaves grok holding a dead RT and logs the user out —
+// this was verified by breaking a real login during development. (An
+// earlier probe's "the old RT stays valid — reusable" observation was a
+// rotation GRACE WINDOW, not reusability.) So: use the stored access token
+// while it's valid; once expired, report Expired — running grok refreshes
+// its own login and rewrites auth.json, and the quota comes back.
+
+/// The fields Termory needs from one grok auth.json login entry.
+struct GrokAuthEntry {
+    /// The stored access token (`key`) — may be expired.
+    key: String,
+    user_id: String,
+}
+
+fn grok_auth_path() -> Option<PathBuf> {
+    crate::providers::grok_home_dir().map(|h| h.join("auth.json"))
+}
+
+/// Unix-seconds `exp` claim from a JWT (no signature verification —
+/// local staleness check only, the API remains the authority).
+fn jwt_exp_seconds(jwt: &str) -> Option<i64> {
+    use base64::Engine;
+    let payload = jwt.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    claims.get("exp")?.as_i64()
+}
+
+fn read_grok_credentials() -> (Option<GrokAuthEntry>, CredentialStatus, Option<String>) {
+    let Some(path) = grok_auth_path() else {
+        return (None, CredentialStatus::NotFound, None);
+    };
+    if !path.exists() {
+        return (None, CredentialStatus::NotFound, None);
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(err) => {
+            return (
+                None,
+                CredentialStatus::ParseError,
+                Some(format!("Failed to read Grok credentials: {err}")),
+            );
+        }
+    };
+    parse_grok_credentials(&content)
+}
+
+/// auth.json is a map keyed by auth scope (`{issuer}::{client_id}`,
+/// auth/config.rs:213); each value is a `GrokAuth` (auth/model.rs:40).
+/// Take the first entry that carries a `key` + `user_id`.
+fn parse_grok_credentials(
+    content: &str,
+) -> (Option<GrokAuthEntry>, CredentialStatus, Option<String>) {
+    let parsed: serde_json::Value = match serde_json::from_str(content) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                None,
+                CredentialStatus::ParseError,
+                Some(format!("Failed to parse Grok credentials: {err}")),
+            );
+        }
+    };
+    let Some(map) = parsed.as_object() else {
+        return (None, CredentialStatus::NotFound, None);
+    };
+    let s = |v: &serde_json::Value, k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .filter(|x| !x.is_empty())
+            .map(String::from)
+    };
+    for entry in map.values() {
+        let (Some(key), Some(user_id)) = (s(entry, "key"), s(entry, "user_id")) else {
+            continue;
+        };
+        // Local staleness check on the JWT exp (60s slack). The scaffold
+        // still tries an Expired token against the API; the refresh in the
+        // fetch arm normally replaces it first.
+        let status = match jwt_exp_seconds(&key) {
+            Some(exp)
+                if exp
+                    <= (SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64)
+                        + 60 =>
+            {
+                CredentialStatus::Expired
+            }
+            _ => CredentialStatus::Valid,
+        };
+        return (Some(GrokAuthEntry { key, user_id }), status, None);
+    }
+    (None, CredentialStatus::NotFound, None)
+}
+
+/// `x-grok-client-version` the billing proxy expects — a known-good CLI
+/// version (the live probe was verified with it).
+const GROK_CLIENT_VERSION: &str = "0.2.99";
+
+/// Map the billing response to quota tiers + extra usage.
+/// `config.creditUsagePercent` is the included-credit utilization
+/// (0–100; proto3 JSON omits zero → missing means 0). The usage window
+/// is `config.currentPeriod` (`USAGE_PERIOD_TYPE_WEEKLY`/`_MONTHLY`,
+/// billing.rs:37) with the deprecated `billingPeriodEnd` as fallback —
+/// mapped onto the existing `seven_day`/`30_day` tier ids so the tray
+/// ("W"/"M") and card labels apply. On-demand credits surface as
+/// `ExtraUsage` when a cap is configured.
+fn parse_grok_billing(body: &serde_json::Value) -> (Vec<QuotaTier>, Option<ExtraUsage>) {
+    let config = body.get("config").cloned().unwrap_or(serde_json::json!({}));
+    let utilization = config
+        .get("creditUsagePercent")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let period_type = config
+        .pointer("/currentPeriod/type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let name = if period_type.contains("MONTHLY") {
+        "30_day"
+    } else {
+        // Weekly is the observed consumer default; unspecified enums are
+        // omitted by proto3 JSON, so missing ⇒ weekly.
+        "seven_day"
+    };
+    let resets_at = config
+        .pointer("/currentPeriod/end")
+        .or_else(|| config.get("billingPeriodEnd"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let tiers = vec![QuotaTier {
+        name: name.to_string(),
+        utilization,
+        resets_at,
+    }];
+    // On-demand (pay-per-use overflow) — Cent values (USD cents, `val`
+    // omitted when 0).
+    let cents = |k: &str| {
+        config
+            .get(k)
+            .and_then(|v| v.get("val"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+    };
+    let cap = cents("onDemandCap");
+    let used = cents("onDemandUsed");
+    let extra = (cap > 0).then(|| ExtraUsage {
+        is_enabled: true,
+        monthly_limit: Some(cap as f64 / 100.0),
+        used_credits: Some(used as f64 / 100.0),
+        utilization: Some(used as f64 / cap as f64 * 100.0),
+        currency: Some("USD".to_string()),
+    });
+    (tiers, extra)
+}
+
+/// Query the billing endpoint the TUI's own `/usage` uses (see the
+/// module note above for the full source trail + live verification).
+async fn query_grok_quota(access_token: &str, user_id: &str) -> SubscriptionQuota {
+    let client = match quota_http_client("grok") {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let resp = match client
+        .get("https://cli-chat-proxy.grok.com/v1/billing?format=credits")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("X-XAI-Token-Auth", "xai-grok-cli")
+        .header("x-userid", user_id)
+        .header("x-grok-client-version", GROK_CLIENT_VERSION)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(err) => return network_error("grok", err),
+    };
+    let body = match read_json_or_error("grok", resp).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let (tiers, extra) = parse_grok_billing(&body);
+    // The subscription tier name rides a separate RemoteSettings channel
+    // (billing.rs `subscription_tier` — "Populated from RemoteSettings"),
+    // not this response, so `plan` stays empty.
+    SubscriptionQuota::success("grok", tiers, None, extra)
+}
+
+// ===================================================================
 // Entry point
 // ===================================================================
 
@@ -1292,8 +1511,28 @@ pub async fn fetch_quota(app: CliApp) -> SubscriptionQuota {
         // OpenCode has no official subscription quota. bin_name
         // doubles as the frontend CliApp key.
         CliApp::Opencode => SubscriptionQuota::not_found(app.bin_name()),
-        // Grok Build has no official subscription-quota endpoint we can query.
-        CliApp::Grok => SubscriptionQuota::not_found(app.bin_name()),
+        CliApp::Grok => {
+            let (entry, status, message) = read_grok_credentials();
+            let token = entry.as_ref().map(|e| e.key.clone());
+            // NO refresh — deliberate (see the module note: auth.x.ai
+            // rotates refresh tokens with reuse detection; refreshing
+            // without persisting the rotated RT kills grok's own login).
+            // Expired ⇒ the scaffold still tries the stale token once, then
+            // reports Expired; running grok refreshes its login and the
+            // quota comes back on the next fetch.
+            let message = message.or_else(|| {
+                (status == CredentialStatus::Expired)
+                    .then(|| "Grok token expired — run grok once to refresh its login".to_string())
+            });
+            let user_id = entry
+                .as_ref()
+                .map(|e| e.user_id.clone())
+                .unwrap_or_default();
+            quota_for_credential("grok", token, status, message, move |t| async move {
+                query_grok_quota(&t, &user_id).await
+            })
+            .await
+        }
         // Claude Desktop's quota would belong to its own claude.ai login,
         // which Termory doesn't read here — surface nothing.
         CliApp::ClaudeDesktop => SubscriptionQuota::not_found(app.bin_name()),
@@ -1971,6 +2210,128 @@ mod tests {
             Some("Plus")
         );
         assert!(codex_plan(&json!({})).is_none());
+    }
+
+    #[test]
+    fn parse_grok_billing_maps_weekly_window_and_omitted_percent() {
+        // The REAL response shape captured live (2026-07-16): proto3 JSON
+        // omits zero-valued fields, so creditUsagePercent absent ⇒ 0%.
+        let body = json!({
+            "config": {
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "start": "2026-07-15T00:00:00+00:00",
+                    "end": "2026-07-22T00:00:00+00:00"
+                },
+                "onDemandCap": {"val": 0},
+                "onDemandUsed": {"val": 0},
+                "isUnifiedBillingUser": true,
+                "prepaidBalance": {"val": 0},
+                "billingPeriodStart": "2026-07-15T00:00:00+00:00",
+                "billingPeriodEnd": "2026-07-22T00:00:00+00:00"
+            }
+        });
+        let (tiers, extra) = parse_grok_billing(&body);
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].name, "seven_day");
+        assert_eq!(tiers[0].utilization, 0.0);
+        assert_eq!(
+            tiers[0].resets_at.as_deref(),
+            Some("2026-07-22T00:00:00+00:00")
+        );
+        assert!(extra.is_none(), "no on-demand cap → no extra usage");
+    }
+
+    #[test]
+    fn parse_grok_billing_monthly_percent_and_on_demand() {
+        let body = json!({
+            "config": {
+                "creditUsagePercent": 42.5,
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_MONTHLY",
+                    "end": "2026-08-01T00:00:00+00:00"
+                },
+                "onDemandCap": {"val": 5000},
+                "onDemandUsed": {"val": 1250}
+            }
+        });
+        let (tiers, extra) = parse_grok_billing(&body);
+        assert_eq!(tiers[0].name, "30_day");
+        assert_eq!(tiers[0].utilization, 42.5);
+        let extra = extra.expect("on-demand cap configured");
+        assert!(extra.is_enabled);
+        assert_eq!(extra.monthly_limit, Some(50.0));
+        assert_eq!(extra.used_credits, Some(12.5));
+        assert_eq!(extra.utilization, Some(25.0));
+    }
+
+    #[test]
+    fn parse_grok_credentials_reads_entry_and_expiry() {
+        // Far-future exp → Valid.
+        let exp = (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64)
+            + 86_400;
+        let jwt = |exp: i64| {
+            use base64::Engine;
+            let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+            format!(
+                "{}.{}.sig",
+                b64(br#"{"alg":"none"}"#),
+                b64(format!(r#"{{"exp":{exp}}}"#).as_bytes())
+            )
+        };
+        let content = json!({
+            "https://auth.x.ai::client-123": {
+                "key": jwt(exp),
+                "auth_mode": "oidc",
+                "user_id": "user-1",
+                "refresh_token": "rt-1",
+                "oidc_issuer": "https://auth.x.ai",
+                "oidc_client_id": "client-123",
+                "principal_type": "User",
+                "principal_id": "user-1"
+            }
+        })
+        .to_string();
+        let (entry, status, msg) = parse_grok_credentials(&content);
+        let entry = entry.expect("entry parsed");
+        assert_eq!(status, CredentialStatus::Valid);
+        assert!(msg.is_none());
+        assert_eq!(entry.user_id, "user-1");
+        assert!(entry.key.starts_with("eyJ"), "key is the stored JWT");
+
+        // Expired exp → Expired (refresh path takes over in the fetch arm).
+        let content = json!({
+            "https://auth.x.ai::client-123": {
+                "key": jwt(1_000_000),
+                "user_id": "user-1"
+            }
+        })
+        .to_string();
+        let (_, status, _) = parse_grok_credentials(&content);
+        assert_eq!(status, CredentialStatus::Expired);
+
+        // No usable entry → NotFound (logged out).
+        let (entry, status, _) = parse_grok_credentials(r#"{"other": {}}"#);
+        assert!(entry.is_none());
+        assert_eq!(status, CredentialStatus::NotFound);
+    }
+
+    #[test]
+    fn credential_path_matches_grok_auth_json() {
+        assert_eq!(
+            credential_cli_for_path(std::path::Path::new("/home/u/.grok/auth.json")),
+            Some(CliApp::Grok)
+        );
+        // OpenCode's unrelated auth.json still doesn't match.
+        assert_eq!(
+            credential_cli_for_path(std::path::Path::new(
+                "/home/u/.local/share/opencode/auth.json"
+            )),
+            None
+        );
     }
 
     #[test]

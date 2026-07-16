@@ -143,23 +143,21 @@ let cachedCodexInstalls: CodexInstalls | null = null;
 let versionsEverResolved = false;
 
 // CLIs whose Official card shows the subscription quota (5-hour /
-// weekly rate-limit windows). MIRROR of the backend list
-// `quota::SUPPORTED` in src-tauri/src/quota.rs (which drives the tray)
-// — when a CLI's fetch_quota arm lands, add it in BOTH places.
+// weekly rate-limit windows; grok: the weekly/monthly credit window).
+// MIRROR of the backend list `quota::SUPPORTED` in src-tauri/src/quota.rs
+// (which drives the tray) — when a CLI's fetch_quota arm lands, add it
+// in BOTH places.
 const QUOTA_SUPPORTED: ReadonlySet<CliApp> = new Set([
   "claude",
   "codex",
-  "gemini"
-]);
-
-// CLIs whose Official card shows the logged-in account. Superset of
-// QUOTA_SUPPORTED: Grok Build has no quota endpoint but its auth.json
-// carries plain email/first_name/last_name (display-only, like
-// Claude/Gemini — backend `list_grok_accounts`).
-const ACCOUNT_SUPPORTED: ReadonlySet<CliApp> = new Set([
-  ...QUOTA_SUPPORTED,
+  "gemini",
   "grok"
 ]);
+
+// CLIs whose Official card shows the logged-in account (grok's
+// auth.json also carries plain email/first_name/last_name —
+// display-only account info via backend `list_grok_accounts`).
+const ACCOUNT_SUPPORTED: ReadonlySet<CliApp> = new Set([...QUOTA_SUPPORTED]);
 // Quota results survive route remounts (like cachedVersions). An entry
 // older than QUOTA_STALE_MS is silently re-fetched on the next entry
 // to the tab. Manual Refresh bypasses the stale window but is still
