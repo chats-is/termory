@@ -155,7 +155,7 @@ On the **Codex** tab, the Official card also manages multiple ChatGPT logins. **
 
 ## 2. Records
 
-**What it is.** Records is the history browser. Three panes — **Sessions**, **Memories**, **Skills** — list everything Termory found across all four tools.
+**What it is.** Records is the history browser. Three panes — **Sessions**, **Memories**, **Skills** — list everything Termory found across all supported tools.
 
 - **Sessions** — chat transcripts from each CLI.
 - **Memories** — on-disk memory / instruction files (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, per-project memory folders, etc.).
