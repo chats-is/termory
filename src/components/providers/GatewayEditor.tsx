@@ -81,7 +81,7 @@ type BindDraft = {
   npm: string; // OpenCode AI SDK package ("" → default for supported mode)
   models: ModelRow[]; // OpenCode extra models
   options: KV[]; // advanced settings (Claude: per-size routing keys)
-  apiBackend: string; // grok wire API ("" → "responses")
+  apiBackend: string; // grok wire API ("" → omitted; grok's own default applies)
 };
 
 /**
@@ -598,22 +598,29 @@ export function GatewayEditor({
                             </Select>
                           </>
                         )}
-                        {/* Grok: api_backend (default responses) — before the model. */}
+                        {/* Grok: api_backend — before the model. "" = default
+                            (field omitted; grok applies its own default,
+                            chat_completions). */}
                         {app === "grok" && (
                           <>
                             <Label className="text-xs">
                               {t("providers.apiBackend")}
                             </Label>
                             <Select
-                              value={draft.apiBackend || "responses"}
+                              value={draft.apiBackend || "default"}
                               onValueChange={(v) =>
-                                setBind(app, { apiBackend: v })
+                                setBind(app, {
+                                  apiBackend: v === "default" ? "" : v
+                                })
                               }
                             >
                               <SelectTrigger className="w-full">
                                 <SelectValue />
                               </SelectTrigger>
                               <SelectContent>
+                                <SelectItem value="default">
+                                  {t("providers.apiBackendDefault")}
+                                </SelectItem>
                                 <SelectItem value="responses">
                                   responses
                                 </SelectItem>

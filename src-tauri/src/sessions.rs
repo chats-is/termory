@@ -1060,7 +1060,7 @@ fn scan_grok() -> Result<Vec<AppSession>, Box<dyn Error>> {
 }
 
 fn scan_grok_sessions_in(root: &Path) -> Result<Vec<AppSession>, Box<dyn Error>> {
-    let mut out = Vec::new();
+    let mut scanned: Vec<GrokScanned> = Vec::new();
     for cwd_entry in fs::read_dir(root)?.flatten() {
         let cwd_dir = cwd_entry.path();
         // Skips the sibling session_search.sqlite / lock files.
@@ -1076,37 +1076,76 @@ fn scan_grok_sessions_in(root: &Path) -> Result<Vec<AppSession>, Box<dyn Error>>
             if !dir.is_dir() {
                 continue;
             }
-            if let Some(app) = grok_session_from_summary(&dir) {
-                out.push(app);
+            if let Some(g) = grok_scanned_from_summary(&dir) {
+                scanned.push(g);
             }
         }
     }
-    Ok(out)
+    // Official empty-session rule (`dedup_empty_sessions`, session/merge.rs):
+    // with sessions sorted newest-first (`last_active_at` else `updated_at` —
+    // `effective_sort_time`), each cwd keeps only its MOST RECENT
+    // `num_messages == 0` session — the "new session" resume entry grok itself
+    // shows — and older empties drop. Cwd normalization = trailing-slash trim
+    // (official `normalize_cwd`).
+    scanned.sort_by(|a, b| b.sort_key.cmp(&a.sort_key));
+    let mut seen_empty_cwds: HashSet<String> = HashSet::new();
+    scanned.retain(|g| {
+        if !g.empty {
+            return true;
+        }
+        let cwd = g.session.project.trim_end_matches('/');
+        let key = if cwd.is_empty() { "/" } else { cwd };
+        seen_empty_cwds.insert(key.to_string())
+    });
+    Ok(scanned.into_iter().map(|g| g.session).collect())
 }
 
+/// One scanned grok session plus the two summary fields the list-level
+/// empty-session dedup needs but `AppSession` doesn't carry.
+struct GrokScanned {
+    session: AppSession,
+    /// Official emptiness signal: `num_messages == 0` (the field the picker's
+    /// `dedup_empty_sessions` keys on — NOT `num_chat_messages`, which counts
+    /// chat_history lines and is 2 even for a fresh CLI-entry shell).
+    empty: bool,
+    /// Official sort key: `last_active_at` else `updated_at`
+    /// (`effective_sort_time`, merge.rs). RFC 3339 strings sort lexically.
+    sort_key: String,
+}
+
+/// Detail-path adapter: just the `AppSession` for one session dir.
 fn grok_session_from_summary(session_dir: &Path) -> Option<AppSession> {
+    grok_scanned_from_summary(session_dir).map(|g| g.session)
+}
+
+fn grok_scanned_from_summary(session_dir: &Path) -> Option<GrokScanned> {
     let summary: Value =
         serde_json::from_str(&fs::read_to_string(session_dir.join("summary.json")).ok()?).ok()?;
     let id = summary.get("info")?.get("id")?.as_str()?.to_string();
+    // Hidden sessions are excluded from history listings, mirroring the
+    // official `Summary::is_hidden()` (persistence.rs:949): explicit `hidden`
+    // wins; default = session_kind starts with "subagent" (grok's sidechain
+    // analog — same list-time rule as Claude's isSidechain / Gemini's
+    // kind=subagent filters).
+    let hidden = summary.get("hidden").and_then(Value::as_bool).unwrap_or(
+        summary
+            .get("session_kind")
+            .and_then(Value::as_str)
+            .is_some_and(|k| k.starts_with("subagent")),
+    );
+    if hidden {
+        return None;
+    }
     // Message log: the interactive TUI writes `chat_history.jsonl` (current
     // grok — universal), headless `grok -p` ALSO writes the legacy
     // `updates.jsonl` ACP stream. Prefer chat_history.jsonl (present in every
-    // session), fall back to updates.jsonl for very old sessions.
+    // session), fall back to updates.jsonl for very old sessions. Emptiness is
+    // NOT judged here — the caller's per-cwd dedup (official rule) handles it.
     let chat = session_dir.join("chat_history.jsonl");
     let updates = session_dir.join("updates.jsonl");
     let log = if chat.is_file() {
-        // Grok opens a NEW session dir every time the CLI is entered, so most
-        // dirs are empty shells: only the `system` prompt + a synthetic
-        // `system_reminder` user turn, no real conversation. Skip those — a
-        // session counts only when it has a real user turn or any assistant
-        // reply (`grok_chat_has_content`).
-        if !grok_chat_has_content(&chat) {
-            return None;
-        }
         chat
     } else if updates.is_file() {
-        // Legacy ACP log — only written by headless `grok -p`, which always
-        // has real activity, so no emptiness check needed.
         updates
     } else {
         return None;
@@ -1117,20 +1156,55 @@ fn grok_session_from_summary(session_dir: &Path) -> Option<AppSession> {
             .and_then(|v| v.as_str())
             .map(str::to_string)
     };
-    Some(AppSession {
+    // Tokens live in updates.jsonl (the ACP rail), never in chat_history.jsonl
+    // — so extract them from the sibling regardless of which file `log` is.
+    // mtime-cached like the Claude/Codex passes.
+    let updates_path = session_dir.join("updates.jsonl");
+    let extract = if updates_path.is_file() {
+        cached_scan_extract(&updates_path, grok_scan_extract)
+    } else {
+        ScanExtract::default()
+    };
+    // Display title mirrors the official `Summary::display_title()`
+    // (persistence.rs:958): the LLM/manual `generated_title` (trimmed,
+    // non-empty) is preferred over `session_summary`.
+    let title = str_of("generated_title")
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .or_else(|| str_of("session_summary"))
+        .unwrap_or_default();
+    let updated_at = str_of("updated_at");
+    // Official dedup inputs (see `GrokScanned`): `num_messages` is the
+    // emptiness signal, `last_active_at` else `updated_at` the sort key.
+    let empty = summary
+        .get("num_messages")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        == 0;
+    let sort_key = str_of("last_active_at")
+        .or_else(|| updated_at.clone())
+        .unwrap_or_default();
+    let session = AppSession {
         id,
         source: "Grok".to_string(),
-        title: str_of("session_summary").unwrap_or_default(),
+        title,
         project: summary["info"]["cwd"].as_str().unwrap_or("").to_string(),
         path: log.to_string_lossy().into_owned(),
         started_at: str_of("created_at"),
-        updated_at: str_of("updated_at"),
+        updated_at,
         message_count: summary
             .get("num_chat_messages")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as usize,
         model: str_of("current_model_id"),
+        tokens: extract.tokens,
+        daily_tokens: extract.daily_tokens,
         ..Default::default()
+    };
+    Some(GrokScanned {
+        session,
+        empty,
+        sort_key,
     })
 }
 
@@ -1158,7 +1232,44 @@ pub fn delete_grok_session(id: &str) -> Result<(), String> {
     if !session_dir.starts_with(&root) {
         return Err("refusing to delete outside the grok sessions dir".into());
     }
-    fs::remove_dir_all(&session_dir).map_err(|e| e.to_string())
+    fs::remove_dir_all(&session_dir).map_err(|e| e.to_string())?;
+    // Official delete's second step: evict the session's FTS doc.
+    evict_grok_search_docs(&root, &[id.to_string()]);
+    Ok(())
+}
+
+/// Evict deleted sessions from grok's search index
+/// (`<sessions-root>/session_search.sqlite`) — the official delete's second
+/// step (`delete_session_history` → `notify_session_updated` → `delete_doc`,
+/// search_fts.rs:286: `DELETE FROM session_docs WHERE session_id = ?`; the
+/// FTS5 table follows via the schema's AFTER DELETE trigger, "callers only
+/// touch session_docs"). BEST-EFFORT: the index is a self-healing derived
+/// cache (a per-session refresh drops a doc whose summary is gone, and
+/// `reindex_all` prunes orphans against `expected_ids`), so a locked or
+/// missing DB is only logged — the authoritative dir removal already
+/// happened, and grok reconciles the index on its own.
+fn evict_grok_search_docs(sessions_root: &Path, ids: &[String]) {
+    let db_path = sessions_root.join("session_search.sqlite");
+    if !db_path.is_file() {
+        return;
+    }
+    let open = || -> Result<(), rusqlite::Error> {
+        let conn = Connection::open_with_flags(
+            &db_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(std::time::Duration::from_millis(1500))?;
+        for id in ids {
+            conn.execute(
+                "DELETE FROM session_docs WHERE session_id = ?1",
+                rusqlite::params![id],
+            )?;
+        }
+        Ok(())
+    };
+    if let Err(e) = open() {
+        log::warn!("grok search-index eviction skipped (self-heals): {e}");
+    }
 }
 
 /// Delete a whole grok "project" (a cwd): remove every
@@ -1172,6 +1283,7 @@ pub fn delete_grok_project(project: &str) -> Result<(), String> {
     if !root.is_dir() {
         return Ok(());
     }
+    let mut removed_ids: Vec<String> = Vec::new();
     for cwd_entry in fs::read_dir(&root).map_err(|e| e.to_string())?.flatten() {
         let cwd_dir = cwd_entry.path();
         if !cwd_dir.is_dir() {
@@ -1186,8 +1298,24 @@ pub fn delete_grok_project(project: &str) -> Result<(), String> {
             .filter(|s| s.path().is_dir())
             .any(|s| grok_session_cwd(&s.path()).as_deref() == Some(project));
         if belongs {
+            // Session dir names ARE the session ids (official session_dir =
+            // sessions_cwd_dir(cwd)/<id>) — collect them before removal for
+            // the search-index eviction. The index lives at the sessions ROOT
+            // (one global session_search.sqlite), so it does NOT go away with
+            // this cwd dir.
+            removed_ids.extend(
+                fs::read_dir(&cwd_dir)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter(|s| s.path().is_dir())
+                    .filter_map(|s| s.file_name().to_str().map(str::to_string)),
+            );
             fs::remove_dir_all(&cwd_dir).map_err(|e| e.to_string())?;
         }
+    }
+    if !removed_ids.is_empty() {
+        evict_grok_search_docs(&root, &removed_ids);
     }
     Ok(())
 }
@@ -1272,61 +1400,226 @@ fn grok_output_text(raw: &Value) -> Option<String> {
 /// labels grok's own TUI renders (observed on real data). Falls back to the
 /// raw name for anything unmapped.
 fn grok_tool_label(name: &str) -> String {
+    // NAME → display label, source-verified: each wire name (ToolId::new
+    // registrations + claude_alias.rs grok columns across the grok_build /
+    // concise / hashline / codex / opencode toolsets) maps to its ToolKind,
+    // whose label is `ToolKind::presentation_name()`
+    // (xai-grok-tools/src/tool_taxonomy.rs:37 — "harness-independent display
+    // label ... `read_file` and `Read` → `Read`"). Unknown names fall back to
+    // the raw name (more informative than the taxonomy's generic "Tool").
     match name {
-        "read_file" => "Read",
-        "grep" => "Search",
-        "run_terminal_command" => "Run Command",
-        "search_replace" => "Edit",
-        "write_file" | "create_file" => "Write",
-        "list_dir" => "List Files",
-        "todo_write" => "Plan",
+        // Read
+        "read_file" | "hashline_read" | "read" => "Read",
+        // Edit
+        "search_replace" | "edit" | "hashline_edit" | "apply_patch" => "Edit",
+        // Write
+        "write" => "Write",
+        // Execute
+        "run_terminal_command" | "run_terminal_cmd" | "bash" => "Run Command",
+        // Search
+        "grep" | "hashline_grep" | "grep_files" => "Search",
+        // List
+        "list_dir" | "glob" => "List Files",
+        // Lsp
+        "lsp" => "Code Intelligence",
+        // Plan
+        "todo_write" | "todowrite" => "Plan",
+        // WebSearch / WebFetch
         "web_search" => "Web Search",
-        "web_fetch" => "Fetch",
+        "web_fetch" => "Web Fetch",
+        // AskUser / plan-mode
+        "ask_user_question" => "Ask User",
+        "enter_plan_mode" => "Enter Plan Mode",
+        "exit_plan_mode" => "Exit Plan Mode",
+        // Task (subagents)
+        "task" | "spawn_subagent" => "Subagent",
+        // Background tasks
+        "get_task_output" | "get_terminal_command_output" | "get_command_or_subagent_output" => {
+            "Background Task"
+        }
+        "wait_tasks" => "Wait for Tasks",
+        "kill_task" | "kill_terminal_command" | "kill_command_or_subagent" => "Kill Task",
+        // Skill / memory / tool discovery
+        "skill" => "Skill",
+        "memory_search" => "Memory Search",
+        "memory_get" => "Memory Read",
+        "search_tool" => "Search Tools",
+        "use_tool" => "Use Tool",
+        // Misc grok_build tools
+        "monitor" => "Monitor",
+        "image_gen" | "image_edit" => "Generate Image",
+        "video_gen" | "image_to_video" | "reference_to_video" => "Generate Video",
+        "deploy_app" => "Deploy App",
+        "update_goal" => "Update Goal",
         other => other,
     }
     .to_string()
 }
 
 /// Flatten a `chat_history.jsonl` `content` field (a bare string, or an
-/// array of `{type:"text", text}` parts) into plain text.
+/// array of `ContentPart`s — `{type:"text", text}` / `{type:"image", url}`
+/// per conversation.rs:356) into plain text. Image parts surface as an
+/// italic notice (never dropped — full-history rule), matching the other
+/// platforms' image labels.
 fn grok_chat_content_text(content: Option<&Value>) -> String {
     match content {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Array(parts)) => parts
             .iter()
-            .filter_map(|p| p.get("text").and_then(|v| v.as_str()))
+            .filter_map(|p| match p.get("type").and_then(Value::as_str) {
+                Some("image") => Some(grok_image_part_label(p)),
+                // Text (and untyped legacy parts that still carry `text`).
+                _ => p.get("text").and_then(Value::as_str).map(|s| s.to_string()),
+            })
             .collect::<Vec<_>>()
             .join(""),
         _ => String::new(),
     }
 }
 
-/// Does a `chat_history.jsonl` hold a real conversation? A freshly-entered grok
-/// CLI writes only the `system` prompt + a synthetic `user` turn carrying the
-/// injected `system_reminder` (`synthetic_reason == "system_reminder"`) — that's
-/// an empty shell. A session counts when it has ANY assistant message OR a user
-/// turn that isn't synthetic. Streams line-by-line, early-returning on the first
-/// real message (empty shells are 2 lines).
-fn grok_chat_has_content(path: &Path) -> bool {
+/// Italic notice for a `{type:"image", url}` content part. Data URIs (base64
+/// payloads) show a generic label; real URLs are shown.
+fn grok_image_part_label(part: &Value) -> String {
+    match part.get("url").and_then(Value::as_str) {
+        Some(url) if !url.starts_with("data:") => format!("*Image: {url}*"),
+        _ => "*Image*".to_string(),
+    }
+}
+
+/// Scan-time token extraction for a grok session, from its `updates.jsonl`
+/// (the ACP rail). Token usage is NOT in `chat_history.jsonl` — it rides the
+/// `turn_completed` update's `usage` object, which every session with a real
+/// turn has (an empty CLI-entry shell ran no inference, so it has no
+/// updates.jsonl at all).
+///
+/// **The `usage` is PER-TURN, so turns are summed** — verified in the official
+/// source (grok-build is open source): the ACP turn-end path reads
+/// `try_get_prompt_usage()` (`session/acp_session_impl/turn.rs`), i.e. the
+/// `prompt_usage` ledger, documented in `xai-chat-state/src/actor/state.rs` as
+/// *"Billing for the open prompt (cleared on next prompt)"* — NOT the sibling
+/// lifetime `session_usage`. `numTurns` counts main-agent loop ROUNDS inside
+/// one prompt (same unit as `--max-turns`), not session turns, so it never
+/// signals cumulative-ness.
+///
+/// **Field mapping**: grok follows the xAI/OpenAI convention where
+/// `cachedReadTokens ⊆ inputTokens` ("Full prompt input tokens including cache
+/// reads" — `extensions/notification.rs`) and `reasoningTokens ⊆ outputTokens`
+/// (its own `total_tokens() = input + output` adds neither). Termory's
+/// `TokenStats` wants the four DISJOINT (`input` = non-cached, `total` = their
+/// sum), so the subsets are subtracted out — the four then re-sum to grok's own
+/// `totalTokens` exactly.
+fn grok_scan_extract(path: &Path) -> ScanExtract {
     let Ok(file) = fs::File::open(path) else {
-        return false;
+        return ScanExtract::default();
     };
-    let reader = std::io::BufReader::with_capacity(64 * 1024, file);
+    let reader = std::io::BufReader::with_capacity(256 * 1024, file);
+    let mut totals = [0u64; 4]; // input, output, cached, reasoning
+    let mut any = false;
+    let mut daily: HashMap<String, [u64; 5]> = HashMap::new();
+    let mut daily_hours: HashMap<String, [u64; 24]> = HashMap::new();
+    let mut daily_hour_tokens: HashMap<String, [u64; 24]> = HashMap::new();
+
     for line in std::io::BufRead::lines(reader) {
         let Ok(line) = line else { continue };
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        match v.get("type").and_then(|t| t.as_str()) {
-            Some("assistant") => return true,
-            Some("user") if v.get("synthetic_reason").is_none() => return true,
-            _ => {}
+        let Some(update) = value.get("params").and_then(|p| p.get("update")) else {
+            continue;
+        };
+        if update.get("sessionUpdate").and_then(Value::as_str) != Some("turn_completed") {
+            continue;
+        }
+        let Some(usage) = update.get("usage") else {
+            continue;
+        };
+        let u = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
+        let cached = u("cachedReadTokens");
+        let reasoning = u("reasoningTokens");
+        // Subtract the subsets so the four counters are disjoint.
+        let input = u("inputTokens").saturating_sub(cached);
+        let output = u("outputTokens").saturating_sub(reasoning);
+        let turn = [input, output, cached, reasoning];
+        if turn.iter().all(|v| *v == 0) {
+            continue;
+        }
+        any = true;
+        for (slot, add) in totals.iter_mut().zip(turn) {
+            *slot = slot.saturating_add(add);
+        }
+        // Bucket the turn on the day/hour it completed. `agentTimestampMs` is
+        // epoch millis; the top-level `timestamp` is epoch SECONDS.
+        let date_hour = value
+            .get("params")
+            .and_then(|p| p.get("_meta"))
+            .and_then(|m| m.get("agentTimestampMs"))
+            .and_then(Value::as_i64)
+            .or_else(|| {
+                value
+                    .get("timestamp")
+                    .and_then(Value::as_i64)
+                    .map(|s| s * 1000)
+            })
+            .and_then(epoch_ms_to_local_date_hour);
+        if let Some((date, hour)) = date_hour {
+            let bucket = daily.entry(date.clone()).or_insert([0u64; 5]);
+            for (slot, add) in bucket.iter_mut().zip(turn) {
+                *slot += add;
+            }
+            bucket[4] += 1; // one AI interaction (a completed turn)
+            let hourbox = daily_hours.entry(date.clone()).or_insert([0u64; 24]);
+            hourbox[hour as usize] += 1;
+            let tokbox = daily_hour_tokens.entry(date).or_insert([0u64; 24]);
+            tokbox[hour as usize] += turn.iter().sum::<u64>();
         }
     }
-    false
+
+    let tokens = any.then(|| TokenStats {
+        input: totals[0],
+        output: totals[1],
+        cached: totals[2],
+        reasoning: totals[3],
+        total: totals.iter().sum(),
+    });
+    let daily_tokens = (!daily.is_empty()).then(|| {
+        daily
+            .into_iter()
+            .map(|(date, [i, o, c, r, m])| {
+                let hours = daily_hours
+                    .get(&date)
+                    .map(|a| a.to_vec())
+                    .unwrap_or_default();
+                let hour_tokens = daily_hour_tokens
+                    .get(&date)
+                    .map(|a| a.to_vec())
+                    .unwrap_or_default();
+                DailyTokenBreakdown {
+                    date,
+                    tokens: TokenStats {
+                        input: i,
+                        output: o,
+                        cached: c,
+                        reasoning: r,
+                        total: i + o + c + r,
+                    },
+                    messages: m,
+                    hours,
+                    hour_tokens,
+                }
+            })
+            .collect()
+    });
+    ScanExtract {
+        tokens,
+        // model + message_count come from summary.json (read verbatim by
+        // `grok_session_from_summary`), so this pass doesn't derive them.
+        model: None,
+        daily_tokens,
+        message_count: 0,
+    }
 }
 
 /// Parse the CURRENT grok transcript format (`chat_history.jsonl`): one JSON
@@ -1441,23 +1734,103 @@ fn parse_grok_chat_history(path: &Path) -> Result<SessionDetail, Box<dyn Error>>
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                // Inline images on a tool result (e.g. read_file on an image
+                // — ToolResultItem.images, conversation.rs) surface as italic
+                // notices AFTER the output fence (inside it they'd render as
+                // literal code, not markdown).
+                let image_notices: Vec<String> = msg
+                    .get("images")
+                    .and_then(|v| v.as_array())
+                    .map(|imgs| imgs.iter().map(grok_image_part_label).collect())
+                    .unwrap_or_default();
+                let mut body = String::new();
+                if !content.trim().is_empty() {
+                    body.push_str(&format!("````\n{}\n````", content.trim_end()));
+                }
+                for notice in &image_notices {
+                    if !body.is_empty() {
+                        body.push_str("\n\n");
+                    }
+                    body.push_str(notice);
+                }
                 match tool_index.get(id) {
                     // Fold the output into the matching tool card.
-                    Some(&idx) if !content.trim().is_empty() => {
-                        messages[idx]
-                            .text
-                            .push_str(&format!("\n\n````\n{}\n````", content.trim_end()));
+                    Some(&idx) if !body.is_empty() => {
+                        messages[idx].text.push_str(&format!("\n\n{body}"));
                     }
                     Some(_) => {}
                     // Orphan result (no matching call) — surface standalone.
-                    None if !content.trim().is_empty() => messages.push(SessionMessage {
+                    None if !body.is_empty() => messages.push(SessionMessage {
                         role: "tool".to_string(),
-                        text: format!("````\n{}\n````", content.trim_end()),
+                        text: body,
                         kind: "tool_result".to_string(),
                         ..Default::default()
                     }),
                     None => {}
                 }
+            }
+            // Server-side tool calls (the backend's agentic sampler ran them —
+            // web search / X search / code interpreter). Stored precisely so
+            // they can be "rendered by the pager" (conversation.rs:43), so
+            // Termory surfaces them too. Shape: {type:"backend_tool_call",
+            // kind:{tool_type:"web_search"|"x_search"|"code_interpreter", …}}
+            // where the inner fields are OpenAI Responses API tool-call items
+            // (`rs::WebSearchToolCall` etc.).
+            "backend_tool_call" => {
+                let kind = msg.get("kind").cloned().unwrap_or(Value::Null);
+                let tool_type = kind
+                    .get("tool_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("backend_tool");
+                // Verb per the pager's blocks: WebSearchToolCallBlock renders
+                // "Web Search" (X search shares the block with a label
+                // override); code interpreter gets its taxonomy-style label.
+                let (label, detail) = match tool_type {
+                    "web_search" => {
+                        // rs::WebSearchToolCall carries an `action` like
+                        // Codex's web_search: query / url / pattern.
+                        let action = kind.get("action").cloned().unwrap_or(Value::Null);
+                        let detail = action
+                            .get("query")
+                            .or_else(|| action.get("url"))
+                            .or_else(|| action.get("pattern"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        ("Web Search", detail)
+                    }
+                    "x_search" => {
+                        let detail = kind
+                            .get("input")
+                            .map(|v| {
+                                v.as_str()
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| v.to_string())
+                            })
+                            .unwrap_or_default();
+                        ("X Search", detail)
+                    }
+                    "code_interpreter" => {
+                        let detail = kind
+                            .get("code")
+                            .and_then(Value::as_str)
+                            .map(snippet_line)
+                            .unwrap_or_default();
+                        ("Code Interpreter", detail)
+                    }
+                    other => (other, String::new()),
+                };
+                let text = if detail.trim().is_empty() {
+                    format!("⏺ **{label}**")
+                } else {
+                    format!("⏺ **{label}**({})", wrap_inline_code(detail.trim()))
+                };
+                messages.push(SessionMessage {
+                    role: "tool".to_string(),
+                    text,
+                    kind: "tool_use".to_string(),
+                    ..Default::default()
+                });
             }
             _ => {}
         }
@@ -2227,6 +2600,7 @@ fn scan_memory(project_cwds: &HashSet<String>) -> Result<Vec<AppSession>, Box<dy
     sessions.extend(scan_claude_memory()?);
     sessions.extend(scan_claude_rules(project_cwds));
     sessions.extend(scan_codex_memory());
+    sessions.extend(scan_grok_memory());
     sessions.extend(scan_gemini_memory());
     sessions.extend(scan_global_instructions());
 
@@ -2523,6 +2897,33 @@ fn scan_codex_memory() -> Vec<AppSession> {
         "codex",
         "Memory",
         &["skills"],
+        &mut sessions,
+    );
+    sessions
+}
+
+/// Grok Build cross-session memory: human-readable Markdown under
+/// `<grok-home>/memory/` — global files at the root, workspace-scoped files
+/// under `{project-slug}-{hash8}/` subdirs (source: xai-grok-memory
+/// storage.rs:24 — "Memory files are human-readable/editable Markdown stored
+/// under `~/.grok/memory/`"). The hash isn't reversible, so the recursive
+/// scan's per-file relative path (which shows the `{slug}-{hash8}` segment)
+/// is the project hint.
+fn scan_grok_memory() -> Vec<AppSession> {
+    let Some(root) = crate::providers::grok_home_dir().map(|h| h.join("memory")) else {
+        return Vec::new();
+    };
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let mut sessions = Vec::new();
+    push_doc_files_recursive(
+        &root,
+        &root,
+        &root.to_string_lossy(),
+        "grok",
+        "Memory",
+        &[],
         &mut sessions,
     );
     sessions
@@ -2846,11 +3247,13 @@ fn scan_agents_skills(project_cwds: &HashSet<String>) -> Vec<AppSession> {
         return sessions;
     };
 
-    let tag = "codex,gemini,opencode";
-    // Grok Build additionally discovers USER-level ~/.agents/skills
-    // (docs.x.ai/build/features/skills-plugins-marketplaces); it does
-    // not document the project-level .agents/skills, so only the global
-    // dir gets the grok tag.
+    // Grok Build reads .agents at BOTH levels — source-verified in
+    // `collect_skill_config_dirs` (xai-grok-agent/src/prompt/skills.rs:142):
+    // `.agents` is in the cwd→git-root walk's dir set AND always added at
+    // `~/.agents` ("`.agents` is always added, while `.claude`/`.cursor` are
+    // gated by the skills compat cells"). An earlier docs-only survey saw just
+    // the user-level dir; the source supersedes it.
+    let tag = "codex,gemini,opencode,grok";
     let global_tag = "codex,gemini,opencode,grok";
 
     let global_dir = home.join(".agents").join("skills");
@@ -4439,6 +4842,16 @@ fn derive_memory_project_label(path: &Path) -> String {
     // Codex global memory: $CODEX_HOME/memories/**
     if path.starts_with(codex_home.join("memories")) {
         return format!("{}/memories", codex_home.display());
+    }
+
+    // Grok global memory / skills: <grok-home>/{memory,skills}/**
+    if let Some(grok_home) = crate::providers::grok_home_dir() {
+        if path.starts_with(grok_home.join("memory")) {
+            return format!("{}/memory", grok_home.display());
+        }
+        if path.starts_with(grok_home.join("skills")) {
+            return format!("{}/skills", grok_home.display());
+        }
     }
 
     // Gemini global skills: ~/.gemini/skills/**
@@ -16322,8 +16735,10 @@ mod tests {
             })
             .expect("project-level .agents/skills/ entry should be picked up");
         assert_eq!(entry.source, "Skill");
-        // Codex, Gemini CLI, and OpenCode all officially read this path.
-        assert_eq!(entry.preview, "codex,gemini,opencode");
+        // Codex, Gemini CLI, OpenCode, and Grok Build all officially read this
+        // path (grok: `.agents` is in `collect_skill_config_dirs`'s cwd walk —
+        // xai-grok-agent/src/prompt/skills.rs).
+        assert_eq!(entry.preview, "codex,gemini,opencode,grok");
     }
 
     #[test]
@@ -17251,7 +17666,9 @@ mod tests {
             fs::create_dir_all(&d).unwrap();
             fs::write(
                 d.join("summary.json"),
-                format!(r#"{{"info":{{"id":"{uuid}","cwd":"{cwd}"}},"session_summary":"t"}}"#),
+                format!(
+                    r#"{{"info":{{"id":"{uuid}","cwd":"{cwd}"}},"session_summary":"t","num_messages":1}}"#
+                ),
             )
             .unwrap();
             fs::write(d.join("updates.jsonl"), b"{}").unwrap();
@@ -17261,20 +17678,289 @@ mod tests {
         let a2 = mk("%2Fwork%2Fa", "u-a2", "/work/a");
         let b1 = mk("%2Fwork%2Fb", "u-b1", "/work/b");
 
+        // A search index shaped like the official schema (search_fts.rs) with
+        // one doc per session — deletes must evict docs like the official
+        // `delete_doc` does.
+        let db_path = root.join("session_search.sqlite");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session_docs (
+                     session_id TEXT PRIMARY KEY, cwd TEXT NOT NULL,
+                     updated_at INTEGER NOT NULL, title TEXT NOT NULL,
+                     content TEXT NOT NULL, content_hash TEXT NOT NULL);",
+            )
+            .unwrap();
+            for (id, cwd) in [
+                ("u-a1", "/work/a"),
+                ("u-a2", "/work/a"),
+                ("u-b1", "/work/b"),
+            ] {
+                conn.execute(
+                    "INSERT INTO session_docs VALUES (?1, ?2, 0, 't', 'c', 'h')",
+                    rusqlite::params![id, cwd],
+                )
+                .unwrap();
+            }
+        }
+        let doc_ids = || -> Vec<String> {
+            let conn = Connection::open(&db_path).unwrap();
+            let mut stmt = conn
+                .prepare("SELECT session_id FROM session_docs ORDER BY session_id")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+
         // Populate the path index that delete_grok_session resolves through.
         let sessions = scan_grok_sessions_in(&root).unwrap();
         refresh_session_path_index(&sessions);
 
-        // Delete ONE session → only its dir goes; siblings stay.
+        // Delete ONE session → only its dir goes; siblings stay; its search
+        // doc is evicted.
         delete_grok_session("u-a1").unwrap();
         assert!(!a1.exists());
         assert!(a2.exists() && b1.exists());
+        assert_eq!(doc_ids(), vec!["u-a2", "u-b1"]);
 
         // Delete the /work/a PROJECT → its whole encoded-cwd dir goes; /work/b
-        // is untouched (scoped by the session's recorded cwd).
+        // is untouched (scoped by the session's recorded cwd). The index lives
+        // at the sessions ROOT, so the project's docs are evicted explicitly.
         delete_grok_project("/work/a").unwrap();
         assert!(!root.join("%2Fwork%2Fa").exists());
         assert!(b1.exists());
+        assert_eq!(doc_ids(), vec!["u-b1"]);
+    }
+
+    #[test]
+    fn grok_memory_scan_reads_markdown_under_grok_home_memory() {
+        let _g = crate::testutils::lock_home();
+        let tmp = TestDir::new("grok-memory");
+        let _home = crate::testutils::override_home(tmp.path());
+        // Global file + a workspace-scoped `{slug}-{hash8}/` subdir file
+        // (storage.rs layout).
+        let root = tmp.path().join(".grok/memory");
+        fs::create_dir_all(root.join("termory-a3f7b2c9/sessions")).unwrap();
+        fs::write(root.join("MEMORY.md"), "# global fact").unwrap();
+        fs::write(
+            root.join("termory-a3f7b2c9/sessions/2026-07-13-hello-abcd1234.md"),
+            "# session memory",
+        )
+        .unwrap();
+
+        let found = scan_grok_memory();
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().all(|s| s.source == "Memory"));
+        assert!(found.iter().all(|s| s.preview == "grok"));
+        assert!(found.iter().any(|s| s.path.ends_with("MEMORY.md")));
+        assert!(found.iter().any(|s| s.path.contains("termory-a3f7b2c9")
+            && s.path.ends_with("2026-07-13-hello-abcd1234.md")));
+    }
+
+    #[test]
+    fn grok_scan_prefers_generated_title_and_hides_subagent_sessions() {
+        // Mirrors the official Summary rules (persistence.rs): display_title()
+        // prefers a non-blank generated_title over session_summary, and
+        // is_hidden() = hidden.unwrap_or(session_kind starts_with "subagent")
+        // excludes a session from history listings.
+        let dir = std::env::temp_dir().join(format!(
+            "termory-grok-vis-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let chat = concat!(
+            r#"{"type":"user","content":[{"type":"text","text":"do it"}]}"#,
+            "\n",
+            r#"{"type":"assistant","content":"done"}"#
+        );
+        let mk = |uuid: &str, extra: &str| {
+            let d = dir.join("%2Fwork").join(uuid);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(
+                d.join("summary.json"),
+                format!(
+                    r#"{{"info":{{"id":"{uuid}","cwd":"/work"}},"session_summary":"raw summary","num_messages":2{extra}}}"#
+                ),
+            )
+            .unwrap();
+            fs::write(d.join("chat_history.jsonl"), chat).unwrap();
+        };
+        mk("u-titled", r#","generated_title":"  Nice Title  ""#);
+        mk("u-blank-title", r#","generated_title":"   ""#);
+        mk("u-subagent", r#","session_kind":"subagent_fork""#);
+        mk("u-hidden", r#","hidden":true"#);
+        // Explicit hidden:false overrides the subagent default (official rule:
+        // explicit `hidden` wins over the session_kind-derived default).
+        mk(
+            "u-unhidden-sub",
+            r#","session_kind":"subagent","hidden":false"#,
+        );
+
+        let mut scanned = scan_grok_sessions_in(&dir).unwrap();
+        scanned.sort_by(|a, b| a.id.cmp(&b.id));
+        let ids: Vec<&str> = scanned.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["u-blank-title", "u-titled", "u-unhidden-sub"]);
+        let titled = scanned.iter().find(|s| s.id == "u-titled").unwrap();
+        assert_eq!(titled.title, "Nice Title", "generated_title wins, trimmed");
+        let blank = scanned.iter().find(|s| s.id == "u-blank-title").unwrap();
+        assert_eq!(
+            blank.title, "raw summary",
+            "blank generated_title falls back"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn grok_parse_chat_history_backend_tool_call_and_images() {
+        // backend_tool_call (server-side web search) + an image content part +
+        // tool_result images must all surface — never silently dropped.
+        let dir = std::env::temp_dir().join(format!(
+            "termory-grok-btc-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let sess = dir.join("%2Fwork").join("uuid-btc");
+        fs::create_dir_all(&sess).unwrap();
+        fs::write(
+            sess.join("summary.json"),
+            r#"{"info":{"id":"uuid-btc","cwd":"/work"},"session_summary":"t"}"#,
+        )
+        .unwrap();
+        let chat = [
+            r#"{"type":"user","content":[{"type":"text","text":"look: "},{"type":"image","url":"https://x.test/a.png"}]}"#,
+            r#"{"type":"backend_tool_call","kind":{"tool_type":"web_search","action":{"type":"search","query":"rust serde"}}}"#,
+            r#"{"type":"assistant","content":"ok","tool_calls":[{"id":"c1","name":"read_file","arguments":"{\"target_file\":\"img.png\"}"}]}"#,
+            r#"{"type":"tool_result","tool_call_id":"c1","content":"","images":[{"type":"image","url":"data:image/png;base64,AAA"}]}"#,
+        ]
+        .join("\n");
+        fs::write(sess.join("chat_history.jsonl"), chat).unwrap();
+
+        let detail = parse_grok_session(&sess.join("chat_history.jsonl")).unwrap();
+        let joined: String = detail
+            .messages
+            .iter()
+            .map(|m| format!("[{}/{}] {}", m.role, m.kind, m.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Image part in user content → italic notice with the URL.
+        assert!(joined.contains("*Image: https://x.test/a.png*"));
+        // Server-side web search → a Web Search tool card with the query.
+        assert!(joined.contains("[tool/tool_use] ⏺ **Web Search**(`rust serde`)"));
+        // tool_result images (data URI) fold into the card as a notice.
+        assert!(joined.contains("*Image*"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn grok_tool_label_matches_official_presentation_names() {
+        // Spot-check the taxonomy mapping (tool_taxonomy.rs presentation_name):
+        // the web_fetch label is "Web Fetch" (NOT "Fetch"), write is `write`,
+        // and multi-toolset aliases collapse to one label.
+        for (name, label) in [
+            ("web_fetch", "Web Fetch"),
+            ("write", "Write"),
+            ("run_terminal_cmd", "Run Command"),
+            ("run_terminal_command", "Run Command"),
+            ("hashline_edit", "Edit"),
+            ("glob", "List Files"),
+            ("lsp", "Code Intelligence"),
+            ("task", "Subagent"),
+            ("spawn_subagent", "Subagent"),
+            ("memory_get", "Memory Read"),
+            ("wait_tasks", "Wait for Tasks"),
+            ("unknown_future_tool", "unknown_future_tool"),
+        ] {
+            assert_eq!(grok_tool_label(name), label, "label for {name}");
+        }
+    }
+
+    #[test]
+    fn grok_scan_extract_sums_per_turn_usage_and_splits_subsets() {
+        // Real `turn_completed` shape (two turns). Per the official source the
+        // wire usage is the PER-PROMPT ledger (cleared each prompt), so turns
+        // SUM. grok nests the subsets: cachedRead ⊆ input, reasoning ⊆ output.
+        let dir = std::env::temp_dir().join(format!(
+            "termory-grok-tok-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("updates.jsonl");
+        let line = |ms: i64, inp: u64, out: u64, cached: u64, reasoning: u64| {
+            format!(
+                r#"{{"timestamp":{},"params":{{"_meta":{{"agentTimestampMs":{ms}}},"update":{{"sessionUpdate":"turn_completed","usage":{{"inputTokens":{inp},"outputTokens":{out},"cachedReadTokens":{cached},"reasoningTokens":{reasoning},"totalTokens":{},"numTurns":1}}}}}}}}"#,
+                ms / 1000,
+                inp + out
+            )
+        };
+        // Same local day (epoch ms far apart enough to be 2 interactions).
+        let t1 = 1_783_955_969_268i64;
+        let t2 = t1 + 60_000;
+        fs::write(
+            &path,
+            [
+                r#"{"params":{"update":{"sessionUpdate":"agent_message_chunk"}}}"#.to_string(),
+                line(t1, 69_373, 60, 11_264, 31),
+                line(t2, 1_000, 500, 200, 100),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let e = grok_scan_extract(&path);
+        let t = e.tokens.expect("tokens extracted");
+        // Turn 1: input 69373-11264=58109, output 60-31=29, cached 11264, reas 31
+        // Turn 2: input 1000-200=800,     output 500-100=400, cached 200,  reas 100
+        assert_eq!(t.input, 58_109 + 800);
+        assert_eq!(t.output, 29 + 400);
+        assert_eq!(t.cached, 11_264 + 200);
+        assert_eq!(t.reasoning, 31 + 100);
+        // The four re-sum to grok's OWN totals (input+output per turn).
+        assert_eq!(t.total, (69_373 + 60) + (1_000 + 500));
+        assert_eq!(t.total, t.input + t.output + t.cached + t.reasoning);
+
+        // Both turns land on one day, counted as 2 interactions.
+        let daily = e.daily_tokens.expect("daily breakdown");
+        assert_eq!(daily.len(), 1);
+        assert_eq!(daily[0].messages, 2);
+        assert_eq!(daily[0].tokens.total, t.total);
+        assert_eq!(daily[0].hours.iter().sum::<u64>(), 2);
+        assert_eq!(daily[0].hour_tokens.iter().sum::<u64>(), t.total);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn grok_scan_extract_empty_without_turns() {
+        // A shell / no completed turn → no tokens at all (not a zeroed stat).
+        let dir = std::env::temp_dir().join(format!(
+            "termory-grok-tok0-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("updates.jsonl");
+        fs::write(
+            &path,
+            r#"{"params":{"update":{"sessionUpdate":"agent_message_chunk"}}}"#,
+        )
+        .unwrap();
+        let e = grok_scan_extract(&path);
+        assert!(e.tokens.is_none());
+        assert!(e.daily_tokens.is_none());
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -17294,7 +17980,8 @@ mod tests {
         fs::write(
             sess.join("summary.json"),
             r#"{"info":{"id":"uuid-1","cwd":"/work/app"},"session_summary":"Fix it",
-                "num_chat_messages":6,"current_model_id":"grok-4.5"}"#,
+                "num_messages":2,"num_chat_messages":6,"current_model_id":"grok-4.5",
+                "updated_at":"2026-07-13T10:00:00Z"}"#,
         )
         .unwrap();
         // No updates.jsonl — only the new chat_history.jsonl.
@@ -17309,32 +17996,40 @@ mod tests {
         .join("\n");
         fs::write(sess.join("chat_history.jsonl"), chat).unwrap();
 
-        // An EMPTY shell: grok opens a new dir on every CLI entry with only the
-        // system prompt + a synthetic system_reminder user turn — must be
-        // skipped so the sidebar isn't flooded with blank sessions.
-        let empty = dir.join("%2Fwork%2Fapp").join("uuid-empty");
-        fs::create_dir_all(&empty).unwrap();
-        fs::write(
-            empty.join("summary.json"),
-            r#"{"info":{"id":"uuid-empty","cwd":"/work/app"},"session_summary":"",
-                "num_chat_messages":2}"#,
-        )
-        .unwrap();
-        fs::write(
-            empty.join("chat_history.jsonl"),
-            [
-                r#"{"type":"system","content":"You are Grok."}"#,
-                r#"{"type":"user","content":[{"type":"text","text":"<system-reminder>skills…</system-reminder>"}],"synthetic_reason":"system_reminder"}"#,
-            ]
-            .join("\n"),
-        )
-        .unwrap();
+        // TWO empty shells (grok opens a new dir on every CLI entry — only the
+        // system prompt + a synthetic system_reminder user turn, num_messages
+        // 0). Official `dedup_empty_sessions` (merge.rs): each cwd keeps ONLY
+        // its most recent empty (the "new session" resume entry); older
+        // empties drop.
+        let empty_chat = [
+            r#"{"type":"system","content":"You are Grok."}"#,
+            r#"{"type":"user","content":[{"type":"text","text":"<system-reminder>skills…</system-reminder>"}],"synthetic_reason":"system_reminder"}"#,
+        ]
+        .join("\n");
+        for (uuid, updated) in [
+            ("uuid-empty-old", "2026-07-13T11:00:00Z"),
+            ("uuid-empty-new", "2026-07-13T12:00:00Z"),
+        ] {
+            let shell = dir.join("%2Fwork%2Fapp").join(uuid);
+            fs::create_dir_all(&shell).unwrap();
+            fs::write(
+                shell.join("summary.json"),
+                format!(
+                    r#"{{"info":{{"id":"{uuid}","cwd":"/work/app"}},"session_summary":"",
+                        "num_messages":0,"num_chat_messages":2,"updated_at":"{updated}"}}"#
+                ),
+            )
+            .unwrap();
+            fs::write(shell.join("chat_history.jsonl"), &empty_chat).unwrap();
+        }
 
-        // Scanner accepts the real one, drops the empty shell.
-        let scanned = scan_grok_sessions_in(&dir).unwrap();
-        assert_eq!(scanned.len(), 1);
-        assert_eq!(scanned[0].id, "uuid-1");
-        assert!(scanned[0].path.ends_with("chat_history.jsonl"));
+        // Scanner keeps the real session + the NEWEST empty per cwd.
+        let mut scanned = scan_grok_sessions_in(&dir).unwrap();
+        scanned.sort_by(|a, b| a.id.cmp(&b.id));
+        let ids: Vec<&str> = scanned.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["uuid-1", "uuid-empty-new"]);
+        let real = scanned.iter().find(|s| s.id == "uuid-1").unwrap();
+        assert!(real.path.ends_with("chat_history.jsonl"));
 
         // Parser maps every type.
         let detail = parse_grok_session(&sess.join("chat_history.jsonl")).unwrap();

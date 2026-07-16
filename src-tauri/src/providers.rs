@@ -2049,14 +2049,24 @@ fn activate_grok(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>> {
             entry["description"] = toml_value(p.name.trim());
         }
         entry["api_key"] = toml_value(p.api_key.as_str());
-        // Wire API for this entry (default "responses" when unset/blank).
-        entry["api_backend"] = toml_value(
-            p.api_backend
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or("responses"),
-        );
+        // Wire API for this entry. When unset/blank the field is OMITTED so
+        // grok applies its OWN default — `ApiBackend::default()` =
+        // chat_completions (xai-grok-sampling-types/types.rs, applied via
+        // `ModelInfo::fallback`) — and keeps following grok if that default
+        // ever changes. Only an explicit editor choice is written.
+        match p
+            .api_backend
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(backend) => entry["api_backend"] = toml_value(backend),
+            None => {
+                if let Some(tbl) = entry.as_table_mut() {
+                    tbl.remove("api_backend");
+                }
+            }
+        }
     }
 
     // The optional default, set in the same action (no separate step).
@@ -4897,8 +4907,10 @@ base_url = "https://x.io/v1"
         assert!(text.contains("name = \"Grok 3\""));
         assert!(text.contains("description = \"x-third\""));
         assert!(text.contains("api_key = \"xai-sk\""));
-        // api_backend defaults to "responses" on every entry.
-        assert!(text.contains("api_backend = \"responses\""));
+        // Unset api_backend is OMITTED — grok applies its own default
+        // (chat_completions per `ApiBackend::default()`); only an explicit
+        // editor choice is written.
+        assert!(!text.contains("api_backend"));
         // Default points at the chosen model's entry key (set by activate).
         assert!(text.contains("default = \"test-x-third-grok-4.5\""));
         assert!(!text.contains("termory"));
@@ -4914,6 +4926,13 @@ base_url = "https://x.io/v1"
                 .and_then(|s| s.model.as_deref()),
             Some("grok-4.5")
         );
+
+        // An EXPLICIT api_backend choice IS written into every entry.
+        let mut p_explicit = p.clone();
+        p_explicit.api_backend = Some("responses".into());
+        activate(&p_explicit, &[p_explicit.clone()]).unwrap();
+        let text_explicit = fs::read_to_string(grok.join("config.toml")).unwrap();
+        assert!(text_explicit.contains("api_backend = \"responses\""));
 
         // "Set Official" sweeps our entries + default → back to factory.
         deactivate(CliApp::Grok, &[p.clone()]).unwrap();

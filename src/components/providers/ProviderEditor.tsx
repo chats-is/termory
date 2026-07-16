@@ -390,19 +390,25 @@ export function ProviderEditor({
             )}
 
             {/* Grok: the wire API each model entry declares (api_backend) —
-                shown BEFORE the model fields. Written into every [model.*]
-                entry; defaults to responses. */}
+                shown BEFORE the model fields. Only an explicit choice is
+                written into the [model.*] entries; "default" omits the field
+                so grok applies its own default (chat_completions). */}
             {isGrok && (
               <div className="grid gap-2 sm:col-span-2">
                 <Label>{t("providers.apiBackend")}</Label>
                 <Select
-                  value={draft.apiBackend ?? "responses"}
-                  onValueChange={(v) => update("apiBackend", v)}
+                  value={draft.apiBackend ?? "default"}
+                  onValueChange={(v) =>
+                    update("apiBackend", v === "default" ? undefined : v)
+                  }
                 >
                   <SelectTrigger className="w-full">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="default">
+                      {t("providers.apiBackendDefault")}
+                    </SelectItem>
                     <SelectItem value="responses">responses</SelectItem>
                     <SelectItem value="chat_completions">
                       chat_completions
