@@ -138,10 +138,13 @@ export const CLI_INSTALL: Record<
       }
     ]
   },
+  // Method tabs across every CLI share ONE canonical order:
+  // npm → curl → brew → npx → bun → paru → App/Download.
   codex: {
     binary: "codex",
     url: "https://github.com/openai/codex",
     methods: [
+      { id: "npm", label: "npm", command: "npm install -g @openai/codex" },
       // Official standalone installer (chatgpt.com domain, redirects to
       // the GitHub release install.sh) — installs a native CLI to
       // ~/.local/bin/codex, already covered by cli_search_paths.
@@ -151,7 +154,6 @@ export const CLI_INSTALL: Record<
         command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
       },
       { id: "brew", label: "brew", command: "brew install --cask codex" },
-      { id: "npm", label: "npm", command: "npm install -g @openai/codex" },
       // The merged ChatGPT/Codex desktop app (2026-07: the Codex app IS
       // the new unified ChatGPT app) — an app-only install is fully
       // supported (shared ~/.codex/, bundled-CLI fallback), so it's a
@@ -186,12 +188,12 @@ export const CLI_INSTALL: Record<
         label: "curl",
         command: "curl -fsSL https://opencode.ai/install | bash"
       },
-      { id: "bun", label: "bun", command: "bun install -g opencode-ai" },
       {
         id: "brew",
         label: "brew",
         command: "brew install anomalyco/tap/opencode"
       },
+      { id: "bun", label: "bun", command: "bun install -g opencode-ai" },
       { id: "paru", label: "paru", command: "paru -S opencode-bin" }
     ]
   },

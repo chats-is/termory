@@ -4,6 +4,7 @@ import { Check, Copy, ExternalLink, Loader2, RefreshCw, Terminal } from "lucide-
 import { Button } from "@/components/ui/button";
 import { BrandIcon } from "@/components/BrandIcon";
 import { CLI_APP_LABEL, CLI_APP_SOURCE_BADGE, CLI_INSTALL } from "@/constants";
+import { IS_MAC } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { useT } from "@/i18n";
 import type { CliApp } from "@/types";
@@ -20,18 +21,23 @@ export function InstallGuide({
   const t = useT();
   const info = CLI_INSTALL[app];
   const label = CLI_APP_LABEL[app];
-  const [methodId, setMethodId] = React.useState(info.methods[0].id);
+  // Homebrew installs are macOS-only in this guide — hide the brew tab
+  // elsewhere instead of suggesting a command that won't exist.
+  const methods = React.useMemo(
+    () => info.methods.filter((m) => m.id !== "brew" || IS_MAC),
+    [info.methods]
+  );
+  const [methodId, setMethodId] = React.useState(methods[0].id);
   const [copied, setCopied] = React.useState(false);
 
   // Reset to the first method when switching apps — different apps
   // expose different installer sets (npm/curl/brew/bun/paru).
   React.useEffect(() => {
-    setMethodId(info.methods[0].id);
+    setMethodId(methods[0].id);
     setCopied(false);
-  }, [app, info.methods]);
+  }, [app, methods]);
 
-  const method =
-    info.methods.find((m) => m.id === methodId) ?? info.methods[0];
+  const method = methods.find((m) => m.id === methodId) ?? methods[0];
 
   const copy = async () => {
     try {
@@ -55,9 +61,9 @@ export function InstallGuide({
         </div>
 
         <div className="w-full flex flex-col gap-2">
-          {info.methods.length > 1 && (
+          {methods.length > 1 && (
             <div className="flex flex-wrap items-center gap-1 rounded-md bg-muted p-1">
-              {info.methods.map((m) => (
+              {methods.map((m) => (
                 <button
                   key={m.id}
                   type="button"
@@ -79,7 +85,9 @@ export function InstallGuide({
           )}
           <div className="flex items-center gap-2 rounded-md outline outline-1 outline-foreground/10 bg-muted px-3 py-2">
             <Terminal className="size-3.5 shrink-0 text-muted-foreground" />
-            <code className="flex-1 text-left text-xs font-mono break-all">
+            {/* Single line, horizontal scroll on overflow — install
+                commands/URLs must never soft-wrap mid-token. */}
+            <code className="flex-1 min-w-0 overflow-x-auto whitespace-nowrap text-left text-xs font-mono">
               {method.command}
             </code>
             <Button
