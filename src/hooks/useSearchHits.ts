@@ -10,7 +10,9 @@ export function useSearchHits(query: string) {
 
   React.useEffect(() => {
     const trimmed = query.trim();
-    if (trimmed.length < 2) {
+    // 1-char minimum (aligned with the backend): a single CJK character
+    // is a meaningful query.
+    if (trimmed.length === 0) {
       setHits([]);
       setCommittedQuery("");
       setLoading(false);

@@ -53,7 +53,7 @@ const THEME_OPTIONS: { value: ThemeChoice; labelKey: MessageKey; icon: React.Rea
 
 const SHORTCUTS: { keys: string[]; labelKey: MessageKey }[] = [
   { keys: ["⌘", "K"], labelKey: "settings.shortcuts.searchPalette" },
-  { keys: ["⌘", "F"], labelKey: "settings.shortcuts.searchPaletteAlias" },
+  { keys: ["⌘", "F"], labelKey: "settings.shortcuts.findInSession" },
   { keys: ["⌘", "1..6"], labelKey: "settings.shortcuts.switchRoute" },
   { keys: ["Esc"], labelKey: "settings.shortcuts.closePalette" }
 ];

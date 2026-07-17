@@ -1,6 +1,7 @@
 import React from "react";
 import { Loader2, Search, Trash2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { SearchClearButton } from "@/components/SearchClearButton";
 import { Button } from "@/components/ui/button";
 import { useSearchHits } from "@/hooks/useSearchHits";
 import { formatFullNumber } from "@/lib/format";
@@ -16,13 +17,22 @@ export function SearchPage({
   onOpenItem,
   recentSearches,
   onCommitSearch,
-  onClearRecent
+  onClearRecent,
+  seed,
+  onSeedConsumed
 }: {
   sessions: AppSession[];
-  onOpenItem: (item: AppSession, messageIndex?: number) => void;
+  onOpenItem: (item: AppSession, messageIndex?: number, query?: string) => void;
   recentSearches: string[];
   onCommitSearch: (query: string) => void;
   onClearRecent: () => void;
+  /** Query handed over by the ⌘K palette's "view all results" bridge.
+   * Nonce so bridging the same query twice still re-seeds. */
+  seed?: { query: string; nonce: number } | null;
+  /** Called once a seed has been applied — the owner clears it, so a
+   * LATER normal visit to this page can't resurrect the stale query
+   * on remount (the page is route-gated and remounts every visit). */
+  onSeedConsumed?: () => void;
 }) {
   const t = useT();
   const [query, setQuery] = React.useState("");
@@ -33,16 +43,29 @@ export function SearchPage({
     inputRef.current?.focus();
   }, []);
 
+  // Consume-once bridge seed: covers both fresh-mount (bridge set the
+  // seed, then routed here) and already-mounted re-bridge.
+  React.useEffect(() => {
+    if (!seed) return;
+    setQuery(seed.query);
+    onSeedConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seed]);
+
   const handleOpen = React.useCallback(
     (item: AppSession, messageIndex?: number) => {
-      onCommitSearch(committedQuery || query);
-      onOpenItem(item, messageIndex);
+      const committed = committedQuery || query;
+      onCommitSearch(committed);
+      // Pass the query along so Records opens with the in-detail find
+      // bar pre-filled — the search page only scrolls to the FIRST
+      // match; the find bar carries the user to the rest.
+      onOpenItem(item, messageIndex, committed);
     },
     [committedQuery, onCommitSearch, onOpenItem, query]
   );
 
   const trimmed = query.trim();
-  const settled = committedQuery === trimmed && trimmed.length >= 2;
+  const settled = committedQuery === trimmed && trimmed.length >= 1;
   const noResults = settled && !loading && hits.length === 0;
 
   return (
@@ -56,7 +79,6 @@ export function SearchPage({
           )}
           <Input {...INPUT_NO_AUTO}
             ref={inputRef}
-            type="search"
             placeholder={t("search.placeholder")}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -65,8 +87,11 @@ export function SearchPage({
             autoCorrect="off"
             autoCapitalize="off"
             spellCheck={false}
-            className="h-11 pl-9 pr-3 border-0 bg-transparent shadow-none focus-visible:ring-0"
+            className="h-11 pl-9 pr-8 border-0 bg-transparent shadow-none focus-visible:ring-0"
           />
+          {query.length > 0 && (
+            <SearchClearButton onClear={() => setQuery("")} />
+          )}
         </div>
       </div>
       <div className="flex-1 min-h-0 overflow-auto px-3 flex flex-col gap-5">
@@ -75,7 +100,7 @@ export function SearchPage({
             {error}
           </div>
         )}
-        {trimmed.length < 2 && !loading && (
+        {trimmed.length < 1 && !loading && (
           <div className="flex flex-col items-center justify-center text-center gap-3 py-12 text-muted-foreground">
             <Search className="size-7" />
             <p className="text-sm">{t("search.hint")}</p>

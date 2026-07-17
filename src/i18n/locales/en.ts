@@ -16,13 +16,9 @@ export const en = {
   "command.description": "Find sessions, memories, skills",
   "command.placeholder": "Find sessions, memories, skills…",
   "command.typeToSearch": "Type to search across all records.",
+  "command.viewAllResults": "View all results for “{query}” in Search",
   "command.noMatches": "No matches.",
-  "command.recentSearches": "Recent searches",
-  "command.results": "Results",
-  "command.matching": "Matching",
-  "command.typeSession": "Session",
   "command.typeMemory": "Memory",
-  "command.typeSkill": "Skill",
 
   // Search
   "search.placeholder": "Search across sessions, memories, skills…",
@@ -117,6 +113,11 @@ export const en = {
   "records.nothingToView": "Nothing to view yet",
   "records.nothingToViewDesc": "Once Termory finds local history, sessions, memories, and skills will show up here.",
   "records.selectRecord": "Select a record",
+  "records.findPlaceholder": "Find in session",
+  "records.findNoMatches": "No matches",
+  "records.findPrev": "Previous match",
+  "records.findNext": "Next match",
+  "records.findClose": "Close find",
   "common.all": "All",
   "common.cancel": "Cancel",
   "favorites.add": "Add to favorites",
@@ -396,9 +397,9 @@ export const en = {
   // Keyboard shortcuts
   "settings.shortcuts": "Keyboard shortcuts",
   "settings.shortcuts.searchPalette": "Open search palette",
-  "settings.shortcuts.searchPaletteAlias": "Open search palette (alias)",
+  "settings.shortcuts.findInSession": "Find in current record",
   "settings.shortcuts.switchRoute": "Switch sidebar tab",
-  "settings.shortcuts.closePalette": "Close palette / dropdown",
+  "settings.shortcuts.closePalette": "Close / cancel",
 
   // About
   "settings.about": "About",

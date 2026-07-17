@@ -22,7 +22,6 @@ import {
   MessageSquare,
   Sparkles
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Tooltip,
@@ -95,6 +94,7 @@ import {
   recordUnderFolder,
   withProject
 } from "@/lib/records";
+import { matchingLoweredIndices } from "@/lib/search-utils";
 import { revealLabelKey } from "@/lib/platform";
 import { ActivityRail } from "@/components/ActivityRail";
 import { ListItemMenu } from "@/components/ListItemMenu";
@@ -105,8 +105,9 @@ import { EmptyState } from "@/components/EmptyState";
 import { FreshnessFooter } from "@/components/FreshnessFooter";
 import { SessionCardSkeletonList } from "@/components/SessionCardSkeleton";
 import { MemoryCard } from "@/components/MemoryCard";
-import { MessageBody } from "@/components/MessageBody";
 import { MessageList } from "@/components/MessageList";
+import { DocDetailView } from "@/components/DocDetailView";
+import { TranscriptFindBar } from "@/components/TranscriptFindBar";
 import { SnippetLine } from "@/components/SnippetLine";
 import { useI18n, useT } from "@/i18n";
 
@@ -401,6 +402,169 @@ export function App() {
     []
   );
 
+  // In-session transcript find (Records detail pane, ⌘F). Match list is
+  // frontend-only over the already-loaded `detail.messages` — same
+  // case-insensitive substring semantics as the backend search. Jumps
+  // reuse the pendingScroll → MessageList scrollRequest pipeline.
+  const [findOpen, setFindOpen] = React.useState(false);
+  const [findQuery, setFindQuery] = React.useState("");
+  const [findPos, setFindPos] = React.useState(0);
+  const [findFocusNonce, setFindFocusNonce] = React.useState(0);
+  // Search → find-bar linkage payload, staged by openItem (like
+  // pendingScroll) and consumed by the selection effect below.
+  const [pendingFind, setPendingFind] = React.useState<{
+    sessionKey: string;
+    query: string;
+  } | null>(null);
+
+  const selectedKey = selected ? `${selected.source}::${selected.id}` : null;
+
+  // ONE effect owns the find bar's reaction to selection changes and
+  // staged pendingFind — no declaration-order dependency between a
+  // "close on selection change" effect and a "reopen from search"
+  // effect (the previous two-effect split silently relied on order):
+  //  - staged find matching the selection → open pre-filled, consume;
+  //  - selection actually changed → close (query kept, browser-style)
+  //    and DROP a stale pendingFind so it can't fire on a much-later
+  //    manual selection of its target;
+  //  - re-run caused by consuming pendingFind → no-op.
+  const findPrevSelectedKeyRef = React.useRef(selectedKey);
+  const lastJumpQueryRef = React.useRef("");
+  React.useEffect(() => {
+    const selectionChanged = findPrevSelectedKeyRef.current !== selectedKey;
+    findPrevSelectedKeyRef.current = selectedKey;
+    if (pendingFind && pendingFind.sessionKey === selectedKey) {
+      setFindQuery(pendingFind.query);
+      setFindOpen(true);
+      setFindPos(0);
+      lastJumpQueryRef.current = "";
+      setPendingFind(null);
+      return;
+    }
+    if (selectionChanged) {
+      setFindOpen(false);
+      setFindPos(0);
+      lastJumpQueryRef.current = "";
+      if (pendingFind) setPendingFind(null);
+    }
+  }, [selectedKey, pendingFind]);
+
+  // Lowercase every message ONCE per opened find session (not per
+  // keystroke — session text runs to 100+MB and per-keystroke
+  // re-lowercasing caused GC-visible jank). Gated on findOpen so
+  // merely loading a detail pays nothing.
+  const loweredTexts = React.useMemo(
+    () =>
+      findOpen && detail
+        ? detail.messages.map((message) => message.text.toLowerCase())
+        : null,
+    [findOpen, detail]
+  );
+  const findMatches = React.useMemo(
+    () => (loweredTexts ? matchingLoweredIndices(loweredTexts, findQuery) : []),
+    [loweredTexts, findQuery]
+  );
+  const findMatchSet = React.useMemo(() => new Set(findMatches), [findMatches]);
+  // Clamp instead of resetting when the list shrinks (e.g. the watcher
+  // re-loaded a shorter detail) so the position doesn't jump to 0.
+  const findPosClamped = findMatches.length
+    ? Math.min(findPos, findMatches.length - 1)
+    : 0;
+
+  const jumpToFindMatch = React.useCallback(
+    (pos: number, matchList: number[]) => {
+      setFindPos(pos);
+      const index = matchList[pos];
+      if (selectedKey && index != null) {
+        setPendingScroll({ sessionKey: selectedKey, index, nonce: Date.now() });
+      }
+    },
+    [selectedKey]
+  );
+  // Jump to the first match when the QUERY changes (each keystroke,
+  // browser-find style). Runs off the memoized findMatches so the scan
+  // happens exactly once per keystroke — the previous handler-computed
+  // variant scanned the transcript a second time on the same key.
+  React.useEffect(() => {
+    if (!findOpen) return;
+    const trimmed = findQuery.trim();
+    if (!trimmed) {
+      // Reset the dedup ref, so clearing and retyping the SAME query
+      // jumps to the first match again.
+      lastJumpQueryRef.current = "";
+      return;
+    }
+    if (trimmed === lastJumpQueryRef.current) return;
+    lastJumpQueryRef.current = trimmed;
+    setFindPos(0);
+    if (findMatches.length > 0 && selectedKey) {
+      setPendingScroll({
+        sessionKey: selectedKey,
+        index: findMatches[0],
+        nonce: Date.now()
+      });
+    }
+  }, [findOpen, findQuery, findMatches, selectedKey]);
+  const findNext = React.useCallback(() => {
+    if (findMatches.length === 0) return;
+    jumpToFindMatch((findPosClamped + 1) % findMatches.length, findMatches);
+  }, [findMatches, findPosClamped, jumpToFindMatch]);
+  const findPrev = React.useCallback(() => {
+    if (findMatches.length === 0) return;
+    jumpToFindMatch(
+      (findPosClamped - 1 + findMatches.length) % findMatches.length,
+      findMatches
+    );
+  }, [findMatches, findPosClamped, jumpToFindMatch]);
+  const closeFind = React.useCallback(() => setFindOpen(false), []);
+
+  // The ⌘K palette's open state lives HERE (controlled) so the ⌘F
+  // handler can see it — with it open, ⌘F must do nothing instead of
+  // opening the find bar underneath the modal (window keydown
+  // listeners still fire under a Radix dialog).
+  const [paletteOpen, setPaletteOpen] = React.useState(false);
+
+  // ⌘F opens/refocuses the in-detail find bar when Records shows
+  // content (session transcript OR memory/skill doc) — and does
+  // NOTHING anywhere else. ⌘K alone owns the search palette
+  // (revised plan, user decision 2026-07-17).
+  const detailHasMessages = (detail?.messages.length ?? 0) > 0;
+  const tryOpenFind = React.useCallback((): boolean => {
+    if (paletteOpen) return false;
+    if (route !== "records") return false;
+    if (!selected) return false;
+    if (!detailHasMessages) return false;
+    setFindOpen(true);
+    setFindFocusNonce((nonce) => nonce + 1);
+    return true;
+  }, [paletteOpen, route, selected, detailHasMessages]);
+  React.useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.shiftKey) return;
+      if (event.key.toLowerCase() !== "f") return;
+      if (tryOpenFind()) event.preventDefault();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [tryOpenFind]);
+
+  // Palette → Search-page bridge ("view all results"): seeds the full
+  // Search page with the palette's query. CONSUME-ONCE: SearchPage
+  // reports consumption and the seed is cleared, so later visits to
+  // the Search page don't resurrect a stale query on remount.
+  const [searchSeed, setSearchSeed] = React.useState<{
+    query: string;
+    nonce: number;
+  } | null>(null);
+  const openSearchPage = React.useCallback(
+    (query: string) => {
+      setSearchSeed({ query, nonce: Date.now() });
+      setRoute("search");
+    },
+    [setRoute]
+  );
+  const clearSearchSeed = React.useCallback(() => setSearchSeed(null), []);
+
   // Shared "jump to this record" action — used by Search, Cmd-K, and
   // the Favorites "Open original" button. Resets the Records sidebar
   // filters so the target item is visible in its pane and switches
@@ -408,7 +572,7 @@ export function App() {
   // When `messageIndex` is supplied, the records detail pane will
   // scroll that message into view as soon as it finishes loading.
   const openItem = React.useCallback(
-    (item: AppSession, messageIndex?: number) => {
+    (item: AppSession, messageIndex?: number, query?: string) => {
       setSource("All");
       setProject(null);
       if (isMemoryItem(item)) setPane("memory");
@@ -420,6 +584,13 @@ export function App() {
           sessionKey: `${item.source}::${item.id}`,
           index: messageIndex,
           nonce: Date.now()
+        });
+      }
+      const carried = query?.trim();
+      if (carried) {
+        setPendingFind({
+          sessionKey: `${item.source}::${item.id}`,
+          query: carried
         });
       }
       setRoute("records");
@@ -891,6 +1062,8 @@ export function App() {
                 recentSearches={recentSearches}
                 onCommitSearch={addRecentSearch}
                 onClearRecent={clearRecentSearches}
+                seed={searchSeed}
+                onSeedConsumed={clearSearchSeed}
               />
             )}
             {route === "providers" && (
@@ -1603,34 +1776,60 @@ export function App() {
                         <Loader2 className="animate-spin" />
                       </div>
                     ) : isSessionItem(selected) && detail?.messages.length ? (
-                      <MessageList
-                        messages={detail.messages}
-                        favorites={{
-                          session: selected,
-                          keys: favoriteKeys,
-                          onToggle: (message, index) =>
-                            toggleFavorite(selected, message, index)
-                        }}
-                        scrollRequest={
-                          pendingScroll &&
-                          pendingScroll.sessionKey ===
-                            `${selected.source}::${selected.id}`
-                            ? {
-                                index: pendingScroll.index,
-                                nonce: pendingScroll.nonce
-                              }
-                            : null
-                        }
-                        onScrolled={clearPendingScroll}
-                      />
-                    ) : detail?.messages.length ? (
-                      <div className="flex-1 overflow-auto px-4 py-2">
-                        <div className="rounded-lg bg-card text-card-foreground px-5 py-4">
-                          <MessageBody
-                            text={detail.messages.map((m) => m.text).join("\n\n")}
+                      <>
+                        {findOpen && (
+                          <TranscriptFindBar
+                            query={findQuery}
+                            onQueryChange={setFindQuery}
+                            position={findPosClamped}
+                            total={findMatches.length}
+                            onNext={findNext}
+                            onPrev={findPrev}
+                            onClose={closeFind}
+                            focusNonce={findFocusNonce}
                           />
-                        </div>
-                      </div>
+                        )}
+                        <MessageList
+                          messages={detail.messages}
+                          favorites={{
+                            session: selected,
+                            keys: favoriteKeys,
+                            onToggle: (message, index) =>
+                              toggleFavorite(selected, message, index)
+                          }}
+                          find={
+                            findOpen && findQuery.trim()
+                              ? {
+                                  query: findQuery.trim(),
+                                  indices: findMatchSet,
+                                  current: findMatches.length
+                                    ? findMatches[findPosClamped]
+                                    : null
+                                }
+                              : undefined
+                          }
+                          scrollRequest={
+                            pendingScroll &&
+                            pendingScroll.sessionKey ===
+                              `${selected.source}::${selected.id}`
+                              ? {
+                                  index: pendingScroll.index,
+                                  nonce: pendingScroll.nonce
+                                }
+                              : null
+                          }
+                          onScrolled={clearPendingScroll}
+                        />
+                      </>
+                    ) : detail?.messages.length ? (
+                      <DocDetailView
+                        text={detail.messages.map((m) => m.text).join("\n\n")}
+                        findOpen={findOpen}
+                        findQuery={findQuery}
+                        onQueryChange={setFindQuery}
+                        onClose={closeFind}
+                        focusNonce={findFocusNonce}
+                      />
                     ) : (
                       <div className="flex-1" />
                     )}
@@ -1647,11 +1846,11 @@ export function App() {
         error={error}
       />
       <CommandPalette
-        sessions={sessions}
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
         onOpenItem={openItem}
-        recentSearches={recentSearches}
         onCommitSearch={addRecentSearch}
-        onClearRecent={clearRecentSearches}
+        onOpenSearchPage={openSearchPage}
       />
       {/* UpdateDialog is gated on `pendingUpdate` being non-null AND
           wrapped in Suspense so its chunk only downloads when an

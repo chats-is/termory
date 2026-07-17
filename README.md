@@ -34,7 +34,7 @@ Termory brings **Codex**, **Claude Code**, **Gemini CLI**, and **OpenCode** toge
 - **Manage** — Delete or migrate any record — sessions, projects, memory — from the right-click menu, with a confirmation step.
 - **Providers** — Keep named API profiles for each CLI and switch the active one with a click, or from the menu bar. Codex supports multiple saved accounts — add, switch, and re-authenticate without losing session history.
 - **Favorites** — Star any message; it's saved as a snapshot that stays readable even after the original session is gone.
-- **Search** — Instant search across all your history, with a `⌘K` command palette.
+- **Search** — Instant search across all your history, with a `⌘K` command palette and in-record find (`⌘F`) with term highlighting.
 - **Stats** — Sessions, messages, tokens, models, projects, and an activity heatmap over any date range.
 - **Private** — No servers, no accounts, no telemetry. Termory reads your history where it already lives, and only ever changes it when you explicitly ask — deleting or migrating a record, or keeping sessions across a provider switch.
 

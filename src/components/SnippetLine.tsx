@@ -1,6 +1,7 @@
 import React from "react";
 import { MessageSquare } from "lucide-react";
 import { splitSnippet } from "@/lib/search-utils";
+import { SearchMark } from "@/components/SearchMark";
 
 export function SnippetLine({
   snippet,
@@ -32,9 +33,7 @@ export function SnippetLine({
       <span className="text-xs text-muted-foreground line-clamp-2">
         {segments.map((seg, index) =>
           seg.match ? (
-            <mark key={index} className="bg-primary/20 text-foreground rounded px-0.5">
-              {seg.text}
-            </mark>
+            <SearchMark key={index}>{seg.text}</SearchMark>
           ) : (
             <span key={index}>{seg.text}</span>
           )

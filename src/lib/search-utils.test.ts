@@ -1,5 +1,40 @@
 import { describe, expect, it } from "vitest";
-import { splitSnippet } from "./search-utils";
+import { matchingLoweredIndices, splitSnippet } from "./search-utils";
+
+describe("matchingLoweredIndices", () => {
+  // Production callers pre-lowercase once per transcript (App.tsx memo).
+  const msgs = (...texts: string[]) => texts.map((text) => text.toLowerCase());
+
+  it("returns [] for an empty or whitespace-only query", () => {
+    expect(matchingLoweredIndices(msgs("a", "b"), "")).toEqual([]);
+    expect(matchingLoweredIndices(msgs("a", "b"), "   ")).toEqual([]);
+  });
+
+  it("matches case-insensitively as a substring", () => {
+    expect(
+      matchingLoweredIndices(msgs("Hello World", "nothing", "say hello"), "HELLO")
+    ).toEqual([0, 2]);
+  });
+
+  it("trims the query before matching", () => {
+    expect(matchingLoweredIndices(msgs("a todo b"), " todo ")).toEqual([0]);
+  });
+
+  it("returns [] when nothing matches", () => {
+    expect(matchingLoweredIndices(msgs("aaa", "bbb"), "zzz")).toEqual([]);
+  });
+
+  it("matches markdown-formatted tool text verbatim (no stripping)", () => {
+    // Message bodies are the formatted markdown — `**Bash**(...)` etc. —
+    // so the marker characters themselves are matchable, same as the
+    // backend search.
+    expect(matchingLoweredIndices(msgs("⏺ **Bash**(`ls -la`)"), "**bash**")).toEqual([0]);
+  });
+
+  it("handles an empty message list", () => {
+    expect(matchingLoweredIndices([], "x")).toEqual([]);
+  });
+});
 
 describe("splitSnippet", () => {
   it("returns the whole snippet as a non-match when the query is empty", () => {

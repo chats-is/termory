@@ -486,7 +486,11 @@ const SEARCH_MATCH_CAP: usize = 500;
 
 pub fn search_sessions(query: &str) -> Result<Vec<SearchHit>, Box<dyn Error>> {
     let trimmed = query.trim();
-    if trimmed.chars().count() < 2 {
+    // Minimum query length is ONE character (not two): a single CJK
+    // character is a meaningful query, and hits aggregate per session
+    // (one SearchHit per record), so a broad single-letter query costs
+    // the same scan and returns at most one row per record.
+    if trimmed.is_empty() {
         return Ok(Vec::new());
     }
     let needle = trimmed.to_lowercase();

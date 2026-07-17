@@ -208,9 +208,13 @@ The sidebar project row also has **Open in terminal** — opens a terminal in th
 **Two ways in:**
 
 - The **Search** page (`⌘4`) — type a query; results are grouped by source with the matching snippet highlighted. Clicking a result opens the record scrolled to the first match.
-- The **`⌘K` quick-search palette** — summon it from anywhere (also `⌘F`); same index, keyboard-driven (↑/↓/Enter), with your recent searches listed.
+- The **`⌘K` quick-search palette** — summon it from anywhere; the same search and the same result rows as the Search page, keyboard-driven (↑/↓/Enter), capped to the top 8. A **"View all results"** row at the bottom (or plain Enter when nothing is listed) jumps to the full Search page with your query carried over.
 
-Recent searches are remembered; clear them under **Settings → Search history**.
+Queries can be as short as **one character** (a single CJK character is a valid query). Opening a result also pre-fills the record's **in-record find** (below) with your query, so you can walk every match, not just the first.
+
+**Find in the open record (`⌘F`)** — with a session or memory/skill doc open in Records, `⌘F` opens a find bar over that record: every occurrence is highlighted, `Enter` / `Shift+Enter` (or ↑/↓ buttons) jump between matches, `Esc` closes. Sessions navigate match-by-message; docs navigate occurrence-by-occurrence.
+
+Recent searches are remembered (shown on the Search page); clear them under **Settings → Search history**.
 
 ---
 
@@ -255,7 +259,8 @@ The Settings page (`⌘6`) has these sections:
 | Shortcut | Action |
 |----------|--------|
 | `⌘1`–`⌘6` | Switch rail destination |
-| `⌘K` / `⌘F` | Open the quick-search palette |
+| `⌘K` | Open the quick-search palette |
+| `⌘F` | Find in the open record (Records) |
 | `Esc` | Close the palette / a dropdown |
 
 ---

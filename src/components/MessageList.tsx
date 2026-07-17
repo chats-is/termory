@@ -21,6 +21,19 @@ import { roleClass } from "@/lib/session-utils";
  * effect inside MessageList is idempotent per nonce. */
 export type ScrollRequest = { index: number; nonce: number };
 
+/** In-session find highlight. `query` is the term — every occurrence
+ * inside a matching message's rendered body gets a `<mark>` (via
+ * MessageBody's rehype pass); `indices` = matching message indexes;
+ * `current` = the message the find position sits on. The `data-find`
+ * attribute drives the mark colors (all matches yellow, the current
+ * message's marks orange — styles.css), browser-find style; there is
+ * deliberately NO whole-message background (user decision). */
+export type FindHighlight = {
+  query: string;
+  indices: Set<number>;
+  current: number | null;
+};
+
 /** All the wiring needed to render the per-message star button.
  * Bundled into one optional prop so a caller that doesn't want the
  * favorites affordance only has to omit one field (instead of
@@ -34,11 +47,13 @@ export type FavoriteContext = {
 export function MessageList({
   messages,
   favorites,
+  find,
   scrollRequest,
   onScrolled
 }: {
   messages: SessionMessage[];
   favorites?: FavoriteContext;
+  find?: FindHighlight;
   scrollRequest?: ScrollRequest | null;
   /** Called once a scrollRequest has been consumed (either dispatched
    * to the virtualizer or dropped because the index is out of range).
@@ -95,12 +110,18 @@ export function MessageList({
             favorites?.keys.has(
               favoriteKey(favorites.session.source, favorites.session.id, idx)
             ) ?? false;
+          const findState = find?.indices.has(idx)
+            ? find.current === idx
+              ? "current"
+              : "match"
+            : undefined;
           return (
             <article
               key={virtualRow.key}
               data-index={virtualRow.index}
               ref={virtualizer.measureElement}
               data-role={roleClass(message.role)}
+              data-find={findState}
               style={{
                 position: "absolute",
                 top: 0,
@@ -155,7 +176,11 @@ export function MessageList({
                   </Tooltip>
                 )}
               </header>
-              <MessageBody text={message.text} className="pl-[11px]" />
+              <MessageBody
+                text={message.text}
+                className="pl-[11px]"
+                highlight={findState ? find?.query : undefined}
+              />
             </article>
           );
         })}

@@ -184,6 +184,52 @@ describe("MessageList — star button state + toggle", () => {
   });
 });
 
+describe("MessageList — find highlight", () => {
+  it("marks matching rows with data-find and the current one as 'current'", () => {
+    const { container } = render(
+      <MessageList
+        messages={[
+          mkMessage({ text: "alpha" }),
+          mkMessage({ text: "beta" }),
+          mkMessage({ text: "gamma" })
+        ]}
+        find={{ query: "a", indices: new Set([0, 2]), current: 2 }}
+      />
+    );
+    const articles = container.querySelectorAll("article");
+    expect(articles[0].getAttribute("data-find")).toBe("match");
+    expect(articles[1].hasAttribute("data-find")).toBe(false);
+    expect(articles[2].getAttribute("data-find")).toBe("current");
+  });
+
+  it("wraps the matched term in <mark> inside matching messages only", () => {
+    const { container } = render(
+      <MessageList
+        messages={[
+          mkMessage({ text: "say hello world" }),
+          mkMessage({ text: "no match here" })
+        ]}
+        find={{ query: "hello", indices: new Set([0]), current: 0 }}
+      />
+    );
+    const marks = container.querySelectorAll("article mark");
+    expect(marks).toHaveLength(1);
+    expect(marks[0].textContent).toBe("hello");
+    // The non-matching message body has no marks.
+    expect(
+      container.querySelectorAll("article")[1].querySelectorAll("mark")
+    ).toHaveLength(0);
+  });
+
+  it("marks nothing when the find prop is omitted", () => {
+    const { container } = render(
+      <MessageList messages={[mkMessage(), mkMessage()]} />
+    );
+    expect(container.querySelectorAll("article[data-find]")).toHaveLength(0);
+    expect(container.querySelectorAll("mark")).toHaveLength(0);
+  });
+});
+
 describe("MessageList — per-message copy button", () => {
   it("renders one copy button per message even without the favorites prop", () => {
     render(
