@@ -16,10 +16,11 @@ import { CLI_APPS } from "../constants";
 type Translate = (key: MessageKey, params?: Record<string, string | number>) => string;
 
 /** Tools OFF BY DEFAULT — hidden until the user flips their Settings →
- * Tools switch to an explicit `true`. Gemini CLI was deprecated by
- * Google on 2026-06-18 (individual accounts; replaced by Antigravity
- * CLI). MIRROR of `DEFAULT_OFF_KEYS` in src-tauri/src/config.rs — keep
- * the two in sync. */
+ * Tools switch to an explicit `true`. Gemini CLI stopped serving
+ * individual accounts on 2026-06-18 (HTTP 410; enterprise Code Assist
+ * still works, Google steers individuals to Antigravity CLI). MIRROR of
+ * `DEFAULT_OFF_KEYS` in src-tauri/src/config.rs — keep the two in
+ * sync. */
 const DEFAULT_OFF_SOURCES: ReadonlySet<CliApp> = new Set(["gemini"]);
 
 /** Resolve the user's Settings → Tools drag order (config `source_order`)

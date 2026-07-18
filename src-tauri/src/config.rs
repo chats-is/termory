@@ -118,10 +118,11 @@ pub fn read_config() -> Result<JsonValue, Box<dyn Error>> {
 }
 
 /// Tools OFF BY DEFAULT — hidden until the user flips their Settings →
-/// Tools switch to an explicit `true`. Gemini CLI was deprecated by
-/// Google on 2026-06-18 (individual accounts get HTTP 410; replaced by
-/// Antigravity CLI), so it no longer earns a default slot. MIRROR of
-/// `DEFAULT_OFF_SOURCES` in src/lib/provider-utils.ts — keep in sync.
+/// Tools switch to an explicit `true`. Gemini CLI stopped serving
+/// individual accounts on 2026-06-18 (HTTP 410; enterprise Code Assist
+/// still works, Google steers individuals to Antigravity CLI), so it no
+/// longer earns a default slot. MIRROR of `DEFAULT_OFF_SOURCES` in
+/// src/lib/provider-utils.ts — keep in sync.
 const DEFAULT_OFF_KEYS: &[&str] = &["gemini"];
 
 /// CLI keys ("codex" / "claude" / …) the user has switched OFF in

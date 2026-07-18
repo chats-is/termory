@@ -535,9 +535,34 @@ fn quota_http_client(app_key: &str) -> Result<reqwest::Client, SubscriptionQuota
         })
 }
 
-/// Shared response handling: non-2xx → error result (401/403 marks the
-/// credential Expired; message via `http_error_message` so the card
-/// shows the API's own error text), 2xx → parsed JSON body.
+/// Map a non-2xx quota response to a result:
+/// - **410 Gone → NotFound.** The usage endpoint no longer serves this
+///   account (e.g. Gemini CLI stopped serving individual/free logins on
+///   2026-06-18). Treated like a logout: the card hides cleanly instead
+///   of surfacing a confusing error toast on manual refresh. Enterprise
+///   logins keep serving quota, so they are unaffected.
+/// - **401/403 → error with an Expired credential** (re-login prompt).
+/// - **everything else → error** carrying the API's own message text.
+fn quota_error_for_status(
+    app_key: &str,
+    status: reqwest::StatusCode,
+    body: &str,
+) -> SubscriptionQuota {
+    if status == reqwest::StatusCode::GONE {
+        return SubscriptionQuota::not_found(app_key);
+    }
+    let cred = if status == reqwest::StatusCode::UNAUTHORIZED
+        || status == reqwest::StatusCode::FORBIDDEN
+    {
+        CredentialStatus::Expired
+    } else {
+        CredentialStatus::Valid
+    };
+    SubscriptionQuota::error(app_key, cred, http_error_message(status, body))
+}
+
+/// Shared response handling: non-2xx → error result (see
+/// `quota_error_for_status`), 2xx → parsed JSON body.
 async fn read_json_or_error(
     app_key: &str,
     resp: reqwest::Response,
@@ -545,18 +570,7 @@ async fn read_json_or_error(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        let cred = if status == reqwest::StatusCode::UNAUTHORIZED
-            || status == reqwest::StatusCode::FORBIDDEN
-        {
-            CredentialStatus::Expired
-        } else {
-            CredentialStatus::Valid
-        };
-        return Err(SubscriptionQuota::error(
-            app_key,
-            cred,
-            http_error_message(status, &body),
-        ));
+        return Err(quota_error_for_status(app_key, status, &body));
     }
     resp.json().await.map_err(|err| {
         SubscriptionQuota::error(
@@ -2025,6 +2039,34 @@ mod tests {
         );
         // Empty body → status only.
         assert_eq!(http_error_message(status, ""), "HTTP 429 Too Many Requests");
+    }
+
+    #[test]
+    fn quota_error_for_status_maps_gone_to_not_found() {
+        use reqwest::StatusCode;
+        // 410 Gone (individual Gemini login cut off) → clean NotFound,
+        // no error text — the card hides instead of toasting.
+        let gone = quota_error_for_status("gemini", StatusCode::GONE, "gone");
+        assert_eq!(gone.credential_status, CredentialStatus::NotFound);
+        assert!(!gone.success);
+        assert!(gone.error.is_none());
+        assert!(gone.tiers.is_empty());
+
+        // 401/403 → Expired credential (re-login), with a message.
+        let unauth = quota_error_for_status("gemini", StatusCode::UNAUTHORIZED, "");
+        assert_eq!(unauth.credential_status, CredentialStatus::Expired);
+        assert!(unauth.error.is_some());
+        let forbidden = quota_error_for_status("gemini", StatusCode::FORBIDDEN, "");
+        assert_eq!(forbidden.credential_status, CredentialStatus::Expired);
+
+        // Other failures keep a Valid credential + surface the message.
+        let server = quota_error_for_status(
+            "gemini",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":{"message":"boom"}}"#,
+        );
+        assert_eq!(server.credential_status, CredentialStatus::Valid);
+        assert!(server.error.unwrap().contains("boom"));
     }
 
     #[test]

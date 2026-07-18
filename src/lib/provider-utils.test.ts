@@ -516,7 +516,7 @@ describe("isSourceEnabled", () => {
     expect(isSourceEnabled({ codex: false }, "claude")).toBe(true);
   });
 
-  it("gemini is OFF by default (deprecated CLI) — explicit true re-enables", () => {
+  it("gemini is OFF by default (individual support stopped) — explicit true re-enables", () => {
     // MIRROR of DEFAULT_OFF_KEYS in src-tauri/src/config.rs.
     expect(isSourceEnabled(undefined, "gemini")).toBe(false);
     expect(isSourceEnabled({}, "gemini")).toBe(false);

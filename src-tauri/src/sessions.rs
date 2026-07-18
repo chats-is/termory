@@ -5754,7 +5754,7 @@ struct GeminiConversation {
     kind: Option<String>,
     messages: Vec<Value>,
     message_count: usize,
-    has_user_or_assistant: bool,
+    has_resumable_content: bool,
     // Token + model are extracted during the same line/record walk as
     // the loader does, so metadata_only scans (Stats page) get the
     // numbers without paying for full message construction.
@@ -5780,8 +5780,12 @@ fn parse_gemini_session_file(
         Some("json") => load_gemini_json_conversation(path, metadata_only)?,
         _ => return Err("unsupported Gemini session file".into()),
     };
+    // List filter mirrors `getAllSessionFiles` in
+    // packages/cli/src/utils/sessionUtils.ts:284: gate on `hasResumableContent`
+    // (skips startup-only / system-only / command-only / internal-context-only
+    // sessions) plus non-empty sessionId and `kind !== 'subagent'`.
     if conversation.session_id.is_empty()
-        || !conversation.has_user_or_assistant
+        || !conversation.has_resumable_content
         || conversation.kind.as_deref() == Some("subagent")
     {
         return Err("not a Gemini session list entry".into());
@@ -6029,7 +6033,9 @@ fn load_gemini_jsonl_conversation(
     let mut messages_map = HashMap::<String, Value>::new();
     let mut message_order = Vec::<String>::new();
     let mut message_ids = Vec::<String>::new();
-    let mut message_kinds = HashMap::<String, (bool, bool)>::new();
+    // id → is the message resumable (mirrors `hasResumableContent`); used only
+    // by the metadata_only path, where full messages aren't reconstructed.
+    let mut message_kinds = HashMap::<String, bool>::new();
     let mut first_user_message: Option<String> = None;
     let mut token_acc = GeminiTokenAccumulator::default();
     for line in content.lines().filter(|line| !line.trim().is_empty()) {
@@ -6065,10 +6071,7 @@ fn load_gemini_jsonl_conversation(
 
         if let Some(id) = value.get("id").and_then(value_to_string) {
             let is_user = value.get("type").and_then(Value::as_str) == Some("user");
-            let is_user_or_assistant = matches!(
-                value.get("type").and_then(Value::as_str),
-                Some("user" | "gemini")
-            );
+            let is_resumable = gemini_is_resumable_message(&value);
             if is_user && first_user_message.is_none() {
                 first_user_message = value
                     .get("content")
@@ -6077,7 +6080,7 @@ fn load_gemini_jsonl_conversation(
             }
             if metadata_only {
                 message_ids.push(id.clone());
-                message_kinds.insert(id.clone(), (is_user, is_user_or_assistant));
+                message_kinds.insert(id.clone(), is_resumable);
             }
             if !metadata_only {
                 if !messages_map.contains_key(&id) {
@@ -6130,12 +6133,12 @@ fn load_gemini_jsonl_conversation(
     } else {
         loaded_messages.len()
     };
-    let has_user_or_assistant = if metadata_only && !metadata_messages.is_empty() {
-        metadata_messages.iter().any(gemini_is_user_or_assistant)
+    let has_resumable_content = if metadata_only && !metadata_messages.is_empty() {
+        metadata_messages.iter().any(gemini_is_resumable_message)
     } else if metadata_only {
-        message_kinds.values().any(|(_, visible)| *visible)
+        message_kinds.values().any(|&resumable| resumable)
     } else {
-        loaded_messages.iter().any(gemini_is_user_or_assistant)
+        loaded_messages.iter().any(gemini_is_resumable_message)
     };
     // metadata_only path skips the loop above, so feed the metadata
     // messages (set via `$set`) into the accumulator before finishing.
@@ -6173,7 +6176,7 @@ fn load_gemini_jsonl_conversation(
             loaded_messages
         },
         message_count,
-        has_user_or_assistant,
+        has_resumable_content,
         token_stats,
         model,
         daily_tokens,
@@ -6190,7 +6193,7 @@ fn load_gemini_json_conversation(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let has_user_or_assistant = messages.iter().any(gemini_is_user_or_assistant);
+    let has_resumable_content = messages.iter().any(gemini_is_resumable_message);
     // The .json layout has all messages up-front, so the simple
     // aggregating helper is enough — no streaming needed.
     let (token_stats, model, daily_tokens) = gemini_extract_token_usage(&messages);
@@ -6220,7 +6223,7 @@ fn load_gemini_json_conversation(
             messages.clone()
         },
         message_count: messages.len(),
-        has_user_or_assistant,
+        has_resumable_content,
         token_stats,
         model,
         daily_tokens,
@@ -6904,11 +6907,51 @@ fn gemini_part_to_string(value: &Value) -> Option<String> {
     None
 }
 
-fn gemini_is_user_or_assistant(value: &Value) -> bool {
-    matches!(
-        value.get("type").and_then(Value::as_str),
-        Some("user" | "gemini")
-    )
+/// Mirror of gemini-cli `isIgnoredUserContent`
+/// (packages/core/src/utils/sessionUtils.ts:97): user content the resume list
+/// treats as non-conversational — empty, a `/` slash command, a `?` shell
+/// passthrough, or the injected `<session_context>` / `<hook_context>` blocks.
+fn gemini_is_ignored_user_content(trimmed: &str) -> bool {
+    trimmed.is_empty()
+        || trimmed.starts_with('/')
+        || trimmed.starts_with('?')
+        || trimmed.starts_with("<session_context>")
+        || trimmed.starts_with("<hook_context>")
+}
+
+/// Mirror of gemini-cli `isResumableMessageRecord`
+/// (packages/core/src/services/chatRecordingService.ts:107): a stored message
+/// worth surfacing in resume flows. A `user` record counts unless its content
+/// is ignored (above); a `gemini` record counts when it has text, tool calls,
+/// or thoughts. Everything else (system, etc.) does not. Replaces the old
+/// "any user/gemini message" rule — the CLI tightened `getAllSessionFiles` to
+/// gate on `hasResumableContent`.
+fn gemini_is_resumable_message(value: &Value) -> bool {
+    match value.get("type").and_then(Value::as_str) {
+        Some("user") => {
+            let content = value
+                .get("content")
+                .and_then(gemini_content_text_raw)
+                .unwrap_or_default();
+            !gemini_is_ignored_user_content(content.trim())
+        }
+        Some("gemini") => {
+            let has_text = value
+                .get("content")
+                .and_then(gemini_content_text_raw)
+                .is_some();
+            let has_tool_calls = value
+                .get("toolCalls")
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty());
+            let has_thoughts = value
+                .get("thoughts")
+                .and_then(Value::as_array)
+                .is_some_and(|thoughts| !thoughts.is_empty());
+            has_text || has_tool_calls || has_thoughts
+        }
+        _ => false,
+    }
 }
 
 fn gemini_project_from_chat_path(path: &Path) -> Option<String> {
@@ -13056,7 +13099,7 @@ mod tests {
             "sessionId should be populated"
         );
         assert!(conversation.message_count > 100, "expected a real chat");
-        assert!(conversation.has_user_or_assistant);
+        assert!(conversation.has_resumable_content);
         assert!(
             conversation.first_user_message.is_some(),
             "firstUserMessage extraction should not silently fail"
@@ -14567,6 +14610,80 @@ mod tests {
         assert_eq!(detail.messages[1].role, "assistant");
         assert_eq!(detail.messages[2].role, "tool");
         assert!(detail.messages[2].text.contains("Ran tests"));
+    }
+
+    #[test]
+    fn gemini_list_filter_gates_on_resumable_content() {
+        // Mirror of gemini-cli `getAllSessionFiles` gating on
+        // `hasResumableContent` (sessionUtils.ts:284 + isResumableMessageRecord
+        // / isIgnoredUserContent). A session whose only user turns are ignored
+        // (slash command, `<session_context>`) with no resumable gemini reply
+        // is NOT listed — the earlier "any user/gemini message" rule wrongly
+        // surfaced these startup/command-only shells.
+        let dir = TestDir::new("gemini-resumable");
+        let project_dir = dir.path().join("tmp").join("proj-slug");
+        let chats_dir = project_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+        fs::write(project_dir.join(".project_root"), "/workspace/resumable").unwrap();
+
+        // Slash-command-only session → ignored user content, no gemini reply.
+        fs::write(
+            chats_dir.join("session-2026-05-01T00-00-11111111.jsonl"),
+            r#"{"sessionId":"cmd-only","projectHash":"proj-slug","startTime":"2026-05-01T00:00:00Z","lastUpdated":"2026-05-01T00:00:00Z","kind":"main"}"#.to_string()
+                + "\n"
+                + r#"{"id":"m1","type":"user","content":[{"text":"/help"}]}"#,
+        )
+        .unwrap();
+
+        // `<session_context>`-only session → injected context, not resumable.
+        fs::write(
+            chats_dir.join("session-2026-05-01T00-01-22222222.jsonl"),
+            r#"{"sessionId":"ctx-only","projectHash":"proj-slug","startTime":"2026-05-01T00:01:00Z","lastUpdated":"2026-05-01T00:01:00Z","kind":"main"}"#.to_string()
+                + "\n"
+                + r#"{"id":"m2","type":"user","content":[{"text":"<session_context>cwd=/x</session_context>"}]}"#,
+        )
+        .unwrap();
+
+        // Gemini reply carries ONLY tool calls (no text) → still resumable,
+        // even though its user turn is an ignored slash command.
+        fs::write(
+            chats_dir.join("session-2026-05-01T00-02-33333333.jsonl"),
+            r#"{"sessionId":"tool-only","projectHash":"proj-slug","startTime":"2026-05-01T00:02:00Z","lastUpdated":"2026-05-01T00:02:00Z","kind":"main"}"#.to_string()
+                + "\n"
+                + r#"{"id":"m3","type":"user","content":[{"text":"/run"}]}"#
+                + "\n"
+                + r#"{"id":"m4","type":"gemini","content":[],"toolCalls":[{"id":"t1","name":"run_shell_command","status":"success"}]}"#,
+        )
+        .unwrap();
+
+        // Ordinary conversation → resumable (control).
+        fs::write(
+            chats_dir.join("session-2026-05-01T00-03-44444444.jsonl"),
+            r#"{"sessionId":"normal","projectHash":"proj-slug","startTime":"2026-05-01T00:03:00Z","lastUpdated":"2026-05-01T00:03:00Z","kind":"main"}"#.to_string()
+                + "\n"
+                + r#"{"id":"m5","type":"user","content":[{"text":"Hi there"}]}"#,
+        )
+        .unwrap();
+
+        let listed: std::collections::HashSet<String> = scan_gemini_chats_dir(&chats_dir)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert!(
+            listed.contains("tool-only"),
+            "gemini tool call keeps a session resumable"
+        );
+        assert!(listed.contains("normal"), "a real user prompt is resumable");
+        assert!(
+            !listed.contains("cmd-only"),
+            "slash-command-only session is filtered"
+        );
+        assert!(
+            !listed.contains("ctx-only"),
+            "session_context-only session is filtered"
+        );
+        assert_eq!(listed.len(), 2);
     }
 
     #[test]
