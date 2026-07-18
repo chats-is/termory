@@ -145,13 +145,57 @@ describe("ListItemMenu — Migrate (single session / memory)", () => {
     );
   });
 
-  it("offers no migrate item for OpenCode sessions or plain memory files", async () => {
-    const { unmount } = render(
-      <ListItemMenu path="/p/s.jsonl" id="s1" source="OpenCode" project="/old">
+  it("migrates an OpenCode session via migrate_opencode_session", async () => {
+    openMock.mockResolvedValue("/new/oc");
+    askMock.mockResolvedValue(true);
+    invokeMock.mockResolvedValue({ sessions: 1, new_project: "/new/oc" });
+    render(
+      <ListItemMenu path="/p/opencode.db" id="s1" source="OpenCode" project="/old">
         <button>ocrow</button>
       </ListItemMenu>
     );
     fireEvent.contextMenu(screen.getByText("ocrow"));
+    await userEvent.click(await screen.findByText("Migrate session…"));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("migrate_opencode_session", {
+        id: "s1",
+        newPath: "/new/oc"
+      })
+    );
+  });
+
+  it("migrates a Grok session via migrate_grok_session (file move)", async () => {
+    openMock.mockResolvedValue("/new/grok");
+    askMock.mockResolvedValue(true);
+    invokeMock.mockResolvedValue({
+      sessions: 1,
+      new_project: "/new/grok",
+      old_dir: "/g/%2Fold",
+      new_dir: "/g/%2Fnew%2Fgrok"
+    });
+    render(
+      <ListItemMenu path="/g/%2Fold/u1/chat_history.jsonl" id="u1" source="Grok" project="/old">
+        <button>grokrow</button>
+      </ListItemMenu>
+    );
+    fireEvent.contextMenu(screen.getByText("grokrow"));
+    await userEvent.click(await screen.findByText("Migrate session…"));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("migrate_grok_session", {
+        id: "u1",
+        newPath: "/new/grok"
+      })
+    );
+  });
+
+  it("offers no migrate item for Gemini sessions or plain memory files", async () => {
+    // Gemini has project-level migrate only (sidebar), not per-session.
+    const { unmount } = render(
+      <ListItemMenu path="/p/s.jsonl" id="s1" source="Gemini" project="/old">
+        <button>gmrow</button>
+      </ListItemMenu>
+    );
+    fireEvent.contextMenu(screen.getByText("gmrow"));
     expect(await screen.findByText(/Reveal in/)).toBeTruthy();
     expect(screen.queryByText("Migrate session…")).toBeNull();
     unmount();
@@ -309,6 +353,48 @@ describe("ListItemMenu — Delete (single session / memory)", () => {
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("delete_codex_memory", {
         rel: "sub/NOTE.md"
+      })
+    );
+  });
+
+  it("routes a Grok auto-memory to delete_grok_memory (rel from the project root)", async () => {
+    askMock.mockResolvedValue(true);
+    invokeMock.mockResolvedValue(undefined);
+    render(
+      <ListItemMenu
+        path="/u/.grok/memory/proj-abcd1234/NOTE.md"
+        project="/u/.grok/memory"
+        memoryTags="grok"
+      >
+        <button>gkmem</button>
+      </ListItemMenu>
+    );
+    fireEvent.contextMenu(screen.getByText("gkmem"));
+    await userEvent.click(await screen.findByText("Delete memory…"));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("delete_grok_memory", {
+        rel: "proj-abcd1234/NOTE.md"
+      })
+    );
+  });
+
+  it("resolves the Grok memory rel from a custom $GROK_HOME root", async () => {
+    askMock.mockResolvedValue(true);
+    invokeMock.mockResolvedValue(undefined);
+    render(
+      <ListItemMenu
+        path="/custom/grok-home/memory/notes.md"
+        project="/custom/grok-home/memory"
+        memoryTags="grok"
+      >
+        <button>gkmem2</button>
+      </ListItemMenu>
+    );
+    fireEvent.contextMenu(screen.getByText("gkmem2"));
+    await userEvent.click(await screen.findByText("Delete memory…"));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("delete_grok_memory", {
+        rel: "notes.md"
       })
     );
   });

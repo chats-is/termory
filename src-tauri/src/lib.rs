@@ -356,6 +356,14 @@ async fn delete_codex_memory(rel: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?
 }
 
+/// Permanently delete one Grok auto-memory (.md under <grok-home>/memory/).
+#[tauri::command]
+async fn delete_grok_memory(rel: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::delete_grok_memory(&rel))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Migrate one Codex session (by thread id) to a new cwd — rewrites the rollout
 /// file's payload.cwd + the threads row. Regrouping convenience; resume-by-id
 /// already works across renames.
@@ -377,6 +385,69 @@ async fn migrate_codex_project(
 ) -> Result<sessions::CodexMigrationResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         sessions::migrate_codex_project(&project, &new_path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Re-point a Gemini project's history to a new cwd (rewrites its `.project_root`
+/// ownership markers; gemini self-heals its registry from them on next run).
+#[tauri::command]
+async fn migrate_gemini_project(
+    project: String,
+    new_path: String,
+) -> Result<sessions::GeminiMigrationResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        sessions::migrate_gemini_project(&project, &new_path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Re-point one OpenCode session to a new cwd (UPDATE session.directory by id).
+#[tauri::command]
+async fn migrate_opencode_session(
+    id: String,
+    new_path: String,
+) -> Result<sessions::OpencodeMigrationResult, String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::migrate_opencode_session(&id, &new_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Re-point a whole OpenCode project's sessions to a new cwd (by directory).
+#[tauri::command]
+async fn migrate_opencode_project(
+    project: String,
+    new_path: String,
+) -> Result<sessions::OpencodeMigrationResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        sessions::migrate_opencode_project(&project, &new_path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Move one Grok session's dir to a new cwd's encoded-cwd dir + rewrite its
+/// summary.json info.cwd (grok resumes per-cwd by scanning the encoded dir).
+#[tauri::command]
+async fn migrate_grok_session(
+    id: String,
+    new_path: String,
+) -> Result<sessions::GrokMigrationResult, String> {
+    tauri::async_runtime::spawn_blocking(move || sessions::migrate_grok_session(&id, &new_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Move a whole Grok project's session dirs to a new cwd's encoded-cwd dir.
+#[tauri::command]
+async fn migrate_grok_project(
+    project: String,
+    new_path: String,
+) -> Result<sessions::GrokMigrationResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        sessions::migrate_grok_project(&project, &new_path)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -944,8 +1015,14 @@ pub fn run() {
             delete_grok_session,
             delete_grok_project,
             delete_codex_memory,
+            delete_grok_memory,
             migrate_codex_session,
             migrate_codex_project,
+            migrate_gemini_project,
+            migrate_opencode_session,
+            migrate_opencode_project,
+            migrate_grok_session,
+            migrate_grok_project,
             delete_opencode_session,
             delete_opencode_project,
             claude_project_registered,

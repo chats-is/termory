@@ -81,6 +81,9 @@ import {
 import {
   runClaudeMigration,
   runCodexMigration,
+  runGeminiMigration,
+  runGrokMigration,
+  runOpencodeMigration,
   runRecordDelete,
   type MigrateResult
 } from "@/lib/migrate";
@@ -1344,6 +1347,96 @@ export function App() {
                                     {t("menu.migrateProject")}
                                   </ContextMenuItem>
                                 )}
+                                {/* Gemini: pure marker rewrite (no file move).
+                                    Records carry `project` = the cwd, so match
+                                    by (source, cwd) like Codex; per-project
+                                    memory/skills reconcile on the next scan. */}
+                                {group.source === "Gemini" && count > 0 && (
+                                  <ContextMenuItem
+                                    onSelect={() =>
+                                      void runGeminiMigration(
+                                        { project: projectName },
+                                        t,
+                                        (res) =>
+                                          remapRecordsLocally(
+                                            (s) =>
+                                              s.source === "Gemini" &&
+                                              s.project === projectName,
+                                            res,
+                                            {
+                                              newProjectSource: "Gemini",
+                                              removeProject: {
+                                                source: "Gemini",
+                                                project: projectName
+                                              }
+                                            }
+                                          )
+                                      )
+                                    }
+                                  >
+                                    {t("menu.migrateProject")}
+                                  </ContextMenuItem>
+                                )}
+                                {/* OpenCode: sqlite UPDATE session.directory —
+                                    records grouped by directory, so match by
+                                    (source, cwd) like Codex/Gemini. */}
+                                {group.source === "OpenCode" && count > 0 && (
+                                  <ContextMenuItem
+                                    onSelect={() =>
+                                      void runOpencodeMigration(
+                                        "migrate_opencode_project",
+                                        { project: projectName },
+                                        t,
+                                        (res) =>
+                                          remapRecordsLocally(
+                                            (s) =>
+                                              s.source === "OpenCode" &&
+                                              s.project === projectName,
+                                            res,
+                                            {
+                                              newProjectSource: "OpenCode",
+                                              removeProject: {
+                                                source: "OpenCode",
+                                                project: projectName
+                                              }
+                                            }
+                                          )
+                                      )
+                                    }
+                                  >
+                                    {t("menu.migrateProject")}
+                                  </ContextMenuItem>
+                                )}
+                                {/* Grok: FILE move — session dirs relocate to the
+                                    new encoded-cwd dir, so paths change; the
+                                    remap uses res.old_dir/new_dir (like Claude). */}
+                                {group.source === "Grok" && count > 0 && (
+                                  <ContextMenuItem
+                                    onSelect={() =>
+                                      void runGrokMigration(
+                                        "migrate_grok_project",
+                                        { project: projectName },
+                                        t,
+                                        (res) =>
+                                          remapRecordsLocally(
+                                            (s) =>
+                                              s.source === "Grok" &&
+                                              s.project === projectName,
+                                            res,
+                                            {
+                                              newProjectSource: "Grok",
+                                              removeProject: {
+                                                source: "Grok",
+                                                project: projectName
+                                              }
+                                            }
+                                          )
+                                      )
+                                    }
+                                  >
+                                    {t("menu.migrateProject")}
+                                  </ContextMenuItem>
+                                )}
                                 <ContextMenuItem
                                   variant="destructive"
                                   onSelect={() =>
@@ -1457,7 +1550,12 @@ export function App() {
                             }
                             onLocalMigrate={(res) =>
                               remapRecordsLocally(
-                                (s) => s.path === session.path,
+                                // Match by full identity, NOT path — DB-backed
+                                // sources (OpenCode) share one db-file path
+                                // across all sessions, so a path match would
+                                // re-point the whole list (same reason as
+                                // onLocalDelete). sessionKey's id disambiguates.
+                                (s) => sessionKey(s) === sessionKey(session),
                                 res,
                                 // A migrated session lands in (and surfaces) the
                                 // destination project.
@@ -1560,6 +1658,7 @@ export function App() {
                         key={sessionKey(item)}
                         path={item.path}
                         project={item.project}
+                        memoryTags={item.preview}
                         onLocalDelete={() =>
                           removeRecordsLocally((s) => s.path === item.path)
                         }

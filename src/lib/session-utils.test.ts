@@ -9,6 +9,7 @@ import {
   projectDisplayName,
   readRouteFromHash,
   recordRel,
+  relUnderRoot,
   resumeCommandFor,
   roleClass,
   sessionKey,
@@ -168,6 +169,31 @@ describe("recordRel", () => {
   });
   it("falls back to the basename when no data-root marker is present", () => {
     expect(recordRel("/somewhere/else/file.md")).toBe("file.md");
+  });
+});
+
+describe("relUnderRoot", () => {
+  it("strips the root dir and separator", () => {
+    expect(relUnderRoot("/u/.grok/memory", "/u/.grok/memory/sub/N.md")).toBe(
+      "sub/N.md"
+    );
+  });
+  it("works with a custom root location ($GROK_HOME)", () => {
+    expect(relUnderRoot("/custom/home/memory", "/custom/home/memory/N.md")).toBe(
+      "N.md"
+    );
+  });
+  it("tolerates a trailing separator on the root", () => {
+    expect(relUnderRoot("/u/mem/", "/u/mem/a/b.md")).toBe("a/b.md");
+  });
+  it("handles windows separators", () => {
+    expect(relUnderRoot("C:\\g\\memory", "C:\\g\\memory\\p\\x.md")).toBe("p\\x.md");
+  });
+  it("falls back to the basename when full is not under root", () => {
+    expect(relUnderRoot("/u/mem", "/other/place/x.md")).toBe("x.md");
+  });
+  it("falls back to the basename when full equals root", () => {
+    expect(relUnderRoot("/u/mem", "/u/mem")).toBe("mem");
   });
 });
 

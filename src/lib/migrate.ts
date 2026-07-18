@@ -139,6 +139,147 @@ export async function runCodexMigration(
   }
 }
 
+/**
+ * Gemini project migration. Like Codex, this is a pure metadata rewrite: gemini
+ * identifies a project by a slug backed by `.project_root` ownership markers, so
+ * re-pointing those markers makes the existing history follow to `new_path` (no
+ * file move, gemini self-heals its registry on next run). Result adapts to the
+ * shared `MigrateResult` with empty dirs — the chat files stay put, only the
+ * project's `project` is re-pointed in `remapRecordsLocally`.
+ */
+export async function runGeminiMigration(
+  args: Record<string, string>,
+  t: Translate,
+  onMigrated?: (res: MigrateResult) => void
+): Promise<void> {
+  const picked = await open({
+    directory: true,
+    title: t("menu.migratePickTitle")
+  });
+  if (typeof picked !== "string") return; // cancelled
+  const confirmed = await ask(
+    `${t("menu.migrateConfirmGemini", { to: picked })}\n\n${t("menu.exitCliHint", { app: "Gemini" })}`,
+    {
+      title: t("menu.migrate"),
+      kind: "warning",
+      okLabel: t("menu.migrate"),
+      cancelLabel: t("common.cancel")
+    }
+  );
+  if (!confirmed) return;
+  try {
+    const res = await invoke<{ sessions: number; new_project: string }>(
+      "migrate_gemini_project",
+      { ...args, newPath: picked }
+    );
+    toast.success(t("menu.migrateSuccessGemini", { sessions: res.sessions }));
+    onMigrated?.({
+      sessions: res.sessions,
+      memory_files: 0,
+      old_dir: "",
+      new_dir: "",
+      new_project: res.new_project
+    });
+  } catch (err) {
+    toast.error(t("menu.migrateError", { error: String(err) }));
+  }
+}
+
+/**
+ * OpenCode migration (session or whole project). A pure SQLite metadata rewrite:
+ * `UPDATE session.directory` re-groups the records in Termory (which groups by
+ * `session.directory`); the session's `project_id` (git workspace) is left
+ * intact, and `opencode --session <id>` resumes by id regardless. Result adapts
+ * to the shared `MigrateResult` with empty dirs — only `project` is re-pointed.
+ */
+export async function runOpencodeMigration(
+  command: "migrate_opencode_session" | "migrate_opencode_project",
+  args: Record<string, string>,
+  t: Translate,
+  onMigrated?: (res: MigrateResult) => void
+): Promise<void> {
+  const picked = await open({
+    directory: true,
+    title: t("menu.migratePickTitle")
+  });
+  if (typeof picked !== "string") return; // cancelled
+  const confirmed = await ask(
+    `${t("menu.migrateConfirmOpencode", { to: picked })}\n\n${t("menu.exitCliHint", { app: "OpenCode" })}`,
+    {
+      title: t("menu.migrate"),
+      kind: "warning",
+      okLabel: t("menu.migrate"),
+      cancelLabel: t("common.cancel")
+    }
+  );
+  if (!confirmed) return;
+  try {
+    const res = await invoke<{ sessions: number; new_project: string }>(command, {
+      ...args,
+      newPath: picked
+    });
+    toast.success(t("menu.migrateSuccessOpencode", { sessions: res.sessions }));
+    onMigrated?.({
+      sessions: res.sessions,
+      memory_files: 0,
+      old_dir: "",
+      new_dir: "",
+      new_project: res.new_project
+    });
+  } catch (err) {
+    toast.error(t("menu.migrateError", { error: String(err) }));
+  }
+}
+
+/**
+ * Grok migration (session or whole project). Unlike the metadata-rewrite CLIs,
+ * Grok is FILE-based: session dirs are MOVED on disk into the destination cwd's
+ * encoded-cwd dir (grok resumes per-cwd by scanning that dir), and each
+ * `summary.json` info.cwd is rewritten. The backend returns the old/new
+ * encoded-cwd dirs so the frontend prefix-remaps the moved record paths (like
+ * Claude).
+ */
+export async function runGrokMigration(
+  command: "migrate_grok_session" | "migrate_grok_project",
+  args: Record<string, string>,
+  t: Translate,
+  onMigrated?: (res: MigrateResult) => void
+): Promise<void> {
+  const picked = await open({
+    directory: true,
+    title: t("menu.migratePickTitle")
+  });
+  if (typeof picked !== "string") return; // cancelled
+  const confirmed = await ask(
+    `${t("menu.migrateConfirmGrok", { to: picked })}\n\n${t("menu.exitCliHint", { app: "Grok Build" })}`,
+    {
+      title: t("menu.migrate"),
+      kind: "warning",
+      okLabel: t("menu.migrate"),
+      cancelLabel: t("common.cancel")
+    }
+  );
+  if (!confirmed) return;
+  try {
+    const res = await invoke<{
+      sessions: number;
+      new_project: string;
+      old_dir: string;
+      new_dir: string;
+    }>(command, { ...args, newPath: picked });
+    toast.success(t("menu.migrateSuccessGrok", { sessions: res.sessions }));
+    onMigrated?.({
+      sessions: res.sessions,
+      memory_files: 0,
+      old_dir: res.old_dir,
+      new_dir: res.new_dir,
+      new_project: res.new_project
+    });
+  } catch (err) {
+    toast.error(t("menu.migrateError", { error: String(err) }));
+  }
+}
+
 type DeleteCommand =
   | "delete_claude_project"
   | "delete_claude_session"
@@ -152,7 +293,8 @@ type DeleteCommand =
   | "delete_opencode_session"
   | "delete_opencode_project"
   | "delete_grok_session"
-  | "delete_grok_project";
+  | "delete_grok_project"
+  | "delete_grok_memory";
 
 /**
  * Shared flow for the delete entry points (whole project / single session /

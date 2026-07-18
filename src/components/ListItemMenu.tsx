@@ -11,10 +11,17 @@ import {
   ContextMenuTrigger
 } from "@/components/ui/context-menu";
 import { copyToClipboard } from "@/lib/clipboard";
-import { basename, recordRel, resumeCommandFor } from "@/lib/session-utils";
+import {
+  basename,
+  recordRel,
+  relUnderRoot,
+  resumeCommandFor
+} from "@/lib/session-utils";
 import {
   runClaudeMigration,
   runCodexMigration,
+  runGrokMigration,
+  runOpencodeMigration,
   runRecordDelete,
   type MigrateResult
 } from "@/lib/migrate";
@@ -31,6 +38,7 @@ export function ListItemMenu({
   messageId,
   source,
   project,
+  memoryTags,
   onLocalDelete,
   onLocalMigrate,
   hideSessionOps,
@@ -46,6 +54,10 @@ export function ListItemMenu({
   source?: string;
   /** Session project/cwd — the terminal `cd`s here before resuming. */
   project?: string;
+  /** Comma-separated tool tags of a memory row (the record's `preview`).
+   *  Set only on the Memories pane; used to identify a Grok auto-memory
+   *  ($GROK_HOME-robust) without a hardcoded path marker. */
+  memoryTags?: string;
   /** Drop this row from the list after a successful delete (local, no re-scan). */
   onLocalDelete?: () => void;
   /** Re-point this row after a successful migrate (local, no re-scan). */
@@ -95,6 +107,14 @@ export function ListItemMenu({
   const isOpencodeSession = source === "OpenCode" && !!id;
   // Grok: delete only (removes the session dir; migration not built yet).
   const isGrokSession = source === "Grok" && !!id;
+
+  // Migrate/delete locate every record by project + `rel` (the file's path
+  // within its project dir) — uniform across Claude/Gemini, session/memory.
+  // The backend rebuilds the path under the bounded project dir, so the
+  // frontend never passes a raw filesystem path.
+  const proj = project ?? "";
+  const rel = recordRel(path);
+
   const isCodexAutoMemory =
     !id && path.includes("/.codex/memories/") && path.endsWith(".md");
   // Codex memory rel = the path under ~/.codex/memories/ (backend bounds it).
@@ -103,13 +123,19 @@ export function ListItemMenu({
     const i = path.indexOf(marker);
     return i < 0 ? basename(path) : path.slice(i + marker.length);
   })();
-
-  // Migrate/delete locate every record by project + `rel` (the file's path
-  // within its project dir) — uniform across Claude/Gemini, session/memory.
-  // The backend rebuilds the path under the bounded project dir, so the
-  // frontend never passes a raw filesystem path.
-  const proj = project ?? "";
-  const rel = recordRel(path);
+  // Grok: file-based memory under <grok-home>/memory/ — delete only (no
+  // migrate). Unlike the marker-based siblings this is $GROK_HOME-robust: the
+  // record's `project` IS that memory root (the scan passes it verbatim), so
+  // the rel is project-relative regardless of where grok-home lives, and the
+  // "grok" tool tag (present only on Memories-pane rows, since grok never tags
+  // a project-instruction file) identifies it without a hardcoded `.grok` path.
+  const isGrokAutoMemory =
+    !id &&
+    (memoryTags ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .includes("grok");
+  const grokMemoryRel = relUnderRoot(proj, path);
 
   return (
     <ContextMenu>
@@ -286,6 +312,18 @@ export function ListItemMenu({
           <>
             <ContextMenuSeparator />
             <ContextMenuItem
+              onSelect={() =>
+                void runOpencodeMigration(
+                  "migrate_opencode_session",
+                  { id: id! },
+                  t,
+                  onLocalMigrate
+                )
+              }
+            >
+              {t("menu.migrateSession")}
+            </ContextMenuItem>
+            <ContextMenuItem
               variant="destructive"
               onSelect={() =>
                 void runRecordDelete(
@@ -304,6 +342,18 @@ export function ListItemMenu({
         {!hideSessionOps && isGrokSession && (
           <>
             <ContextMenuSeparator />
+            <ContextMenuItem
+              onSelect={() =>
+                void runGrokMigration(
+                  "migrate_grok_session",
+                  { id: id! },
+                  t,
+                  onLocalMigrate
+                )
+              }
+            >
+              {t("menu.migrateSession")}
+            </ContextMenuItem>
             <ContextMenuItem
               variant="destructive"
               onSelect={() =>
@@ -329,6 +379,25 @@ export function ListItemMenu({
                 void runRecordDelete(
                   "delete_codex_memory",
                   { rel: codexMemoryRel },
+                  basename(path),
+                  t,
+                  onLocalDelete
+                )
+              }
+            >
+              {t("menu.deleteMemory")}
+            </ContextMenuItem>
+          </>
+        )}
+        {isGrokAutoMemory && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              variant="destructive"
+              onSelect={() =>
+                void runRecordDelete(
+                  "delete_grok_memory",
+                  { rel: grokMemoryRel },
                   basename(path),
                   t,
                   onLocalDelete

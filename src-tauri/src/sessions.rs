@@ -1324,6 +1324,234 @@ pub fn delete_grok_project(project: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Grok migration — move a session / project's session dirs to a new cwd.
+//
+// Grok is FILE-based: a session lives at `<grok-home>/sessions/<encoded-cwd>/<id>/`
+// where `<encoded-cwd>` = `encode_cwd_dirname(info.cwd)` and `info.cwd` is stored
+// verbatim in `summary.json`. Grok's per-cwd list scans EXACTLY
+// `sessions/<encode_cwd_dirname(launch_cwd)>/` (jsonl/mod.rs:130), so for its own
+// resume to find the sessions at the new cwd they MUST physically live under the
+// new encoded dir. So migrating = MOVE the `<id>/` dir(s) to the new encoded dir
+// (fs::rename) AND rewrite each `summary.json` info.cwd (mtime preserved — grok's
+// cross-workspace recent list sorts by summary.json mtime). Mirrors Claude's move
+// (path changes → old_dir/new_dir in the result for the frontend remap).
+//
+// `grok_encode_cwd_dirname` replicates grok's URL-encoding (paths.rs:112) byte
+// for byte; the long-path blake3 fallback (encoded > 255 bytes) is refused rather
+// than pulling blake3 + slugify for a pathological >250-char cwd.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GrokMigrationResult {
+    pub sessions: usize,
+    pub new_project: String,
+    /// Old / new encoded-cwd dir — the frontend prefix-remaps moved record paths.
+    pub old_dir: String,
+    pub new_dir: String,
+}
+
+/// Replicate grok's `encode_cwd_dirname` for the URL-encoded (short) case:
+/// `urlencoding::encode` keeps RFC-3986 unreserved bytes (ALPHA / DIGIT / `-._~`)
+/// and percent-encodes every other byte as uppercase `%XX`. Byte-identical to
+/// grok (paths.rs:112) so its per-cwd list scan finds the moved sessions. Refuses
+/// the long-path blake3 hash fallback (encoded > 255 bytes).
+fn grok_encode_cwd_dirname(cwd: &str) -> Result<String, String> {
+    const MAX_DIRNAME_BYTES: usize = 255;
+    let mut out = String::with_capacity(cwd.len());
+    for &b in cwd.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(
+                char::from_digit((b >> 4) as u32, 16)
+                    .unwrap()
+                    .to_ascii_uppercase(),
+            );
+            out.push(
+                char::from_digit((b & 0xf) as u32, 16)
+                    .unwrap()
+                    .to_ascii_uppercase(),
+            );
+        }
+    }
+    if out.len() > MAX_DIRNAME_BYTES {
+        return Err("destination path is too long for Grok migration".into());
+    }
+    Ok(out)
+}
+
+/// Absolute, **canonicalized** (symlinks resolved) destination dir — the form a
+/// CLI stores/compares when it derives its cwd from the OS `current_dir` (which
+/// resolves symlinks). Used by BOTH grok (`info.cwd` + its encoded dir) and
+/// gemini (the `.project_root` marker). Verified LIVE that non-canonical values
+/// BREAK a symlinked destination: grok reported "No session found", and gemini
+/// minted a fresh slug for `/private/tmp/x` instead of adopting the migrated
+/// one when the marker said `/tmp/x`. (gemini's `normalizePath` is `path.resolve`
+/// with no symlink resolution, but its QUERY is `process.cwd()`, which Node has
+/// ALREADY resolved — so the marker must be resolved to match.) Falls back to
+/// the trimmed input for a not-yet-existing dir (a picked folder always exists,
+/// so that's only defensive); strips the Windows `\\?\` verbatim prefix.
+fn canonical_dest_dir(new_path: &str) -> Result<String, String> {
+    let trimmed = new_path.trim();
+    if trimmed.is_empty() {
+        return Err("destination path is empty".into());
+    }
+    let resolved = match fs::canonicalize(trimmed) {
+        Ok(p) => {
+            let s = p.to_string_lossy().into_owned();
+            s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
+        }
+        Err(_) => trimmed.to_string(),
+    };
+    let out = resolved.trim_end_matches(['/', '\\']);
+    if out.is_empty() {
+        return Err("destination path is empty".into());
+    }
+    Ok(out.to_string())
+}
+
+/// Rewrite `<session_dir>/summary.json` info.cwd = `new_cwd`, preserving the
+/// file's mtime. Tolerates a missing summary (a session dir without one carries
+/// no cwd to rewrite); errors only on a present-but-corrupt file.
+fn rewrite_grok_summary_cwd(session_dir: &Path, new_cwd: &str) -> Result<(), String> {
+    let path = session_dir.join("summary.json");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut doc: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let info = doc
+        .get_mut("info")
+        .and_then(Value::as_object_mut)
+        .ok_or("grok summary.json missing info object")?;
+    info.insert("cwd".into(), Value::String(new_cwd.to_string()));
+    let mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
+    fs::write(
+        &path,
+        serde_json::to_string(&doc).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(mtime) = mtime {
+        if let Ok(f) = fs::OpenOptions::new().write(true).open(&path) {
+            let _ = f.set_modified(mtime);
+        }
+    }
+    Ok(())
+}
+
+/// Move one session dir into the new encoded-cwd dir + rewrite its summary.
+/// Returns the (old_enc_dir, new_enc_dir) for the frontend path remap.
+fn move_grok_session_dir(
+    session_dir: &Path,
+    new_cwd: &str,
+    new_enc_dir: &Path,
+) -> Result<(PathBuf, PathBuf), String> {
+    let old_enc_dir = session_dir
+        .parent()
+        .ok_or("invalid grok session path")?
+        .to_path_buf();
+    let id = session_dir.file_name().ok_or("invalid grok session dir")?;
+    let dest = new_enc_dir.join(id);
+    if dest == session_dir {
+        return Err("source and destination are the same".into());
+    }
+    if dest.exists() {
+        return Err("a session with this id already exists at the destination".into());
+    }
+    fs::create_dir_all(new_enc_dir).map_err(|e| e.to_string())?;
+    // Move first (rename preserves the inner files' mtimes), then rewrite the
+    // summary in its new home. Grok isn't running during a migrate (the confirm
+    // says quit it), so the two-step window is inert.
+    fs::rename(session_dir, &dest).map_err(|e| e.to_string())?;
+    rewrite_grok_summary_cwd(&dest, new_cwd)?;
+    Ok((old_enc_dir, new_enc_dir.to_path_buf()))
+}
+
+pub fn migrate_grok_session(id: &str, new_path: &str) -> Result<GrokMigrationResult, String> {
+    let root = grok_sessions_root().ok_or("grok home unavailable")?;
+    let log = lookup_session_path("Grok", id).ok_or("grok session not found")?;
+    let session_dir = log
+        .parent()
+        .ok_or("invalid grok session path")?
+        .to_path_buf();
+    if !session_dir.starts_with(&root) {
+        return Err("refusing to migrate outside the grok sessions dir".into());
+    }
+    let new_cwd = canonical_dest_dir(new_path)?;
+    let new_enc_dir = root.join(grok_encode_cwd_dirname(&new_cwd)?);
+    let (old_dir, new_dir) = move_grok_session_dir(&session_dir, &new_cwd, &new_enc_dir)?;
+    Ok(GrokMigrationResult {
+        sessions: 1,
+        new_project: new_cwd,
+        old_dir: old_dir.to_string_lossy().to_string(),
+        new_dir: new_dir.to_string_lossy().to_string(),
+    })
+}
+
+pub fn migrate_grok_project(project: &str, new_path: &str) -> Result<GrokMigrationResult, String> {
+    let root = grok_sessions_root().ok_or("grok home unavailable")?;
+    if !root.is_dir() {
+        return Err("grok sessions dir not found".into());
+    }
+    migrate_grok_project_in(&root, project, new_path)
+}
+
+fn migrate_grok_project_in(
+    root: &Path,
+    project: &str,
+    new_path: &str,
+) -> Result<GrokMigrationResult, String> {
+    let new_cwd = canonical_dest_dir(new_path)?;
+    if new_cwd == project {
+        return Err("source and destination are the same".into());
+    }
+    let new_enc_dir = root.join(grok_encode_cwd_dirname(&new_cwd)?);
+    let mut moved = 0usize;
+    let mut first_old_dir: Option<PathBuf> = None;
+    for cwd_entry in fs::read_dir(root).map_err(|e| e.to_string())?.flatten() {
+        let cwd_dir = cwd_entry.path();
+        if !cwd_dir.is_dir() || cwd_dir == new_enc_dir {
+            continue;
+        }
+        let session_dirs: Vec<PathBuf> = fs::read_dir(&cwd_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        // A single encoded-cwd dir holds ONE cwd's sessions — match on any that
+        // records this cwd (authoritative info.cwd, never the dir name).
+        if !session_dirs
+            .iter()
+            .any(|s| grok_session_cwd(s).as_deref() == Some(project))
+        {
+            continue;
+        }
+        first_old_dir.get_or_insert_with(|| cwd_dir.clone());
+        for s in &session_dirs {
+            move_grok_session_dir(s, &new_cwd, &new_enc_dir)?;
+            moved += 1;
+        }
+        // The old encoded-cwd dir now has no sessions → remove it (+ its
+        // prompt_history.jsonl / .lock siblings), matching the "project moved
+        // away" semantics of delete_grok_project.
+        let _ = fs::remove_dir_all(&cwd_dir);
+    }
+    if moved == 0 {
+        return Err(format!("no Grok sessions found for {project}"));
+    }
+    let old_dir = first_old_dir.unwrap_or_default();
+    Ok(GrokMigrationResult {
+        sessions: moved,
+        new_project: new_cwd,
+        old_dir: old_dir.to_string_lossy().to_string(),
+        new_dir: new_enc_dir.to_string_lossy().to_string(),
+    })
+}
+
 /// The argument text a grok tool card shows, composed the way the TUI's
 /// per-block headers do (xai-grok-pager/src/scrollback/blocks/tool/ — each
 /// branch cites its block below). Pairs with `grok_tool_label` (the TUI
@@ -4561,6 +4789,36 @@ fn delete_codex_memory_in(root: &Path, rel: &str) -> Result<(), String> {
     fs::remove_file(&file).map_err(|e| e.to_string())
 }
 
+/// Delete one Markdown memory file under `<grok-home>/memory/` (bounded by
+/// `is_safe_rel`). Grok's cross-session memory is human-readable Markdown on
+/// disk (xai-grok-memory storage.rs:58 = `grok_home().join("memory")`), so
+/// removal mirrors `delete_codex_memory` (a plain `fs::remove_file`).
+///
+/// There IS a per-workspace `index.sqlite` (RAG chunks + FTS, storage.rs:110)
+/// but we deliberately DON'T evict from it — unlike the grok SESSION delete
+/// (which clears session_search.sqlite), grok's memory index self-heals: a
+/// live fs watcher (watcher.rs:3-9) calls `MemoryIndex::delete_path` on a `.md`
+/// REMOVE event, and `grok memory reindex`/`doctor` prune orphans. So grok
+/// reconciles a Termory-side delete on next run; replicating the more complex
+/// memory-index schema here would be higher-risk for no durability gain.
+pub fn delete_grok_memory(rel: &str) -> Result<(), String> {
+    let root = crate::providers::grok_home_dir()
+        .map(|h| h.join("memory"))
+        .ok_or("cannot locate <grok-home>/memory")?;
+    delete_grok_memory_in(&root, rel)
+}
+
+fn delete_grok_memory_in(root: &Path, rel: &str) -> Result<(), String> {
+    if !is_safe_rel(rel) {
+        return Err("invalid memory path".into());
+    }
+    let file = root.join(rel);
+    if !file.is_file() {
+        return Err(format!("memory file not found ({rel})"));
+    }
+    fs::remove_file(&file).map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Codex migration — move a session / project's sessions to a new cwd.
 //
@@ -4750,6 +5008,116 @@ pub fn migrate_codex_project(
 }
 
 // ---------------------------------------------------------------------------
+// Gemini migration — re-point a project's on-disk history to a new cwd.
+//
+// Gemini identifies a project by a slug in ~/.gemini/projects.json, backed by
+// `.project_root` ownership markers under BOTH base dirs (~/.gemini/tmp/<slug>/
+// and ~/.gemini/history/<slug>/) holding the project's absolute path. getShortId()
+// SELF-HEALS the registry from those markers: findExistingSlugForPath adopts a
+// slug whose marker names the launch cwd, then rewrites projects.json + re-ensures
+// markers (gemini-cli projectRegistry.ts:216-303 + storage.ts initialize()).
+//
+// So migrating is a pure MARKER rewrite — NO file move (the slug dir stays put,
+// its whole history follows) and NO projects.json write (avoids gemini's
+// proper-lockfile race; gemini reconciles the registry on its next run, and the
+// stale old-path entry auto-removes when the old path is next opened). The marker
+// content matches gemini's `ensureOwnershipMarkers`: the absolute path, NO trailing
+// newline, via the SHARED `canonical_dest_dir` — i.e. CANONICALIZED (symlinks
+// resolved). gemini's `normalizePath` is `path.resolve` (no symlink resolution),
+// BUT the value it compares the marker against is `process.cwd()`, which Node has
+// ALREADY resolved — so the marker MUST be the resolved path or `verifySlugOwnership`
+// fails on a symlinked destination (proven LIVE: an earlier non-canonical version
+// made gemini mint a fresh slug for `/private/tmp/x` when the marker said `/tmp/x`).
+// Mirrors migrate_codex_* in shape.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GeminiMigrationResult {
+    /// Number of chat files under the re-pointed project dir(s).
+    pub sessions: usize,
+    /// The destination cwd written into the `.project_root` marker(s).
+    pub new_project: String,
+}
+
+/// Overwrite a slug dir's `.project_root` with `value` (no trailing newline,
+/// matching gemini's writer). fs::write truncates — the deliberate re-point.
+fn write_project_root_marker(dir: &Path, value: &str) -> Result<(), String> {
+    fs::write(dir.join(".project_root"), value).map_err(|e| e.to_string())
+}
+
+/// Count the `chats/session-*.{jsonl,json}` files under a project's tmp slug dir
+/// that gemini would actually LIST — gated by the SAME
+/// `hasResumableContent` + non-empty-sessionId + non-subagent rule as the scanner
+/// (`parse_gemini_session_file` in metadata_only mode returns Ok only for a
+/// listable entry), so the migrate's session count matches what Termory/gemini
+/// show rather than the raw file count (which includes startup-only /
+/// command-only / context-only shells the CLI hides).
+fn count_gemini_chat_files(dir: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(dir.join("chats")) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| is_gemini_session_file(p) && parse_gemini_session_file(p, true).is_ok())
+        .count()
+}
+
+pub fn migrate_gemini_project(
+    project: &str,
+    new_path: &str,
+) -> Result<GeminiMigrationResult, String> {
+    let home = crate::home_dir().ok_or("cannot locate home dir")?;
+    let gemini = home.join(".gemini");
+    migrate_gemini_project_in(
+        &gemini.join("tmp"),
+        &gemini.join("history"),
+        project,
+        new_path,
+    )
+}
+
+fn migrate_gemini_project_in(
+    tmp: &Path,
+    history: &Path,
+    project: &str,
+    new_path: &str,
+) -> Result<GeminiMigrationResult, String> {
+    let new_cwd = canonical_dest_dir(new_path)?;
+    if new_cwd == project {
+        return Err("source and destination are the same".into());
+    }
+    let dirs = gemini_project_dirs(tmp, project);
+    if dirs.is_empty() {
+        return Err(format!("no Gemini project dir found for {project}"));
+    }
+    // Refuse if the destination already owns a Gemini project dir — re-pointing
+    // onto it would leave two slug dirs claiming the same path (gemini's
+    // ensureOwnershipMarkers then throws an EEXIST collision on next run).
+    if !gemini_project_dirs(tmp, &new_cwd).is_empty() {
+        return Err(format!(
+            "destination already has Gemini history ({new_cwd})"
+        ));
+    }
+    let mut sessions = 0usize;
+    for dir in &dirs {
+        write_project_root_marker(dir, &new_cwd)?;
+        sessions += count_gemini_chat_files(dir);
+        // Re-point the sibling history-dir marker for the SAME slug, if present.
+        if let Some(slug) = dir.file_name() {
+            let hist_dir = history.join(slug);
+            if hist_dir.is_dir() {
+                write_project_root_marker(&hist_dir, &new_cwd)?;
+            }
+        }
+    }
+    Ok(GeminiMigrationResult {
+        sessions,
+        new_project: new_cwd,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // OpenCode deletion — sessions/projects live in
 // ~/.local/share/opencode/opencode.db. session.project_id and the message/part
 // tables have ON DELETE CASCADE, so deleting a session (or a project) cascades.
@@ -4889,6 +5257,114 @@ fn delete_opencode_project_in(db: &Path, project: &str) -> Result<(), String> {
         .map_err(|e| map_db_locked(e, "OpenCode"))?;
     clean_opencode_events(&conn, &aggregates)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode migration — re-point a session / project to a new cwd.
+//
+// Termory groups OpenCode records by `session.directory` (add_record_projects),
+// so migrating = `UPDATE session.directory` for the matched rows. `project_id`
+// (→ the git-workspace `project` row) is deliberately LEFT INTACT: the session
+// stays attached to its project, so it never resurfaces as an empty project at
+// the old cwd, and we never hand-write OpenCode's internal project/worktree
+// registry tables. `path` (the cwd-relative-to-worktree column, nullable) is
+// set NULL so a now-stale relative path doesn't linger — OpenCode tolerates a
+// null path (verified: listByProject has an `isNull(path)` branch).
+//
+// LOW value (like Codex): `opencode --session <id>` resumes by id regardless of
+// cwd, so this is a Termory-display regrouping convenience, not a "history
+// lost" fix. Directory is stored absolute + forward-slashed on Windows
+// (database/path.ts storagePath) — `opencode_directory_value` matches that.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OpencodeMigrationResult {
+    /// Number of session rows re-pointed to the new directory.
+    pub sessions: usize,
+    /// The destination directory written into `session.directory`.
+    pub new_project: String,
+}
+
+/// Absolute directory in OpenCode's storage form. Runs through the SHARED
+/// `canonical_dest_dir` (symlink-resolved) — OpenCode stores `session.directory`
+/// resolved too (it derives it from `process.cwd`), so canonicalizing keeps a
+/// migrated session's directory in the SAME form as OpenCode's own rows (and the
+/// grok/gemini migrates). Then forward-slashes on Windows to match
+/// `database/path.ts` storagePath, since `canonical_dest_dir` leaves the native
+/// `\` separators there.
+fn opencode_directory_value(new_path: &str) -> Result<String, String> {
+    let resolved = canonical_dest_dir(new_path)?;
+    Ok(if cfg!(windows) {
+        resolved.replace('\\', "/")
+    } else {
+        resolved
+    })
+}
+
+pub fn migrate_opencode_session(
+    id: &str,
+    new_path: &str,
+) -> Result<OpencodeMigrationResult, String> {
+    let db = opencode_db_path().ok_or("cannot locate opencode.db")?;
+    migrate_opencode_session_in(&db, id, new_path)
+}
+
+fn migrate_opencode_session_in(
+    db: &Path,
+    id: &str,
+    new_path: &str,
+) -> Result<OpencodeMigrationResult, String> {
+    let new_dir = opencode_directory_value(new_path)?;
+    let conn = open_opencode_rw(db)?;
+    let sessions = conn
+        .execute(
+            "update session set directory = ?1, path = NULL where id = ?2",
+            rusqlite::params![new_dir, id],
+        )
+        .map_err(|e| map_db_locked(e, "OpenCode"))?;
+    if sessions == 0 {
+        return Err("OpenCode session not found".into());
+    }
+    Ok(OpencodeMigrationResult {
+        sessions,
+        new_project: new_dir,
+    })
+}
+
+pub fn migrate_opencode_project(
+    project: &str,
+    new_path: &str,
+) -> Result<OpencodeMigrationResult, String> {
+    let db = opencode_db_path().ok_or("cannot locate opencode.db")?;
+    migrate_opencode_project_in(&db, project, new_path)
+}
+
+fn migrate_opencode_project_in(
+    db: &Path,
+    project: &str,
+    new_path: &str,
+) -> Result<OpencodeMigrationResult, String> {
+    let new_dir = opencode_directory_value(new_path)?;
+    if new_dir == project {
+        return Err("source and destination are the same".into());
+    }
+    let conn = open_opencode_rw(db)?;
+    // Match by `directory` — Termory's sidebar project for OpenCode-with-sessions
+    // IS the session's directory (add_record_projects). Scoped: a directory
+    // belongs to exactly one project, so this can't reach unrelated sessions.
+    let sessions = conn
+        .execute(
+            "update session set directory = ?1, path = NULL where directory = ?2",
+            rusqlite::params![new_dir, project],
+        )
+        .map_err(|e| map_db_locked(e, "OpenCode"))?;
+    if sessions == 0 {
+        return Err(format!("no OpenCode sessions found for {project}"));
+    }
+    Ok(OpencodeMigrationResult {
+        sessions,
+        new_project: new_dir,
+    })
 }
 
 fn memory_session_from_file(path: &Path, project: &str) -> Option<AppSession> {
@@ -16087,6 +16563,123 @@ mod tests {
         assert!(delete_gemini_project_in(tmp.path(), "/Users/me/nope").is_err());
     }
 
+    #[test]
+    fn migrate_gemini_project_in_rewrites_markers_and_counts_sessions() {
+        let tmp = TestDir::new("gemini-mig-tmp");
+        let hist = TestDir::new("gemini-mig-hist");
+        // The project's slug dir: two RESUMABLE chat files + a sibling history
+        // marker. The count mirrors gemini's `hasResumableContent` gate, so the
+        // fixtures must be real listable sessions (a raw file count would also
+        // count the non-resumable + non-session files below).
+        let slug = tmp.path().join("myproj");
+        fs::create_dir_all(slug.join("chats")).unwrap();
+        fs::write(slug.join(".project_root"), "/Users/me/old\n").unwrap();
+        // Resumable JSONL: metadata line (sessionId + projectHash) + a real user turn.
+        fs::write(
+            slug.join("chats").join("session-1.jsonl"),
+            r#"{"sessionId":"s1","projectHash":"myproj","startTime":"2026-05-01T00:00:00Z","lastUpdated":"2026-05-01T00:00:00Z","kind":"main"}"#.to_string()
+                + "\n"
+                + r#"{"id":"m1","type":"user","content":[{"text":"Hi there"}]}"#,
+        )
+        .unwrap();
+        // Resumable JSON single-object session.
+        fs::write(
+            slug.join("chats").join("session-2.json"),
+            r#"{"sessionId":"s2","projectHash":"myproj","messages":[{"id":"m1","type":"user","content":[{"text":"hello"}]}]}"#,
+        )
+        .unwrap();
+        // Non-resumable shell (slash-command-only user turn) → NOT counted.
+        fs::write(
+            slug.join("chats").join("session-3.jsonl"),
+            r#"{"sessionId":"cmd","projectHash":"myproj","startTime":"2026-05-01T00:00:00Z","lastUpdated":"2026-05-01T00:00:00Z","kind":"main"}"#.to_string()
+                + "\n"
+                + r#"{"id":"m1","type":"user","content":[{"text":"/help"}]}"#,
+        )
+        .unwrap();
+        // A non-session file under chats/ is NOT counted.
+        fs::write(slug.join("chats").join("shell_history"), "x").unwrap();
+        let hist_slug = hist.path().join("myproj");
+        fs::create_dir_all(&hist_slug).unwrap();
+        fs::write(hist_slug.join(".project_root"), "/Users/me/old").unwrap();
+        // An unrelated project must be left alone.
+        let other = tmp.path().join("other");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join(".project_root"), "/Users/me/other").unwrap();
+
+        let res = migrate_gemini_project_in(
+            tmp.path(),
+            hist.path(),
+            "/Users/me/old",
+            "/Users/me/new/", // trailing slash trimmed
+        )
+        .unwrap();
+        // 2 resumable sessions — the slash-command shell + shell_history excluded.
+        assert_eq!(res.sessions, 2);
+        assert_eq!(res.new_project, "/Users/me/new");
+        // BOTH markers (tmp + history) re-pointed, verbatim (no trailing newline).
+        assert_eq!(
+            fs::read_to_string(slug.join(".project_root")).unwrap(),
+            "/Users/me/new"
+        );
+        assert_eq!(
+            fs::read_to_string(hist_slug.join(".project_root")).unwrap(),
+            "/Users/me/new"
+        );
+        // Unrelated project untouched; the slug dir is NOT moved (files stay).
+        assert_eq!(
+            fs::read_to_string(other.join(".project_root")).unwrap(),
+            "/Users/me/other"
+        );
+        assert!(slug.join("chats").join("session-1.jsonl").exists());
+    }
+
+    #[test]
+    fn migrate_gemini_project_in_guards_source_dest_and_collision() {
+        let tmp = TestDir::new("gemini-mig-guard-tmp");
+        let hist = TestDir::new("gemini-mig-guard-hist");
+        let slug = tmp.path().join("p");
+        fs::create_dir_all(slug.join("chats")).unwrap();
+        fs::write(slug.join(".project_root"), "/Users/me/old").unwrap();
+
+        // No matching source project → error.
+        assert!(migrate_gemini_project_in(
+            tmp.path(),
+            hist.path(),
+            "/Users/me/nope",
+            "/Users/me/new"
+        )
+        .is_err());
+        // Source == destination → error.
+        assert!(migrate_gemini_project_in(
+            tmp.path(),
+            hist.path(),
+            "/Users/me/old",
+            "/Users/me/old"
+        )
+        .is_err());
+        // Empty destination → error.
+        assert!(
+            migrate_gemini_project_in(tmp.path(), hist.path(), "/Users/me/old", "   ").is_err()
+        );
+
+        // Destination already owns a Gemini project dir → refuse (collision).
+        let dest = tmp.path().join("dest");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join(".project_root"), "/Users/me/taken").unwrap();
+        assert!(migrate_gemini_project_in(
+            tmp.path(),
+            hist.path(),
+            "/Users/me/old",
+            "/Users/me/taken"
+        )
+        .is_err());
+        // A rejected migrate leaves the source marker unchanged.
+        assert_eq!(
+            fs::read_to_string(slug.join(".project_root")).unwrap(),
+            "/Users/me/old"
+        );
+    }
+
     // Fixtures + assertions are unix-path-shaped: on Windows
     // fs::canonicalize returns a \\?\-prefixed path (different slug
     // than production's stripped one) and JSON-escapes the
@@ -16695,6 +17288,22 @@ mod tests {
         assert!(delete_codex_memory_in(&root, "../../etc/x").is_err());
     }
 
+    #[test]
+    fn delete_grok_memory_in_removes_md_and_guards_path() {
+        let tmp = TestDir::new("del-grok-mem");
+        let root = tmp.path().join("memory");
+        let md = root.join("proj-abcd1234").join("notes.md");
+        fs::create_dir_all(md.parent().unwrap()).unwrap();
+        fs::write(&md, "x").unwrap();
+
+        delete_grok_memory_in(&root, "proj-abcd1234/notes.md").unwrap();
+        assert!(!md.exists());
+        // Missing file is an error, not a silent no-op.
+        assert!(delete_grok_memory_in(&root, "proj-abcd1234/notes.md").is_err());
+        // Traversal is refused.
+        assert!(delete_grok_memory_in(&root, "../../etc/x").is_err());
+    }
+
     /// Seed a Codex state DB whose rollout files carry a real `session_meta`
     /// first line with `payload.cwd` (so migrate can rewrite it). a,b → /proj/x;
     /// c → /proj/y. Returns the db path.
@@ -16936,6 +17545,86 @@ mod tests {
             1
         );
         assert!(delete_opencode_project_in(&db, "/w/nope").is_err());
+    }
+
+    /// A `session` table with the `directory` + `path` columns migrate touches.
+    fn seed_opencode_migrate_db(db: &Path) {
+        let conn = Connection::open(db).unwrap();
+        conn.execute_batch(
+            "create table project (id text primary key, worktree text not null);
+             create table session (
+                id text primary key,
+                project_id text not null,
+                directory text not null,
+                path text
+             );",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "insert into project values ('P', '/w/old');
+             insert into session values ('s1', 'P', '/w/old', 'sub');
+             insert into session values ('s2', 'P', '/w/old', NULL);
+             insert into session values ('s3', 'P', '/w/other', 'x');",
+        )
+        .unwrap();
+        drop(conn);
+    }
+
+    #[test]
+    fn migrate_opencode_session_in_repoints_directory_and_nulls_path() {
+        let tmp = TestDir::new("mig-oc-sess");
+        let db = tmp.path().join("opencode.db");
+        seed_opencode_migrate_db(&db);
+
+        let res = migrate_opencode_session_in(&db, "s1", "/w/new/").unwrap();
+        assert_eq!(res.sessions, 1);
+        assert_eq!(res.new_project, "/w/new"); // trailing slash trimmed
+
+        let conn = Connection::open(&db).unwrap();
+        let row = |id: &str| -> (String, Option<String>) {
+            conn.query_row(
+                "select directory, path from session where id = ?1",
+                [id],
+                |r| Ok((r.get(0).unwrap(), r.get(1).unwrap())),
+            )
+            .unwrap()
+        };
+        assert_eq!(row("s1"), ("/w/new".to_string(), None)); // path nulled
+        assert_eq!(row("s2"), ("/w/old".to_string(), None)); // sibling untouched
+                                                             // project_id is left intact — the session stays attached to its project.
+        let pid: String = conn
+            .query_row("select project_id from session where id = 's1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(pid, "P");
+        // Missing id → error.
+        assert!(migrate_opencode_session_in(&db, "nope", "/w/new").is_err());
+    }
+
+    #[test]
+    fn migrate_opencode_project_in_repoints_matching_directory_only() {
+        let tmp = TestDir::new("mig-oc-proj");
+        let db = tmp.path().join("opencode.db");
+        seed_opencode_migrate_db(&db);
+
+        let res = migrate_opencode_project_in(&db, "/w/old", "/w/new").unwrap();
+        assert_eq!(res.sessions, 2); // s1 + s2 (directory = /w/old), NOT s3
+        let conn = Connection::open(&db).unwrap();
+        let dir = |id: &str| -> String {
+            conn.query_row("select directory from session where id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(dir("s1"), "/w/new");
+        assert_eq!(dir("s2"), "/w/new");
+        assert_eq!(dir("s3"), "/w/other"); // different directory untouched
+
+        // Guards: same source==dest, empty dest, no match.
+        assert!(migrate_opencode_project_in(&db, "/w/new", "/w/new").is_err());
+        assert!(migrate_opencode_project_in(&db, "/w/new", "   ").is_err());
+        assert!(migrate_opencode_project_in(&db, "/w/missing", "/w/x").is_err());
     }
 
     #[test]
@@ -18340,6 +19029,114 @@ mod tests {
         assert!(!root.join("%2Fwork%2Fa").exists());
         assert!(b1.exists());
         assert_eq!(doc_ids(), vec!["u-b1"]);
+    }
+
+    #[test]
+    fn grok_encode_cwd_dirname_matches_url_encoding() {
+        assert_eq!(grok_encode_cwd_dirname("/work/a").unwrap(), "%2Fwork%2Fa");
+        assert_eq!(
+            grok_encode_cwd_dirname("/Users/foo/project").unwrap(),
+            "%2FUsers%2Ffoo%2Fproject"
+        );
+        // Unreserved bytes kept (`-._~`); space → %20; hex uppercase.
+        assert_eq!(
+            grok_encode_cwd_dirname("/a b-._~c").unwrap(),
+            "%2Fa%20b-._~c"
+        );
+        // Long path (url-encoded > 255 bytes) is refused — no blake3 fallback.
+        assert!(grok_encode_cwd_dirname(&format!("/{}", "x".repeat(300))).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn canonical_dest_dir_canonicalizes_symlinks() {
+        // Grok's cwd resolves symlinks (verified live against the real binary —
+        // a /tmp destination made grok scan the /private/tmp encoded dir), so
+        // the migrate destination must canonicalize to match.
+        let tmp = TestDir::new("grok-dest-canon");
+        let real = tmp.path().join("realdir");
+        fs::create_dir_all(&real).unwrap();
+        let link = tmp.path().join("linkdir");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(
+            canonical_dest_dir(link.to_str().unwrap()).unwrap(),
+            fs::canonicalize(&real).unwrap().to_string_lossy()
+        );
+        // Non-existent dir → trimmed fallback (trailing sep stripped); empty err.
+        assert_eq!(canonical_dest_dir("/no/such/dir/").unwrap(), "/no/such/dir");
+        assert!(canonical_dest_dir("   ").is_err());
+    }
+
+    fn grok_mk_session(root: &Path, enc: &str, uuid: &str, cwd: &str) -> PathBuf {
+        let d = root.join(enc).join(uuid);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(
+            d.join("summary.json"),
+            format!(r#"{{"info":{{"id":"{uuid}","cwd":"{cwd}"}},"num_messages":1}}"#),
+        )
+        .unwrap();
+        fs::write(d.join("chat_history.jsonl"), b"{}").unwrap();
+        d
+    }
+
+    #[test]
+    fn migrate_grok_project_in_moves_dirs_rewrites_cwd_and_removes_old() {
+        let tmp = TestDir::new("grok-mig-proj");
+        let root = tmp.path().join("sessions");
+        grok_mk_session(&root, "%2Fwork%2Fa", "u-a1", "/work/a");
+        grok_mk_session(&root, "%2Fwork%2Fa", "u-a2", "/work/a");
+        let b1 = grok_mk_session(&root, "%2Fwork%2Fb", "u-b1", "/work/b"); // unrelated
+
+        let res = migrate_grok_project_in(&root, "/work/a", "/work/new/").unwrap();
+        assert_eq!(res.sessions, 2);
+        assert_eq!(res.new_project, "/work/new"); // trailing slash trimmed
+
+        // Old encoded dir removed; new dir holds both uuids with rewritten cwd.
+        assert!(!root.join("%2Fwork%2Fa").exists());
+        let new_enc = root.join("%2Fwork%2Fnew");
+        assert!(new_enc.join("u-a1").join("summary.json").is_file());
+        assert!(new_enc.join("u-a2").join("chat_history.jsonl").is_file());
+        assert_eq!(
+            grok_session_cwd(&new_enc.join("u-a1")).as_deref(),
+            Some("/work/new")
+        );
+        // Unrelated project untouched.
+        assert!(b1.join("summary.json").is_file());
+        assert_eq!(grok_session_cwd(&b1).as_deref(), Some("/work/b"));
+        // old_dir / new_dir reported for the frontend path remap.
+        assert_eq!(
+            res.old_dir,
+            root.join("%2Fwork%2Fa").to_string_lossy().to_string()
+        );
+        assert_eq!(res.new_dir, new_enc.to_string_lossy().to_string());
+
+        // Guards: same source==dest, no match, empty dest.
+        assert!(migrate_grok_project_in(&root, "/work/b", "/work/b").is_err());
+        assert!(migrate_grok_project_in(&root, "/work/missing", "/work/x").is_err());
+        assert!(migrate_grok_project_in(&root, "/work/b", "   ").is_err());
+    }
+
+    #[test]
+    fn migrate_grok_session_moves_single_dir_via_path_index() {
+        let _g = crate::testutils::lock_home();
+        let tmp = TestDir::new("grok-mig-sess");
+        let _home = crate::testutils::override_home(tmp.path());
+        let root = tmp.path().join(".grok/sessions");
+        grok_mk_session(&root, "%2Fwork%2Fa", "u-a1", "/work/a");
+        grok_mk_session(&root, "%2Fwork%2Fa", "u-a2", "/work/a");
+
+        let sessions = scan_grok_sessions_in(&root).unwrap();
+        refresh_session_path_index(&sessions);
+
+        let res = migrate_grok_session("u-a1", "/work/new").unwrap();
+        assert_eq!(res.sessions, 1);
+        assert_eq!(res.new_project, "/work/new");
+        // Only u-a1 moved; u-a2 stays under the old encoded dir.
+        assert!(!root.join("%2Fwork%2Fa").join("u-a1").exists());
+        assert!(root.join("%2Fwork%2Fa").join("u-a2").exists());
+        let moved = root.join("%2Fwork%2Fnew").join("u-a1");
+        assert!(moved.join("chat_history.jsonl").is_file());
+        assert_eq!(grok_session_cwd(&moved).as_deref(), Some("/work/new"));
     }
 
     #[test]

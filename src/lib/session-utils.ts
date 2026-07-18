@@ -77,6 +77,23 @@ export function basename(path: string): string {
 }
 
 /**
+ * A file's path relative to a `root` directory it lives under. Used for records
+ * whose backend delete/migrate command bounds by a resolved root (e.g. Grok
+ * memory under `<grok-home>/memory/`, where the record's `project` IS that
+ * root) — so the rel is correct no matter where the root lives on disk. Both
+ * strings come from the same backend PathBuf, so `full` starts with `root`;
+ * strips it plus the separator. Falls back to the basename if it doesn't.
+ */
+export function relUnderRoot(root: string, full: string): string {
+  const r = root.replace(/[\\/]+$/, "");
+  if (r && full.startsWith(r)) {
+    const rest = full.slice(r.length).replace(/^[\\/]+/, "");
+    if (rest) return rest;
+  }
+  return basename(full);
+}
+
+/**
  * A record file's path relative to its project dir — the single identifier
  * delete/migrate pass so the backend can rebuild the path under the bounded
  * project dir without ever receiving a full filesystem path. Detect the CLI's
