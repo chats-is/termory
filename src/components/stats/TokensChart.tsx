@@ -374,6 +374,9 @@ export function TokensChart({
                 dataKey={s.key}
                 stackId="tokens"
                 fill={s.color}
+                // Cap bar width so a short window (e.g. 7d) doesn't render
+                // absurdly wide bars; wider windows shrink below this anyway.
+                maxBarSize={32}
                 isAnimationActive={false}
               />
             ))}
