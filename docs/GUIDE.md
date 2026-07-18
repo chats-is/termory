@@ -176,7 +176,7 @@ Right-click any session, memory, or skill:
 - **Reveal in Finder** — open the underlying file.
 - **Resume in terminal** / **Copy resume command** — see [resuming](#resuming-a-session) below.
 - **Copy path / filename / session ID**.
-- **Migrate** — re-point a session or its whole project to a new path (Claude Code & Codex). Useful after you rename or move a repo, so its history regroups under the new location. (Project-level migrate is also on the sidebar project row.)
+- **Migrate** — re-point a session or its whole project to a new path (all five CLIs; Gemini is project-level only). Useful after you rename or move a repo, so its history regroups under the new location. (Project-level migrate is also on the sidebar project row.)
 - **Delete session / project / memory** — with a confirmation step.
 
 > **Delete is permanent**, and deleting **changes the CLI's own data**. If a CLI is running it may hold a database lock — Termory will tell you to quit it first. Deleting a *project* removes its stored history only; the files in your actual project folder (`CLAUDE.md`, `AGENTS.md`, …) are never touched.
@@ -245,7 +245,7 @@ The Settings page (`⌘6`) has these sections:
 | Section | What it does |
 |---------|--------------|
 | **Appearance** | Theme — System / Light / Dark. |
-| **Tools** | Turn each tool (Claude Code / Claude Desktop / Codex / Gemini / OpenCode) on or off. A disabled tool disappears everywhere — provider tabs, records, search, stats, and the menu bar — the moment you toggle it; its data on disk is untouched and everything comes back when you re-enable it. The last enabled tool can't be turned off. **Gemini is off by default** (Google deprecated Gemini CLI for individual accounts in June 2026) — flip it on if you still use it or want to browse its history. |
+| **Tools** | Turn each tool (Claude Code / Claude Desktop / Codex / Gemini / OpenCode / Grok Build) on or off. A disabled tool disappears everywhere — provider tabs, records, search, stats, and the menu bar — the moment you toggle it; its data on disk is untouched and everything comes back when you re-enable it. The last enabled tool can't be turned off. **Gemini is off by default** (Google deprecated Gemini CLI for individual accounts in June 2026) — flip it on if you still use it or want to browse its history. |
 | **Startup** | **Launch at login** — start Termory automatically when you log in (tray only, no window). |
 | **Language** | English / 简体中文 / 繁體中文. Changes apply immediately. |
 | **Terminal** | Which terminal opens when you resume a session. Only terminals found on this machine are listed; "auto" uses your OS default. |
@@ -297,8 +297,8 @@ It **reads your history in place** and never changes it — *except* for operati
 
 | Operation | What it changes | Mechanism |
 |-----------|-----------------|-----------|
-| **Delete** a session / project / memory | Removes that record | File-based CLIs (Claude, Gemini): deletes the files. DB-based CLIs (Codex, OpenCode): deletes the rows (Codex also deletes the rollout files, since the row alone would be rebuilt). |
-| **Migrate** a project | Re-points it at a new path | Claude: moves the history folder and rewrites each session's top-level `cwd`. Codex: a metadata rewrite of `cwd` in the rollout file and `threads` table — no files moved. |
+| **Delete** a session / project / memory | Removes that record | File-based CLIs (Claude, Gemini, Grok): deletes the files. DB-based CLIs (Codex, OpenCode): deletes the rows (Codex also deletes the rollout files, since the row alone would be rebuilt). |
+| **Migrate** a project | Re-points it at a new path | Claude & Grok move the on-disk history (the project folder / session dir) and rewrite the stored `cwd`. Codex, Gemini & OpenCode are metadata-only rewrites (rollout `cwd` / `.project_root` marker / DB `directory`) — no files moved. |
 | **Keep sessions** on a Codex switch | Re-tags sessions with the new provider | Rewrites `model_provider` in the rollout file and `threads` table. |
 
 **Two things these never touch:** (1) your OAuth login / credential files, and (2) the files in your project working directory (`CLAUDE.md`, `AGENTS.md`, …) — those live in your repo, not the CLI's history store.
