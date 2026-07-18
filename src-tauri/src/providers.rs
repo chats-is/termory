@@ -677,6 +677,112 @@ fn codex_app_info() -> Option<CodexAppInfo> {
     codex_app_info_in(&codex_app_parents())
 }
 
+/// Windows distribution of the Codex/ChatGPT desktop app is
+/// **Microsoft-Store-only** — there is no direct `.exe`/`.msi`
+/// installer on openai.com/download, so an MSIX package is the ONLY
+/// install form to check (unlike macOS, no separate `/Applications`
+/// scan is needed). Windows renders the taskbar/Start DisplayName as
+/// "ChatGPT" (shared branding with the unified app), but the package
+/// identity stays `OpenAI.Codex` — confirmed on a real installed
+/// package name, `OpenAI.Codex_26.707.9564.0_x64__2p2nqsd0c76g0`
+/// (openai/codex#32772). Detect by package name, never by the
+/// DisplayName.
+///
+/// **Presence** is detected by a filesystem scan (see
+/// [`codex_appx_installed_in`]) — NOT PowerShell — because
+/// [`probe_codex_installs`] runs on [`detect_install_snapshot`]'s hot
+/// path (every tray-menu open, every watcher rescan, on the caller /
+/// main-event thread). A `Get-AppxPackage` spawn there loads the Appx
+/// module (0.5–1.5s cold) and would freeze the tray on every click,
+/// whereas macOS's equivalent is a cheap plist read. The PowerShell
+/// query is reserved for the app VERSION ([`codex_appx_version`]),
+/// which only the cold-path `detect_codex_installs` IPC (Providers
+/// page load + Recheck) consumes.
+///
+/// `bundled_cli` has no Windows equivalent: MSIX packages install into
+/// the ACL-restricted `C:\Program Files\WindowsApps\`, unreadable by a
+/// normal process, so there's no way to reach a bundled binary the way
+/// `<bundle>/Contents/Resources/codex` works on macOS —
+/// `codex_binary()` stays standalone-CLI-only on this platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+const CODEX_APPX_PACKAGE_PREFIX: &str = "OpenAI.Codex_";
+
+/// Whether the Codex/ChatGPT MSIX package is installed for the current
+/// user, by scanning `<local_app_data>\Packages\` for a
+/// `OpenAI.Codex_<publisherhash>` dir (the PackageFamilyName — the
+/// publisher-hash suffix varies per signing identity, so match the
+/// prefix, never a hardcoded hash). This per-user Packages dir is
+/// readable (unlike `WindowsApps\`) and is the SAME mechanism Claude
+/// Desktop's Windows detection uses (`msix_package_roaming_parents`).
+/// Path-injected + compiled off-Windows so it's unit-testable on any
+/// host (mirrors claude_desktop.rs). Best-effort: still unverified on
+/// real Windows hardware.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn codex_appx_installed_in(local_app_data: &std::path::Path) -> bool {
+    std::fs::read_dir(local_app_data.join("Packages"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| {
+            // Name-prefix check FIRST (cheap, no syscall): the Packages
+            // dir holds hundreds of MSIX entries, so only the rare
+            // prefix match pays for the `is_dir` stat.
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with(CODEX_APPX_PACKAGE_PREFIX))
+                && e.path().is_dir()
+        })
+}
+
+#[cfg(windows)]
+fn codex_appx_installed() -> bool {
+    match std::env::var_os("LOCALAPPDATA") {
+        Some(local) if !local.is_empty() => codex_appx_installed_in(std::path::Path::new(&local)),
+        _ => false,
+    }
+}
+
+/// Extract the version segment (`26.707.9564.0`) from an AppX
+/// `PackageFullName` (`<Name>_<Version>_<Architecture>__<PublisherId>`,
+/// the `__` marking an empty ResourceId segment). Split out from
+/// [`codex_appx_version`] so the parsing is testable without a real
+/// Windows install. Compiled off-Windows for that test.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_appx_package_version(full_name: &str) -> Option<String> {
+    full_name.split('_').nth(1).map(|s| s.to_string())
+}
+
+/// The installed Codex/ChatGPT MSIX package version via PowerShell's
+/// `Get-AppxPackage` — the supported way to read package identity
+/// without touching the ACL-restricted `WindowsApps` directory. Queries
+/// the CURRENT USER's packages only (no `-AllUsers`, so no elevation).
+/// COLD PATH ONLY (`detect_codex_installs` IPC) — never call from
+/// `detect_install_snapshot` (see [`codex_appx_installed_in`] for why).
+/// Best-effort: any failure (PowerShell missing, package absent,
+/// timeout) is just `None`, never an error.
+#[cfg(windows)]
+fn codex_appx_version() -> Option<String> {
+    let mut cmd = std::process::Command::new("powershell.exe");
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        &format!(
+            "(Get-AppxPackage -Name '{}' | Select-Object -First 1 -ExpandProperty PackageFullName)",
+            CODEX_APPX_PACKAGE_PREFIX.trim_end_matches('_')
+        ),
+    ]);
+    let output = output_with_timeout(cmd)?;
+    if !output.status.success() {
+        return None;
+    }
+    let full_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if full_name.is_empty() {
+        return None;
+    }
+    parse_appx_package_version(&full_name)
+}
+
 /// The desktop app's bundled codex CLI, when the app is installed and
 /// ships one. macOS-only (like the app detection itself).
 pub fn codex_bundled_cli() -> Option<std::path::PathBuf> {
@@ -727,7 +833,19 @@ pub fn probe_codex_installs() -> CodexInstalls {
             bundled_cli: info.as_ref().is_some_and(|i| i.bundled_cli.is_some()),
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        // Presence only (cheap filesystem scan) — the version needs a
+        // slow PowerShell spawn and is filled in by
+        // `probe_codex_installs_detailed` on the cold path.
+        CodexInstalls {
+            cli,
+            app: codex_appx_installed(),
+            app_version: None,
+            bundled_cli: false,
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         CodexInstalls {
             cli,
@@ -736,6 +854,24 @@ pub fn probe_codex_installs() -> CodexInstalls {
             bundled_cli: false,
         }
     }
+}
+
+/// Full Codex install probe INCLUDING the Windows app version — for the
+/// `detect_codex_installs` IPC ONLY (Providers page load + Recheck),
+/// never the hot path. On Windows the version costs a PowerShell
+/// `Get-AppxPackage` spawn, so it's fetched here rather than in
+/// [`probe_codex_installs`]; macOS already has the version from the
+/// plist read the base probe does, so this is a passthrough there.
+pub fn probe_codex_installs_detailed() -> CodexInstalls {
+    let base = probe_codex_installs();
+    #[cfg(windows)]
+    if base.app && base.app_version.is_none() {
+        return CodexInstalls {
+            app_version: codex_appx_version(),
+            ..base
+        };
+    }
+    base
 }
 
 /// One probe pass for everything the tray and the `detect_clis` IPC
@@ -3982,6 +4118,41 @@ mod tests {
         assert_eq!(info.bundled_cli, Some(resources.join("codex")));
 
         fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[test]
+    fn parse_appx_package_version_reads_second_underscore_segment() {
+        // Real package name reported for the Codex/ChatGPT app
+        // (openai/codex#32772) — Name_Version_Arch__PublisherId, the
+        // `__` marking an empty ResourceId segment.
+        assert_eq!(
+            parse_appx_package_version("OpenAI.Codex_26.707.9564.0_x64__2p2nqsd0c76g0"),
+            Some("26.707.9564.0".to_string())
+        );
+        // Malformed / no underscores at all.
+        assert_eq!(parse_appx_package_version("OpenAIcodex"), None);
+        assert_eq!(parse_appx_package_version(""), None);
+    }
+
+    #[test]
+    fn codex_appx_installed_in_matches_package_family_prefix() {
+        let local = tempdir("codex-appx");
+        // No Packages dir at all → not installed (no panic).
+        assert!(!codex_appx_installed_in(&local));
+
+        let packages = local.join("Packages");
+        fs::create_dir_all(&packages).unwrap();
+        // Unrelated MSIX packages must not count.
+        fs::create_dir_all(packages.join("Microsoft.Edge_8wekyb3d8bbwe")).unwrap();
+        fs::create_dir_all(packages.join("Claude_pzs8sxrjxfjjc")).unwrap();
+        assert!(!codex_appx_installed_in(&local));
+
+        // The real PackageFamilyName shape: OpenAI.Codex_<publisherhash>
+        // (hash varies per signing identity → prefix match).
+        fs::create_dir_all(packages.join("OpenAI.Codex_2p2nqsd0c76g0")).unwrap();
+        assert!(codex_appx_installed_in(&local));
+
+        fs::remove_dir_all(&local).unwrap();
     }
 
     #[cfg(unix)]

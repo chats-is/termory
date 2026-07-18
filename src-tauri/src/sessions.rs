@@ -15973,8 +15973,9 @@ mod tests {
     // Fixtures + assertions are unix-path-shaped: on Windows
     // fs::canonicalize returns a \\?\-prefixed path (different slug
     // than production's stripped one) and JSON-escapes the
-    // backslashes, so the substring asserts can't hold verbatim.
-    // Windows-shaped migrate coverage is a tracked follow-up.
+    // backslashes, so the substring asserts can't hold verbatim. The
+    // Windows-shaped counterparts live below (migrate_claude_*_windows*
+    // / *_rewrites_windows_cwd), which parse the migrated JSONL instead.
     #[cfg(unix)]
     #[test]
     fn migrate_claude_project_copies_sessions_memory_and_rewrites_cwd() {
@@ -16043,8 +16044,9 @@ mod tests {
     // Fixtures + assertions are unix-path-shaped: on Windows
     // fs::canonicalize returns a \\?\-prefixed path (different slug
     // than production's stripped one) and JSON-escapes the
-    // backslashes, so the substring asserts can't hold verbatim.
-    // Windows-shaped migrate coverage is a tracked follow-up.
+    // backslashes, so the substring asserts can't hold verbatim. The
+    // Windows-shaped counterparts live below (migrate_claude_*_windows*
+    // / *_rewrites_windows_cwd), which parse the migrated JSONL instead.
     #[cfg(unix)]
     #[test]
     fn migrate_claude_session_in_copies_one_session_and_rewrites_cwd() {
@@ -16105,11 +16107,84 @@ mod tests {
         }
     }
 
+    // Windows-shaped counterpart of
+    // `migrate_claude_session_in_copies_one_session_and_rewrites_cwd`.
+    // The unix version's substring asserts can't hold on Windows for two
+    // reasons this test works around: (1) `fs::canonicalize` yields a
+    // `\\?\`-prefixed path, so the expected `new_canon` is derived the
+    // SAME way production's `resolve_new_claude_dir` does (strip `\\?\`);
+    // (2) a Windows cwd's backslashes are JSON-escaped in the rewritten
+    // line, so instead of substring-matching the escaped form this
+    // PARSES the migrated JSONL and asserts the `cwd` field's decoded
+    // value — robust against escaping and the exact source of the
+    // long-standing zero-coverage gap.
+    #[cfg(windows)]
+    #[test]
+    fn migrate_claude_session_in_rewrites_windows_cwd() {
+        let tmp = TestDir::new("migrate-sess-win");
+        let projects = tmp.path().join("projects");
+        // A Windows-shaped old cwd (backslashes, drive letter). It only
+        // needs to name the slug dir under `projects/`; the real dir on
+        // disk it once pointed at doesn't have to exist.
+        let old_path = r"C:\Users\test\oldproj";
+        let old_dir = projects.join(sanitize_claude_path(old_path).unwrap());
+        fs::create_dir_all(&old_dir).unwrap();
+        let src = old_dir.join("bbb.jsonl");
+        // Build the line via serde so the backslashes are validly escaped.
+        let line = serde_json::to_string(&serde_json::json!({ "cwd": old_path, "k": 2 })).unwrap();
+        fs::write(&src, format!("{line}\n")).unwrap();
+        // Companion subagent transcript rides along, cwd rewritten too.
+        fs::create_dir_all(old_dir.join("bbb").join("subagents")).unwrap();
+        let sub_line =
+            serde_json::to_string(&serde_json::json!({ "cwd": old_path, "s": 9 })).unwrap();
+        fs::write(
+            old_dir.join("bbb").join("subagents").join("agent-y.jsonl"),
+            format!("{sub_line}\n"),
+        )
+        .unwrap();
+
+        // The NEW path must be a real dir (production canonicalizes it).
+        let new_path_dir = tmp.path().join("newproj");
+        fs::create_dir_all(&new_path_dir).unwrap();
+        let new_path = new_path_dir.to_string_lossy().to_string();
+
+        let res =
+            migrate_claude_session_in(&projects, old_path, "bbb.jsonl", &new_path, false).unwrap();
+        assert_eq!((res.sessions, res.memory_files), (1, 0));
+
+        // Expected canonical new cwd — SAME derivation as production
+        // (`resolve_new_claude_dir`): canonicalize, then strip `\\?\`.
+        let canon = fs::canonicalize(&new_path)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let new_canon = canon.strip_prefix(r"\\?\").unwrap_or(&canon).to_string();
+        assert_eq!(res.new_project, new_canon);
+        let new_dir = projects.join(sanitize_claude_path(&new_canon).unwrap());
+
+        // Parse the migrated JSONL and assert the DECODED cwd — dodges the
+        // backslash-escaping that made the substring asserts unix-only.
+        let migrated = fs::read_to_string(new_dir.join("bbb.jsonl")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(migrated.trim_end()).unwrap();
+        assert_eq!(parsed["cwd"], serde_json::Value::String(new_canon.clone()));
+        assert_eq!(parsed["k"], serde_json::json!(2)); // sibling field intact
+        assert_ne!(parsed["cwd"], serde_json::json!(old_path)); // old cwd gone
+
+        let sub = fs::read_to_string(new_dir.join("bbb").join("subagents").join("agent-y.jsonl"))
+            .unwrap();
+        let sub_parsed: serde_json::Value = serde_json::from_str(sub.trim_end()).unwrap();
+        assert_eq!(sub_parsed["cwd"], serde_json::Value::String(new_canon));
+        assert_eq!(sub_parsed["s"], serde_json::json!(9));
+
+        assert!(src.exists()); // copy mode → source kept
+    }
+
     // Fixtures + assertions are unix-path-shaped: on Windows
     // fs::canonicalize returns a \\?\-prefixed path (different slug
     // than production's stripped one) and JSON-escapes the
-    // backslashes, so the substring asserts can't hold verbatim.
-    // Windows-shaped migrate coverage is a tracked follow-up.
+    // backslashes, so the substring asserts can't hold verbatim. The
+    // Windows-shaped counterpart is
+    // `migrate_claude_memory_in_windows_preserves_subpath_and_rejects_stray`.
     #[cfg(unix)]
     #[test]
     fn migrate_claude_memory_in_copies_md_preserving_subpath_and_rejects_stray() {
@@ -16169,8 +16244,9 @@ mod tests {
     // Fixtures + assertions are unix-path-shaped: on Windows
     // fs::canonicalize returns a \\?\-prefixed path (different slug
     // than production's stripped one) and JSON-escapes the
-    // backslashes, so the substring asserts can't hold verbatim.
-    // Windows-shaped migrate coverage is a tracked follow-up.
+    // backslashes, so the substring asserts can't hold verbatim. The
+    // Windows-shaped counterparts live below (migrate_claude_*_windows*
+    // / *_rewrites_windows_cwd), which parse the migrated JSONL instead.
     #[cfg(unix)]
     #[test]
     fn migrate_claude_project_move_mode_is_complete_and_removes_old() {
@@ -16254,6 +16330,127 @@ mod tests {
 
         // MOVE mode removed the old slug dir entirely (no duplicate UUIDs left).
         assert!(!old_dir.exists());
+    }
+
+    // Windows-shaped counterparts of the two migrate tests above. Same
+    // workarounds as `migrate_claude_session_in_rewrites_windows_cwd`:
+    // derive `new_canon` exactly as production (`resolve_new_claude_dir`:
+    // canonicalize → strip `\\?\`), and PARSE the migrated JSONL to
+    // assert the decoded `cwd` rather than substring-matching the
+    // backslash-escaped form. Logic is platform-agnostic (verified
+    // locally by temporarily switching the gate to `#[cfg(unix)]`), so
+    // the `#[cfg(windows)]` gate is only to run it where the real
+    // `\\?\` + escaping behavior occurs.
+    #[cfg(windows)]
+    #[test]
+    fn migrate_claude_project_move_mode_rewrites_windows_cwd() {
+        let tmp = TestDir::new("migrate-e2e-win");
+        let projects = tmp.path().join("projects");
+        let old_path = r"C:\Users\test\copilot";
+        let old_dir = projects.join(sanitize_claude_path(old_path).unwrap());
+        fs::create_dir_all(&old_dir).unwrap();
+
+        // 2 sessions carrying the old cwd (serde builds valid escaping).
+        for id in ["s1", "s2"] {
+            let line = serde_json::to_string(
+                &serde_json::json!({ "type": "user", "cwd": old_path, "id": id }),
+            )
+            .unwrap();
+            fs::write(old_dir.join(format!("{id}.jsonl")), format!("{line}\n")).unwrap();
+        }
+        // Companion subagent transcript (cwd rewritten) + raw tool result
+        // (copied verbatim) + nested memory + regenerable index (skipped).
+        fs::create_dir_all(old_dir.join("s1").join("subagents")).unwrap();
+        let agent_line =
+            serde_json::to_string(&serde_json::json!({ "cwd": old_path, "agent": 1 })).unwrap();
+        fs::write(
+            old_dir.join("s1").join("subagents").join("agent-a.jsonl"),
+            format!("{agent_line}\n"),
+        )
+        .unwrap();
+        fs::create_dir_all(old_dir.join("memory").join("sub")).unwrap();
+        fs::write(old_dir.join("memory").join("MEMORY.md"), "m1").unwrap();
+        fs::write(old_dir.join("memory").join("sub").join("NOTE.md"), "m2").unwrap();
+        fs::write(old_dir.join("sessions-index.json"), "{\"v\":1}").unwrap();
+
+        let new_path_dir = tmp.path().join("chats");
+        fs::create_dir_all(&new_path_dir).unwrap();
+        let new_path = new_path_dir.to_string_lossy().to_string();
+
+        let res = migrate_claude_project_in(&projects, old_path, &new_path, true).unwrap();
+        assert_eq!((res.sessions, res.memory_files), (2, 2));
+
+        let canon = fs::canonicalize(&new_path)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let new_canon = canon.strip_prefix(r"\\?\").unwrap_or(&canon).to_string();
+        assert_eq!(res.new_project, new_canon);
+        let new_dir = projects.join(sanitize_claude_path(&new_canon).unwrap());
+
+        // Sessions present with cwd rewritten (parse to dodge escaping).
+        for id in ["s1", "s2"] {
+            let body = fs::read_to_string(new_dir.join(format!("{id}.jsonl"))).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(body.trim_end()).unwrap();
+            assert_eq!(parsed["cwd"], serde_json::Value::String(new_canon.clone()));
+            assert_eq!(parsed["id"], serde_json::json!(id));
+        }
+        let agent =
+            fs::read_to_string(new_dir.join("s1").join("subagents").join("agent-a.jsonl")).unwrap();
+        let agent_parsed: serde_json::Value = serde_json::from_str(agent.trim_end()).unwrap();
+        assert_eq!(
+            agent_parsed["cwd"],
+            serde_json::Value::String(new_canon.clone())
+        );
+        // Nested memory copied; regenerable index skipped.
+        assert_eq!(
+            fs::read_to_string(new_dir.join("memory").join("MEMORY.md")).unwrap(),
+            "m1"
+        );
+        assert_eq!(
+            fs::read_to_string(new_dir.join("memory").join("sub").join("NOTE.md")).unwrap(),
+            "m2"
+        );
+        assert!(!new_dir.join("sessions-index.json").exists());
+        // MOVE mode removed the old slug dir entirely.
+        assert!(!old_dir.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn migrate_claude_memory_in_windows_preserves_subpath_and_rejects_stray() {
+        let tmp = TestDir::new("migrate-mem-win");
+        let projects = tmp.path().join("projects");
+        let old_path = r"C:\Users\test\oldproj";
+        let old_dir = projects.join(sanitize_claude_path(old_path).unwrap());
+        let src = old_dir.join("memory").join("sub").join("NOTE.md");
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        fs::write(&src, "remember").unwrap();
+
+        let new_path_dir = tmp.path().join("newproj");
+        fs::create_dir_all(&new_path_dir).unwrap();
+        let new_path = new_path_dir.to_string_lossy().to_string();
+
+        let res =
+            migrate_claude_memory_in(&projects, old_path, "memory/sub/NOTE.md", &new_path, false)
+                .unwrap();
+        assert_eq!((res.sessions, res.memory_files), (0, 1));
+
+        let canon = fs::canonicalize(&new_path)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let new_canon = canon.strip_prefix(r"\\?\").unwrap_or(&canon).to_string();
+        let new_dir = projects.join(sanitize_claude_path(&new_canon).unwrap());
+        // Memory is copied verbatim (no cwd rewrite), subpath preserved.
+        assert_eq!(
+            fs::read_to_string(new_dir.join("memory").join("sub").join("NOTE.md")).unwrap(),
+            "remember"
+        );
+        assert!(src.exists()); // copy mode → source kept
+
+        // Backslash-bearing traversal is still rejected by is_safe_rel.
+        assert!(migrate_claude_memory_in(&projects, old_path, "..\\x", &new_path, false).is_err());
     }
 
     #[test]

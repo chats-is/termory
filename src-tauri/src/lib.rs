@@ -468,10 +468,12 @@ async fn detect_cli_versions_cmd(
 /// any of them (shared `~/.codex/`), which is what `detect_clis`'
 /// codex entry says; the frontend disables login flows only when BOTH
 /// `cli` and `bundled_cli` are false. One probe pass backend-side
-/// (`providers::probe_codex_installs` — single bundle resolution).
+/// (`providers::probe_codex_installs_detailed` — the cold-path variant
+/// that also fetches the Windows app version via PowerShell; this IPC
+/// runs on page load + Recheck, off the tray/watcher hot path).
 #[tauri::command]
 async fn detect_codex_installs() -> Result<providers::CodexInstalls, String> {
-    tauri::async_runtime::spawn_blocking(|| Ok(providers::probe_codex_installs()))
+    tauri::async_runtime::spawn_blocking(|| Ok(providers::probe_codex_installs_detailed()))
         .await
         .map_err(|err| err.to_string())?
 }
