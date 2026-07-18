@@ -1290,22 +1290,55 @@ struct GrokAuthEntry {
     /// The stored access token (`key`) — may be expired.
     key: String,
     user_id: String,
+    /// Plain `email` on the auth entry — the official `/v1/settings`
+    /// request attaches it as `x-email` when present
+    /// (remote/client.rs:28-30).
+    email: Option<String>,
 }
 
 fn grok_auth_path() -> Option<PathBuf> {
     crate::providers::grok_home_dir().map(|h| h.join("auth.json"))
 }
 
-/// Unix-seconds `exp` claim from a JWT (no signature verification —
-/// local staleness check only, the API remains the authority).
-fn jwt_exp_seconds(jwt: &str) -> Option<i64> {
+/// Decode a JWT's payload segment into its claims (no signature
+/// verification — local reads only, the API remains the authority).
+/// Shared by every JWT-claim reader below so the decode step (base64
+/// alphabet, padding, error handling) can't drift between them.
+fn jwt_claims(jwt: &str) -> Option<serde_json::Value> {
     use base64::Engine;
     let payload = jwt.split('.').nth(1)?;
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload)
         .ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    claims.get("exp")?.as_i64()
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Unix-seconds `exp` claim from a JWT.
+fn jwt_exp_seconds(jwt: &str) -> Option<i64> {
+    jwt_claims(jwt)?.get("exp")?.as_i64()
+}
+
+/// Subscription plan from the access token's numeric `tier` claim — the
+/// official enum map (grok-build mvp_agent/mod.rs `jwt_tier_claim`:
+/// 0 free, 1 supergrok, 2 x_basic, 3 x_premium, 4 x_premium_plus,
+/// 5 supergrok_heavy, 6 supergrok_lite), rendered in the CCP display
+/// spelling ("SuperGrok", "X Premium+", … — config-types/lib.rs
+/// `subscription_tier_display` doc). Fallback only: the claim can be
+/// STALE right after an upgrade (the "stale JWT tier" note in
+/// mvp_agent/mod.rs) — `/v1/settings` is the authoritative channel.
+fn grok_jwt_tier_plan(jwt: &str) -> Option<String> {
+    let tier = jwt_claims(jwt)?.get("tier")?.as_u64()?;
+    let raw = match tier {
+        0 => "Free",
+        1 => "SuperGrok",
+        2 => "X Basic",
+        3 => "X Premium",
+        4 => "X Premium+",
+        5 => "SuperGrok Heavy",
+        6 => "SuperGrok Lite",
+        n => return display_plan(&n.to_string()),
+    };
+    display_plan(raw)
 }
 
 fn read_grok_credentials() -> (Option<GrokAuthEntry>, CredentialStatus, Option<String>) {
@@ -1373,7 +1406,16 @@ fn parse_grok_credentials(
             }
             _ => CredentialStatus::Valid,
         };
-        return (Some(GrokAuthEntry { key, user_id }), status, None);
+        let email = s(entry, "email");
+        return (
+            Some(GrokAuthEntry {
+                key,
+                user_id,
+                email,
+            }),
+            status,
+            None,
+        );
     }
     (None, CredentialStatus::NotFound, None)
 }
@@ -1381,6 +1423,16 @@ fn parse_grok_credentials(
 /// `x-grok-client-version` the billing proxy expects — a known-good CLI
 /// version (the live probe was verified with it).
 const GROK_CLIENT_VERSION: &str = "0.2.99";
+
+/// `x-grok-client-identifier` — official default `"grok-shell"`
+/// (`process_client_identifier()`, xai-grok-http/lib.rs:240; the
+/// `GROK_CLIENT_NAME` env override is a grok-process concern, not ours).
+const GROK_CLIENT_IDENTIFIER: &str = "grok-shell";
+
+/// `x-grok-client-mode` — official default `"interactive"`
+/// (`process_client_mode()` one-way latch, xai-grok-http/lib.rs:260;
+/// `"headless"` is only set by the `grok -p` entry points).
+const GROK_CLIENT_MODE: &str = "interactive";
 
 /// Map the billing response to quota tiers + extra usage.
 /// `config.creditUsagePercent` is the included-credit utilization
@@ -1438,22 +1490,82 @@ fn parse_grok_billing(body: &serde_json::Value) -> (Vec<QuotaTier>, Option<Extra
     (tiers, extra)
 }
 
+/// `subscription_tier_display` from a `/v1/settings` response body.
+/// Field names are the Rust field names verbatim (RemoteSettings has no
+/// serde rename_all — config-types/lib.rs:211).
+fn parse_grok_settings_plan(body: &serde_json::Value) -> Option<String> {
+    body.get("subscription_tier_display")
+        .and_then(|v| v.as_str())
+        .and_then(display_plan)
+}
+
+/// Subscription tier display name ("SuperGrok", "X Premium+", "Free",
+/// "API Key") from cli-chat-proxy `GET /v1/settings`
+/// (`RemoteSettings.subscription_tier_display`, grok-build
+/// config-types/lib.rs:718) — the same channel the TUI's billing
+/// extension shows (billing.rs:274 enriches its response from
+/// RemoteSettings). Headers mirror the official settings fetch
+/// (remote/client.rs:17-41 `add_cli_chat_proxy_headers_blocking`:
+/// bearer + token-auth + userid + version + optional `x-email` +
+/// identifier + mode).
+/// Best-effort: any failure → None (the JWT claim fallback applies).
+async fn fetch_grok_plan(
+    client: &reqwest::Client,
+    access_token: &str,
+    user_id: &str,
+    email: Option<&str>,
+) -> Option<String> {
+    let mut req = client
+        .get("https://cli-chat-proxy.grok.com/v1/settings")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("X-XAI-Token-Auth", "xai-grok-cli")
+        .header("x-userid", user_id)
+        .header("x-grok-client-version", GROK_CLIENT_VERSION);
+    if let Some(email) = email {
+        req = req.header("x-email", email);
+    }
+    let resp = req
+        .header("x-grok-client-identifier", GROK_CLIENT_IDENTIFIER)
+        .header("x-grok-client-mode", GROK_CLIENT_MODE)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    parse_grok_settings_plan(&body)
+}
+
 /// Query the billing endpoint the TUI's own `/usage` uses (see the
 /// module note above for the full source trail + live verification).
-async fn query_grok_quota(access_token: &str, user_id: &str) -> SubscriptionQuota {
+/// Headers mirror the official billing fetch (billing.rs
+/// `handle_get_billing`: bearer + token-auth + userid + version +
+/// client-mode — NO `x-email`/identifier there, unlike `/settings`).
+/// The billing GET and the `/v1/settings` plan lookup are independent
+/// (neither's result feeds the other), so they run concurrently — each
+/// has its own 10s timeout and sequencing them would let a slow
+/// connection double the worst-case wait for a single quota refresh.
+async fn query_grok_quota(
+    access_token: &str,
+    user_id: &str,
+    email: Option<&str>,
+) -> SubscriptionQuota {
     let client = match quota_http_client("grok") {
         Ok(c) => c,
         Err(e) => return e,
     };
-    let resp = match client
+    let billing_send = client
         .get("https://cli-chat-proxy.grok.com/v1/billing?format=credits")
         .header("Authorization", format!("Bearer {access_token}"))
         .header("X-XAI-Token-Auth", "xai-grok-cli")
         .header("x-userid", user_id)
         .header("x-grok-client-version", GROK_CLIENT_VERSION)
-        .send()
-        .await
-    {
+        .header("x-grok-client-mode", GROK_CLIENT_MODE)
+        .send();
+    let plan_fetch = fetch_grok_plan(&client, access_token, user_id, email);
+    let (billing_result, plan_from_settings) = tokio::join!(billing_send, plan_fetch);
+    let resp = match billing_result {
         Ok(r) => r,
         Err(err) => return network_error("grok", err),
     };
@@ -1462,10 +1574,12 @@ async fn query_grok_quota(access_token: &str, user_id: &str) -> SubscriptionQuot
         Err(e) => return e,
     };
     let (tiers, extra) = parse_grok_billing(&body);
-    // The subscription tier name rides a separate RemoteSettings channel
-    // (billing.rs `subscription_tier` — "Populated from RemoteSettings"),
-    // not this response, so `plan` stays empty.
-    SubscriptionQuota::success("grok", tiers, None, extra)
+    // The tier name is NOT in the billing response (billing.rs enriches it
+    // from RemoteSettings client-side) — official precedence per
+    // mvp_agent/mod.rs `resolve_subscription_tier_for_telemetry`:
+    // `/settings` display name first, JWT `tier` claim fallback.
+    let plan = plan_from_settings.or_else(|| grok_jwt_tier_plan(access_token));
+    SubscriptionQuota::success("grok", tiers, plan, extra)
 }
 
 // ===================================================================
@@ -1528,8 +1642,9 @@ pub async fn fetch_quota(app: CliApp) -> SubscriptionQuota {
                 .as_ref()
                 .map(|e| e.user_id.clone())
                 .unwrap_or_default();
+            let email = entry.as_ref().and_then(|e| e.email.clone());
             quota_for_credential("grok", token, status, message, move |t| async move {
-                query_grok_quota(&t, &user_id).await
+                query_grok_quota(&t, &user_id, email.as_deref()).await
             })
             .await
         }
@@ -2266,6 +2381,62 @@ mod tests {
     }
 
     #[test]
+    fn grok_jwt_tier_plan_maps_claims_to_display_names() {
+        let jwt = |claims: &str| {
+            use base64::Engine;
+            let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+            format!(
+                "{}.{}.sig",
+                b64(br#"{"alg":"none"}"#),
+                b64(claims.as_bytes())
+            )
+        };
+        // The official enum map (mvp_agent/mod.rs jwt_tier_claim), CCP
+        // display spelling.
+        assert_eq!(
+            grok_jwt_tier_plan(&jwt(r#"{"tier":0}"#)).as_deref(),
+            Some("Free")
+        );
+        assert_eq!(
+            grok_jwt_tier_plan(&jwt(r#"{"tier":1}"#)).as_deref(),
+            Some("SuperGrok")
+        );
+        assert_eq!(
+            grok_jwt_tier_plan(&jwt(r#"{"tier":4}"#)).as_deref(),
+            Some("X Premium+")
+        );
+        assert_eq!(
+            grok_jwt_tier_plan(&jwt(r#"{"tier":5}"#)).as_deref(),
+            Some("SuperGrok Heavy")
+        );
+        // Unknown future tier passes through as the raw number (fail-open,
+        // mirrors the official `_ => tier.to_string()` arm).
+        assert_eq!(
+            grok_jwt_tier_plan(&jwt(r#"{"tier":9}"#)).as_deref(),
+            Some("9")
+        );
+        // No tier claim / not a JWT → None.
+        assert_eq!(grok_jwt_tier_plan(&jwt(r#"{"exp":1}"#)), None);
+        assert_eq!(grok_jwt_tier_plan("not-a-jwt"), None);
+    }
+
+    #[test]
+    fn parse_grok_settings_plan_reads_display_name() {
+        assert_eq!(
+            parse_grok_settings_plan(&json!({"subscription_tier_display": "SuperGrok Heavy"}))
+                .as_deref(),
+            Some("SuperGrok Heavy")
+        );
+        // Empty / whitespace-only display → None so the JWT fallback runs
+        // (mirrors the official `.filter(|s| !s.trim().is_empty())`).
+        assert_eq!(
+            parse_grok_settings_plan(&json!({"subscription_tier_display": "  "})),
+            None
+        );
+        assert_eq!(parse_grok_settings_plan(&json!({})), None);
+    }
+
+    #[test]
     fn parse_grok_credentials_reads_entry_and_expiry() {
         // Far-future exp → Valid.
         let exp = (SystemTime::now()
@@ -2287,6 +2458,7 @@ mod tests {
                 "key": jwt(exp),
                 "auth_mode": "oidc",
                 "user_id": "user-1",
+                "email": "u@example.com",
                 "refresh_token": "rt-1",
                 "oidc_issuer": "https://auth.x.ai",
                 "oidc_client_id": "client-123",
@@ -2300,6 +2472,7 @@ mod tests {
         assert_eq!(status, CredentialStatus::Valid);
         assert!(msg.is_none());
         assert_eq!(entry.user_id, "user-1");
+        assert_eq!(entry.email.as_deref(), Some("u@example.com"));
         assert!(entry.key.starts_with("eyJ"), "key is the stored JWT");
 
         // Expired exp → Expired (refresh path takes over in the fetch arm).
