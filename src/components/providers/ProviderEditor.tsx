@@ -7,7 +7,6 @@ import {
   TooltipContent,
   TooltipTrigger
 } from "@/components/ui/tooltip";
-import { TooltipIconButton } from "@/components/TooltipIconButton";
 import { ModelCombobox } from "@/components/ModelCombobox";
 import {
   Collapsible,
@@ -542,18 +541,25 @@ export function ProviderEditor({
                         autoComplete="off"
                         spellCheck={false}
                       />
-                      <TooltipIconButton
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                        tooltip={t("providers.removeModel")}
-                        onClick={() =>
-                          setModelList(modelRows.filter((_, j) => j !== i))
-                        }
-                      >
-                        <Trash2 className="size-4" />
-                      </TooltipIconButton>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                            aria-label={t("providers.removeModel")}
+                            onClick={() =>
+                              setModelList(modelRows.filter((_, j) => j !== i))
+                            }
+                          >
+                            <Trash2 className="size-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent side="top">
+                          {t("providers.removeModel")}
+                        </TooltipContent>
+                      </Tooltip>
                     </div>
                   ))}
                 </div>
@@ -652,20 +658,27 @@ export function ProviderEditor({
                             // keep its footprint so inputs stay aligned.
                             <span className="size-9 shrink-0" aria-hidden />
                           ) : (
-                            <TooltipIconButton
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                              tooltip={t("providers.removeOverride")}
-                              onClick={() =>
-                                setOverrides(
-                                  overrideRows.filter((_, j) => j !== i)
-                                )
-                              }
-                            >
-                              <Trash2 className="size-4" />
-                            </TooltipIconButton>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon"
+                                  className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                                  aria-label={t("providers.removeOverride")}
+                                  onClick={() =>
+                                    setOverrides(
+                                      overrideRows.filter((_, j) => j !== i)
+                                    )
+                                  }
+                                >
+                                  <Trash2 className="size-4" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent side="top">
+                                {t("providers.removeOverride")}
+                              </TooltipContent>
+                            </Tooltip>
                           )}
                         </div>
                       );

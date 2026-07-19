@@ -15,7 +15,6 @@ import {
   TooltipContent,
   TooltipTrigger
 } from "@/components/ui/tooltip";
-import { TooltipIconButton } from "@/components/TooltipIconButton";
 import {
   Collapsible,
   CollapsibleContent,
@@ -500,25 +499,31 @@ export function GatewayEditor({
                   </span>
                 )}
               </div>
-              <TooltipIconButton
-                type="button"
-                variant="ghost"
-                size="icon"
-                wrapperClassName="shrink-0"
-                className="size-7 shrink-0"
-                tooltip={t("providers.detectApis")}
-                disabled={
-                  !baseUrl.trim() ||
-                  !apiKey.trim() ||
-                  detecting ||
-                  Date.now() < cooldownUntil
-                }
-                onClick={() => void detect()}
-              >
-                <RefreshCw
-                  className={cn("size-4", detecting && "animate-spin")}
-                />
-              </TooltipIconButton>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="size-7 shrink-0"
+                    aria-label={t("providers.detectApis")}
+                    disabled={
+                      !baseUrl.trim() ||
+                      !apiKey.trim() ||
+                      detecting ||
+                      Date.now() < cooldownUntil
+                    }
+                    onClick={() => void detect()}
+                  >
+                    <RefreshCw
+                      className={cn("size-4", detecting && "animate-spin")}
+                    />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top">
+                  {t("providers.detectApis")}
+                </TooltipContent>
+              </Tooltip>
             </div>
             {!detectAttempted && !detecting && (
               <p className="text-xs text-muted-foreground">
@@ -734,21 +739,27 @@ export function GatewayEditor({
                                     })
                                   }
                                 />
-                                <TooltipIconButton
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon"
-                                  wrapperClassName="shrink-0"
-                                  className="size-8 shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
-                                  tooltip={t("providers.removeModel")}
-                                  onClick={() =>
-                                    setBind(app, {
-                                      models: modelRows.filter((_, j) => j !== i)
-                                    })
-                                  }
-                                >
-                                  <Trash2 className="size-4" />
-                                </TooltipIconButton>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="icon"
+                                      className="size-8 shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
+                                      aria-label={t("providers.removeModel")}
+                                      onClick={() =>
+                                        setBind(app, {
+                                          models: modelRows.filter((_, j) => j !== i)
+                                        })
+                                      }
+                                    >
+                                      <Trash2 className="size-4" />
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="top">
+                                    {t("providers.removeModel")}
+                                  </TooltipContent>
+                                </Tooltip>
                               </div>
                             ))}
                             {modelRows.some(
@@ -826,21 +837,27 @@ export function GatewayEditor({
                                     })
                                   }
                                 />
-                                <TooltipIconButton
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon"
-                                  wrapperClassName="shrink-0"
-                                  className="size-8 shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
-                                  tooltip={t("providers.removeModel")}
-                                  onClick={() =>
-                                    setBind(app, {
-                                      models: modelRows.filter((_, j) => j !== i)
-                                    })
-                                  }
-                                >
-                                  <Trash2 className="size-4" />
-                                </TooltipIconButton>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="icon"
+                                      className="size-8 shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
+                                      aria-label={t("providers.removeModel")}
+                                      onClick={() =>
+                                        setBind(app, {
+                                          models: modelRows.filter((_, j) => j !== i)
+                                        })
+                                      }
+                                    >
+                                      <Trash2 className="size-4" />
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="top">
+                                    {t("providers.removeModel")}
+                                  </TooltipContent>
+                                </Tooltip>
                               </div>
                             ))}
                             {bindingModelsDup(app) && (
@@ -915,21 +932,27 @@ export function GatewayEditor({
                                 }
                               />
                               {!isTemplate && (
-                                <TooltipIconButton
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon"
-                                  wrapperClassName="shrink-0"
-                                  className="size-8 shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
-                                  tooltip={t("providers.removeOverride")}
-                                  onClick={() =>
-                                    setBind(app, {
-                                      options: rows.filter((_, j) => j !== i)
-                                    })
-                                  }
-                                >
-                                  <Trash2 className="size-4" />
-                                </TooltipIconButton>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="icon"
+                                      className="size-8 shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
+                                      aria-label={t("providers.removeOverride")}
+                                      onClick={() =>
+                                        setBind(app, {
+                                          options: rows.filter((_, j) => j !== i)
+                                        })
+                                      }
+                                    >
+                                      <Trash2 className="size-4" />
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="top">
+                                    {t("providers.removeOverride")}
+                                  </TooltipContent>
+                                </Tooltip>
                               )}
                             </div>
                           );

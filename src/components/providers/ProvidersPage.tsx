@@ -20,7 +20,6 @@ import {
   TooltipContent,
   TooltipTrigger
 } from "@/components/ui/tooltip";
-import { TooltipIconButton } from "@/components/TooltipIconButton";
 import {
   ACTIVE_STATE_REFRESH_EVENT,
   CLI_APPS,
@@ -1115,22 +1114,28 @@ export function ProvidersPage({
               </TabsList>
             </Tabs>
           </div>
-          <TooltipIconButton
-            type="button"
-            variant="default"
-            size="icon"
-            onClick={() =>
-              view === "gateways"
-                ? setGatewayAddSignal((n) => n + 1)
-                : startNew()
-            }
-            disabled={view === "providers" && !installed[app]}
-            tooltip={t("providers.addProvider")}
-            side="left"
-            className="shrink-0 rounded-md shadow-sm"
-          >
-            <Plus className="size-4" />
-          </TooltipIconButton>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="default"
+                size="icon"
+                onClick={() =>
+                  view === "gateways"
+                    ? setGatewayAddSignal((n) => n + 1)
+                    : startNew()
+                }
+                disabled={view === "providers" && !installed[app]}
+                aria-label={t("providers.addProvider")}
+                className="shrink-0 rounded-md shadow-sm"
+              >
+                <Plus className="size-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="left">
+              {t("providers.addProvider")}
+            </TooltipContent>
+          </Tooltip>
         </div>
       </div>
 
@@ -1370,23 +1375,28 @@ export function ProvidersPage({
             <span className="break-all font-mono text-xs select-all">
               {codexLoginUrl}
             </span>
-            <TooltipIconButton
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              wrapperClassName="absolute right-1 top-1"
-              tooltip={t("common.copy")}
-              onClick={() => {
-                if (codexLoginUrl) {
-                  void navigator.clipboard.writeText(codexLoginUrl).then(() => {
-                    setCodexLoginUrlCopied(true);
-                    setTimeout(() => setCodexLoginUrlCopied(false), 1500);
-                  });
-                }
-              }}
-            >
-              {codexLoginUrlCopied ? <Check className="size-4" /> : <Copy className="size-4" />}
-            </TooltipIconButton>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  className="absolute right-1 top-1"
+                  aria-label={t("common.copy")}
+                  onClick={() => {
+                    if (codexLoginUrl) {
+                      void navigator.clipboard.writeText(codexLoginUrl).then(() => {
+                        setCodexLoginUrlCopied(true);
+                        setTimeout(() => setCodexLoginUrlCopied(false), 1500);
+                      });
+                    }
+                  }}
+                >
+                  {codexLoginUrlCopied ? <Check className="size-4" /> : <Copy className="size-4" />}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top">{t("common.copy")}</TooltipContent>
+            </Tooltip>
           </div>
           <DialogFooter className="flex-row items-center gap-3">
             <p className="flex-1 text-xs text-muted-foreground">{t("providers.codexLoginDialogWaiting")}</p>

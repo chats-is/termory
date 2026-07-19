@@ -2,7 +2,11 @@ import React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Check, Copy, ExternalLink, Loader2, RefreshCw, Terminal } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { TooltipIconButton } from "@/components/TooltipIconButton";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from "@/components/ui/tooltip";
 import { BrandIcon } from "@/components/BrandIcon";
 import { CLI_APP_LABEL, CLI_APP_SOURCE_BADGE, CLI_INSTALL } from "@/constants";
 import { IS_MAC } from "@/lib/platform";
@@ -91,20 +95,25 @@ export function InstallGuide({
             <code className="flex-1 min-w-0 overflow-x-auto whitespace-nowrap text-left text-xs font-mono">
               {method.command}
             </code>
-            <TooltipIconButton
-              variant="ghost"
-              size="icon-sm"
-              type="button"
-              onClick={() => void copy()}
-              tooltip={t("install.copyCommand")}
-              className="size-7"
-            >
-              {copied ? (
-                <Check className="size-4 text-green-600" />
-              ) : (
-                <Copy className="size-4" />
-              )}
-            </TooltipIconButton>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  type="button"
+                  onClick={() => void copy()}
+                  aria-label={t("install.copyCommand")}
+                  className="size-7"
+                >
+                  {copied ? (
+                    <Check className="size-4 text-green-600" />
+                  ) : (
+                    <Copy className="size-4" />
+                  )}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top">{t("install.copyCommand")}</TooltipContent>
+            </Tooltip>
           </div>
         </div>
 

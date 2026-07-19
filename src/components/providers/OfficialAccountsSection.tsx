@@ -19,7 +19,6 @@ import {
   TooltipContent,
   TooltipTrigger
 } from "@/components/ui/tooltip";
-import { TooltipIconButton } from "@/components/TooltipIconButton";
 import { QUOTA_CHANGED_EVENT } from "@/constants";
 import { formatResetTime } from "@/lib/format";
 import { quotaLevel, type QuotaLevel } from "@/lib/quota-utils";
@@ -494,24 +493,28 @@ export function OfficialAccountsSection({
                       resetsAt={tier.resetsAt}
                     />
                   ))}
-                <TooltipIconButton
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  wrapperClassName="shrink-0 -ml-2"
-                  onClick={onRefreshQuota}
-                  disabled={quotaLoading || quotaCooldown}
-                  aria-label={t("providers.quotaRefresh")}
-                  tooltip={
-                    quotaCooldown && !quotaLoading
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      className="shrink-0 -ml-2"
+                      onClick={onRefreshQuota}
+                      disabled={quotaLoading || quotaCooldown}
+                      aria-label={t("providers.quotaRefresh")}
+                    >
+                      <RefreshCw
+                        className={cn("size-4", quotaLoading && "animate-spin")}
+                      />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">
+                    {quotaCooldown && !quotaLoading
                       ? t("providers.quotaCooldownHint")
-                      : t("providers.quotaRefresh")
-                  }
-                >
-                  <RefreshCw
-                    className={cn("size-4", quotaLoading && "animate-spin")}
-                  />
-                </TooltipIconButton>
+                      : t("providers.quotaRefresh")}
+                  </TooltipContent>
+                </Tooltip>
               </div>
             )}
 
@@ -534,29 +537,42 @@ export function OfficialAccountsSection({
                   </Button>
                 )}
                 {row.isCurrentUnsaved && (
-                  <TooltipIconButton
-                    type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    onClick={() => void saveCurrent()}
-                    aria-label={t("providers.accountSaveCurrent")}
-                    tooltip={t("providers.accountSaveCurrentHint")}
-                  >
-                    <SavePlus className="size-4" />
-                  </TooltipIconButton>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={() => void saveCurrent()}
+                        aria-label={t("providers.accountSaveCurrent")}
+                      >
+                        <SavePlus className="size-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">
+                      {t("providers.accountSaveCurrentHint")}
+                    </TooltipContent>
+                  </Tooltip>
                 )}
                 {acc && (
-                  <TooltipIconButton
-                    type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    className="text-destructive hover:bg-destructive/10"
-                    disabled={rowBusy}
-                    onClick={() => void remove(acc)}
-                    tooltip={t("providers.accountDelete")}
-                  >
-                    <Trash2 className="size-4" />
-                  </TooltipIconButton>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        className="text-destructive hover:bg-destructive/10"
+                        disabled={rowBusy}
+                        onClick={() => void remove(acc)}
+                        aria-label={t("providers.accountDelete")}
+                      >
+                        <Trash2 className="size-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">
+                      {t("providers.accountDelete")}
+                    </TooltipContent>
+                  </Tooltip>
                 )}
               </>
             )}

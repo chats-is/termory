@@ -1,6 +1,11 @@
 import React from "react";
 import { ChevronDown, ChevronUp, Search, X } from "lucide-react";
-import { TooltipIconButton } from "@/components/TooltipIconButton";
+import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
 import { INPUT_NO_AUTO } from "@/lib/utils";
 import { useT } from "@/i18n";
@@ -81,35 +86,50 @@ export function TranscriptFindBar({
           </span>
         )}
         <div className="flex items-center gap-0.5 pr-1.5 shrink-0">
-          <TooltipIconButton
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            onClick={onPrev}
-            disabled={total === 0}
-            tooltip={t("records.findPrev")}
-          >
-            <ChevronUp aria-hidden />
-          </TooltipIconButton>
-          <TooltipIconButton
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            onClick={onNext}
-            disabled={total === 0}
-            tooltip={t("records.findNext")}
-          >
-            <ChevronDown aria-hidden />
-          </TooltipIconButton>
-          <TooltipIconButton
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            onClick={onClose}
-            tooltip={t("records.findClose")}
-          >
-            <X aria-hidden />
-          </TooltipIconButton>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                onClick={onPrev}
+                disabled={total === 0}
+                aria-label={t("records.findPrev")}
+              >
+                <ChevronUp aria-hidden />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top">{t("records.findPrev")}</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                onClick={onNext}
+                disabled={total === 0}
+                aria-label={t("records.findNext")}
+              >
+                <ChevronDown aria-hidden />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top">{t("records.findNext")}</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                onClick={onClose}
+                aria-label={t("records.findClose")}
+              >
+                <X aria-hidden />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top">{t("records.findClose")}</TooltipContent>
+          </Tooltip>
         </div>
       </div>
     </div>
