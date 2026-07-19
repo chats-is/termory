@@ -3,7 +3,7 @@ import { CircleCheckBig, CircleOff, Loader2, Pencil, Trash2, Zap } from "lucide-
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { TooltipIconButton } from "@/components/TooltipIconButton";
 import { cn } from "@/lib/utils";
 import { useT } from "@/i18n";
 import { maskKey } from "@/lib/provider-utils";
@@ -167,81 +167,62 @@ export function ProviderCard({
           <div className="flex flex-col items-end gap-1.5 shrink-0">
             <div className="inline-flex items-center gap-1.5">
             {onToggleEnabled && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    type="button"
-                    onClick={onToggleEnabled}
-                    disabled={toggling || !activatable}
-                    aria-label={isConfigured ? t("providers.disable") : t("providers.enable")}
-                  >
-                    {toggling ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : isConfigured ? (
-                      <CircleCheckBig className="size-4 text-green-600" />
-                    ) : (
-                      <CircleOff className="size-4 text-red-600" />
-                    )}
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">
-                  {!activatable
+              <TooltipIconButton
+                variant="ghost"
+                size="icon-sm"
+                type="button"
+                onClick={onToggleEnabled}
+                disabled={toggling || !activatable}
+                aria-label={isConfigured ? t("providers.disable") : t("providers.enable")}
+                tooltip={
+                  !activatable
                     ? t("providers.installFirst")
                     : isConfigured
                       ? t("providers.disable")
-                      : t("providers.enable")}
-                </TooltipContent>
-              </Tooltip>
+                      : t("providers.enable")
+                }
+              >
+                {toggling ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : isConfigured ? (
+                  <CircleCheckBig className="size-4 text-green-600" />
+                ) : (
+                  <CircleOff className="size-4 text-red-600" />
+                )}
+              </TooltipIconButton>
             )}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  type="button"
-                  onClick={onTest}
-                  disabled={testing}
-                  aria-label={t("providers.test")}
-                >
-                  {testing ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" />}
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">{t("providers.test")}</TooltipContent>
-            </Tooltip>
+            <TooltipIconButton
+              variant="ghost"
+              size="icon-sm"
+              type="button"
+              onClick={onTest}
+              disabled={testing}
+              tooltip={t("providers.test")}
+            >
+              {testing ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" />}
+            </TooltipIconButton>
             {onEdit && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    type="button"
-                    onClick={onEdit}
-                    aria-label={t("providers.edit")}
-                  >
-                    <Pencil className="size-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">{t("providers.edit")}</TooltipContent>
-              </Tooltip>
+              <TooltipIconButton
+                variant="ghost"
+                size="icon-sm"
+                type="button"
+                onClick={onEdit}
+                tooltip={t("providers.edit")}
+              >
+                <Pencil className="size-4" />
+              </TooltipIconButton>
             )}
             {onDelete && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    type="button"
-                    onClick={onDelete}
-                    aria-label={t("providers.delete")}
-                    className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                  >
-                    <Trash2 className="size-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">{t("providers.delete")}</TooltipContent>
-              </Tooltip>
+              <TooltipIconButton
+                variant="ghost"
+                size="icon-sm"
+                type="button"
+                onClick={onDelete}
+                tooltip={t("providers.delete")}
+                className="text-destructive hover:text-destructive hover:bg-destructive/10"
+              >
+                <Trash2 className="size-4" />
+              </TooltipIconButton>
             )}
             </div>
             {!isInUse && (

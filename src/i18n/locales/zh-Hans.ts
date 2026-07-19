@@ -332,6 +332,7 @@ export const zhHans: Record<MessageKey, string> = {
   "providers.accountSwitch": "切换",
   "providers.accountDelete": "删除",
   "providers.accountSwitchTitle": "切换账号",
+  "providers.accountUse": "使用此账号",
   "providers.accountSwitchConfirm": "将实时登录切换到 {name}?这会替换 Codex 当前使用的凭据。",
   "providers.accountSwitchWarnUnsaved": "当前登录尚未保存 —— 切换会覆盖它。",
   "providers.accountDeleteTitle": "删除账号",

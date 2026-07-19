@@ -2,6 +2,12 @@ import React from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronRight, Eye, EyeOff, Loader2, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from "@/components/ui/tooltip";
+import { TooltipIconButton } from "@/components/TooltipIconButton";
 import { ModelCombobox } from "@/components/ModelCombobox";
 import {
   Collapsible,
@@ -357,14 +363,21 @@ export function ProviderEditor({
                   value={draft.apiKey ?? ""}
                   onChange={(e) => update("apiKey", e.target.value)}
                 />
-                <button
-                  type="button"
-                  onClick={() => setRevealKey((c) => !c)}
-                  aria-label={revealKey ? t("providers.hideApiKey") : t("providers.showApiKey")}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                >
-                  {revealKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                </button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() => setRevealKey((c) => !c)}
+                      aria-label={revealKey ? t("providers.hideApiKey") : t("providers.showApiKey")}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                      {revealKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">
+                    {revealKey ? t("providers.hideApiKey") : t("providers.showApiKey")}
+                  </TooltipContent>
+                </Tooltip>
               </div>
             </div>
 
@@ -529,17 +542,18 @@ export function ProviderEditor({
                         autoComplete="off"
                         spellCheck={false}
                       />
-                      <Button
+                      <TooltipIconButton
                         type="button"
                         variant="ghost"
                         size="icon"
-                        aria-label={t("providers.removeModel")}
+                        className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                        tooltip={t("providers.removeModel")}
                         onClick={() =>
                           setModelList(modelRows.filter((_, j) => j !== i))
                         }
                       >
                         <Trash2 className="size-4" />
-                      </Button>
+                      </TooltipIconButton>
                     </div>
                   ))}
                 </div>
@@ -577,7 +591,7 @@ export function ProviderEditor({
               onOpenChange={setOverridesOpen}
               className="grid gap-2 sm:col-span-2"
             >
-              <CollapsibleTrigger className="flex w-full items-center justify-between gap-1.5 text-sm font-medium select-none [&[data-state=open]>svg]:rotate-90">{t("providers.advancedSettings")}<ChevronRight className="size-3.5 text-muted-foreground transition-transform" />
+              <CollapsibleTrigger className="flex w-full items-center justify-between gap-1.5 text-sm font-medium select-none [&[data-state=open]>svg]:rotate-90">{t("providers.advancedSettings")}<ChevronRight className="size-4 text-muted-foreground transition-transform" />
               </CollapsibleTrigger>
               <CollapsibleContent className="-mx-1.5 overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
                 <div className="grid gap-3 px-1.5 py-1.5">
@@ -638,11 +652,12 @@ export function ProviderEditor({
                             // keep its footprint so inputs stay aligned.
                             <span className="size-9 shrink-0" aria-hidden />
                           ) : (
-                            <Button
+                            <TooltipIconButton
                               type="button"
                               variant="ghost"
                               size="icon"
-                              aria-label={t("providers.removeOverride")}
+                              className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                              tooltip={t("providers.removeOverride")}
                               onClick={() =>
                                 setOverrides(
                                   overrideRows.filter((_, j) => j !== i)
@@ -650,7 +665,7 @@ export function ProviderEditor({
                               }
                             >
                               <Trash2 className="size-4" />
-                            </Button>
+                            </TooltipIconButton>
                           )}
                         </div>
                       );

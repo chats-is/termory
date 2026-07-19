@@ -106,7 +106,9 @@ describe("CommandPalette — view-all-results bridge", () => {
     const bridge = screen.getByText('View all results for “gateway” in Search');
     await user.click(bridge);
     expect(onOpenSearchPage).toHaveBeenCalledWith("gateway");
-    expect(onCommitSearch).toHaveBeenCalledWith("gateway");
+    // Bridging no longer records a recent search — that happens in
+    // useSearchHits only when a query actually returns results.
+    expect(onCommitSearch).not.toHaveBeenCalled();
     // Palette closes after bridging.
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });

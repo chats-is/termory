@@ -11,6 +11,12 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from "@/components/ui/tooltip";
+import { TooltipIconButton } from "@/components/TooltipIconButton";
+import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger
@@ -455,14 +461,21 @@ export function GatewayEditor({
                 placeholder={t("providers.apiKeyPlaceholder")}
                 className="pr-9"
               />
-              <button
-                type="button"
-                onClick={() => setRevealKey((v) => !v)}
-                aria-label={revealKey ? t("providers.hideApiKey") : t("providers.showApiKey")}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-              >
-                {revealKey ? <EyeOff size={16} /> : <Eye size={16} />}
-              </button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={() => setRevealKey((v) => !v)}
+                    aria-label={revealKey ? t("providers.hideApiKey") : t("providers.showApiKey")}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  >
+                    {revealKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="top">
+                  {revealKey ? t("providers.hideApiKey") : t("providers.showApiKey")}
+                </TooltipContent>
+              </Tooltip>
             </div>
           </div>
 
@@ -487,12 +500,13 @@ export function GatewayEditor({
                   </span>
                 )}
               </div>
-              <Button
+              <TooltipIconButton
                 type="button"
                 variant="ghost"
                 size="icon"
+                wrapperClassName="shrink-0"
                 className="size-7 shrink-0"
-                aria-label={t("providers.detectApis")}
+                tooltip={t("providers.detectApis")}
                 disabled={
                   !baseUrl.trim() ||
                   !apiKey.trim() ||
@@ -504,7 +518,7 @@ export function GatewayEditor({
                 <RefreshCw
                   className={cn("size-4", detecting && "animate-spin")}
                 />
-              </Button>
+              </TooltipIconButton>
             </div>
             {!detectAttempted && !detecting && (
               <p className="text-xs text-muted-foreground">
@@ -720,12 +734,13 @@ export function GatewayEditor({
                                     })
                                   }
                                 />
-                                <Button
+                                <TooltipIconButton
                                   type="button"
                                   variant="ghost"
                                   size="icon"
-                                  className="size-8 shrink-0"
-                                  aria-label={t("providers.removeModel")}
+                                  wrapperClassName="shrink-0"
+                                  className="size-8 shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
+                                  tooltip={t("providers.removeModel")}
                                   onClick={() =>
                                     setBind(app, {
                                       models: modelRows.filter((_, j) => j !== i)
@@ -733,7 +748,7 @@ export function GatewayEditor({
                                   }
                                 >
                                   <Trash2 className="size-4" />
-                                </Button>
+                                </TooltipIconButton>
                               </div>
                             ))}
                             {modelRows.some(
@@ -811,12 +826,13 @@ export function GatewayEditor({
                                     })
                                   }
                                 />
-                                <Button
+                                <TooltipIconButton
                                   type="button"
                                   variant="ghost"
                                   size="icon"
-                                  className="size-8 shrink-0"
-                                  aria-label={t("providers.removeModel")}
+                                  wrapperClassName="shrink-0"
+                                  className="size-8 shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
+                                  tooltip={t("providers.removeModel")}
                                   onClick={() =>
                                     setBind(app, {
                                       models: modelRows.filter((_, j) => j !== i)
@@ -824,7 +840,7 @@ export function GatewayEditor({
                                   }
                                 >
                                   <Trash2 className="size-4" />
-                                </Button>
+                                </TooltipIconButton>
                               </div>
                             ))}
                             {bindingModelsDup(app) && (
@@ -899,12 +915,13 @@ export function GatewayEditor({
                                 }
                               />
                               {!isTemplate && (
-                                <Button
+                                <TooltipIconButton
                                   type="button"
                                   variant="ghost"
                                   size="icon"
-                                  className="size-8 shrink-0"
-                                  aria-label={t("providers.removeOverride")}
+                                  wrapperClassName="shrink-0"
+                                  className="size-8 shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
+                                  tooltip={t("providers.removeOverride")}
                                   onClick={() =>
                                     setBind(app, {
                                       options: rows.filter((_, j) => j !== i)
@@ -912,7 +929,7 @@ export function GatewayEditor({
                                   }
                                 >
                                   <Trash2 className="size-4" />
-                                </Button>
+                                </TooltipIconButton>
                               )}
                             </div>
                           );

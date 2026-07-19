@@ -19,6 +19,7 @@ import {
   TooltipContent,
   TooltipTrigger
 } from "@/components/ui/tooltip";
+import { TooltipIconButton } from "@/components/TooltipIconButton";
 import { QUOTA_CHANGED_EVENT } from "@/constants";
 import { formatResetTime } from "@/lib/format";
 import { quotaLevel, type QuotaLevel } from "@/lib/quota-utils";
@@ -407,28 +408,45 @@ export function OfficialAccountsSection({
             key={row.key}
             className="flex items-center gap-3 border-t border-border/50 px-3 py-2 hover:bg-accent/40 first:border-t-0 last:rounded-b-xl"
           >
-            {/* Switch button — managed only */}
-            {isManaged && (
-              <button
-                type="button"
-                disabled={row.active || row.needsRelogin || rowBusy}
-                onClick={acc ? () => void switchTo(acc) : undefined}
-                aria-label={
-                  row.active
-                    ? t("providers.accountActive")
-                    : t("providers.accountSwitch")
-                }
-                className={`group/sw flex size-10 shrink-0 items-center justify-center text-primary${(row.needsRelogin || rowBusy) ? " opacity-30 cursor-not-allowed" : ""}`}
-              >
-                {rowBusy ? (
-                  <Loader2 className="size-6 animate-spin" />
-                ) : row.active ? (
-                  <CircleCheck className="size-6" />
+            {/* Switch button — managed only. The Tooltip is added ONLY on a
+                switchable (inactive, actionable) button; the active current
+                account and disabled rows render a plain button with no tip. */}
+            {isManaged &&
+              (() => {
+                const switchable =
+                  !row.active && !row.needsRelogin && !rowBusy && !!acc;
+                const btn = (
+                  <button
+                    type="button"
+                    disabled={row.active || row.needsRelogin || rowBusy}
+                    onClick={acc ? () => void switchTo(acc) : undefined}
+                    aria-label={
+                      row.active
+                        ? t("providers.accountActive")
+                        : t("providers.accountSwitch")
+                    }
+                    className={`group/sw flex size-10 shrink-0 items-center justify-center text-primary${(row.needsRelogin || rowBusy) ? " opacity-30 cursor-not-allowed" : ""}`}
+                  >
+                    {rowBusy ? (
+                      <Loader2 className="size-6 animate-spin" />
+                    ) : row.active ? (
+                      <CircleCheck className="size-6" />
+                    ) : (
+                      <Circle className="size-6 text-muted-foreground/40 transition-colors group-hover/sw:enabled:text-primary" />
+                    )}
+                  </button>
+                );
+                return switchable ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>{btn}</TooltipTrigger>
+                    <TooltipContent side="top">
+                      {t("providers.accountUse")}
+                    </TooltipContent>
+                  </Tooltip>
                 ) : (
-                  <Circle className="size-6 text-muted-foreground/40 transition-colors group-hover/sw:enabled:text-primary" />
-                )}
-              </button>
-            )}
+                  btn
+                );
+              })()}
 
             {/* Display-only active indicator */}
             {!isManaged && (
@@ -476,29 +494,24 @@ export function OfficialAccountsSection({
                       resetsAt={tier.resetsAt}
                     />
                   ))}
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="shrink-0 -ml-2 inline-flex">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        onClick={onRefreshQuota}
-                        disabled={quotaLoading || quotaCooldown}
-                        aria-label={t("providers.quotaRefresh")}
-                      >
-                        <RefreshCw
-                          className={cn("size-4", quotaLoading && "animate-spin")}
-                        />
-                      </Button>
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    {quotaCooldown && !quotaLoading
+                <TooltipIconButton
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  wrapperClassName="shrink-0 -ml-2"
+                  onClick={onRefreshQuota}
+                  disabled={quotaLoading || quotaCooldown}
+                  aria-label={t("providers.quotaRefresh")}
+                  tooltip={
+                    quotaCooldown && !quotaLoading
                       ? t("providers.quotaCooldownHint")
-                      : t("providers.quotaRefresh")}
-                  </TooltipContent>
-                </Tooltip>
+                      : t("providers.quotaRefresh")
+                  }
+                >
+                  <RefreshCw
+                    className={cn("size-4", quotaLoading && "animate-spin")}
+                  />
+                </TooltipIconButton>
               </div>
             )}
 
@@ -515,48 +528,35 @@ export function OfficialAccountsSection({
                     className="shrink-0 gap-1.5 text-destructive border-destructive/40 hover:bg-destructive/10"
                   >
                     {activeReloginId === row.key ? (
-                      <Loader2 className="size-3.5 animate-spin" />
+                      <Loader2 className="size-4 animate-spin" />
                     ) : null}
                     {t("providers.accountRelogin")}
                   </Button>
                 )}
                 {row.isCurrentUnsaved && (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className="inline-flex">
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon-sm"
-                          onClick={() => void saveCurrent()}
-                          aria-label={t("providers.accountSaveCurrent")}
-                        >
-                          <SavePlus className="size-4" />
-                        </Button>
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      {t("providers.accountSaveCurrentHint")}
-                    </TooltipContent>
-                  </Tooltip>
+                  <TooltipIconButton
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={() => void saveCurrent()}
+                    aria-label={t("providers.accountSaveCurrent")}
+                    tooltip={t("providers.accountSaveCurrentHint")}
+                  >
+                    <SavePlus className="size-4" />
+                  </TooltipIconButton>
                 )}
                 {acc && (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        className="text-destructive hover:bg-destructive/10"
-                        disabled={rowBusy}
-                        onClick={() => void remove(acc)}
-                        aria-label={t("providers.accountDelete")}
-                      >
-                        <Trash2 className="size-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>{t("providers.accountDelete")}</TooltipContent>
-                  </Tooltip>
+                  <TooltipIconButton
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="text-destructive hover:bg-destructive/10"
+                    disabled={rowBusy}
+                    onClick={() => void remove(acc)}
+                    tooltip={t("providers.accountDelete")}
+                  >
+                    <Trash2 className="size-4" />
+                  </TooltipIconButton>
                 )}
               </>
             )}

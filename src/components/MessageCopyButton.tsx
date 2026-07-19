@@ -49,9 +49,9 @@ export function MessageCopyButton({
           )}
         >
           {copied ? (
-            <Check className="size-3.5" aria-hidden />
+            <Check className="size-4" aria-hidden />
           ) : (
-            <Copy className="size-3.5" aria-hidden />
+            <Copy className="size-4" aria-hidden />
           )}
         </button>
       </TooltipTrigger>

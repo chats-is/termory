@@ -332,6 +332,7 @@ export const zhHant: Record<MessageKey, string> = {
   "providers.accountSwitch": "切換",
   "providers.accountDelete": "刪除",
   "providers.accountSwitchTitle": "切換帳號",
+  "providers.accountUse": "使用此帳號",
   "providers.accountSwitchConfirm": "將即時登入切換到 {name}?這會替換 Codex 目前使用的憑證。",
   "providers.accountSwitchWarnUnsaved": "目前登入尚未儲存 —— 切換會覆寫它。",
   "providers.accountDeleteTitle": "刪除帳號",

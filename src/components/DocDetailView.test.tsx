@@ -1,7 +1,19 @@
 import React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import {
+  fireEvent,
+  render as rtlRender,
+  screen,
+  type RenderOptions
+} from "@testing-library/react";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { DocDetailView } from "./DocDetailView";
+
+// DocDetailView embeds TranscriptFindBar, whose nav buttons use shadcn
+// Tooltip and need a TooltipProvider ancestor (mounted at app root).
+function render(ui: React.ReactElement, options?: RenderOptions) {
+  return rtlRender(ui, { wrapper: TooltipProvider, ...options });
+}
 
 // jsdom has no layout, so Element.scrollIntoView is undefined; the
 // occurrence navigation calls it on the current <mark>.

@@ -290,7 +290,9 @@ export function App() {
   const addRecentSearch = React.useCallback(
     (raw: string) => {
       const trimmed = raw.trim();
-      if (trimmed.length < 2) return;
+      // Match the search's own 1-char minimum (a single CJK char is a
+      // valid query) — don't refuse to save a query the user could search.
+      if (trimmed.length < 1) return;
       setRecentSearches((current) => {
         const filtered = current.filter((entry) => entry !== trimmed);
         return [trimmed, ...filtered].slice(0, 5);
@@ -1744,7 +1746,11 @@ export function App() {
                 )}
                 {selected && (
                   <>
-                    <header className="flex flex-col gap-2 p-3">
+                    {/* Header action icons are structured like the message-row
+                        icons so BOTH line up: pr-4 (16px, = message list px-4)
+                        + the icon buttons carry p-1 + size-4, so glyph right
+                        edges land at 20px and the inter-icon gap matches. */}
+                    <header className="flex flex-col gap-2 p-3 pr-4">
                       <h2 className="text-lg font-semibold leading-snug line-clamp-2">
                         {selected.title || "(untitled)"}
                       </h2>
@@ -1834,16 +1840,16 @@ export function App() {
                           <File size={12} className="shrink-0" />
                           <span className="truncate">{selected.path}</span>
                         </div>
-                        <div className="inline-flex items-center gap-2 shrink-0">
+                        <div className="inline-flex items-center gap-1 shrink-0">
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <button
                                 type="button"
                                 onClick={() => revealItemInDir(selected.path)}
                                 aria-label={t(revealLabelKey())}
-                                className="inline-flex shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+                                className="inline-flex shrink-0 p-1 rounded text-muted-foreground hover:text-foreground transition-colors"
                               >
-                                <FolderOpen size={12} />
+                                <FolderOpen className="size-4" />
                               </button>
                             </TooltipTrigger>
                             <TooltipContent>{t(revealLabelKey())}</TooltipContent>

@@ -12,11 +12,7 @@ import {
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger
-} from "@/components/ui/tooltip";
+import { TooltipIconButton } from "@/components/TooltipIconButton";
 import { BrandIcon } from "@/components/BrandIcon";
 import { EmptyState } from "@/components/EmptyState";
 import {
@@ -442,26 +438,26 @@ export function GatewaysPage({
                     </div>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
-                    <Button
+                    <TooltipIconButton
                       type="button"
                       variant="ghost"
                       size="icon"
                       className="size-7"
-                      aria-label={t("providers.editGateway")}
+                      tooltip={t("providers.editGateway")}
                       onClick={() => startEdit(gateway)}
                     >
                       <Pencil className="size-4" />
-                    </Button>
-                    <Button
+                    </TooltipIconButton>
+                    <TooltipIconButton
                       type="button"
                       variant="ghost"
                       size="icon"
-                      className="size-7 text-muted-foreground hover:text-destructive"
-                      aria-label={t("providers.deleteGateway")}
+                      className="size-7 text-destructive hover:text-destructive hover:bg-destructive/10"
+                      tooltip={t("providers.deleteGateway")}
                       onClick={() => void deleteGateway(gateway)}
                     >
                       <Trash2 className="size-4" />
-                    </Button>
+                    </TooltipIconButton>
                   </div>
                 </div>
 
@@ -512,37 +508,33 @@ export function GatewaysPage({
                             // Two-state: Set-as-default (or "In use" badge)
                             // + an enable/disable toggle for the slot.
                             <div className="flex items-center gap-1.5 shrink-0">
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon-sm"
-                                    type="button"
-                                    onClick={() =>
-                                      void toggleBindingEnabled(gateway, b)
-                                    }
-                                    disabled={busy === b.id}
-                                    aria-label={
-                                      configured
-                                        ? t("providers.removeFromOpencode")
-                                        : t("providers.addToOpencode")
-                                    }
-                                  >
-                                    {busy === b.id ? (
-                                      <Loader2 className="size-4 animate-spin" />
-                                    ) : configured ? (
-                                      <CircleCheckBig className="size-4 text-green-600" />
-                                    ) : (
-                                      <CircleOff className="size-4 text-red-600" />
-                                    )}
-                                  </Button>
-                                </TooltipTrigger>
-                                <TooltipContent side="bottom">
-                                  {configured
+                              <TooltipIconButton
+                                variant="ghost"
+                                size="icon-sm"
+                                type="button"
+                                onClick={() =>
+                                  void toggleBindingEnabled(gateway, b)
+                                }
+                                disabled={busy === b.id}
+                                aria-label={
+                                  configured
+                                    ? t("providers.removeFromOpencode")
+                                    : t("providers.addToOpencode")
+                                }
+                                tooltip={
+                                  configured
                                     ? t("providers.addedToOpencode")
-                                    : t("providers.notInOpencode")}
-                                </TooltipContent>
-                              </Tooltip>
+                                    : t("providers.notInOpencode")
+                                }
+                              >
+                                {busy === b.id ? (
+                                  <Loader2 className="size-4 animate-spin" />
+                                ) : configured ? (
+                                  <CircleCheckBig className="size-4 text-green-600" />
+                                ) : (
+                                  <CircleOff className="size-4 text-red-600" />
+                                )}
+                              </TooltipIconButton>
                               {isDefault ? (
                                 <Button
                                   type="button"

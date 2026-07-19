@@ -52,9 +52,9 @@ export function CopyMenu({ items }: { items: { label: string; value: string }[] 
             aria-haspopup="menu"
             aria-expanded={open}
             aria-label={t("common.copy")}
-            className="inline-flex shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+            className="inline-flex shrink-0 p-1 rounded text-muted-foreground hover:text-foreground transition-colors"
           >
-            <Copy size={12} />
+            <Copy className="size-4" />
           </button>
         </TooltipTrigger>
         <TooltipContent>{t("common.copy")}</TooltipContent>
@@ -76,7 +76,7 @@ export function CopyMenu({ items }: { items: { label: string; value: string }[] 
               )}
             >
               <span>{item.label}</span>
-              {copied === item.label && <Check className="size-3.5 text-primary" />}
+              {copied === item.label && <Check className="size-4 text-primary" />}
             </button>
           ))}
         </div>

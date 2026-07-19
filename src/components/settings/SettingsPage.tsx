@@ -99,7 +99,7 @@ function SortableSourceRow({
           (isDragging ? " cursor-grabbing" : " cursor-grab")
         }
       >
-        <GripVertical className="size-3.5" aria-hidden />
+        <GripVertical className="size-4" aria-hidden />
       </button>
       {children}
     </div>

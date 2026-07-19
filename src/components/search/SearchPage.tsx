@@ -36,7 +36,12 @@ export function SearchPage({
 }) {
   const t = useT();
   const [query, setQuery] = React.useState("");
-  const { hits, loading, committedQuery, error } = useSearchHits(query);
+  // Recording a recent search lives in the hook (fires when a search
+  // returns results), so the Search page and the ⌘K palette behave the same.
+  const { hits, loading, committedQuery, error } = useSearchHits(
+    query,
+    onCommitSearch
+  );
   const inputRef = React.useRef<HTMLInputElement>(null);
 
   React.useEffect(() => {
@@ -55,13 +60,14 @@ export function SearchPage({
   const handleOpen = React.useCallback(
     (item: AppSession, messageIndex?: number) => {
       const committed = committedQuery || query;
-      onCommitSearch(committed);
+      // The recent search was already saved when this query returned
+      // results (in useSearchHits) — opening just navigates.
       // Pass the query along so Records opens with the in-detail find
       // bar pre-filled — the search page only scrolls to the FIRST
       // match; the find bar carries the user to the rest.
       onOpenItem(item, messageIndex, committed);
     },
-    [committedQuery, onCommitSearch, onOpenItem, query]
+    [committedQuery, onOpenItem, query]
   );
 
   const trimmed = query.trim();
@@ -112,9 +118,15 @@ export function SearchPage({
             </p>
             <p className="text-xs">{t("search.indexed", { n: formatFullNumber(sessions.length) })}</p>
             {recentSearches.length > 0 && (
-              <div className="w-full max-w-md mt-4 flex flex-col gap-2 items-center">
-                <Button variant="ghost" size="sm" onClick={onClearRecent}>
-                  <Trash2 />
+              <div className="w-full max-w-md mt-4 flex flex-col gap-3 items-center">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={onClearRecent}
+                  className="text-foreground"
+                >
+                  <Trash2 className="size-4" />
                   {t("search.clear")}
                 </Button>
                 <div className="flex flex-wrap justify-center gap-1.5">
@@ -123,7 +135,7 @@ export function SearchPage({
                       key={entry}
                       type="button"
                       onClick={() => setQuery(entry)}
-                      className="inline-flex items-center gap-1 rounded-full bg-muted px-3 py-1 text-[10px] hover:bg-accent"
+                      className="inline-flex items-center gap-1 rounded-full bg-muted px-3 py-0.5 text-[10px] hover:bg-accent"
                     >
                       {entry}
                     </button>

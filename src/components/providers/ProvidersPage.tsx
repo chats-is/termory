@@ -20,6 +20,7 @@ import {
   TooltipContent,
   TooltipTrigger
 } from "@/components/ui/tooltip";
+import { TooltipIconButton } from "@/components/TooltipIconButton";
 import {
   ACTIVE_STATE_REFRESH_EVENT,
   CLI_APPS,
@@ -1114,8 +1115,9 @@ export function ProvidersPage({
               </TabsList>
             </Tabs>
           </div>
-          <Button
+          <TooltipIconButton
             type="button"
+            variant="default"
             size="icon"
             onClick={() =>
               view === "gateways"
@@ -1123,11 +1125,12 @@ export function ProvidersPage({
                 : startNew()
             }
             disabled={view === "providers" && !installed[app]}
-            aria-label={t("providers.addProvider")}
-            className="rounded-md size-8 shrink-0 shadow-sm"
+            tooltip={t("providers.addProvider")}
+            side="left"
+            className="shrink-0 rounded-md shadow-sm"
           >
             <Plus className="size-4" />
-          </Button>
+          </TooltipIconButton>
         </div>
       </div>
 
@@ -1198,7 +1201,7 @@ export function ProvidersPage({
                     actions={app === "codex" ? (
                       codexLoggingIn ? (
                         <div className="flex items-center gap-2 shrink-0">
-                          <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+                          <Loader2 className="size-4 animate-spin text-muted-foreground" />
                           <span className="text-sm text-muted-foreground">{t("providers.accountAdding")}</span>
                           <Button
                             type="button"
@@ -1223,7 +1226,7 @@ export function ProvidersPage({
                                 disabled
                                 className="gap-1.5"
                               >
-                                <UserPlus className="size-3.5" />
+                                <UserPlus className="size-4" />
                                 {t("providers.accountAdd")}
                               </Button>
                             </span>
@@ -1240,7 +1243,7 @@ export function ProvidersPage({
                           onClick={() => void handleCodexLogin()}
                           className="shrink-0 gap-1.5"
                         >
-                          <UserPlus className="size-3.5" />
+                          <UserPlus className="size-4" />
                           {t("providers.accountAdd")}
                         </Button>
                       )
@@ -1367,12 +1370,12 @@ export function ProvidersPage({
             <span className="break-all font-mono text-xs select-all">
               {codexLoginUrl}
             </span>
-            <Button
+            <TooltipIconButton
               type="button"
               variant="ghost"
               size="icon-sm"
-              aria-label={t("common.copy")}
-              className="absolute right-1 top-1"
+              wrapperClassName="absolute right-1 top-1"
+              tooltip={t("common.copy")}
               onClick={() => {
                 if (codexLoginUrl) {
                   void navigator.clipboard.writeText(codexLoginUrl).then(() => {
@@ -1382,8 +1385,8 @@ export function ProvidersPage({
                 }
               }}
             >
-              {codexLoginUrlCopied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-            </Button>
+              {codexLoginUrlCopied ? <Check className="size-4" /> : <Copy className="size-4" />}
+            </TooltipIconButton>
           </div>
           <DialogFooter className="flex-row items-center gap-3">
             <p className="flex-1 text-xs text-muted-foreground">{t("providers.codexLoginDialogWaiting")}</p>

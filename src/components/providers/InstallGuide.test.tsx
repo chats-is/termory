@@ -1,7 +1,18 @@
+import React from "react";
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import {
+  render as rtlRender,
+  screen,
+  type RenderOptions
+} from "@testing-library/react";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { InstallGuide } from "./InstallGuide";
 import { IS_MAC } from "@/lib/platform";
+
+// The copy-command button uses shadcn Tooltip → needs a TooltipProvider.
+function render(ui: React.ReactElement, options?: RenderOptions) {
+  return rtlRender(ui, { wrapper: TooltipProvider, ...options });
+}
 
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 

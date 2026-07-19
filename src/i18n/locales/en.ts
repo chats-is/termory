@@ -349,6 +349,7 @@ export const en = {
   "providers.accountSwitch": "Switch",
   "providers.accountDelete": "Delete",
   "providers.accountSwitchTitle": "Switch account",
+  "providers.accountUse": "Use this account",
   "providers.accountSwitchConfirm": "Switch the live login to {name}? This replaces the credential Codex currently uses.",
   "providers.accountSwitchWarnUnsaved": "The current login isn't saved — switching will overwrite it.",
   "providers.accountDeleteTitle": "Delete account",

@@ -2,6 +2,11 @@ import React from "react";
 import { Layers, RefreshCw } from "lucide-react";
 import { BrandIcon } from "@/components/BrandIcon";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from "@/components/ui/tooltip";
 import { CLI_APP_LABEL, CLI_APP_SOURCE_BADGE } from "@/constants";
 import { isSourceEnabled, visibleSources } from "@/lib/provider-utils";
 import { cn } from "@/lib/utils";
@@ -176,21 +181,26 @@ export function StatsPage({
                 ))}
               </TabsList>
             </Tabs>
-            <button
-              type="button"
-              onClick={onRefresh}
-              disabled={refreshing}
-              aria-label={t("stats.refresh")}
-              className={cn(
-                "h-9 w-9 shrink-0 rounded-md border bg-card shadow-sm inline-flex items-center justify-center",
-                "hover:bg-accent hover:text-accent-foreground transition-colors",
-                refreshing && "opacity-60",
-              )}
-            >
-              <RefreshCw
-                className={cn("size-4", refreshing && "animate-spin")}
-              />
-            </button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={onRefresh}
+                  disabled={refreshing}
+                  aria-label={t("stats.refresh")}
+                  className={cn(
+                    "h-9 w-9 shrink-0 rounded-md bg-background shadow-sm inline-flex items-center justify-center",
+                    "hover:bg-accent hover:text-accent-foreground transition-colors",
+                    refreshing && "opacity-60",
+                  )}
+                >
+                  <RefreshCw
+                    className={cn("size-4", refreshing && "animate-spin")}
+                  />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="left">{t("stats.refresh")}</TooltipContent>
+            </Tooltip>
           </div>
         </div>
       </div>

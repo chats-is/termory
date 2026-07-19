@@ -1,6 +1,6 @@
 import React from "react";
 import { ChevronDown, ChevronUp, Search, X } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { TooltipIconButton } from "@/components/TooltipIconButton";
 import { Input } from "@/components/ui/input";
 import { INPUT_NO_AUTO } from "@/lib/utils";
 import { useT } from "@/i18n";
@@ -81,35 +81,35 @@ export function TranscriptFindBar({
           </span>
         )}
         <div className="flex items-center gap-0.5 pr-1.5 shrink-0">
-          <Button
+          <TooltipIconButton
             type="button"
             variant="ghost"
             size="icon-xs"
             onClick={onPrev}
             disabled={total === 0}
-            aria-label={t("records.findPrev")}
+            tooltip={t("records.findPrev")}
           >
             <ChevronUp aria-hidden />
-          </Button>
-          <Button
+          </TooltipIconButton>
+          <TooltipIconButton
             type="button"
             variant="ghost"
             size="icon-xs"
             onClick={onNext}
             disabled={total === 0}
-            aria-label={t("records.findNext")}
+            tooltip={t("records.findNext")}
           >
             <ChevronDown aria-hidden />
-          </Button>
-          <Button
+          </TooltipIconButton>
+          <TooltipIconButton
             type="button"
             variant="ghost"
             size="icon-xs"
             onClick={onClose}
-            aria-label={t("records.findClose")}
+            tooltip={t("records.findClose")}
           >
             <X aria-hidden />
-          </Button>
+          </TooltipIconButton>
         </div>
       </div>
     </div>

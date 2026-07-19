@@ -2,20 +2,36 @@ import React from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { SearchHit } from "../types";
 
-export function useSearchHits(query: string) {
+/** Debounce so the search — and its loading state — only start AFTER the
+ * user stops typing, not on every keystroke. */
+const SEARCH_DEBOUNCE_MS = 300;
+
+export function useSearchHits(
+  query: string,
+  /** Called with the query the moment a search returns results (> 0). This
+   * is the SINGLE place a recent search is recorded, so the Search page and
+   * the ⌘K palette save on the exact same trigger — no results, no save. */
+  onResults?: (query: string) => void
+) {
   const [hits, setHits] = React.useState<SearchHit[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [committedQuery, setCommittedQuery] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
+  // Hold the latest callback without re-triggering the debounce effect.
+  const onResultsRef = React.useRef(onResults);
+  onResultsRef.current = onResults;
 
   React.useEffect(() => {
     const trimmed = query.trim();
+    // While the user is still typing, no search is running yet — clear any
+    // stale loading so the spinner only appears once the debounced search
+    // actually fires (i.e. after the user has stopped typing).
+    setLoading(false);
     // 1-char minimum (aligned with the backend): a single CJK character
     // is a meaningful query.
     if (trimmed.length === 0) {
       setHits([]);
       setCommittedQuery("");
-      setLoading(false);
       setError(null);
       return;
     }
@@ -28,6 +44,7 @@ export function useSearchHits(query: string) {
           setHits(result);
           setCommittedQuery(trimmed);
           setError(null);
+          if (result.length > 0) onResultsRef.current?.(trimmed);
         })
         .catch((err) => {
           if (!cancelled) setError(String(err));
@@ -35,7 +52,7 @@ export function useSearchHits(query: string) {
         .finally(() => {
           if (!cancelled) setLoading(false);
         });
-    }, 300);
+    }, SEARCH_DEBOUNCE_MS);
     return () => {
       cancelled = true;
       window.clearTimeout(handle);

@@ -50,7 +50,9 @@ export function CommandPalette({
 }) {
   const t = useT();
   const [query, setQuery] = React.useState("");
-  const { hits, loading, committedQuery } = useSearchHits(query);
+  // Same shared trigger as the Search page: a recent search is recorded
+  // inside the hook when a search returns results (no results, no save).
+  const { hits, loading, committedQuery } = useSearchHits(query, onCommitSearch);
 
   // Global ⌘K (or Ctrl+K) toggle — the palette's only shortcut.
   React.useEffect(() => {
@@ -70,7 +72,7 @@ export function CommandPalette({
 
   const handleOpen = (item: AppSession, messageIndex?: number) => {
     const committed = committedQuery || query;
-    onCommitSearch(committed);
+    // Already recorded when the query returned results (in useSearchHits).
     // Carry the query into the Records in-detail find bar (same as
     // SearchPage) so every match is reachable, not just the first.
     onOpenItem(item, messageIndex, committed);
@@ -92,14 +94,15 @@ export function CommandPalette({
   // keystroke before the results arrived.
   const showEmpty = settled && !loading && rows.length === 0;
   const highlightQuery = committedQuery || trimmed;
-  // "Searching" covers the whole not-yet-settled window (debounce +
-  // IPC) — the raw `loading` flag alone is true only for the few ms
-  // of the actual invoke and would never be visible.
-  const searching = trimmed.length >= 1 && (loading || committedQuery !== trimmed);
+  // Loading only reflects the ACTUAL search (which fires after the user
+  // stops typing) — never the debounce/typing window — so the palette
+  // matches the Search page: no spinner while typing.
+  const searching = loading;
 
   const bridgeToSearch = () => {
     if (!onOpenSearchPage || trimmed.length === 0) return;
-    onCommitSearch(committedQuery || trimmed);
+    // No explicit save here — the hook records the query when it returns
+    // results (a no-result query shouldn't be saved just for bridging).
     onOpenSearchPage(trimmed);
     onOpenChange(false);
   };

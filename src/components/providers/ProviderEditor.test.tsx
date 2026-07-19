@@ -1,8 +1,21 @@
 import React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render as rtlRender,
+  screen,
+  waitFor,
+  type RenderOptions
+} from "@testing-library/react";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { blankProvider } from "@/lib/provider-utils";
 import { ProviderEditor } from "./ProviderEditor";
+
+// The editor's icon buttons (eye toggle, remove-model/-override) use shadcn
+// Tooltip → needs a TooltipProvider ancestor (mounted at app root).
+function render(ui: React.ReactElement, options?: RenderOptions) {
+  return rtlRender(ui, { wrapper: TooltipProvider, ...options });
+}
 
 // ProviderEditor calls invoke() on save (fetch_provider_favicon) and on the
 // "fetch models" button. Stub it so saving resolves without a Tauri host.

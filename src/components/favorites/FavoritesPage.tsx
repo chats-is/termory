@@ -103,6 +103,7 @@ export function FavoritesPage({
                     `${fav.source}::${fav.source_session_id}`
                   )
                 }
+                onRemoveFavorite={() => onRemove(fav.id)}
               >
               <button
                 type="button"
@@ -152,7 +153,10 @@ export function FavoritesPage({
             pane: text-lg font-semibold title on a row of its own, meta
             row below in text-xs with `·`-separated chips. Actions
             cluster on the right of the title row. */}
-        <header className="flex flex-col gap-2 p-3">
+        {/* Header action icons mirror the message copy button (p-1 +
+            size-4) and pr-4 (= body px-4), so the header's right-edge
+            icon lines up with the message copy icon at 20px. */}
+        <header className="flex flex-col gap-2 p-3 pr-4">
           <h2 className="text-lg font-semibold leading-snug truncate">
             {selected.source_session_title || "(untitled)"}
           </h2>
@@ -188,9 +192,9 @@ export function FavoritesPage({
                         )
                       }
                       aria-label={t("favorites.openOriginal")}
-                      className="inline-flex shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+                      className="inline-flex shrink-0 p-1 rounded text-muted-foreground hover:text-foreground transition-colors"
                     >
-                      <ExternalLink size={12} />
+                      <ExternalLink className="size-4" />
                     </button>
                   </TooltipTrigger>
                   <TooltipContent>{t("favorites.openOriginal")}</TooltipContent>
@@ -202,9 +206,9 @@ export function FavoritesPage({
                     type="button"
                     onClick={() => onRemove(selected.id)}
                     aria-label={t("favorites.remove")}
-                    className="inline-flex shrink-0 text-muted-foreground hover:text-destructive transition-colors"
+                    className="inline-flex shrink-0 p-1 rounded text-destructive hover:text-destructive/80 transition-colors"
                   >
-                    <Trash2 size={12} />
+                    <Trash2 className="size-4" />
                   </button>
                 </TooltipTrigger>
                 <TooltipContent>{t("favorites.remove")}</TooltipContent>

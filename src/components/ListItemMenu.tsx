@@ -43,6 +43,7 @@ export function ListItemMenu({
   onLocalMigrate,
   hideSessionOps,
   sourceMissing,
+  onRemoveFavorite,
   children
 }: {
   path: string;
@@ -69,6 +70,9 @@ export function ListItemMenu({
   /** The source file/session is gone (deleted favorite). Hide the actions that
    *  need it on disk — Reveal in Finder + the resume command. */
   sourceMissing?: boolean;
+  /** Favorites list only — adds a "Remove from favorites" action that
+   *  deletes the saved snapshot (not the source session). */
+  onRemoveFavorite?: () => void;
   children: React.ReactNode;
 }) {
   const t = useT();
@@ -405,6 +409,17 @@ export function ListItemMenu({
               }
             >
               {t("menu.deleteMemory")}
+            </ContextMenuItem>
+          </>
+        )}
+        {onRemoveFavorite && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              variant="destructive"
+              onSelect={() => onRemoveFavorite()}
+            >
+              {t("favorites.remove")}
             </ContextMenuItem>
           </>
         )}

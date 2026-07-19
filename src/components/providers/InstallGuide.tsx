@@ -2,6 +2,7 @@ import React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Check, Copy, ExternalLink, Loader2, RefreshCw, Terminal } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { TooltipIconButton } from "@/components/TooltipIconButton";
 import { BrandIcon } from "@/components/BrandIcon";
 import { CLI_APP_LABEL, CLI_APP_SOURCE_BADGE, CLI_INSTALL } from "@/constants";
 import { IS_MAC } from "@/lib/platform";
@@ -84,26 +85,26 @@ export function InstallGuide({
             </div>
           )}
           <div className="flex items-center gap-2 rounded-md outline outline-1 outline-foreground/10 bg-muted px-3 py-2">
-            <Terminal className="size-3.5 shrink-0 text-muted-foreground" />
+            <Terminal className="size-4 shrink-0 text-muted-foreground" />
             {/* Single line, horizontal scroll on overflow — install
                 commands/URLs must never soft-wrap mid-token. */}
             <code className="flex-1 min-w-0 overflow-x-auto whitespace-nowrap text-left text-xs font-mono">
               {method.command}
             </code>
-            <Button
+            <TooltipIconButton
               variant="ghost"
               size="icon-sm"
               type="button"
               onClick={() => void copy()}
-              aria-label={t("install.copyCommand")}
+              tooltip={t("install.copyCommand")}
               className="size-7"
             >
               {copied ? (
-                <Check className="size-3.5 text-green-600" />
+                <Check className="size-4 text-green-600" />
               ) : (
-                <Copy className="size-3.5" />
+                <Copy className="size-4" />
               )}
-            </Button>
+            </TooltipIconButton>
           </div>
         </div>
 

@@ -141,40 +141,43 @@ export function MessageList({
                   {message.role || "event"}
                 </span>
                 <span className="flex-1" />
-                <MessageCopyButton text={message.text} />
-                {favorites && (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          favorites.onToggle(message, idx);
-                        }}
-                        aria-label={
-                          isFavorited ? t("favorites.remove") : t("favorites.add")
-                        }
-                        className={cn(
-                          "p-1 rounded transition-colors",
-                          isFavorited
-                            ? "text-amber-500 hover:text-amber-600"
-                            : "text-muted-foreground/40 hover:text-foreground"
-                        )}
-                      >
-                        <Star
+                {/* Star left, copy rightmost; tight gap-1 between them. */}
+                <div className="flex items-center gap-1">
+                  {favorites && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            favorites.onToggle(message, idx);
+                          }}
+                          aria-label={
+                            isFavorited ? t("favorites.remove") : t("favorites.add")
+                          }
                           className={cn(
-                            "size-3.5",
-                            isFavorited && "fill-current"
+                            "p-1 rounded transition-colors",
+                            isFavorited
+                              ? "text-amber-500 hover:text-amber-600"
+                              : "text-muted-foreground/40 hover:text-foreground"
                           )}
-                          aria-hidden
-                        />
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      {isFavorited ? t("favorites.remove") : t("favorites.add")}
-                    </TooltipContent>
-                  </Tooltip>
-                )}
+                        >
+                          <Star
+                            className={cn(
+                              "size-4",
+                              isFavorited && "fill-current"
+                            )}
+                            aria-hidden
+                          />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {isFavorited ? t("favorites.remove") : t("favorites.add")}
+                      </TooltipContent>
+                    </Tooltip>
+                  )}
+                  <MessageCopyButton text={message.text} />
+                </div>
               </header>
               <MessageBody
                 text={message.text}
