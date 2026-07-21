@@ -182,6 +182,8 @@ export function App() {
       fiveHour: t("tray.quotaFiveHour"),
       weekly: t("tray.quotaWeekly"),
       monthly: t("tray.quotaMonthly"),
+      // Pay-as-you-go "Credits" label on the CLI rows (Claude / grok).
+      credits: t("tray.credits"),
       // "New Session" submenu title + its "Choose Folder…" tail.
       newSession: t("tray.newSession"),
       chooseFolder: t("tray.chooseFolder"),

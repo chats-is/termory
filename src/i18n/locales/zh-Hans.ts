@@ -54,6 +54,7 @@ export const zhHans: Record<MessageKey, string> = {
   "tray.quotaFiveHour": "5h",
   "tray.quotaWeekly": "周",
   "tray.quotaMonthly": "月",
+  "tray.credits": "额度",
 
   "stats.kpi.sessions": "会话",
   "stats.kpi.messages": "消息",
@@ -204,8 +205,8 @@ export const zhHans: Record<MessageKey, string> = {
   "providers.quotaSevenDaySonnetShort": "Sonnet",
   "providers.quotaResets": "{time} 重置",
   "providers.quotaNotUsedYet": "还没有使用过 {model}",
-  "providers.usageCredits": "使用额度",
-  "providers.usageCreditsHint": "达到套餐上限后由使用额度承接 —— 已用 {used} / 共 {limit}",
+  "providers.usageCredits": "额度",
+  "providers.usageCreditsHint": "达到套餐上限后由额度承接 —— 已用 {used} / 共 {limit}",
   "providers.addProvider": "添加供应商",
   "providers.noCustomProviders": "还没有自定义供应商",
   "providers.aiGateways": "AI Gateways",

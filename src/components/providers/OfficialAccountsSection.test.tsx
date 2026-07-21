@@ -395,7 +395,7 @@ describe("OfficialAccountsSection — quota rings in active row", () => {
       />
     );
     await screen.findByText("Jane");
-    expect(screen.getByText("Usage credits")).toBeInTheDocument();
+    expect(screen.getByText("Credits")).toBeInTheDocument();
     // 1944 / 10^2 → 19.44 used of 5000 / 10^2 → 50.00 (currency symbol
     // varies by the test runner's resolved locale, so match the amounts).
     expect(screen.getByText(/19\.44 \/ .*50\.00/)).toBeInTheDocument();
@@ -411,7 +411,7 @@ describe("OfficialAccountsSection — quota rings in active row", () => {
       />
     );
     await screen.findByText("Jane");
-    expect(screen.queryByText("Usage credits")).toBeNull();
+    expect(screen.queryByText("Credits")).toBeNull();
   });
 
   it("uses quota.plan in the display-only row when current.plan is null", async () => {

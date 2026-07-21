@@ -116,6 +116,20 @@ struct TrayQuota {
     tiers: Vec<(String, f64)>,
     /// Subscription plan display name ("Max" / "Plus" / "Free" …).
     plan: Option<String>,
+    /// Pay-as-you-go credits (Claude "extra usage" / grok on-demand),
+    /// present only when enabled — appended as "🟢 $used / $limit Credits".
+    credits: Option<TrayCredits>,
+}
+
+/// The pieces of an enabled `ExtraUsage` the tray row renders: a
+/// pressure glyph off `utilization` + the `$used / $limit` amounts.
+#[derive(Clone, PartialEq)]
+struct TrayCredits {
+    utilization: f64,
+    used: f64,
+    limit: Option<f64>,
+    currency: Option<String>,
+    decimal_places: Option<u32>,
 }
 
 static QUOTA: Mutex<Vec<(CliApp, TrayQuota)>> = Mutex::new(Vec::new());
@@ -228,6 +242,7 @@ struct TrayLabels {
     choose_folder: String,
     status_busy: String,
     status_waiting: String,
+    credits: String,
 }
 
 impl Default for TrayLabels {
@@ -243,6 +258,7 @@ impl Default for TrayLabels {
             choose_folder: "Choose Folder…".to_string(),
             status_busy: "Working".to_string(),
             status_waiting: "Needs input".to_string(),
+            credits: "Credits".to_string(),
         }
     }
 }
@@ -271,6 +287,7 @@ pub fn set_labels(
     choose_folder: String,
     status_busy: String,
     status_waiting: String,
+    credits: String,
 ) {
     if let Ok(mut g) = TRAY_LABELS.lock() {
         *g = Some(TrayLabels {
@@ -284,6 +301,7 @@ pub fn set_labels(
             choose_folder,
             status_busy,
             status_waiting,
+            credits,
         });
     }
 }
@@ -757,13 +775,27 @@ pub fn refresh_quota(app: &AppHandle, quota: &crate::quota::SubscriptionQuota) {
             .map(|t| (t.name.clone(), t.utilization))
             .collect(),
         plan: quota.plan.clone(),
+        credits: quota
+            .extra_usage
+            .as_ref()
+            .filter(|e| e.is_enabled)
+            .map(|e| TrayCredits {
+                utilization: e.utilization.unwrap_or(0.0),
+                used: e.used_credits.unwrap_or(0.0),
+                limit: e.monthly_limit,
+                currency: e.currency.clone(),
+                decimal_places: e.decimal_places,
+            }),
     };
-    // A successful fetch that carries no usable windows means the
-    // official account has no active subscription quota (e.g. logged in
-    // but unsubscribed — the usage endpoint returns windows with no
-    // `utilization`). Drop any stale numbers instead of leaving them on
-    // the menu, same as a definitive logout (`not_found`).
-    if next.tiers.is_empty() {
+    // A successful fetch that carries no usable windows AND no credits
+    // means the official account has no active subscription quota (e.g.
+    // logged in but unsubscribed — the usage endpoint returns windows
+    // with no `utilization`). Drop any stale numbers instead of leaving
+    // them on the menu, same as a definitive logout (`not_found`). When
+    // pay-as-you-go credits ARE enabled we keep the entry so the tray
+    // shows them even with no windows — matching the in-app card, which
+    // renders credits off `extraUsage.isEnabled` regardless of tiers.
+    if next.tiers.is_empty() && next.credits.is_none() {
         clear_quota_entry(app, cli);
         return;
     }
@@ -859,27 +891,71 @@ fn tray_tier_label(name: &str, labels: &TrayLabels) -> String {
     }
 }
 
-/// "🟢 12% 5h · 🟡 78% Weekly" (or "🟢 9% 30d" on a Codex free plan)
-/// — appended to the CLI's first-level row title (percent right after
-/// the pressure glyph). None when no window is known.
+/// Render a credit amount in MINOR units (Claude sends cents +
+/// `decimal_places`) or major units (grok, no decimal places) as a
+/// short currency string — "$19.44" for USD, "19.44 EUR" otherwise.
+/// Whole amounts drop the ".00" so "$3.00" reads "$3" (matches the
+/// user-requested "$3 / $10" style). Rust has no Intl, so this is a
+/// deliberately simple mirror of `formatCurrency` in format.ts.
+fn format_credit_amount(value: f64, currency: Option<&str>, decimal_places: Option<u32>) -> String {
+    let amount = match decimal_places {
+        Some(dp) if dp > 0 => value / 10f64.powi(dp as i32),
+        _ => value,
+    };
+    let num = if (amount.fract()).abs() < f64::EPSILON {
+        format!("{:.0}", amount)
+    } else {
+        format!("{:.2}", amount)
+    };
+    match currency.unwrap_or("USD") {
+        "USD" => format!("${num}"),
+        code => format!("{num} {code}"),
+    }
+}
+
+/// "🟢 $3 / $10 Credits" (or "🟢 $3 Credits" when no cap is set) —
+/// the credits suffix appended after the quota windows.
+fn credits_label(c: &TrayCredits, labels: &TrayLabels) -> String {
+    let used = format_credit_amount(c.used, c.currency.as_deref(), c.decimal_places);
+    let amounts = match c.limit {
+        Some(limit) => {
+            let limit = format_credit_amount(limit, c.currency.as_deref(), c.decimal_places);
+            format!("{used} / {limit}")
+        }
+        None => used,
+    };
+    format!(
+        "{} {} {}",
+        quota_glyph(c.utilization),
+        amounts,
+        labels.credits
+    )
+}
+
+/// "🟢 12% 5h · 🟡 78% Weekly · 🟢 $3 / $10 Credits" (or "🟢 9% 30d"
+/// on a Codex free plan) — appended to the CLI's first-level row title
+/// (percent right after the pressure glyph). None when no window and no
+/// credits are known.
 fn quota_label(q: &TrayQuota, labels: &TrayLabels) -> Option<String> {
-    if q.tiers.is_empty() {
+    let mut parts: Vec<String> = q
+        .tiers
+        .iter()
+        .map(|(name, used)| {
+            format!(
+                "{} {:.0}% {}",
+                quota_glyph(*used),
+                used,
+                tray_tier_label(name, labels)
+            )
+        })
+        .collect();
+    if let Some(credits) = &q.credits {
+        parts.push(credits_label(credits, labels));
+    }
+    if parts.is_empty() {
         return None;
     }
-    Some(
-        q.tiers
-            .iter()
-            .map(|(name, used)| {
-                format!(
-                    "{} {:.0}% {}",
-                    quota_glyph(*used),
-                    used,
-                    tray_tier_label(name, labels)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" · "),
-    )
+    Some(parts.join(" · "))
 }
 
 /// The (pure) selection. One shared filtered+sorted candidate list
@@ -1452,6 +1528,7 @@ mod tests {
         let both = TrayQuota {
             tiers: vec![("five_hour".into(), 12.4), ("seven_day".into(), 78.0)],
             plan: None,
+            credits: None,
         };
         assert_eq!(
             quota_label(&both, &labels).as_deref(),
@@ -1461,12 +1538,14 @@ mod tests {
         let monthly = TrayQuota {
             tiers: vec![("30_day".into(), 9.0)],
             plan: None,
+            credits: None,
         };
         assert_eq!(quota_label(&monthly, &labels).as_deref(), Some("🟢 9% M"));
         // Truly unknown ids pass through raw.
         let odd = TrayQuota {
             tiers: vec![("mystery_window".into(), 99.6)],
             plan: None,
+            credits: None,
         };
         assert_eq!(
             quota_label(&odd, &labels).as_deref(),
@@ -1475,8 +1554,47 @@ mod tests {
         let none = TrayQuota {
             tiers: vec![],
             plan: None,
+            credits: None,
         };
         assert_eq!(quota_label(&none, &labels), None);
+    }
+
+    #[test]
+    fn quota_label_appends_credits_after_windows() {
+        let labels = TrayLabels::default();
+        // Claude sends cents + decimal_places=2 → "$19.44 / $50 Credits"
+        // ($50.00 trims to $50; $19.44 keeps its cents).
+        let q = TrayQuota {
+            tiers: vec![("five_hour".into(), 12.0)],
+            plan: None,
+            credits: Some(TrayCredits {
+                utilization: 38.88,
+                used: 1944.0,
+                limit: Some(5000.0),
+                currency: Some("USD".into()),
+                decimal_places: Some(2),
+            }),
+        };
+        assert_eq!(
+            quota_label(&q, &labels).as_deref(),
+            Some("🟢 12% 5h · 🟢 $19.44 / $50 Credits")
+        );
+        // grok stores major units (no decimal_places) and may have no cap.
+        let grok = TrayQuota {
+            tiers: vec![],
+            plan: None,
+            credits: Some(TrayCredits {
+                utilization: 95.0,
+                used: 3.0,
+                limit: None,
+                currency: Some("USD".into()),
+                decimal_places: None,
+            }),
+        };
+        assert_eq!(
+            quota_label(&grok, &labels).as_deref(),
+            Some("🔴 $3 Credits")
+        );
     }
 
     #[test]

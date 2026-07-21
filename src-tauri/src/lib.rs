@@ -496,6 +496,7 @@ async fn set_tray_labels(
     choose_folder: String,
     status_busy: String,
     status_waiting: String,
+    credits: String,
 ) -> Result<(), String> {
     tray::set_labels(
         open,
@@ -508,6 +509,7 @@ async fn set_tray_labels(
         choose_folder,
         status_busy,
         status_waiting,
+        credits,
     );
     let _ = tray::rebuild_menu(&app);
     Ok(())

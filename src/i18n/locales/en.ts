@@ -60,6 +60,7 @@ export const en = {
   "tray.quotaFiveHour": "5h",
   "tray.quotaWeekly": "W",
   "tray.quotaMonthly": "M",
+  "tray.credits": "Credits",
 
   // Stats
   "stats.kpi.sessions": "Sessions",
@@ -216,8 +217,8 @@ export const en = {
   "providers.quotaSevenDaySonnetShort": "Sonnet",
   "providers.quotaResets": "Resets {time}",
   "providers.quotaNotUsedYet": "You haven't used {model} yet",
-  "providers.usageCredits": "Usage credits",
-  "providers.usageCreditsHint": "Usage credits cover you when you hit your plan limits — {used} of {limit} used",
+  "providers.usageCredits": "Credits",
+  "providers.usageCreditsHint": "Credits cover you when you hit your plan limits — {used} of {limit} used",
   "providers.addProvider": "Add provider",
   "providers.noCustomProviders": "No custom providers yet",
   "providers.aiGateways": "AI Gateways",
