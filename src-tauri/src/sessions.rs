@@ -783,7 +783,12 @@ pub fn scan_sessions() -> Result<ScanResult, Box<dyn Error>> {
         .collect();
     records.extend(scan_memory(&project_cwds)?);
     records.extend(scan_skills(&project_cwds)?);
-    records.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    // Sort by the PARSED instant, not the raw string. Records from
+    // different sources emit RFC3339 with different UTC offsets (`+00:00`
+    // vs `Z` vs, historically, a local offset), and those don't order
+    // lexicographically — a lexicographic `cmp` put an older Codex record
+    // above a newer Claude one whenever their wall-clock digits crossed.
+    records.sort_by(|a, b| record_instant(&b.updated_at).cmp(&record_instant(&a.updated_at)));
 
     // Projects = the project ENTITIES each CLI actually keeps, enumerated
     // directly and INDEPENDENTLY of records. A project shows because its entity
@@ -12575,13 +12580,31 @@ fn extract_json_string_field_from(text: &str, key: &str, last: bool) -> Option<S
     result
 }
 
+/// Parse a record's `updated_at` (RFC3339, any UTC offset) into epoch
+/// millis for chronological sorting. Missing/unparseable → sorts last.
+/// String comparison is unsafe across sources because they emit different
+/// offsets (`+00:00` / `Z` / a local offset), which don't order lexically.
+/// Reused by the tray's recent-session sort (also cross-source).
+pub(crate) fn record_instant(value: &Option<String>) -> i64 {
+    value
+        .as_deref()
+        .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
+        .map(|dt| dt.timestamp_millis())
+        .unwrap_or(i64::MIN)
+}
+
 fn normalize_time(value: String) -> Option<String> {
     if value.trim().is_empty() {
         return None;
     }
     if let Ok(ts) = value.parse::<i64>() {
         let millis = if ts > 10_000_000_000 { ts } else { ts * 1000 };
-        return Local
+        // Emit UTC, NOT a local offset. Every other source stores its
+        // timestamps in UTC; a local-offset string here made the
+        // cross-source string sort inconsistent. Display is unaffected
+        // (the frontend parses with `new Date()` and renders in local
+        // time regardless of the offset in the string).
+        return Utc
             .timestamp_millis_opt(millis)
             .single()
             .map(|dt| dt.to_rfc3339());
@@ -16505,6 +16528,39 @@ mod tests {
         assert!(!is_safe_rel("..")); // parent
         assert!(!is_safe_rel("a/../b")); // traversal mid-path
         assert!(!is_safe_rel("/etc/passwd")); // absolute
+    }
+
+    #[test]
+    fn normalize_time_from_epoch_emits_utc_not_local_offset() {
+        // 1784557747s = 2026-07-20T14:29:07Z. Must render as UTC so it
+        // string-compares consistently with the other sources.
+        let out = normalize_time("1784557747".to_string()).unwrap();
+        assert!(
+            out.ends_with("+00:00") || out.ends_with('Z'),
+            "expected a UTC offset, got {out}"
+        );
+        assert_eq!(
+            DateTime::parse_from_rfc3339(&out).unwrap().timestamp(),
+            1784557747
+        );
+    }
+
+    #[test]
+    fn record_instant_orders_across_mixed_utc_offsets() {
+        // Same wall-clock digits, different offsets: the `+08:00` one is the
+        // EARLIER instant, yet sorts AFTER lexicographically ("+08" > "+00").
+        // record_instant must order them by true time.
+        let newer = Some("2026-07-21T12:00:00+00:00".to_string()); // 12:00Z
+        let older = Some("2026-07-21T12:00:00+08:00".to_string()); // 04:00Z
+        assert!(record_instant(&newer) > record_instant(&older));
+        // A `Z` string and a `+00:00` string at the same instant tie.
+        assert_eq!(
+            record_instant(&Some("2026-07-21T12:00:00Z".to_string())),
+            record_instant(&newer)
+        );
+        // Missing / unparseable sorts last (smallest).
+        assert_eq!(record_instant(&None), i64::MIN);
+        assert_eq!(record_instant(&Some("garbage".to_string())), i64::MIN);
     }
 
     #[test]

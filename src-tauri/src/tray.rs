@@ -897,9 +897,14 @@ fn select_recent_state(sessions: &[AppSession]) -> RecentState {
         // (`/model`, `/clear`, …) — they're system commands, not chats.
         .filter(|s| !is_slash_command(label_text(&s.title, &s.snippet)))
         .collect();
-    // Newest first. ISO-8601 `updated_at` sorts lexicographically =
-    // chronologically; `None` sorts last under descending order.
-    picked.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    // Newest first, by PARSED instant — this list mixes all sources, whose
+    // RFC3339 offsets differ (`+00:00` / `Z`), so a lexicographic string
+    // compare misorders them (same bug as the Records list). `None` /
+    // unparseable sorts last under descending order (`record_instant` → MIN).
+    picked.sort_by(|a, b| {
+        crate::sessions::record_instant(&b.updated_at)
+            .cmp(&crate::sessions::record_instant(&a.updated_at))
+    });
 
     let recent_sessions: Vec<RecentSession> = picked
         .iter()
@@ -1541,6 +1546,22 @@ mod tests {
         let state = select_recent_state(&sessions);
         let ids: Vec<&str> = state.sessions.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["c-new", "x1", "g1", "c-old"]);
+    }
+
+    #[test]
+    fn select_recent_state_sorts_mixed_offsets_by_instant() {
+        // The recent list mixes sources with different UTC offsets. A Codex
+        // record carrying a local `+08:00` offset (its historical shape) is an
+        // EARLIER instant (12:00Z) than the Claude `Z` record (13:00Z), yet its
+        // larger wall-clock digits sort it ABOVE under a lexicographic string
+        // compare. The parsed-instant sort must put the newer Claude one first.
+        let sessions = vec![
+            sess_in("Codex", "/work/a", "x-earlier", "2026-07-21T20:00:00+08:00"),
+            sess_in("Claude", "/work/b", "c-later", "2026-07-21T13:00:00Z"),
+        ];
+        let state = select_recent_state(&sessions);
+        let ids: Vec<&str> = state.sessions.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["c-later", "x-earlier"]);
     }
 
     #[test]
