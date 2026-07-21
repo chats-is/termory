@@ -30,6 +30,7 @@ import {
 import {
   blankProvider,
   codexVersionText,
+  hasUpdate,
   isSourceEnabled,
   providerFromBinding,
   resolveActiveProviderId
@@ -129,6 +130,18 @@ let cachedVersions: Record<CliApp, string | null> = {
   grok: null
 };
 let cachedVersionsLoading = true;
+// Latest available versions (from the npm registry / grok's channel
+// endpoint via `detect_latest_versions_cmd`). Cached like the installed
+// versions so route remounts don't refetch the network; the backend
+// additionally caches for 6h.
+let cachedLatestVersions: Record<CliApp, string | null> = {
+  claude: null,
+  "claude-desktop": null,
+  codex: null,
+  gemini: null,
+  opencode: null,
+  grok: null
+};
 // Codex's two install forms (CLI binary vs the merged ChatGPT/Codex
 // desktop app). Null until the first `detect_codex_installs` resolves;
 // cached like the maps above so route remounts don't flash the
@@ -269,6 +282,8 @@ export function ProvidersPage({
   const [codexInstalls, setCodexInstalls] = React.useState<CodexInstalls | null>(
     cachedCodexInstalls
   );
+  const [latestVersions, setLatestVersions] =
+    React.useState<Record<CliApp, string | null>>(cachedLatestVersions);
 
   // Mirror state into the module-level cache on every change so the
   // next mount has the fresh truth as its initial value.
@@ -284,6 +299,9 @@ export function ProvidersPage({
   React.useEffect(() => {
     cachedCodexInstalls = codexInstalls;
   }, [codexInstalls]);
+  React.useEffect(() => {
+    cachedLatestVersions = latestVersions;
+  }, [latestVersions]);
   const [toggling, setToggling] = React.useState<string | null>(null);
   const [testing, setTesting] = React.useState<string | null>(null);
   const [settingDefault, setSettingDefault] = React.useState<string | null>(null);
@@ -466,6 +484,22 @@ export function ProvidersPage({
     }
   }, []);
 
+  // Latest available versions (network). Runs independently of
+  // `refreshVersions` so the slower fetch never blocks the installed-
+  // version render; the update badge simply appears once it resolves.
+  // `force` bypasses the backend's 6h cache (Recheck).
+  const refreshLatestVersions = React.useCallback(async (force = false) => {
+    try {
+      const map = await invoke<Record<string, string | null>>(
+        "detect_latest_versions_cmd",
+        { force }
+      );
+      setLatestVersions(cliVersionRecord(map));
+    } catch {
+      /* network best-effort — leave previous state on error */
+    }
+  }, []);
+
   const handleRecheckInstall = async () => {
     setRechecking(true);
     try {
@@ -475,6 +509,7 @@ export function ProvidersPage({
       if (next[app]) {
         toast.success(t("toast.detected", { app: CLI_APP_LABEL[app] }));
         void refreshVersions();
+        void refreshLatestVersions(true);
       } else {
         toast.error(t("toast.notInstalled", { app: CLI_APP_LABEL[app] }));
       }
@@ -569,8 +604,11 @@ export function ProvidersPage({
     // `refreshVersions`.
     if (!versionsEverResolved) {
       void refreshVersions();
+      // Latest-version check rides the same cold-start gate. Network,
+      // backend-cached 6h; route remounts skip it.
+      void refreshLatestVersions();
     }
-  }, [refreshInstalled, refreshVersions]);
+  }, [refreshInstalled, refreshVersions, refreshLatestVersions]);
 
   // Event-driven install detection — no polling. Three triggers:
   //   1. Rust watcher fires `cli-install-changed` when any CLI binary
@@ -1185,6 +1223,13 @@ export function ProvidersPage({
                           : null
                     }
                     versionLoading={versionsLoading}
+                    latestVersion={
+                      // Codex compares the CLI version (npm); the app
+                      // version line is unaffected.
+                      hasUpdate(versions[app], latestVersions[app])
+                        ? latestVersions[app]
+                        : null
+                    }
                     actions={app === "codex" ? (
                       codexLoggingIn ? (
                         <div className="flex items-center gap-2 shrink-0">

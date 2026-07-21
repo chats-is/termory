@@ -157,6 +157,8 @@ export const zhHant: Record<MessageKey, string> = {
   "menu.deleteError": "刪除失敗:{error}",
 
   "providers.official": "官方",
+  "providers.updateAvailable": "新版本 {version}",
+  "providers.updateAvailableHint": "有新版本可用 —— 請透過安裝程式更新。",
   "providers.followTitle": "保留之前的工作階段？",
   "providers.followDesc":
     "Codex 的 resume 歷史按供應商分桶，啟用 {label} 後這個專案之前的工作階段不會出現在 codex resume 裡。選擇要保留哪些專案的工作階段，這樣 codex resume 仍能找到它們。",

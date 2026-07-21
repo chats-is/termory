@@ -7,6 +7,7 @@ mod quota;
 mod sessions;
 mod terminal;
 mod tray;
+mod updates;
 mod watcher;
 
 /// Shared test infrastructure. The `HOME_LOCK` mutex serializes every
@@ -549,6 +550,21 @@ async fn detect_codex_installs() -> Result<providers::CodexInstalls, String> {
         .map_err(|err| err.to_string())?
 }
 
+/// Latest available version for each managed CLI (see `updates.rs`),
+/// keyed by the same CliApp string as `detect_cli_versions_cmd`. The
+/// frontend compares these to the installed versions and shows an
+/// update badge when behind. `force` bypasses the 6h cache (Recheck).
+#[tauri::command]
+async fn detect_latest_versions_cmd(
+    force: Option<bool>,
+) -> Result<std::collections::HashMap<String, Option<String>>, String> {
+    let map = updates::detect_latest_versions(force.unwrap_or(false)).await;
+    Ok(map
+        .into_iter()
+        .map(|(app, version)| (cli_app_key(app).to_string(), version))
+        .collect())
+}
+
 fn cli_app_key(app: CliApp) -> &'static str {
     match app {
         CliApp::Claude => "claude",
@@ -1028,6 +1044,7 @@ pub fn run() {
             claude_project_registered,
             set_tray_labels,
             detect_cli_versions_cmd,
+            detect_latest_versions_cmd,
             detect_codex_installs,
             provider_active_state,
             provider_active_states,

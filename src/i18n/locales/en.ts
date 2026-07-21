@@ -168,6 +168,9 @@ export const en = {
 
   // Providers
   "providers.official": "Official",
+  "providers.updateAvailable": "New {version}",
+  "providers.updateAvailableHint":
+    "A newer version is available — update with your installer.",
   "providers.followTitle": "Keep earlier sessions?",
   "providers.followDesc":
     "Codex lists resume history per provider, so after activating {label} this project's earlier sessions won't show in codex resume. Pick which recent projects' sessions to keep so codex resume still finds them.",

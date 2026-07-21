@@ -5,6 +5,7 @@ import {
   visibleSources,
   blankProvider,
   codexVersionText,
+  hasUpdate,
   isClaudeSafeModelId,
   isManagedOptionKey,
   isSourceEnabled,
@@ -503,6 +504,38 @@ describe("codexVersionText", () => {
   it("falls back to the plain CLI form before detection resolves", () => {
     expect(codexVersionText("0.142.5", null, tEn)).toBe("v0.142.5");
     expect(codexVersionText(null, null, tEn)).toBeNull();
+  });
+});
+
+describe("hasUpdate", () => {
+  it("is true when latest is a higher release", () => {
+    expect(hasUpdate("0.142.5", "0.144.6")).toBe(true);
+    expect(hasUpdate("2.1.100", "2.1.216")).toBe(true);
+    expect(hasUpdate("1.9.0", "2.0.0")).toBe(true);
+  });
+
+  it("is false when installed is equal or newer", () => {
+    expect(hasUpdate("2.1.216", "2.1.216")).toBe(false);
+    expect(hasUpdate("2.1.216", "2.1.100")).toBe(false);
+    expect(hasUpdate("2.0.0", "1.9.9")).toBe(false);
+  });
+
+  it("treats an installed prerelease at the same core as behind the stable latest", () => {
+    expect(hasUpdate("0.2.0-alpha.1", "0.2.0")).toBe(true);
+    // But a stable install is not behind an equal-core prerelease.
+    expect(hasUpdate("0.2.0", "0.2.0-alpha.1")).toBe(false);
+  });
+
+  it("zero-pads mismatched segment counts", () => {
+    expect(hasUpdate("2.1", "2.1.1")).toBe(true);
+    expect(hasUpdate("2.1.0", "2.1")).toBe(false);
+  });
+
+  it("is false when either side is missing or unparseable", () => {
+    expect(hasUpdate(null, "2.1.216")).toBe(false);
+    expect(hasUpdate("2.1.216", null)).toBe(false);
+    expect(hasUpdate("2.1.216", "")).toBe(false);
+    expect(hasUpdate("latest", "2.1.216")).toBe(false);
   });
 });
 

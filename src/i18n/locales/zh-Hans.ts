@@ -157,6 +157,8 @@ export const zhHans: Record<MessageKey, string> = {
   "menu.deleteError": "删除失败:{error}",
 
   "providers.official": "官方",
+  "providers.updateAvailable": "新版本 {version}",
+  "providers.updateAvailableHint": "有新版本可用 —— 请通过安装程序更新。",
   "providers.followTitle": "保留之前的会话？",
   "providers.followDesc":
     "Codex 的 resume 历史按供应商分桶，激活 {label} 后这个项目之前的会话不会出现在 codex resume 里。选择要保留哪些项目的会话，这样 codex resume 仍能找到它们。",

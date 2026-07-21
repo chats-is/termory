@@ -98,6 +98,41 @@ export function codexVersionText(
   return parts.length > 0 ? parts.join(" · ") : null;
 }
 
+/**
+ * True when `latest` is a strictly newer release than `installed`.
+ *
+ * Both are `MAJOR.MINOR.PATCH[-prerelease]`. Cores are compared numerically
+ * (shorter is zero-padded); on an equal core, a version WITH a prerelease is
+ * treated as older than one without (so an installed Codex alpha reads as
+ * behind the stable npm `latest`). A missing or unparseable side → `false`,
+ * so we never show a spurious "update available".
+ */
+export function hasUpdate(
+  installed: string | null | undefined,
+  latest: string | null | undefined
+): boolean {
+  if (!installed || !latest) return false;
+  const parse = (v: string) => {
+    const [core, pre] = v.trim().split("-", 2);
+    const nums = core.split(".").map((n) => Number.parseInt(n, 10));
+    if (nums.length === 0 || nums.some((n) => Number.isNaN(n))) return null;
+    return { nums, hasPre: pre !== undefined && pre !== "" };
+  };
+  const a = parse(installed);
+  const b = parse(latest);
+  if (!a || !b) return false;
+  const len = Math.max(a.nums.length, b.nums.length);
+  for (let i = 0; i < len; i++) {
+    const ai = a.nums[i] ?? 0;
+    const bi = b.nums[i] ?? 0;
+    if (bi > ai) return true;
+    if (bi < ai) return false;
+  }
+  // Equal cores: latest is newer only if installed is a prerelease and
+  // latest is a stable release.
+  return a.hasPre && !b.hasPre;
+}
+
 export function newProviderId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();

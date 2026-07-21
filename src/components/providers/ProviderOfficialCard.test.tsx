@@ -2,6 +2,7 @@ import React from "react";
 import { describe, expect, it, vi } from "vitest";
 import { render as rtlRender, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { ProviderOfficialCard } from "./ProviderOfficialCard";
 
 const baseProps = {
@@ -13,7 +14,7 @@ const baseProps = {
 };
 
 function render(ui: React.ReactElement) {
-  return rtlRender(ui);
+  return rtlRender(<TooltipProvider>{ui}</TooltipProvider>);
 }
 
 describe("ProviderOfficialCard", () => {
@@ -57,6 +58,23 @@ describe("ProviderOfficialCard", () => {
   it("disables Activate while settingDefault", () => {
     render(<ProviderOfficialCard {...baseProps} settingDefault />);
     expect(screen.getByRole("button", { name: "Activating…" })).toBeDisabled();
+  });
+
+  it("shows the update badge with the new version when latestVersion is set", () => {
+    render(<ProviderOfficialCard {...baseProps} latestVersion="2.1.216" />);
+    expect(screen.getByText("New v2.1.216")).toBeInTheDocument();
+  });
+
+  it("shows no update badge when latestVersion is null", () => {
+    render(<ProviderOfficialCard {...baseProps} latestVersion={null} />);
+    expect(screen.queryByText(/^New /)).toBeNull();
+  });
+
+  it("hides the update badge while the version is still loading", () => {
+    render(
+      <ProviderOfficialCard {...baseProps} versionLoading latestVersion="2.1.216" />
+    );
+    expect(screen.queryByText("New v2.1.216")).toBeNull();
   });
 
   it("renders the actions slot before the Activate button", () => {
