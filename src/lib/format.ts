@@ -156,6 +156,28 @@ export function formatFullNumber(value: number): string {
   return numberFormatter.format(value);
 }
 
+/** Format a currency amount for the usage-credits display. `value` is in
+ * MINOR units when `decimalPlaces` is set (Claude sends cents +
+ * `decimalPlaces: 2`), else already a major-unit amount (grok). Follows
+ * the app locale; falls back to a plain `{symbol}{amount}` string if the
+ * currency code is unknown to Intl. */
+export function formatCurrency(
+  value: number,
+  currency?: string,
+  decimalPlaces?: number
+): string {
+  const amount = decimalPlaces ? value / 10 ** decimalPlaces : value;
+  const code = currency || "USD";
+  try {
+    return new Intl.NumberFormat(currentLocale, {
+      style: "currency",
+      currency: code
+    }).format(amount);
+  } catch {
+    return `${amount.toFixed(2)} ${code}`;
+  }
+}
+
 /**
  * Compact format for dashboard widgets — token-tuned so M is the
  * dominant unit. Pair with `formatFullNumber` in the `title=` attr

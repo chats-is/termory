@@ -204,6 +204,8 @@ export const zhHant: Record<MessageKey, string> = {
   "providers.quotaSevenDaySonnetShort": "Sonnet",
   "providers.quotaResets": "{time} 重置",
   "providers.quotaNotUsedYet": "尚未使用過 {model}",
+  "providers.usageCredits": "使用額度",
+  "providers.usageCreditsHint": "達到方案上限後由使用額度承接 —— 已用 {used} / 共 {limit}",
   "providers.addProvider": "新增供應商",
   "providers.noCustomProviders": "還沒有自訂供應商",
   "providers.aiGateways": "AI Gateways",

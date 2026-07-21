@@ -128,6 +128,12 @@ pub struct ExtraUsage {
     pub utilization: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
+    /// Decimal places of `monthly_limit` / `used_credits` — Claude
+    /// reports these in MINOR units (cents), so the frontend divides by
+    /// `10^decimal_places` to render currency (`1944` + `2` → `$19.44`).
+    /// Absent (grok, which already stores major units) → treat as 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decimal_places: Option<u32>,
 }
 
 /// Result of one quota query for one CLI.
@@ -463,6 +469,10 @@ fn parse_claude_usage(body: &serde_json::Value) -> (Vec<QuotaTier>, Option<Extra
         used_credits: v.get("used_credits").and_then(|n| n.as_f64()),
         utilization: v.get("utilization").and_then(|n| n.as_f64()),
         currency: v.get("currency").and_then(|s| s.as_str()).map(String::from),
+        decimal_places: v
+            .get("decimal_places")
+            .and_then(|n| n.as_u64())
+            .map(|n| n as u32),
     });
 
     (tiers, extra_usage)
@@ -1500,6 +1510,8 @@ fn parse_grok_billing(body: &serde_json::Value) -> (Vec<QuotaTier>, Option<Extra
         used_credits: Some(used as f64 / 100.0),
         utilization: Some(used as f64 / cap as f64 * 100.0),
         currency: Some("USD".to_string()),
+        // grok values are already major units (dollars) — no scaling.
+        decimal_places: None,
     });
     (tiers, extra)
 }
@@ -1849,22 +1861,27 @@ mod tests {
 
     #[test]
     fn parse_claude_usage_reads_extra_usage() {
+        // Real-shape body (2026-07): credit amounts are MINOR units with
+        // `decimal_places: 2` (1944 cents + 5000 cents ⇒ $19.44 / $50.00).
         let body = json!({
             "five_hour": { "utilization": 50.0 },
             "extra_usage": {
                 "is_enabled": true,
-                "monthly_limit": 100.0,
-                "used_credits": 12.34,
-                "utilization": 12.34,
-                "currency": "USD"
+                "monthly_limit": 5000.0,
+                "used_credits": 1944.0,
+                "utilization": 38.88,
+                "currency": "USD",
+                "decimal_places": 2
             }
         });
         let (_, extra) = parse_claude_usage(&body);
         let extra = extra.expect("extra_usage parsed");
         assert!(extra.is_enabled);
-        assert_eq!(extra.monthly_limit, Some(100.0));
-        assert_eq!(extra.used_credits, Some(12.34));
+        assert_eq!(extra.monthly_limit, Some(5000.0));
+        assert_eq!(extra.used_credits, Some(1944.0));
+        assert_eq!(extra.utilization, Some(38.88));
         assert_eq!(extra.currency.as_deref(), Some("USD"));
+        assert_eq!(extra.decimal_places, Some(2));
     }
 
     #[test]

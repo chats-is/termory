@@ -273,13 +273,17 @@ export type QuotaTier = {
   resetsAt?: string;
 };
 
-/** Pay-as-you-go overflow usage (Claude "extra usage"). */
+/** Pay-as-you-go overflow usage (Claude "usage credits" / grok on-demand). */
 export type ExtraUsage = {
   isEnabled: boolean;
   monthlyLimit?: number;
   usedCredits?: number;
   utilization?: number;
   currency?: string;
+  /** Decimal places of `monthlyLimit` / `usedCredits`. Claude reports them
+   * in MINOR units (cents) with `decimalPlaces: 2`; divide by
+   * `10^decimalPlaces` to get the currency amount. Absent → treat as 0. */
+  decimalPlaces?: number;
 };
 
 /** Result of `fetch_subscription_quota` for one CLI. Credential and

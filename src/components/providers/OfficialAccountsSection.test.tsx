@@ -375,6 +375,45 @@ describe("OfficialAccountsSection — quota rings in active row", () => {
     expect(container.firstChild).toBeNull();
   });
 
+  it("renders the Usage credits item, scaling minor units by decimalPlaces", async () => {
+    mockList(makeState());
+    render(
+      <OfficialAccountsSection
+        app="claude"
+        quota={makeQuota({
+          app: "claude",
+          extraUsage: {
+            isEnabled: true,
+            monthlyLimit: 5000,
+            usedCredits: 1944,
+            utilization: 38.88,
+            currency: "USD",
+            decimalPlaces: 2
+          }
+        })}
+        onRefreshQuota={vi.fn()}
+      />
+    );
+    await screen.findByText("Jane");
+    expect(screen.getByText("Usage credits")).toBeInTheDocument();
+    // 1944 / 10^2 → 19.44 used of 5000 / 10^2 → 50.00 (currency symbol
+    // varies by the test runner's resolved locale, so match the amounts).
+    expect(screen.getByText(/19\.44 \/ .*50\.00/)).toBeInTheDocument();
+  });
+
+  it("hides the Usage credits item when extraUsage is disabled", async () => {
+    mockList(makeState());
+    render(
+      <OfficialAccountsSection
+        app="claude"
+        quota={makeQuota({ app: "claude", extraUsage: { isEnabled: false } })}
+        onRefreshQuota={vi.fn()}
+      />
+    );
+    await screen.findByText("Jane");
+    expect(screen.queryByText("Usage credits")).toBeNull();
+  });
+
   it("uses quota.plan in the display-only row when current.plan is null", async () => {
     mockList(
       makeState({

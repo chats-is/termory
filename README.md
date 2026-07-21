@@ -32,7 +32,7 @@ Termory brings **Codex**, **Claude Code**, **Gemini CLI**, **OpenCode**, and **G
 - **Records** — Every session, memory file, and skill from all your tools, in one place — each rendered the way its own tool shows it.
 - **Resume** — Reopen any recent session straight in your terminal, running the CLI's own resume command — one click from the menu bar or a right-click.
 - **Manage** — Delete or migrate any record — sessions, projects, memory — from the right-click menu, with a confirmation step.
-- **Providers** — Keep named API profiles for each CLI and switch the active one with a click, or from the menu bar. Codex supports multiple saved accounts — add, switch, and re-authenticate without losing session history.
+- **Providers** — Keep named API profiles for each CLI and switch the active one with a click, or from the menu bar. See your official-plan usage — rate-limit windows plus pay-as-you-go **Usage credits** — right on the card, and a badge when a CLI has a newer version. Codex supports multiple saved accounts — add, switch, and re-authenticate without losing session history.
 - **Favorites** — Star any message; it's saved as a snapshot that stays readable even after the original session is gone.
 - **Search** — Instant search across all your history, with a `⌘K` command palette and in-record find (`⌘F`) with term highlighting.
 - **Stats** — Sessions, messages, tokens, models, projects, and an activity heatmap over any date range.

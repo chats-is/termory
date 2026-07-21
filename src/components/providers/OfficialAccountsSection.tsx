@@ -20,7 +20,7 @@ import {
   TooltipTrigger
 } from "@/components/ui/tooltip";
 import { QUOTA_CHANGED_EVENT } from "@/constants";
-import { formatResetTime } from "@/lib/format";
+import { formatCurrency, formatResetTime } from "@/lib/format";
 import { quotaLevel, type QuotaLevel } from "@/lib/quota-utils";
 import { cn } from "@/lib/utils";
 import { useT, type MessageKey } from "@/i18n";
@@ -28,6 +28,7 @@ import type {
   AccountsState,
   CliApp,
   CurrentAccount,
+  ExtraUsage,
   SavedAccount,
   SubscriptionQuota
 } from "@/types";
@@ -173,6 +174,44 @@ function QuotaTierItem({
                 {subline}
               </span>
             )}
+          </span>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{detail}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** "Usage credits" — Claude's pay-as-you-go overflow (and grok on-demand
+ * credits). Rendered next to the quota rings when enabled: a pressure ring
+ * on the used-credit utilization + the currency amounts as the subline. */
+function ExtraUsageItem({ extra }: { extra: ExtraUsage }) {
+  const t = useT();
+  const used = formatCurrency(
+    extra.usedCredits ?? 0,
+    extra.currency,
+    extra.decimalPlaces
+  );
+  const limit =
+    extra.monthlyLimit != null
+      ? formatCurrency(extra.monthlyLimit, extra.currency, extra.decimalPlaces)
+      : null;
+  const subline = limit ? `${used} / ${limit}` : used;
+  const detail = limit
+    ? t("providers.usageCreditsHint", { used, limit })
+    : t("providers.usageCredits");
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex items-center gap-1.5 text-xs leading-none">
+          <QuotaRing utilization={extra.utilization ?? 0} />
+          <span className="flex flex-col gap-1 min-w-0">
+            <span className="max-w-32 truncate text-foreground">
+              {t("providers.usageCredits")}
+            </span>
+            <span className="whitespace-nowrap text-[10px] text-muted-foreground/70">
+              {subline}
+            </span>
           </span>
         </span>
       </TooltipTrigger>
@@ -493,6 +532,9 @@ export function OfficialAccountsSection({
                       resetsAt={tier.resetsAt}
                     />
                   ))}
+                {quota?.extraUsage?.isEnabled && (
+                  <ExtraUsageItem extra={quota.extraUsage} />
+                )}
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
