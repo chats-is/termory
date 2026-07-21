@@ -610,42 +610,62 @@ export function ProvidersPage({
     }
   }, [refreshInstalled, refreshVersions, refreshLatestVersions]);
 
-  // Event-driven install detection — no polling. Three triggers:
+  // Event-driven install + version refresh — no polling. Triggers:
   //   1. Rust watcher fires `cli-install-changed` when any CLI binary
-  //      dir or node-version-manager root mutates (install / uninstall).
-  //   2. Tauri window gains focus — covers the case where the OS
-  //      didn't propagate an FS event (e.g. uninstall script left the
-  //      binary in place but stripped PATH; user came back from
-  //      terminal and we re-check just in case).
+  //      dir / node-version-manager root mutates — install, uninstall,
+  //      OR an in-place UPGRADE (the watcher matches on path, not event
+  //      kind, so rewriting an existing binary fires it too).
+  //   2. Tauri window gains focus — a cheap bool re-check, covering an
+  //      install/uninstall the OS didn't emit an FS event for.
   //   3. (Already wired above) Page mount + manual Recheck.
   //
-  // Dedup: only refetch versions when the installed map actually flips.
-  // `detect_clis` is pure stat (~10ms), `detect_cli_versions` spawns 4
-  // subprocesses (~hundreds of ms) — without this guard, every focus
-  // event would flash the Version skeleton even when nothing changed.
+  // `detect_clis` is pure stat (~10ms), so it runs on every trigger. The
+  // heavier version probe (`detect_cli_versions`, 4 `--version` spawns)
+  // runs when the installed bool FLIPS (install/uninstall) OR on a watcher
+  // event — the watcher path is what makes an in-place upgrade (bool
+  // unchanged, version changed) update the number + clear the badge, the
+  // same way install/uninstall already do. Each trigger probes versions
+  // EXACTLY ONCE (no double-fetch); on focus the probe runs only if the
+  // bool actually flipped, so frequent window switches don't spawn.
   const installedRef = React.useRef(installed);
   installedRef.current = installed;
   React.useEffect(() => {
-    const refresh = async () => {
+    // Update the install bool; returns whether it flipped so each caller
+    // decides on its own whether a version re-probe is warranted (no
+    // version fetch happens in here — that keeps it to exactly one).
+    const refresh = async (): Promise<boolean> => {
       try {
         const map = await invoke<Record<string, boolean>>("detect_clis");
         const next = cliBoolRecord(map);
         const prev = installedRef.current;
         const changed = CLI_APPS.some((c) => prev[c] !== next[c]);
-        if (changed) {
-          setInstalled(next);
-          void refreshVersions();
-        }
+        if (changed) setInstalled(next);
+        return changed;
       } catch {
         /* leave previous state on transient error */
+        return false;
       }
     };
     const unlistenPromise = listen("termory:cli-install-changed", () => {
+      // A watched binary dir changed — install, uninstall, OR an in-place
+      // upgrade. Update the bool and re-probe the INSTALLED version once
+      // (unconditional because an upgrade doesn't flip the bool). The
+      // latest-version (upstream) value is unaffected by a local (un)install
+      // /upgrade, so it's NOT refetched here — it's owned by cold-start +
+      // Recheck, keeping unrelated bin-dir churn off the network.
       void refresh();
+      void refreshVersions();
     });
     const win = getCurrentWindow();
     const focusPromise = win.onFocusChanged(({ payload: focused }) => {
-      if (focused) void refresh();
+      // Cheap bool re-check on focus (covers an install/uninstall the OS
+      // didn't emit an FS event for); re-probe versions ONLY if it truly
+      // flipped. An in-place upgrade is already handled by the watcher.
+      if (focused) {
+        void refresh().then((changed) => {
+          if (changed) void refreshVersions();
+        });
+      }
     });
     return () => {
       void unlistenPromise.then((fn) => fn()).catch(() => {});
