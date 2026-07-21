@@ -64,17 +64,25 @@ describe("InstallGuide", () => {
     render(
       <InstallGuide app="claude-desktop" rechecking={false} onRecheck={() => {}} />
     );
-    // No tab button — the single method's command still renders.
+    // No tab button — the single method's URL only renders on supported OSes.
     expect(screen.queryByRole("button", { name: "download" })).toBeNull();
-    expect(screen.getByText("https://claude.ai/download")).toBeTruthy();
+    if (IS_MAC || IS_WINDOWS) {
+      expect(screen.getByText("https://claude.ai/download")).toBeTruthy();
+    } else {
+      expect(screen.queryByText("https://claude.ai/download")).toBeNull();
+    }
   });
 
   it("opens an app download URL instead of copying it", () => {
     render(
       <InstallGuide app="claude-desktop" rechecking={false} onRecheck={() => {}} />
     );
-    fireEvent.click(screen.getByRole("button", { name: "Open download page" }));
-    expect(openUrl).toHaveBeenCalledWith("https://claude.ai/download");
+    if (IS_MAC || IS_WINDOWS) {
+      fireEvent.click(screen.getByRole("button", { name: "Open download page" }));
+      expect(openUrl).toHaveBeenCalledWith("https://claude.ai/download");
+    } else {
+      expect(screen.queryByRole("button", { name: "Open download page" })).toBeNull();
+    }
   });
 
   it("shows Grok's installer for the current platform", () => {

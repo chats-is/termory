@@ -36,20 +36,21 @@ export function InstallGuide({
       ),
     [info.methods, platform]
   );
-  const [methodId, setMethodId] = React.useState(methods[0].id);
+  const [methodId, setMethodId] = React.useState(methods[0]?.id ?? "");
   const [copied, setCopied] = React.useState(false);
 
   // Reset to the first method when switching apps — different apps
   // expose different installer sets (npm/curl/brew/bun/paru).
   React.useEffect(() => {
-    setMethodId(methods[0].id);
+    setMethodId(methods[0]?.id ?? "");
     setCopied(false);
   }, [app, methods]);
 
   const method = methods.find((m) => m.id === methodId) ?? methods[0];
-  const isDownloadUrl = /^https?:\/\//.test(method.command);
+  const isDownloadUrl = !!method && /^https?:\/\//.test(method.command);
 
   const copy = async () => {
+    if (!method) return;
     try {
       await navigator.clipboard.writeText(method.command);
       setCopied(true);
@@ -93,7 +94,7 @@ export function InstallGuide({
               ))}
             </div>
           )}
-          <div className="flex items-center gap-2 rounded-md outline outline-1 outline-foreground/10 bg-muted px-3 py-2">
+          {method && <div className="flex items-center gap-2 rounded-md outline outline-1 outline-foreground/10 bg-muted px-3 py-2">
             <Terminal className="size-4 shrink-0 text-muted-foreground" />
             {/* Single line, horizontal scroll on overflow — install
                 commands/URLs must never soft-wrap mid-token. */}
@@ -127,7 +128,7 @@ export function InstallGuide({
                 {isDownloadUrl ? t("install.openDownload") : t("install.copyCommand")}
               </TooltipContent>
             </Tooltip>
-          </div>
+          </div>}
         </div>
 
         <div className="flex items-center gap-2">
