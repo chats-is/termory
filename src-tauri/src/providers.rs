@@ -1062,9 +1062,9 @@ pub struct Provider {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub favicon: Option<String>,
     /// Grok-only: the wire API each `[model.*]` entry declares
-    /// (`api_backend` = chat_completions | responses | messages). Defaults
-    /// to "responses" when unset/blank. Read ONLY by `activate_grok`; inert
-    /// storage for every other app.
+    /// (`api_backend` = chat_completions | responses | messages). When
+    /// unset/blank, `activate_grok` omits the field so Grok applies its own
+    /// default (`chat_completions`). Inert storage for every other app.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_backend: Option<String>,
 }

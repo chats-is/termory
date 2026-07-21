@@ -102,7 +102,12 @@ export const QUOTA_CHANGED_EVENT = "termory:quota-changed";
 // Install instructions surfaced in the Providers page InstallGuide when
 // the corresponding CLI binary is missing from PATH. Commands are
 // pulled from each tool's official README (.audit-sources/<tool>/).
-export type InstallMethod = { id: string; label: string; command: string };
+export type InstallMethod = {
+  id: string;
+  label: string;
+  command: string;
+  platforms?: ("mac" | "linux" | "windows")[];
+};
 
 export const CLI_INSTALL: Record<
   CliApp,
@@ -113,14 +118,34 @@ export const CLI_INSTALL: Record<
     url: "https://code.claude.com/docs",
     methods: [
       {
-        id: "npm",
-        label: "npm",
-        command: "npm install -g @anthropic-ai/claude-code"
+        id: "native",
+        label: "Native",
+        command: "curl -fsSL https://claude.ai/install.sh | bash",
+        platforms: ["mac", "linux"]
       },
       {
-        id: "curl",
-        label: "curl",
-        command: "curl -fsSL https://claude.ai/install.sh | bash"
+        id: "powershell",
+        label: "PowerShell",
+        command: "irm https://claude.ai/install.ps1 | iex",
+        platforms: ["windows"]
+      },
+      {
+        id: "cmd",
+        label: "CMD",
+        command: "curl -fsSL https://claude.ai/install.cmd -o install.cmd && install.cmd && del install.cmd",
+        platforms: ["windows"]
+      },
+      {
+        id: "brew",
+        label: "Homebrew",
+        command: "brew install --cask claude-code",
+        platforms: ["mac", "linux"]
+      },
+      {
+        id: "winget",
+        label: "WinGet",
+        command: "winget install Anthropic.ClaudeCode",
+        platforms: ["windows"]
       }
     ]
   },
@@ -134,15 +159,17 @@ export const CLI_INSTALL: Record<
       {
         id: "download",
         label: "download",
-        command: "https://claude.ai/download"
+        command: "https://claude.ai/download",
+        platforms: ["mac", "windows"]
       }
     ]
   },
   // Method tabs across every CLI share ONE canonical order:
-  // npm → curl → brew → npx → bun → paru → App/Download.
+  // Native → npm → curl → brew → PowerShell → CMD → package-manager-specific
+  // methods → App/Download.
   codex: {
     binary: "codex",
-    url: "https://github.com/openai/codex",
+    url: "https://developers.openai.com/codex",
     methods: [
       { id: "npm", label: "npm", command: "npm install -g @openai/codex" },
       // Official standalone installer (chatgpt.com domain, redirects to
@@ -151,9 +178,21 @@ export const CLI_INSTALL: Record<
       {
         id: "curl",
         label: "curl",
-        command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
+        command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+        platforms: ["mac", "linux"]
       },
-      { id: "brew", label: "brew", command: "brew install --cask codex" },
+      {
+        id: "brew",
+        label: "brew",
+        command: "brew install --cask codex",
+        platforms: ["mac"]
+      },
+      {
+        id: "powershell",
+        label: "PowerShell",
+        command: "powershell -ExecutionPolicy ByPass -c \"irm https://chatgpt.com/codex/install.ps1 | iex\"",
+        platforms: ["windows"]
+      },
       // The merged ChatGPT/Codex desktop app (2026-07: the Codex app IS
       // the new unified ChatGPT app) — an app-only install is fully
       // supported (shared ~/.codex/, bundled-CLI fallback), so it's a
@@ -161,7 +200,8 @@ export const CLI_INSTALL: Record<
       {
         id: "app",
         label: "app",
-        command: "https://chatgpt.com/download"
+        command: "https://chatgpt.com/download",
+        platforms: ["mac", "windows"]
       }
     ]
   },
@@ -174,7 +214,12 @@ export const CLI_INSTALL: Record<
         label: "npm",
         command: "npm install -g @google/gemini-cli"
       },
-      { id: "brew", label: "brew", command: "brew install gemini-cli" },
+      {
+        id: "brew",
+        label: "brew",
+        command: "brew install gemini-cli",
+        platforms: ["mac", "linux"]
+      },
       { id: "npx", label: "npx", command: "npx @google/gemini-cli" }
     ]
   },
@@ -182,19 +227,49 @@ export const CLI_INSTALL: Record<
     binary: "opencode",
     url: "https://opencode.ai/docs",
     methods: [
-      { id: "npm", label: "npm", command: "npm i -g opencode-ai@latest" },
+      { id: "npm", label: "npm", command: "npm install -g opencode-ai" },
       {
         id: "curl",
         label: "curl",
-        command: "curl -fsSL https://opencode.ai/install | bash"
+        command: "curl -fsSL https://opencode.ai/install | bash",
+        platforms: ["mac", "linux"]
       },
       {
         id: "brew",
         label: "brew",
-        command: "brew install anomalyco/tap/opencode"
+        command: "brew install anomalyco/tap/opencode",
+        platforms: ["mac", "linux"]
       },
-      { id: "bun", label: "bun", command: "bun install -g opencode-ai" },
-      { id: "paru", label: "paru", command: "paru -S opencode-bin" }
+      {
+        id: "bun",
+        label: "bun",
+        command: "bun install -g opencode-ai",
+        platforms: ["mac", "linux"]
+      },
+      {
+        id: "paru",
+        label: "paru",
+        command: "paru -S opencode-bin",
+        platforms: ["linux"]
+      },
+      {
+        id: "chocolatey",
+        label: "Chocolatey",
+        command: "choco install opencode",
+        platforms: ["windows"]
+      },
+      {
+        id: "scoop",
+        label: "Scoop",
+        command: "scoop install opencode",
+        platforms: ["windows"]
+      },
+      {
+        id: "mise",
+        label: "Mise",
+        command: "mise use -g github:anomalyco/opencode",
+        platforms: ["windows"]
+      }
     ]
   },
   grok: {
@@ -204,7 +279,14 @@ export const CLI_INSTALL: Record<
       {
         id: "curl",
         label: "curl",
-        command: "curl -fsSL https://x.ai/cli/install.sh | bash"
+        command: "curl -fsSL https://x.ai/cli/install.sh | bash",
+        platforms: ["mac", "linux"]
+      },
+      {
+        id: "powershell",
+        label: "PowerShell",
+        command: "irm https://x.ai/cli/install.ps1 | iex",
+        platforms: ["windows"]
       }
     ]
   }
@@ -229,5 +311,3 @@ export const RAIL_ROUTE_ORDER: Route[] = [
   "stats",
   "settings"
 ];
-
-

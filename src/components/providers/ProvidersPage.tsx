@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { AlertTriangle, Check, Copy, Loader2, Plug, Plus, RadioTower, UserPlus } from "lucide-react";
+import { Check, Copy, Loader2, Plug, Plus, RadioTower, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -1155,7 +1155,11 @@ export function ProvidersPage({
       )}
 
       {view === "providers" &&
-        (!installed[app] && customProviders.length === 0 ? (
+        // A missing CLI always shows its install guide. Provider records and
+        // gateway bindings are configuration for an executable that cannot
+        // currently use them, so neither should leak through based on the
+        // presence (or deletion) of an unrelated custom-provider record.
+        (!installed[app] ? (
           <React.Suspense fallback={null}>
             <InstallGuide
               app={app}
@@ -1166,28 +1170,6 @@ export function ProvidersPage({
         ) : (
         <div className="flex-1 min-h-0 overflow-auto px-3 pb-0">
           <div className="flex flex-col gap-3">
-            {!installed[app] && (
-              <div className="flex items-center gap-2 rounded-md outline outline-1 outline-amber-500/30 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 px-3 py-2 text-base leading-relaxed">
-                <AlertTriangle className="size-4 shrink-0" />
-                <div className="flex-1">
-                  <strong className="font-medium">
-                    {CLI_APP_LABEL[app]} is not installed.
-                  </strong>{" "}
-                  Edit and delete still work, but providers can't be activated
-                  until it's installed.
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={rechecking}
-                  onClick={() => void handleRecheckInstall()}
-                  className="shrink-0"
-                >
-                  {rechecking ? "Checking…" : "Recheck"}
-                </Button>
-              </div>
-            )}
             {installed[app] && (
               <div className="flex flex-col">
                 <div className="relative z-10 rounded-xl bg-card">

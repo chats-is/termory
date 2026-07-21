@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/tooltip";
 import { BrandIcon } from "@/components/BrandIcon";
 import { CLI_APP_LABEL, CLI_APP_SOURCE_BADGE, CLI_INSTALL } from "@/constants";
-import { IS_MAC } from "@/lib/platform";
+import { IS_MAC, IS_WINDOWS } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { useT } from "@/i18n";
 import type { CliApp } from "@/types";
@@ -26,11 +26,15 @@ export function InstallGuide({
   const t = useT();
   const info = CLI_INSTALL[app];
   const label = CLI_APP_LABEL[app];
-  // Homebrew installs are macOS-only in this guide — hide the brew tab
-  // elsewhere instead of suggesting a command that won't exist.
+  const platform = IS_WINDOWS ? "windows" : IS_MAC ? "mac" : "linux";
+  // Each installer declares its supported OSes where needed: e.g. Homebrew
+  // is macOS-only, while Codex has distinct Unix and PowerShell installers.
   const methods = React.useMemo(
-    () => info.methods.filter((m) => m.id !== "brew" || IS_MAC),
-    [info.methods]
+    () =>
+      info.methods.filter(
+        (m) => !m.platforms || m.platforms.includes(platform)
+      ),
+    [info.methods, platform]
   );
   const [methodId, setMethodId] = React.useState(methods[0].id);
   const [copied, setCopied] = React.useState(false);
@@ -43,6 +47,7 @@ export function InstallGuide({
   }, [app, methods]);
 
   const method = methods.find((m) => m.id === methodId) ?? methods[0];
+  const isDownloadUrl = /^https?:\/\//.test(method.command);
 
   const copy = async () => {
     try {
@@ -101,18 +106,26 @@ export function InstallGuide({
                   variant="ghost"
                   size="icon-sm"
                   type="button"
-                  onClick={() => void copy()}
-                  aria-label={t("install.copyCommand")}
+                  onClick={() =>
+                    isDownloadUrl ? void openUrl(method.command) : void copy()
+                  }
+                  aria-label={
+                    isDownloadUrl ? t("install.openDownload") : t("install.copyCommand")
+                  }
                   className="size-7"
                 >
-                  {copied ? (
+                  {isDownloadUrl ? (
+                    <ExternalLink className="size-4" />
+                  ) : copied ? (
                     <Check className="size-4 text-green-600" />
                   ) : (
                     <Copy className="size-4" />
                   )}
                 </Button>
               </TooltipTrigger>
-              <TooltipContent side="top">{t("install.copyCommand")}</TooltipContent>
+              <TooltipContent side="top">
+                {isDownloadUrl ? t("install.openDownload") : t("install.copyCommand")}
+              </TooltipContent>
             </Tooltip>
           </div>
         </div>
