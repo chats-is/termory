@@ -21,10 +21,12 @@ Termory brings **Codex**, **Claude Code**, **Gemini CLI**, **OpenCode**, and **G
 ## Screenshots
 
 <div align="center">
-  <img src="docs/screenshots/gateways.png" alt="Termory — one AI gateway bound to every CLI" width="49%">
-  <img src="docs/screenshots/providers.png" alt="Termory — switch any CLI between API providers" width="49%">
-  <img src="docs/screenshots/stats.png" alt="Termory — usage stats across every tool" width="49%">
-  <img src="docs/screenshots/add-provider.png" alt="Termory — add a provider or gateway in seconds" width="49%">
+  <img src="docs/screenshots/providers.png" alt="Termory — switch any CLI between API providers" width="32%">
+  <img src="docs/screenshots/provider-switch.png" alt="Termory — switch a CLI's provider in a click" width="32%">
+  <img src="docs/screenshots/add-provider.png" alt="Termory — add a provider or gateway in seconds" width="32%">
+  <img src="docs/screenshots/add-gateways.png" alt="Termory — one AI gateway bound to every CLI" width="32%">
+  <img src="docs/screenshots/stats.png" alt="Termory — usage stats across every tool" width="32%">
+  <img src="docs/screenshots/settings.png" alt="Termory — settings and per-tool toggles" width="32%">
 </div>
 
 ## Features
