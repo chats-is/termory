@@ -21,8 +21,8 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 describe("InstallGuide", () => {
   it("shows the method tabs for a multi-method app", () => {
     render(<InstallGuide app="claude" rechecking={false} onRecheck={() => {}} />);
-    expect(screen.getByRole("button", { name: "Native" })).toBeTruthy();
-    if (IS_MAC) expect(screen.getByRole("button", { name: "Homebrew" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "curl" })).toBeTruthy();
+    if (IS_MAC) expect(screen.getByRole("button", { name: "brew" })).toBeTruthy();
   });
 
   it("shows the brew tab on macOS only", () => {

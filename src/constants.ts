@@ -119,31 +119,30 @@ export const CLI_INSTALL: Record<
     methods: [
       {
         id: "native",
-        label: "Native",
-        command: "curl -fsSL https://claude.ai/install.sh | bash",
-        platforms: ["mac", "linux"]
+        label: "curl",
+        command: "curl -fsSL https://claude.ai/install.sh | bash"
       },
       {
         id: "powershell",
-        label: "PowerShell",
+        label: "powershell",
         command: "irm https://claude.ai/install.ps1 | iex",
         platforms: ["windows"]
       },
       {
         id: "cmd",
-        label: "CMD",
+        label: "cmd",
         command: "curl -fsSL https://claude.ai/install.cmd -o install.cmd && install.cmd && del install.cmd",
         platforms: ["windows"]
       },
       {
         id: "brew",
-        label: "Homebrew",
+        label: "brew",
         command: "brew install --cask claude-code",
-        platforms: ["mac", "linux"]
+        platforms: ["mac"]
       },
       {
         id: "winget",
-        label: "WinGet",
+        label: "winget",
         command: "winget install Anthropic.ClaudeCode",
         platforms: ["windows"]
       }
@@ -159,8 +158,7 @@ export const CLI_INSTALL: Record<
       {
         id: "download",
         label: "download",
-        command: "https://claude.ai/download",
-        platforms: ["mac", "windows"]
+        command: "https://claude.ai/download"
       }
     ]
   },
@@ -178,8 +176,7 @@ export const CLI_INSTALL: Record<
       {
         id: "curl",
         label: "curl",
-        command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
-        platforms: ["mac", "linux"]
+        command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
       },
       {
         id: "brew",
@@ -189,7 +186,7 @@ export const CLI_INSTALL: Record<
       },
       {
         id: "powershell",
-        label: "PowerShell",
+        label: "powershell",
         command: "powershell -ExecutionPolicy ByPass -c \"irm https://chatgpt.com/codex/install.ps1 | iex\"",
         platforms: ["windows"]
       },
@@ -218,7 +215,7 @@ export const CLI_INSTALL: Record<
         id: "brew",
         label: "brew",
         command: "brew install gemini-cli",
-        platforms: ["mac", "linux"]
+        platforms: ["mac"]
       },
       { id: "npx", label: "npx", command: "npx @google/gemini-cli" }
     ]
@@ -227,48 +224,28 @@ export const CLI_INSTALL: Record<
     binary: "opencode",
     url: "https://opencode.ai/docs",
     methods: [
-      { id: "npm", label: "npm", command: "npm install -g opencode-ai" },
+      { id: "npm", label: "npm", command: "npm i -g opencode-ai" },
       {
         id: "curl",
         label: "curl",
-        command: "curl -fsSL https://opencode.ai/install | bash",
-        platforms: ["mac", "linux"]
+        command: "curl -fsSL https://opencode.ai/install | bash"
       },
       {
         id: "brew",
         label: "brew",
         command: "brew install anomalyco/tap/opencode",
-        platforms: ["mac", "linux"]
+        platforms: ["mac"]
       },
       {
         id: "bun",
         label: "bun",
-        command: "bun install -g opencode-ai",
-        platforms: ["mac", "linux"]
+        command: "bun add -g opencode-ai"
       },
       {
         id: "paru",
         label: "paru",
-        command: "paru -S opencode-bin",
+        command: "paru -S opencode",
         platforms: ["linux"]
-      },
-      {
-        id: "chocolatey",
-        label: "Chocolatey",
-        command: "choco install opencode",
-        platforms: ["windows"]
-      },
-      {
-        id: "scoop",
-        label: "Scoop",
-        command: "scoop install opencode",
-        platforms: ["windows"]
-      },
-      {
-        id: "mise",
-        label: "Mise",
-        command: "mise use -g github:anomalyco/opencode",
-        platforms: ["windows"]
       }
     ]
   },
@@ -279,12 +256,11 @@ export const CLI_INSTALL: Record<
       {
         id: "curl",
         label: "curl",
-        command: "curl -fsSL https://x.ai/cli/install.sh | bash",
-        platforms: ["mac", "linux"]
+        command: "curl -fsSL https://x.ai/cli/install.sh | bash"
       },
       {
         id: "powershell",
-        label: "PowerShell",
+        label: "powershell",
         command: "irm https://x.ai/cli/install.ps1 | iex",
         platforms: ["windows"]
       }
