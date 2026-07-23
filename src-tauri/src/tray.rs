@@ -1342,15 +1342,26 @@ fn build_menu(app: &AppHandle, installed: &InstallSnapshot) -> tauri::Result<Men
             shows_quota,
         });
     }
+    // Whether anything sits between "Open" and "Exit": the recent region
+    // (sessions / New Session) or any CLI provider submenu. Captured BEFORE
+    // cli_rows is moved into the cache below.
+    let has_middle = region_len > 0 || !cli_rows.is_empty();
+
     if let Ok(mut rows) = CLI_ROWS.lock() {
         *rows = cli_rows;
     }
 
-    let sep = PredefinedMenuItem::separator(app)?;
+    // Separate Exit from the content above ONLY when there IS content. With
+    // an empty middle (no tools AND no records) the "Open" separator and
+    // this one would be adjacent — a double rule between Open and Exit.
+    // Skipping it leaves a single "Open ─── Exit" divider.
+    if has_middle {
+        menu = menu.item(&PredefinedMenuItem::separator(app)?);
+    }
     // Plain MenuItem (not PredefinedMenuItem::quit) so macOS doesn't
     // attach the native quit-item icon — keeps the menu icon-free.
     let quit = MenuItemBuilder::with_id("tray:quit", &labels.exit).build(app)?;
-    menu = menu.item(&sep).item(&quit);
+    menu = menu.item(&quit);
 
     let menu = menu.build()?;
     // Record the root handle + region length so refresh_recent can
