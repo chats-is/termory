@@ -20,7 +20,10 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 
 describe("InstallGuide", () => {
   it("shows the method tabs for a multi-method app", () => {
-    render(<InstallGuide app="claude" rechecking={false} onRecheck={() => {}} />);
+    // opencode is multi-method on every OS (npm/curl/bun are cross-platform),
+    // so the tab bar shows regardless of the host platform.
+    render(<InstallGuide app="opencode" rechecking={false} onRecheck={() => {}} />);
+    expect(screen.getByRole("button", { name: "npm" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "curl" })).toBeTruthy();
     if (IS_MAC) expect(screen.getByRole("button", { name: "brew" })).toBeTruthy();
   });
@@ -43,7 +46,7 @@ describe("InstallGuide", () => {
     render(<InstallGuide app="codex" rechecking={false} onRecheck={() => {}} />);
 
     if (IS_WINDOWS) {
-      fireEvent.click(screen.getByRole("button", { name: "PowerShell" }));
+      fireEvent.click(screen.getByRole("button", { name: "powershell" }));
       expect(
         screen.getByText(
           'powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"'
@@ -64,34 +67,30 @@ describe("InstallGuide", () => {
     render(
       <InstallGuide app="claude-desktop" rechecking={false} onRecheck={() => {}} />
     );
-    // No tab button — the single method's URL only renders on supported OSes.
+    // Single method → no tab bar; the download URL renders on every OS.
     expect(screen.queryByRole("button", { name: "download" })).toBeNull();
-    if (IS_MAC || IS_WINDOWS) {
-      expect(screen.getByText("https://claude.ai/download")).toBeTruthy();
-    } else {
-      expect(screen.queryByText("https://claude.ai/download")).toBeNull();
-    }
+    expect(screen.getByText("https://claude.ai/download")).toBeTruthy();
   });
 
   it("opens an app download URL instead of copying it", () => {
     render(
       <InstallGuide app="claude-desktop" rechecking={false} onRecheck={() => {}} />
     );
-    if (IS_MAC || IS_WINDOWS) {
-      fireEvent.click(screen.getByRole("button", { name: "Open download page" }));
-      expect(openUrl).toHaveBeenCalledWith("https://claude.ai/download");
-    } else {
-      expect(screen.queryByRole("button", { name: "Open download page" })).toBeNull();
-    }
+    fireEvent.click(screen.getByRole("button", { name: "Open download page" }));
+    expect(openUrl).toHaveBeenCalledWith("https://claude.ai/download");
   });
 
   it("shows Grok's installer for the current platform", () => {
     render(<InstallGuide app="grok" rechecking={false} onRecheck={() => {}} />);
 
     if (IS_WINDOWS) {
+      // grok is multi-method on Windows now (curl + powershell); curl is the
+      // default tab, so switch to powershell to see its command.
+      fireEvent.click(screen.getByRole("button", { name: "powershell" }));
       expect(screen.getByText("irm https://x.ai/cli/install.ps1 | iex")).toBeTruthy();
       expect(screen.queryByText("curl -fsSL https://x.ai/cli/install.sh | bash")).toBeNull();
     } else {
+      // mac/linux: curl is the only method → shown directly, no tab bar.
       expect(screen.getByText("curl -fsSL https://x.ai/cli/install.sh | bash")).toBeTruthy();
       expect(screen.queryByText("irm https://x.ai/cli/install.ps1 | iex")).toBeNull();
     }
