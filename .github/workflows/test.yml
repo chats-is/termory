@@ -15,6 +15,9 @@ on:
       - "**.md"
       - "docs/**"
   workflow_dispatch:
+  # Lets the Release workflow reuse this exact suite as a pre-publish gate
+  # (single source of truth — no duplicated test steps in release.yml).
+  workflow_call:
 
 concurrency:
   group: test-${{ github.ref }}

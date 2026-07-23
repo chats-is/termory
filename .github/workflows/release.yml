@@ -10,11 +10,19 @@ permissions:
   contents: write
 
 jobs:
+  # Gate the ENTIRE release on the full test suite (frontend vitest + build
+  # AND the 3-OS Rust matrix, reused from test.yml). A red test aborts here
+  # — before any draft is created, anything is built, or anything is
+  # published — so a broken commit can never ship a release.
+  test:
+    uses: ./.github/workflows/test.yml
+
   # Create the draft release ONCE up front so the platform matrix below
   # uploads into a single release. (Previously every matrix job ran
   # tauri-action with releaseDraft + tagName, which raced and produced
   # duplicate drafts with the assets split across them.)
   create-release:
+    needs: test
     runs-on: ubuntu-latest
     outputs:
       release_id: ${{ steps.create.outputs.result }}
