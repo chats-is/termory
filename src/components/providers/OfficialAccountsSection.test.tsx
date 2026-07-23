@@ -9,7 +9,10 @@ import {
 import userEvent from "@testing-library/user-event";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { AccountsState, SubscriptionQuota } from "@/types";
-import { OfficialAccountsSection } from "./OfficialAccountsSection";
+import {
+  OfficialAccountsSection,
+  constraintTierName
+} from "./OfficialAccountsSection";
 
 class ResizeObserverStub {
   observe() {}
@@ -431,5 +434,46 @@ describe("OfficialAccountsSection — quota rings in active row", () => {
     await screen.findByText("John");
     // CSS `uppercase` is visual-only; the DOM contains the raw plan string.
     expect(screen.getByText("Max")).toBeInTheDocument();
+  });
+});
+
+describe("constraintTierName", () => {
+  it("returns null for no tiers or all-zero utilization", () => {
+    expect(constraintTierName([])).toBeNull();
+    expect(
+      constraintTierName([
+        { name: "five_hour", utilization: 0 },
+        { name: "seven_day", utilization: 0 }
+      ])
+    ).toBeNull();
+  });
+
+  it("picks the single window that's been used", () => {
+    expect(
+      constraintTierName([
+        { name: "five_hour", utilization: 0 },
+        { name: "seven_day", utilization: 12 }
+      ])
+    ).toBe("seven_day");
+  });
+
+  it("picks the highest-utilization window across several", () => {
+    // 5h nearly full but the weekly is the real constraint here.
+    expect(
+      constraintTierName([
+        { name: "five_hour", utilization: 40 },
+        { name: "seven_day", utilization: 88 },
+        { name: "Fable", utilization: 5 }
+      ])
+    ).toBe("seven_day");
+  });
+
+  it("keeps the first window on a tie", () => {
+    expect(
+      constraintTierName([
+        { name: "five_hour", utilization: 50 },
+        { name: "seven_day", utilization: 50 }
+      ])
+    ).toBe("five_hour");
   });
 });

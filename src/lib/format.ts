@@ -90,6 +90,40 @@ export function formatResetTime(
   return tz ? `${compact} (${tz})` : compact;
 }
 
+/** Human countdown until a future moment: `4 hr 42 min` / `42 min` /
+ * `2 days 3 hr` (localized units; the wrapping copy adds "in …"/"剩 …").
+ * Returns null when the moment is already past (a stale reset boundary) so
+ * callers can fall back to the absolute time. Minutes are shown only under a
+ * day so long horizons stay compact; a sub-minute remainder floors up to
+ * `1 min` rather than `0 min`. `t` is optional — English units without it,
+ * so the pure unit tests need no i18n provider. */
+export function formatCountdown(
+  date: Date,
+  now: Date = new Date(),
+  t?: Translate
+): string | null {
+  const diffMs = date.getTime() - now.getTime();
+  if (diffMs <= 0) return null;
+  let totalMin = Math.round(diffMs / 60_000);
+  const day = Math.floor(totalMin / 1440);
+  totalMin -= day * 1440;
+  const hr = Math.floor(totalMin / 60);
+  const min = totalMin - hr * 60;
+  const seg: string[] = [];
+  if (day > 0) {
+    const key = day === 1 ? "time.durDayOne" : "time.durDayOther";
+    seg.push(t ? t(key, { n: day }) : `${day} ${day === 1 ? "day" : "days"}`);
+  }
+  if (hr > 0) seg.push(t ? t("time.durHr", { n: hr }) : `${hr} hr`);
+  // Minutes only when under a day, so a multi-day horizon reads "2 days 3 hr".
+  if (min > 0 && day === 0) seg.push(t ? t("time.durMin", { n: min }) : `${min} min`);
+  if (seg.length === 0) {
+    const m = Math.max(1, min);
+    seg.push(t ? t("time.durMin", { n: m }) : `${m} min`);
+  }
+  return seg.join(" ");
+}
+
 /** The app's formatting locale, for ad-hoc `toLocale*` calls outside this module
  * (FreshnessFooter tooltip, stats hover labels) so they also follow the app
  * language instead of the OS locale. `undefined` = OS locale. */

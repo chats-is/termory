@@ -20,7 +20,7 @@ import {
   TooltipTrigger
 } from "@/components/ui/tooltip";
 import { QUOTA_CHANGED_EVENT } from "@/constants";
-import { formatCurrency, formatResetTime } from "@/lib/format";
+import { formatCountdown, formatCurrency, formatResetTime } from "@/lib/format";
 import { quotaLevel, type QuotaLevel } from "@/lib/quota-utils";
 import { cn } from "@/lib/utils";
 import { useT, type MessageKey } from "@/i18n";
@@ -83,6 +83,36 @@ function formatReset(iso: string, t: Translate, withZone: boolean): string | nul
   });
 }
 
+// "in 4 hr 42 min" / "in 6 days" — the live countdown appended after the
+// absolute reset time. Shown on ONE window only (see constraintTierName): the
+// one actually constraining usage, whether it resets in hours or days. null
+// once the boundary is past (stale data) so the caller keeps just the
+// absolute form.
+function formatResetCountdown(iso: string, t: Translate): string | null {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  if (date.getTime() <= Date.now()) return null;
+  const dur = formatCountdown(date, new Date(), t);
+  return dur ? t("providers.quotaResetsCountdown", { duration: dur }) : null;
+}
+
+// The single "constraint" window — the highest-utilization tier, i.e. the one
+// deciding when you can use more (whether that's hours OR days out). Only this
+// window shows the countdown; the rest keep just their absolute reset time.
+// Nothing is a constraint until something's been used, so this returns null
+// while every tier is still at 0.
+export function constraintTierName(
+  tiers: { name: string; utilization: number }[]
+): string | null {
+  let best: { name: string; u: number } | null = null;
+  for (const tier of tiers) {
+    if (tier.utilization > 0 && (!best || tier.utilization > best.u)) {
+      best = { name: tier.name, u: tier.utilization };
+    }
+  }
+  return best?.name ?? null;
+}
+
 const NOT_USED_TIERS = new Set(["seven_day_opus", "seven_day_sonnet"]);
 const RING_CLASS: Record<QuotaLevel, string> = {
   ok: "stroke-primary",
@@ -135,12 +165,16 @@ function QuotaTierItem({
   app,
   name,
   utilization,
-  resetsAt
+  resetsAt,
+  showCountdown
 }: {
   app: CliApp;
   name: string;
   utilization: number;
   resetsAt?: string;
+  // Only the constraint window (highest utilization) gets the countdown;
+  // the rest show just the absolute reset time.
+  showCountdown: boolean;
 }) {
   const t = useT();
   let labels = tierLabels(name, t);
@@ -157,8 +191,14 @@ function QuotaTierItem({
     utilization <= 0 && NOT_USED_TIERS.has(name)
       ? t("providers.quotaNotUsedYet", { model: labels.short })
       : null;
-  const subline = notUsed ?? (resetsAt ? formatReset(resetsAt, t, false) : null);
-  const hoverReset = notUsed ?? (resetsAt ? formatReset(resetsAt, t, true) : null);
+  // Absolute reset time (existing) with the live countdown appended:
+  // "Resets 11:09pm · in 4 hr 42 min".
+  const countdown =
+    showCountdown && resetsAt ? formatResetCountdown(resetsAt, t) : null;
+  const withCountdown = (base: string | null): string | null =>
+    base ? (countdown ? `${base} · ${countdown}` : base) : null;
+  const subline = notUsed ?? withCountdown(resetsAt ? formatReset(resetsAt, t, false) : null);
+  const hoverReset = notUsed ?? withCountdown(resetsAt ? formatReset(resetsAt, t, true) : null);
   const detail = [labels.full, `${Math.round(utilization)}%`, hoverReset]
     .filter(Boolean)
     .join(" · ");
@@ -523,15 +563,19 @@ export function OfficialAccountsSection({
                 {/* Gate on tiers, not success: a merged transient
                     failure keeps the last good tiers visible. */}
                 {(quota?.tiers.length ?? 0) > 0 &&
-                  quota!.tiers.map((tier) => (
-                    <QuotaTierItem
-                      key={tier.name}
-                      app={app}
-                      name={tier.name}
-                      utilization={tier.utilization}
-                      resetsAt={tier.resetsAt}
-                    />
-                  ))}
+                  (() => {
+                    const constraint = constraintTierName(quota!.tiers);
+                    return quota!.tiers.map((tier) => (
+                      <QuotaTierItem
+                        key={tier.name}
+                        app={app}
+                        name={tier.name}
+                        utilization={tier.utilization}
+                        resetsAt={tier.resetsAt}
+                        showCountdown={tier.name === constraint}
+                      />
+                    ));
+                  })()}
                 {quota?.extraUsage?.isEnabled && (
                   <ExtraUsageItem extra={quota.extraUsage} />
                 )}

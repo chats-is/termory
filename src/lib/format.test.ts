@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   formatCompact,
+  formatCountdown,
   formatDate,
   formatFullNumber,
   formatRelativeDate,
@@ -187,5 +188,54 @@ describe("formatFullNumber", () => {
     const big = formatFullNumber(1234);
     expect(big.replace(/[^\d]/g, "")).toBe("1234");
     expect(big).not.toBe("1234");
+  });
+});
+
+describe("formatCountdown", () => {
+  const now = new Date("2026-07-24T12:00:00Z");
+  const inMs = (ms: number) => new Date(now.getTime() + ms);
+  const MIN = 60_000;
+  const HR = 60 * MIN;
+
+  it("returns hours + minutes under a day", () => {
+    expect(formatCountdown(inMs(4 * HR + 42 * MIN), now)).toBe("4 hr 42 min");
+  });
+
+  it("returns minutes only when under an hour", () => {
+    expect(formatCountdown(inMs(42 * MIN), now)).toBe("42 min");
+  });
+
+  it("drops minutes on an exact hour", () => {
+    expect(formatCountdown(inMs(5 * HR), now)).toBe("5 hr");
+  });
+
+  it("floors a sub-minute remainder up to 1 min", () => {
+    expect(formatCountdown(inMs(20_000), now)).toBe("1 min");
+  });
+
+  it("uses days + hours past 24h, and hides minutes there", () => {
+    expect(formatCountdown(inMs(2 * 24 * HR + 3 * HR + 15 * MIN), now)).toBe(
+      "2 days 3 hr"
+    );
+    expect(formatCountdown(inMs(24 * HR), now)).toBe("1 day");
+    expect(formatCountdown(inMs(25 * HR), now)).toBe("1 day 1 hr");
+  });
+
+  it("returns null once the moment is in the past", () => {
+    expect(formatCountdown(inMs(-MIN), now)).toBeNull();
+    expect(formatCountdown(now, now)).toBeNull();
+  });
+
+  it("uses the translator's units when provided", () => {
+    const t = ((key: string, params?: Record<string, string | number>) => {
+      const dict: Record<string, string> = {
+        "time.durHr": "{n} 小时",
+        "time.durMin": "{n} 分钟"
+      };
+      return (dict[key] ?? key).replace("{n}", String(params?.n ?? ""));
+    }) as unknown as Parameters<typeof formatCountdown>[2];
+    expect(formatCountdown(inMs(4 * HR + 42 * MIN), now, t)).toBe(
+      "4 小时 42 分钟"
+    );
   });
 });
