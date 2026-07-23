@@ -123,6 +123,11 @@ export const CLI_INSTALL: Record<
         command: "curl -fsSL https://claude.ai/install.sh | bash"
       },
       {
+        id: "npm",
+        label: "npm",
+        command: "npm install -g @anthropic-ai/claude-code"
+      },
+      {
         id: "powershell",
         label: "powershell",
         command: "irm https://claude.ai/install.ps1 | iex",
