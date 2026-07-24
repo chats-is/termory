@@ -4,7 +4,7 @@ import {
   orderSources,
   visibleSources,
   blankProvider,
-  codexVersionText,
+  codexVersionSegments,
   hasUpdate,
   isClaudeSafeModelId,
   isManagedOptionKey,
@@ -468,7 +468,7 @@ describe("resolveActiveProviderId", () => {
   });
 });
 
-describe("codexVersionText", () => {
+describe("codexVersionSegments", () => {
   const installs = (
     cli: boolean,
     app: boolean,
@@ -477,33 +477,87 @@ describe("codexVersionText", () => {
 
   it("shows both forms labeled when CLI and app are installed", () => {
     expect(
-      codexVersionText("0.142.5", installs(true, true, "26.707.31428"), tEn)
-    ).toBe("v0.142.5 (CLI) · v26.707.31428 (App)");
+      codexVersionSegments("0.142.5", installs(true, true, "26.707.31428"), tEn)
+    ).toEqual([
+      { text: "v0.142.5", label: "CLI", latest: undefined },
+      { text: "v26.707.31428", label: "App", latest: null }
+    ]);
   });
 
   it("shows only the installed form", () => {
-    expect(codexVersionText("0.142.5", installs(true, false), tEn)).toBe(
-      "v0.142.5 (CLI)"
-    );
+    expect(codexVersionSegments("0.142.5", installs(true, false), tEn)).toEqual([
+      { text: "v0.142.5", label: "CLI", latest: undefined }
+    ]);
     expect(
-      codexVersionText(null, installs(false, true, "26.707.31428"), tEn)
-    ).toBe("v26.707.31428 (App)");
+      codexVersionSegments(null, installs(false, true, "26.707.31428"), tEn)
+    ).toEqual([{ text: "v26.707.31428", label: "App", latest: null }]);
   });
 
   it("dashes a form whose version probe failed", () => {
-    expect(codexVersionText(null, installs(true, false), tEn)).toBe("— (CLI)");
-    expect(codexVersionText(null, installs(false, true, null), tEn)).toBe(
-      "— (App)"
-    );
+    expect(codexVersionSegments(null, installs(true, false), tEn)).toEqual([
+      { text: "—", label: "CLI", latest: undefined }
+    ]);
+    expect(codexVersionSegments(null, installs(false, true, null), tEn)).toEqual([
+      { text: "—", label: "App", latest: null }
+    ]);
   });
 
-  it("returns null when neither is installed", () => {
-    expect(codexVersionText(null, installs(false, false), tEn)).toBeNull();
+  it("returns nothing when neither is installed", () => {
+    expect(codexVersionSegments(null, installs(false, false), tEn)).toEqual([]);
   });
 
   it("falls back to the plain CLI form before detection resolves", () => {
-    expect(codexVersionText("0.142.5", null, tEn)).toBe("v0.142.5");
-    expect(codexVersionText(null, null, tEn)).toBeNull();
+    expect(codexVersionSegments("0.142.5", null, tEn)).toEqual([
+      { text: "v0.142.5", latest: undefined }
+    ]);
+    expect(codexVersionSegments(null, null, tEn)).toEqual([]);
+  });
+
+  it("keeps the CLI and app updates on their own segments", () => {
+    // Separately versioned products: npm's @openai/codex publishes the
+    // CLI, the Sparkle appcast the desktop app. Crossing them would
+    // compare 0.142.5 against 26.721.30844.
+    const segments = codexVersionSegments(
+      "0.142.5",
+      installs(true, true, "26.707.31428"),
+      tEn,
+      "0.143.0",
+      "26.721.30844"
+    );
+    expect(segments[0]).toEqual({
+      text: "v0.142.5",
+      label: "CLI",
+      latest: "0.143.0"
+    });
+    expect(segments[1]).toEqual({
+      text: "v26.707.31428",
+      label: "App",
+      latest: "26.721.30844"
+    });
+  });
+
+  it("shows no app badge when the app is already current", () => {
+    const segments = codexVersionSegments(
+      "0.142.5",
+      installs(true, true, "26.721.30844"),
+      tEn,
+      null,
+      "26.721.30844"
+    );
+    expect(segments[1].latest).toBeNull();
+  });
+
+  it("shows no app badge when the installed app version is unknown", () => {
+    // No baseline to be behind of — the appcast's newest entry would
+    // otherwise always look like an available update.
+    const segments = codexVersionSegments(
+      "0.142.5",
+      installs(false, true, null),
+      tEn,
+      null,
+      "26.721.30844"
+    );
+    expect(segments[0]).toEqual({ text: "—", label: "App", latest: null });
   });
 });
 

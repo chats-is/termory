@@ -9,7 +9,7 @@ const baseProps = {
   app: "claude" as const,
   isInUse: false,
   settingDefault: false,
-  version: "v2.0.0",
+  versions: [{ text: "v2.0.0" }],
   onSetDefault: vi.fn()
 };
 
@@ -26,13 +26,13 @@ describe("ProviderOfficialCard", () => {
 
   it("shows a loading pulse while version is loading", () => {
     const { container } = render(
-      <ProviderOfficialCard {...baseProps} version={null} versionLoading />
+      <ProviderOfficialCard {...baseProps} versions={[]} versionLoading />
     );
     expect(container.querySelector(".animate-pulse")).toBeTruthy();
   });
 
-  it("shows '—' when version is null and not loading", () => {
-    render(<ProviderOfficialCard {...baseProps} version={null} />);
+  it("shows '—' when there are no version segments and not loading", () => {
+    render(<ProviderOfficialCard {...baseProps} versions={[]} />);
     expect(screen.getByText("—")).toBeInTheDocument();
   });
 
@@ -60,21 +60,51 @@ describe("ProviderOfficialCard", () => {
     expect(screen.getByRole("button", { name: "Activating…" })).toBeDisabled();
   });
 
-  it("shows the update badge with the new version when latestVersion is set", () => {
-    render(<ProviderOfficialCard {...baseProps} latestVersion="2.1.216" />);
+  it("shows the update badge with the new version when a segment has latest", () => {
+    render(
+      <ProviderOfficialCard
+        {...baseProps}
+        versions={[{ text: "v2.0.0", latest: "2.1.216" }]}
+      />
+    );
     expect(screen.getByText("New v2.1.216")).toBeInTheDocument();
   });
 
-  it("shows no update badge when latestVersion is null", () => {
-    render(<ProviderOfficialCard {...baseProps} latestVersion={null} />);
+  it("shows no update badge when no segment has latest", () => {
+    render(
+      <ProviderOfficialCard {...baseProps} versions={[{ text: "v2.0.0", latest: null }]} />
+    );
     expect(screen.queryByText(/^New /)).toBeNull();
   });
 
   it("hides the update badge while the version is still loading", () => {
     render(
-      <ProviderOfficialCard {...baseProps} versionLoading latestVersion="2.1.216" />
+      <ProviderOfficialCard
+        {...baseProps}
+        versionLoading
+        versions={[{ text: "v2.0.0", latest: "2.1.216" }]}
+      />
     );
     expect(screen.queryByText("New v2.1.216")).toBeNull();
+  });
+
+  it("puts the badge after ITS OWN segment, not at the end of the line", () => {
+    // Codex's shape: the npm check is the CLI's, so a badge trailing the
+    // whole line would read as the desktop App being out of date.
+    const { container } = render(
+      <ProviderOfficialCard
+        {...baseProps}
+        app="codex"
+        versions={[
+          { text: "v0.142.5", label: "CLI", latest: "0.143.0" },
+          { text: "v26.707.31428", label: "App" }
+        ]}
+      />
+    );
+    const line = container.querySelector("p")!;
+    const text = line.textContent ?? "";
+    expect(text.indexOf("New v0.143.0")).toBeGreaterThan(text.indexOf("(CLI)"));
+    expect(text.indexOf("New v0.143.0")).toBeLessThan(text.indexOf("(App)"));
   });
 
   it("renders the actions slot before the Activate button", () => {

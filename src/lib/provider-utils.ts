@@ -71,31 +71,69 @@ export function visibleSources(
   );
 }
 
-/** Compose the Codex Official card's version line from its two install
- * forms — "v0.142.5 (CLI) · v26.707.31428 (App)" (whichever are
- * present). Falls back to the plain CLI form while
- * `detect_codex_installs` hasn't resolved yet; null when neither is
- * installed. */
-export function codexVersionText(
+/** One installed component on an Official card's version line.
+ *
+ * Codex is the reason this is a LIST rather than a string: it has two
+ * independently-versioned install forms (the CLI and the desktop app),
+ * and an update applies to ONE of them. Carrying `latest` per segment
+ * lets the card put the badge directly after the component it refers
+ * to — rendering it after the whole joined line made a CLI update read
+ * as an App update. */
+export type VersionSegment = {
+  /** Preformatted version, e.g. `v0.142.5`, or `—` when the probe failed. */
+  text: string;
+  /** Component name shown in parens (`CLI` / `App`). Omitted for
+   *  single-form apps, where there's nothing to disambiguate. */
+  label?: string;
+  /** Newer available version (bare, e.g. `0.143.0`) for THIS component,
+   *  else null/absent — drives the badge that follows this segment. */
+  latest?: string | null;
+};
+
+/** Compose the Codex Official card's version segments from its two
+ * install forms — `v0.144.6 (CLI)` + `v26.715.31925 (App)` (whichever
+ * are present).
+ *
+ * The two updates are tracked SEPARATELY because these are separately
+ * versioned products: `cliLatest` comes from npm's `@openai/codex`
+ * (which publishes the CLI only), `appLatest` from the desktop app's
+ * Sparkle appcast. Each lands on its own segment — crossing them would
+ * compare `0.144.6` against `26.721.30844`.
+ *
+ * Falls back to the plain CLI form while `detect_codex_installs` hasn't
+ * resolved yet; empty when neither form is installed. */
+export function codexVersionSegments(
   cliVersion: string | null | undefined,
   installs: CodexInstalls | null,
-  t: Translate
-): string | null {
-  if (!installs) return cliVersion ? `v${cliVersion}` : null;
-  const parts: string[] = [];
+  t: Translate,
+  cliLatest?: string | null,
+  appLatest?: string | null
+): VersionSegment[] {
+  if (!installs) {
+    return cliVersion ? [{ text: `v${cliVersion}`, latest: cliLatest }] : [];
+  }
+  const segments: VersionSegment[] = [];
   if (installs.cli) {
-    parts.push(
-      `${cliVersion ? `v${cliVersion}` : "—"} (${t("providers.codexVersionCli")})`
-    );
+    segments.push({
+      text: cliVersion ? `v${cliVersion}` : "—",
+      label: t("providers.codexVersionCli"),
+      latest: cliLatest
+    });
   }
   if (installs.app) {
-    parts.push(
-      `${installs.appVersion ? `v${installs.appVersion}` : "—"} (${t(
-        "providers.codexVersionApp"
-      )})`
-    );
+    segments.push({
+      text: installs.appVersion ? `v${installs.appVersion}` : "—",
+      label: t("providers.codexVersionApp"),
+      // Gated on knowing the INSTALLED version too — with no baseline
+      // there is nothing to be behind of, and the appcast's newest entry
+      // would otherwise always look like an available update.
+      latest:
+        installs.appVersion && hasUpdate(installs.appVersion, appLatest)
+          ? appLatest
+          : null
+    });
   }
-  return parts.length > 0 ? parts.join(" · ") : null;
+  return segments;
 }
 
 /**

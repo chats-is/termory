@@ -29,7 +29,7 @@ import {
 } from "@/constants";
 import {
   blankProvider,
-  codexVersionText,
+  codexVersionSegments,
   hasUpdate,
   isSourceEnabled,
   providerFromBinding,
@@ -110,6 +110,13 @@ function cliVersionRecord(
   ) as Record<CliApp, string | null>;
 }
 
+/** Key the Codex DESKTOP app's latest version rides under in the
+ * `detect_latest_versions_cmd` map — deliberately not a `CliApp` (it's a
+ * second product under the codex tab, versioned independently of the npm
+ * CLI), so `cliVersionRecord` passes over it and we read it separately.
+ * Mirrors `updates::CODEX_APP_KEY`. */
+const CODEX_APP_LATEST_KEY = "codex-app";
+
 let cachedInstalled: Record<CliApp, boolean> = {
   claude: true,
   // Optimistic default (like the other CLIs) — its tab always shows; detect
@@ -142,6 +149,7 @@ let cachedLatestVersions: Record<CliApp, string | null> = {
   opencode: null,
   grok: null
 };
+let cachedCodexAppLatest: string | null = null;
 // Codex's two install forms (CLI binary vs the merged ChatGPT/Codex
 // desktop app). Null until the first `detect_codex_installs` resolves;
 // cached like the maps above so route remounts don't flash the
@@ -284,6 +292,9 @@ export function ProvidersPage({
   );
   const [latestVersions, setLatestVersions] =
     React.useState<Record<CliApp, string | null>>(cachedLatestVersions);
+  const [codexAppLatest, setCodexAppLatest] = React.useState<string | null>(
+    cachedCodexAppLatest
+  );
 
   // Mirror state into the module-level cache on every change so the
   // next mount has the fresh truth as its initial value.
@@ -302,6 +313,9 @@ export function ProvidersPage({
   React.useEffect(() => {
     cachedLatestVersions = latestVersions;
   }, [latestVersions]);
+  React.useEffect(() => {
+    cachedCodexAppLatest = codexAppLatest;
+  }, [codexAppLatest]);
   const [toggling, setToggling] = React.useState<string | null>(null);
   const [testing, setTesting] = React.useState<string | null>(null);
   const [settingDefault, setSettingDefault] = React.useState<string | null>(null);
@@ -495,6 +509,7 @@ export function ProvidersPage({
         { force }
       );
       setLatestVersions(cliVersionRecord(map));
+      setCodexAppLatest(map[CODEX_APP_LATEST_KEY] ?? null);
     } catch {
       /* network best-effort — leave previous state on error */
     }
@@ -1235,21 +1250,28 @@ export function ProvidersPage({
                     app={app}
                     isInUse={activeState?.kind === "official"}
                     settingDefault={settingDefault === "__official__"}
-                    version={
-                      app === "codex"
-                        ? codexVersionText(versions.codex, codexInstalls, t)
-                        : versions[app]
-                          ? `v${versions[app]}`
-                          : null
-                    }
-                    versionLoading={versionsLoading}
-                    latestVersion={
-                      // Codex compares the CLI version (npm); the app
-                      // version line is unaffected.
-                      hasUpdate(versions[app], latestVersions[app])
+                    versions={(() => {
+                      // `versions[app]` is the CLI version for every app
+                      // (Codex's desktop-app version rides in
+                      // `codexInstalls`), so the update check is the same
+                      // either way — it just lands on Codex's CLI segment.
+                      const latest = hasUpdate(versions[app], latestVersions[app])
                         ? latestVersions[app]
-                        : null
-                    }
+                        : null;
+                      if (app === "codex") {
+                        return codexVersionSegments(
+                          versions.codex,
+                          codexInstalls,
+                          t,
+                          latest,
+                          codexAppLatest
+                        );
+                      }
+                      return versions[app]
+                        ? [{ text: `v${versions[app]}`, latest }]
+                        : [];
+                    })()}
+                    versionLoading={versionsLoading}
                     actions={app === "codex" ? (
                       codexLoggingIn ? (
                         <div className="flex items-center gap-2 shrink-0">

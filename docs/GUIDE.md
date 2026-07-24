@@ -34,7 +34,7 @@ Two cross-cutting topics — **[Privacy & your data](#privacy--your-data)** and 
 
 Click **Official** to go back to your native login at any time.
 
-Two app-scoping notes: switching **Codex** applies to the Codex CLI and the Codex desktop app together — since mid-2026 that app is the unified **ChatGPT** desktop app (Chat / Work / Codex), and the two share one config and login. Either install alone is enough: the Codex tab works with just the desktop app, and the Official card's version line shows what's present (e.g. `v0.142.5 (CLI) · v26.707.31428 (App)`). **Claude Desktop** is its own tab with its own provider library — managed entirely separately from Claude Code.
+Two app-scoping notes: switching **Codex** applies to the Codex CLI and the Codex desktop app together — since mid-2026 that app is the unified **ChatGPT** desktop app (Chat / Work / Codex), and the two share one config and login. Either install alone is enough: the Codex tab works with just the desktop app, and the Official card's version line shows what's present (e.g. `v0.144.6 (CLI) · v26.715.31925 (App)`), with a "new version" badge on whichever of the two — CLI or app — has an update. **Claude Desktop** is its own tab with its own provider library — managed entirely separately from Claude Code.
 
 ### Adding or editing a provider
 

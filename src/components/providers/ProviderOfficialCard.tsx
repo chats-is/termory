@@ -12,29 +12,27 @@ import { BrandIcon } from "@/components/BrandIcon";
 import { CLI_APP_SOURCE_BADGE } from "@/constants";
 import { cn } from "@/lib/utils";
 import { useT } from "@/i18n";
+import type { VersionSegment } from "@/lib/provider-utils";
 import type { CliApp } from "@/types";
 
 export function ProviderOfficialCard({
   app,
   isInUse,
   settingDefault,
-  version,
+  versions,
   versionLoading = false,
-  latestVersion,
   actions,
   onSetDefault
 }: {
   app: CliApp;
   isInUse: boolean;
   settingDefault: boolean;
-  /** Preformatted version text (e.g. "v2.0.0", or Codex's composed
-   *  "v0.142.5 (CLI) · v26.707.31428 (App)") — rendered verbatim. */
-  version?: string | null;
+  /** One entry per installed component, joined with " · ". Usually a
+   *  single unlabeled version; Codex has two (CLI + App). Each carries
+   *  its own `latest`, so the update badge renders after the component
+   *  it actually applies to. Empty = nothing installed/known ("—"). */
+  versions?: VersionSegment[];
   versionLoading?: boolean;
-  /** The newer available version (bare, e.g. "2.1.216") when the installed
-   *  version is behind — drives the update badge. Null/absent = up to date
-   *  or unknown, no badge. */
-  latestVersion?: string | null;
   /** Optional slot rendered between the info block and the Activate button. */
   actions?: React.ReactNode;
   onSetDefault: () => void;
@@ -62,34 +60,44 @@ export function ProviderOfficialCard({
               </Badge>
             )}
           </div>
-          <p className="text-xs text-muted-foreground leading-snug flex items-center gap-1.5">
-            <span>
-              Version{" "}
-              {versionLoading ? (
-                <span className="inline-block w-12 h-3 align-middle rounded bg-muted-foreground/15 animate-pulse" />
-              ) : version ? (
-                <span className="font-mono">{version}</span>
-              ) : (
-                <span className="font-mono">—</span>
-              )}
-            </span>
-            {!versionLoading && latestVersion && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Badge
-                    variant="outline"
-                    className="gap-0.5 px-1.5 py-0 border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400"
-                  >
-                    <ArrowUp className="size-3" />
-                    <span className="font-mono">
-                      {t("providers.updateAvailable", { version: `v${latestVersion}` })}
-                    </span>
-                  </Badge>
-                </TooltipTrigger>
-                <TooltipContent side="top">
-                  {t("providers.updateAvailableHint")}
-                </TooltipContent>
-              </Tooltip>
+          <p className="text-xs text-muted-foreground leading-snug flex items-center gap-1.5 flex-wrap">
+            <span>Version</span>
+            {versionLoading ? (
+              <span className="inline-block w-12 h-3 align-middle rounded bg-muted-foreground/15 animate-pulse" />
+            ) : versions && versions.length > 0 ? (
+              versions.map((seg, i) => (
+                <React.Fragment key={`${seg.label ?? ""}-${seg.text}`}>
+                  {i > 0 && <span aria-hidden>·</span>}
+                  <span className="font-mono">
+                    {seg.text}
+                    {seg.label ? ` (${seg.label})` : ""}
+                  </span>
+                  {/* Badge belongs to THIS component, not the line — a
+                      Codex CLI update must not read as an App update. */}
+                  {seg.latest && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Badge
+                          variant="outline"
+                          className="gap-0.5 px-1.5 py-0 border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+                        >
+                          <ArrowUp className="size-3" />
+                          <span className="font-mono">
+                            {t("providers.updateAvailable", {
+                              version: `v${seg.latest}`
+                            })}
+                          </span>
+                        </Badge>
+                      </TooltipTrigger>
+                      <TooltipContent side="top">
+                        {t("providers.updateAvailableHint")}
+                      </TooltipContent>
+                    </Tooltip>
+                  )}
+                </React.Fragment>
+              ))
+            ) : (
+              <span className="font-mono">—</span>
             )}
           </p>
         </div>

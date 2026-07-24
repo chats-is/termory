@@ -565,11 +565,19 @@ async fn detect_codex_installs() -> Result<providers::CodexInstalls, String> {
 async fn detect_latest_versions_cmd(
     force: Option<bool>,
 ) -> Result<std::collections::HashMap<String, Option<String>>, String> {
-    let map = updates::detect_latest_versions(force.unwrap_or(false)).await;
-    Ok(map
+    let latest = updates::detect_latest_versions(force.unwrap_or(false)).await;
+    let mut out: std::collections::HashMap<String, Option<String>> = latest
+        .clis
         .into_iter()
         .map(|(app, version)| (cli_app_key(app).to_string(), version))
-        .collect())
+        .collect();
+    // The Codex DESKTOP app rides in the same map under a key that is
+    // deliberately NOT a CliApp: it's a second product under the codex
+    // tab, versioned independently of the npm CLI. The frontend's
+    // `cliVersionRecord` only picks CliApp keys, so this one passes
+    // through it untouched and is read separately.
+    out.insert(updates::CODEX_APP_KEY.to_string(), latest.codex_app);
+    Ok(out)
 }
 
 fn cli_app_key(app: CliApp) -> &'static str {
