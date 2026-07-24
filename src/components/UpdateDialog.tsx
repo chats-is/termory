@@ -1,7 +1,7 @@
 import React from "react";
 import { relaunch } from "@tauri-apps/plugin-process";
 import type { Update } from "@tauri-apps/plugin-updater";
-import { Download, Loader2, Sparkles } from "lucide-react";
+import { Loader2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { useT } from "@/i18n";
+import { MessageBody } from "@/components/MessageBody";
 
 export function UpdateDialog({
   update,
@@ -24,16 +25,17 @@ export function UpdateDialog({
   onClose: () => void;
 }) {
   const t = useT();
-  const [installing, setInstalling] = React.useState(false);
+  const [phase, setPhase] = React.useState<"downloading" | "installing" | null>(null);
   const [progress, setProgress] = React.useState<{ downloaded: number; total: number | null } | null>(
     null
   );
 
+  const busy = phase !== null;
   const open = update !== null;
 
   const handleInstall = async () => {
     if (!update) return;
-    setInstalling(true);
+    setPhase("downloading");
     setProgress({ downloaded: 0, total: null });
     try {
       await update.downloadAndInstall((event) => {
@@ -46,20 +48,22 @@ export function UpdateDialog({
               : null
           );
         } else if (event.event === "Finished") {
+          // Download complete — the updater now applies the bundle.
           setProgress((prev) => (prev ? { ...prev, downloaded: prev.total ?? prev.downloaded } : null));
+          setPhase("installing");
         }
       });
       toast.success(t("update.installed"));
       await relaunch();
     } catch (err) {
       toast.error(t("update.installFailed", { error: String(err) }));
-      setInstalling(false);
+      setPhase(null);
       setProgress(null);
     }
   };
 
   const handleOpenChange = (next: boolean) => {
-    if (!next && !installing) onClose();
+    if (!next && !busy) onClose();
   };
 
   const progressPct = (() => {
@@ -71,7 +75,7 @@ export function UpdateDialog({
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
-        showCloseButton={!installing}
+        showCloseButton={!busy}
         className="sm:max-w-md"
         onPointerDownOutside={(event) => event.preventDefault()}
         onEscapeKeyDown={(event) => event.preventDefault()}
@@ -91,16 +95,18 @@ export function UpdateDialog({
         </DialogHeader>
 
         {update?.body && (
-          <div className="text-xs text-muted-foreground leading-relaxed whitespace-pre-wrap max-h-56 overflow-auto rounded-md outline outline-1 outline-foreground/5 p-3">
-            {update.body}
+          <div className="text-xs text-muted-foreground leading-relaxed max-h-56 overflow-auto rounded-md outline outline-1 outline-foreground/5 p-3">
+            <MessageBody text={update.body} className="[&_h3]:mt-3 [&_h3]:mb-1 [&_h3:first-child]:mt-0 [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:text-foreground [&_ul]:my-1 [&_li]:ml-3" />
           </div>
         )}
 
-        {installing && (
+        {busy && (
           <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>{t("update.downloading")}</span>
-              {progressPct != null && <span className="tabular-nums">{progressPct}%</span>}
+              <span>{phase === "installing" ? t("update.installing") : t("update.downloading")}</span>
+              {phase === "downloading" && progressPct != null && (
+                <span className="tabular-nums">{progressPct}%</span>
+              )}
             </div>
             <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
               {/* Always start at 0% and only grow — never a fake mid-track
@@ -119,20 +125,20 @@ export function UpdateDialog({
           <Button
             type="button"
             variant="outline"
-            disabled={installing}
+            disabled={busy}
             onClick={onClose}
           >{t("update.later")}</Button>
           <Button
             type="button"
-            disabled={installing}
+            disabled={busy}
             onClick={() => void handleInstall()}
           >
-            {installing ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Download className="size-4" />
-            )}
-            {installing ? t("update.installing") : t("update.installNow")}
+            {busy && <Loader2 className="size-4 animate-spin" />}
+            {phase === "downloading"
+              ? t("update.downloading")
+              : phase === "installing"
+                ? t("update.installing")
+                : t("update.downloadInstall")}
           </Button>
         </DialogFooter>
       </DialogContent>

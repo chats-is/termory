@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
-# Generate professional GitHub release notes for a tag: a changelog grouped
-# by conventional-commit type (feat/fix/…), plus download / install / updater
-# sections and a Full Changelog compare link.
+# Generate release notes for a tag.
 #
-# Usage: release-notes.sh <tag>     # prints markdown to stdout
+# Two outputs, one source of truth for the changelog:
+#   release-notes.sh <tag>              # FULL notes for the GitHub Release page
+#                                       # (changelog + downloads/install/updater)
+#   release-notes.sh <tag> --changelog  # changelog ONLY — fed to latest.json's
+#                                       # `notes`, rendered in the in-app
+#                                       # UpdateDialog (no download tables /
+#                                       # xattr steps / commit-hash list)
+#
 # Needs full history + tags (checkout with fetch-depth: 0).
 set -euo pipefail
 
-TAG="${1:?usage: release-notes.sh <tag>}"
+TAG="${1:?usage: release-notes.sh <tag> [--changelog]}"
+MODE="${2:-full}"
 REPO="${GITHUB_REPOSITORY:-chats-is/termory}"
 # Nearest tag reachable from the tag's parent = the previous release.
 PREV="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
@@ -27,15 +33,34 @@ emit() {
   fi
 }
 
-emit feat     '✨ Features'
-emit fix      '🐛 Bug Fixes'
-emit perf     '⚡ Performance'
-emit refactor '♻️ Refactoring'
-emit docs     '📝 Documentation'
-emit test     '✅ Tests'
-emit build    '📦 Packaging'
-emit ci       '🔧 CI'
-emit chore    '🧹 Maintenance' # `chore(release): bump` filtered out inside emit()
+# The changelog — the ONLY part shared by both outputs.
+emit_changelog() {
+  emit feat     '✨ Features'
+  emit fix      '🐛 Bug Fixes'
+  emit perf     '⚡ Performance'
+  emit refactor '♻️ Refactoring'
+  emit docs     '📝 Documentation'
+  emit test     '✅ Tests'
+  emit build    '📦 Packaging'
+  emit ci       '🔧 CI'
+  emit chore    '🧹 Maintenance' # `chore(release): bump` filtered out inside emit()
+}
+
+# --changelog: just the changelog, for the in-app updater dialog. Command
+# substitution already strips trailing blank lines; empty (no conventional
+# commits) falls back to a short line so the dialog still shows something.
+if [ "$MODE" = "--changelog" ]; then
+  body="$(emit_changelog)"
+  if [ -n "$body" ]; then
+    printf '%s\n' "$body"
+  else
+    printf 'Maintenance and internal improvements.\n'
+  fi
+  exit 0
+fi
+
+# Default: FULL notes for the GitHub Release page.
+emit_changelog
 
 cat <<'MD'
 ### 📦 Downloads

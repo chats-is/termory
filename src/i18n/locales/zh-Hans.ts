@@ -318,7 +318,7 @@ export const zhHans: Record<MessageKey, string> = {
   "update.downloading": "下载中…",
   "update.later": "稍后",
   "update.installing": "安装中…",
-  "update.installNow": "立即安装",
+  "update.downloadInstall": "更新",
   "update.installed": "更新已安装。正在重启…",
   "update.installFailed": "安装失败:{error}",
   "providers.noModesResponded": "该 URL 没有响应任何受支持的 API 模式。",

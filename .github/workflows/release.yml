@@ -26,6 +26,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release_id: ${{ steps.create.outputs.result }}
+      # The same changelog text, exposed so the build matrix can hand it to
+      # tauri-action's `releaseBody` — that's what lands in latest.json's
+      # `notes`, which the in-app UpdateDialog renders. Without it `notes` is
+      # "" and the dialog shows no changelog.
+      release_body: ${{ steps.notes.outputs.body }}
     steps:
       # Full history + tags so release-notes.sh can diff against the previous
       # tag and build the conventional-commit changelog.
@@ -34,7 +39,20 @@ jobs:
           fetch-depth: 0
 
       - name: Generate release notes
-        run: bash .github/release-notes.sh "${GITHUB_REF#refs/tags/}" > release-notes.md
+        id: notes
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          # Full notes → the GitHub Release page body.
+          bash .github/release-notes.sh "$tag" > release-notes.md
+          # Changelog-only → latest.json's `notes` (the in-app UpdateDialog).
+          # Exposed as a multiline job output via a heredoc delimiter (a random
+          # marker so the changelog body can't collide with it).
+          {
+            delim="RELEASE_NOTES_$RANDOM$RANDOM"
+            echo "body<<$delim"
+            bash .github/release-notes.sh "$tag" --changelog
+            echo "$delim"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create draft release
         uses: actions/github-script@v8
@@ -137,6 +155,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
+          # Populates latest.json's `notes` (the in-app changelog); harmless
+          # for the platform installers.
+          releaseBody: ${{ needs.create-release.outputs.release_body }}
           args: ${{ matrix.args }}
 
       # Same step again (GitHub Actions has no YAML anchors and `uses:`
@@ -153,6 +174,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
+          releaseBody: ${{ needs.create-release.outputs.release_body }}
           args: ${{ matrix.args }}
 
       # Re-raise non-macOS failures swallowed by continue-on-error (the

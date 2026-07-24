@@ -318,7 +318,7 @@ export const zhHant: Record<MessageKey, string> = {
   "update.downloading": "下載中…",
   "update.later": "稍後",
   "update.installing": "安裝中…",
-  "update.installNow": "立即安裝",
+  "update.downloadInstall": "更新",
   "update.installed": "更新已安裝。正在重新啟動…",
   "update.installFailed": "安裝失敗:{error}",
   "providers.noModesResponded": "該 URL 沒有回應任何支援的 API 模式。",

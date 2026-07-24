@@ -332,7 +332,7 @@ export const en = {
   "update.downloading": "Downloading…",
   "update.later": "Later",
   "update.installing": "Installing…",
-  "update.installNow": "Install now",
+  "update.downloadInstall": "Update",
   "update.installed": "Update installed. Restarting…",
   "update.installFailed": "Install failed: {error}",
   "providers.noModesResponded": "No supported API modes responded at this URL.",
