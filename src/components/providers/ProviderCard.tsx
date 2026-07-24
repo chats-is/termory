@@ -140,6 +140,7 @@ export function ProviderCard({
             {(provider.baseUrl ||
               provider.apiKey ||
               provider.model ||
+              provider.apiBackend ||
               provider.app === "opencode") && (
               <dl className="grid grid-cols-[max-content_1fr] gap-x-3.5 gap-y-1 text-xs">
                 {provider.baseUrl && (
@@ -162,6 +163,14 @@ export function ProviderCard({
                         : t("providers.model")}
                     </dt>
                     <dd className="font-mono break-all">{provider.model}</dd>
+                  </>
+                )}
+                {/* Grok wire API — shown only when explicitly chosen (raw
+                    config value); a default (unset) apiBackend is omitted. */}
+                {provider.apiBackend && (
+                  <>
+                    <dt className="text-muted-foreground">{t("providers.apiBackend")}</dt>
+                    <dd className="font-mono break-all">{provider.apiBackend}</dd>
                   </>
                 )}
                 {provider.app === "opencode" && (
