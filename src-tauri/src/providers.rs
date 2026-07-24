@@ -1657,9 +1657,21 @@ pub fn delete_provider_traces(provider: &Provider) -> Result<(), Box<dyn Error>>
         // when the provider being removed is the one in use.
         CliApp::Claude | CliApp::Codex | CliApp::Gemini | CliApp::ClaudeDesktop => Ok(()),
         CliApp::Opencode => delete_opencode_provider_entry(provider),
-        // Single-slot — deleting a LIBRARY entry is a no-op on live config
-        // (the delete flow deactivates separately when it was in use).
-        CliApp::Grok => Ok(()),
+        // Multi-slot (like OpenCode): remove only this provider's entries +
+        // clear the default if it pointed here; sibling slots survive.
+        CliApp::Grok => delete_grok_provider_entry(provider),
+    }
+}
+
+/// Promote a multi-slot provider to its CLI's startup default. OpenCode and
+/// Grok are the multi-slot CLIs (separate enable vs. set-default steps); the
+/// single-slot CLIs set their default implicitly on activate, so this only
+/// dispatches those two.
+pub fn set_default(p: &Provider) -> Result<(), Box<dyn Error>> {
+    match p.app {
+        CliApp::Opencode => set_opencode_default(p),
+        CliApp::Grok => set_grok_default(p),
+        other => Err(format!("set_default is only for multi-slot CLIs, not {other:?}").into()),
     }
 }
 
@@ -2262,27 +2274,26 @@ fn grok_entry_key(provider_id: &str, model_id: &str) -> String {
     format!("{provider_id}-{model_id}")
 }
 
-/// True when `entry`'s api_key equals one of the library providers' keys —
-/// the only values Termory ever writes (ownership by VALUE), so a user's own
-/// `[model.*]` entry is never mistaken for ours.
-fn grok_entry_is_ours(entry: &Item, all: &[Provider]) -> bool {
-    entry
-        .get("api_key")
-        .and_then(|i| i.as_str())
-        .is_some_and(|k| all.iter().any(|p| !p.api_key.is_empty() && p.api_key == k))
+/// True when `key` is a `[model.<key>]` entry Termory wrote for provider
+/// `pid` — entries are keyed `<pid>-<model-id>`, so ownership is the
+/// `<pid>-` prefix. Provider ids are stable uuids, so a different provider's
+/// id being a prefix of this one is not a practical collision (same
+/// assumption OpenCode makes with its `<termory-id>/` model ref).
+fn grok_key_owned_by(key: &str, pid: &str) -> bool {
+    key.starts_with(&format!("{pid}-"))
 }
 
-/// Remove every `[model.<key>]` entry Termory wrote (ownership by api_key
-/// value), returning the removed keys so deactivate can drop a
-/// `models.default` that pointed at one. Grok is SINGLE-SLOT (one active
-/// provider), so activate/deactivate sweep ALL of Termory's entries.
-fn strip_grok_entries(doc: &mut DocumentMut, all: &[Provider]) -> Vec<String> {
+/// Remove every `[model.<key>]` entry belonging to provider `pid`
+/// (prefix-owned), returning the removed keys. Multi-slot: only THIS
+/// provider's entries are touched — siblings coexist. Also catches stale
+/// entries left by a previous (shorter) model list on re-activate.
+fn remove_grok_provider_entries(doc: &mut DocumentMut, pid: &str) -> Vec<String> {
     let Some(entries) = doc.get_mut("model").and_then(|i| i.as_table_mut()) else {
         return Vec::new();
     };
     let ours: Vec<String> = entries
         .iter()
-        .filter(|(_, item)| grok_entry_is_ours(item, all))
+        .filter(|(k, _)| grok_key_owned_by(k, pid))
         .map(|(k, _)| k.to_string())
         .collect();
     for key in &ours {
@@ -2294,12 +2305,30 @@ fn strip_grok_entries(doc: &mut DocumentMut, all: &[Provider]) -> Vec<String> {
     ours
 }
 
-/// Activate a grok provider: sweep Termory's previous entries (single-slot),
-/// then write THIS provider's `models` list — one flat `[model."<pid>-
-/// <model>"]` entry each — and, when the provider's optional default
-/// (`p.model`) is set, `models.default = "<pid>-<default>"` in the SAME
-/// action. `models` is required; the default (if set) must be one of them.
-fn activate_grok(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>> {
+/// The current `models.default` value, if any.
+fn grok_default_key(doc: &DocumentMut) -> Option<String> {
+    doc.get("models")
+        .and_then(|i| i.get("default"))
+        .and_then(|i| i.as_str())
+        .map(str::to_string)
+}
+
+/// Clear `models.default`, pruning an emptied `[models]` table.
+fn clear_grok_default(doc: &mut DocumentMut) {
+    if let Some(models) = doc.get_mut("models").and_then(|i| i.as_table_mut()) {
+        models.remove("default");
+        if models.is_empty() {
+            doc.remove("models");
+        }
+    }
+}
+
+/// Enable a grok provider (add its models to grok's flat picker list).
+/// MULTI-SLOT, like OpenCode: only THIS provider's `[model.<pid>-*]` entries
+/// are (re)written — sibling providers' entries coexist. Does NOT set the
+/// startup default; promoting a slot to default is a separate action
+/// (`set_grok_default`), mirroring OpenCode's enable-vs-default split.
+fn activate_grok(p: &Provider, _all: &[Provider]) -> Result<(), Box<dyn Error>> {
     let base = p.base_url.trim();
     if base.is_empty() {
         return Err("Grok provider is missing a Base URL".into());
@@ -2325,7 +2354,9 @@ fn activate_grok(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>> {
 
     let path = grok_config_path()?;
     let mut doc = load_toml_document(&path)?;
-    strip_grok_entries(&mut doc, all);
+    // Rebuild ONLY this provider's entries (drop its stale ones first);
+    // sibling providers' entries are left in place.
+    remove_grok_provider_entries(&mut doc, pid);
 
     if doc.get("model").is_none() {
         doc["model"] = toml_edit::table();
@@ -2373,102 +2404,167 @@ fn activate_grok(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // The optional default, set in the same action (no separate step).
-    if !default.is_empty() {
-        if doc.get("models").is_none() {
-            doc["models"] = toml_edit::table();
-        }
-        doc["models"]["default"] = toml_value(grok_entry_key(pid, default));
-    }
-
-    strip_toml_overrides(&mut doc, &override_keys(all, CliApp::Grok));
-    apply_toml_overrides(&mut doc, p);
+    // NOTE: no `models.default` here — enabling only registers the slot.
+    // Promoting it to grok's startup default is `set_grok_default`.
+    //
+    // Grok has NO per-provider Advanced settings: its overrides would be
+    // GLOBAL config.toml keys (not scoped to a provider), so a per-provider
+    // box is misleading and multiple providers would clash on the same
+    // top-level namespace. The editor hides Advanced settings for grok and
+    // never sends `options`, so nothing to apply/strip here.
     atomic_write(&path, doc.to_string().as_bytes())
 }
 
-/// "Set Official" — sweep Termory's entries and clear a `models.default`
-/// that pointed at one, returning grok to its factory (no `[model]`/default)
-/// shape while leaving the user's own config intact.
+/// Promote an already-enabled grok provider to grok's startup default by
+/// writing `models.default = "<pid>-<model>"`. The provider's entries must
+/// already exist (enable first). When the provider has no explicit default
+/// model, the first listed model is promoted (mirrors `set_opencode_default`).
+pub fn set_grok_default(p: &Provider) -> Result<(), Box<dyn Error>> {
+    if p.app != CliApp::Grok || p.kind != ProviderKind::Custom {
+        return Err("set_grok_default only applies to Grok Custom providers.".into());
+    }
+    let pid = p.id.trim();
+    let default_model = if !p.model.trim().is_empty() {
+        p.model.trim()
+    } else {
+        p.models
+            .iter()
+            .map(|m| m.id.trim())
+            .find(|id| !id.is_empty())
+            .ok_or("Provider needs at least one model to be set as default.")?
+    };
+    let key = grok_entry_key(pid, default_model);
+    let path = grok_config_path()?;
+    let mut doc = load_toml_document(&path)?;
+    if doc.get("model").and_then(|i| i.get(&key)).is_none() {
+        return Err("Provider isn't activated yet — activate it first.".into());
+    }
+    if doc.get("models").is_none() {
+        doc["models"] = toml_edit::table();
+    }
+    doc["models"]["default"] = toml_value(key.as_str());
+    atomic_write(&path, doc.to_string().as_bytes())
+}
+
+/// "Set Official" — clear a `models.default` that points at one of our grok
+/// providers' entries. Enabled slots STAY (like OpenCode's "Set Official"),
+/// so they remain selectable in grok's picker; only the startup default is
+/// dropped. A hand-written default is left alone.
 fn deactivate_grok(all: &[Provider]) -> Result<(), Box<dyn Error>> {
     let path = grok_config_path()?;
     if !path.exists() {
         return Ok(());
     }
     let mut doc = load_toml_document(&path)?;
-    let swept = strip_grok_entries(&mut doc, all);
-    let points_at_ours = doc
-        .get("models")
-        .and_then(|i| i.get("default"))
-        .and_then(|i| i.as_str())
-        .is_some_and(|d| swept.iter().any(|k| k == d));
-    if points_at_ours {
-        if let Some(models) = doc.get_mut("models").and_then(|i| i.as_table_mut()) {
-            models.remove("default");
-            if models.is_empty() {
-                doc.remove("models");
-            }
-        }
+    let default_is_ours = grok_default_key(&doc)
+        .map(|d| {
+            all.iter()
+                .filter(|p| p.app == CliApp::Grok && p.kind == ProviderKind::Custom)
+                .any(|p| grok_key_owned_by(&d, p.id.trim()))
+        })
+        .unwrap_or(false);
+    if default_is_ours {
+        clear_grok_default(&mut doc);
+        atomic_write(&path, doc.to_string().as_bytes())?;
     }
-    strip_toml_overrides(&mut doc, &override_keys(all, CliApp::Grok));
-    atomic_write(&path, doc.to_string().as_bytes())
+    Ok(())
+}
+
+/// Surgical per-provider cleanup: remove just this grok provider's entries,
+/// clear the startup default if it pointed here, and strip its own override
+/// keys. Sibling slots survive.
+fn delete_grok_provider_entry(p: &Provider) -> Result<(), Box<dyn Error>> {
+    if p.app != CliApp::Grok || p.kind != ProviderKind::Custom {
+        return Ok(());
+    }
+    let path = grok_config_path()?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let pid = p.id.trim();
+    let mut doc = load_toml_document(&path)?;
+    let removed = remove_grok_provider_entries(&mut doc, pid);
+    let mut changed = !removed.is_empty();
+    let default_ours = grok_default_key(&doc)
+        .map(|d| grok_key_owned_by(&d, pid))
+        .unwrap_or(false);
+    if default_ours {
+        clear_grok_default(&mut doc);
+        changed = true;
+    }
+    // No override cleanup — grok has no per-provider Advanced settings.
+    if changed {
+        atomic_write(&path, doc.to_string().as_bytes())?;
+    }
+    Ok(())
 }
 
 fn read_active_grok(providers: &[Provider]) -> Result<ActiveState, Box<dyn Error>> {
     let path = grok_config_path()?;
     let live_path = path.display().to_string();
-    let official = |live_path: String| ActiveState {
+    let official = |live_path: String, ids: Vec<String>| ActiveState {
         app: CliApp::Grok,
         kind: ActiveKind::Official,
         matched_provider_id: None,
         live_snapshot: None,
         live_path,
-        configured_provider_ids: Vec::new(),
+        configured_provider_ids: ids,
     };
     if !path.exists() {
-        return Ok(official(live_path));
+        return Ok(official(live_path, Vec::new()));
     }
     let doc = fs::read_to_string(&path)?.parse::<DocumentMut>()?;
-    // Single-slot: active iff `models.default` names an existing entry we
-    // own, matched by that entry's base_url + api_key.
-    let Some(default) = doc
-        .get("models")
-        .and_then(|i| i.get("default"))
-        .and_then(|i| i.as_str())
-    else {
-        return Ok(official(live_path));
+
+    // "Enabled" = the provider has ≥1 `[model.<pid>-*]` entry; "default" =
+    // `models.default` points at one of its entries. Independent, like
+    // OpenCode.
+    let has_entry = |pid: &str| -> bool {
+        doc.get("model")
+            .and_then(|i| i.as_table())
+            .map(|t| t.iter().any(|(k, _)| grok_key_owned_by(k, pid)))
+            .unwrap_or(false)
     };
-    let Some(entry) = doc.get("model").and_then(|i| i.get(default)) else {
-        return Ok(official(live_path));
+    let configured_provider_ids: Vec<String> = providers
+        .iter()
+        .filter(|p| p.app == CliApp::Grok && p.kind == ProviderKind::Custom)
+        .filter(|p| has_entry(p.id.trim()))
+        .map(|p| p.id.clone())
+        .collect();
+
+    let Some(default) = grok_default_key(&doc) else {
+        return Ok(official(live_path, configured_provider_ids));
+    };
+    let Some(entry) = doc.get("model").and_then(|i| i.get(&default)) else {
+        return Ok(official(live_path, configured_provider_ids));
+    };
+    // Which grok provider owns the default entry? By `<pid>-` prefix — this
+    // is unambiguous (the entry key IS `<pid>-<model>`) and scoped to grok,
+    // so a same-creds provider on another CLI is never matched.
+    let matched = providers.iter().find(|p| {
+        p.app == CliApp::Grok
+            && p.kind == ProviderKind::Custom
+            && grok_key_owned_by(&default, p.id.trim())
+    });
+    let Some(p) = matched else {
+        // Default points somewhere we don't own → Official (enabled slots
+        // stay exposed via configured_provider_ids).
+        return Ok(official(live_path, configured_provider_ids));
     };
     let get = |k: &str| entry.get(k).and_then(|i| i.as_str()).unwrap_or("");
     let base_url = get("base_url").to_string();
     let api_key = get("api_key");
     let model = get("model");
-    let matched = providers.iter().find(|p| {
-        // Scope to GROK providers — otherwise a same-creds provider on
-        // another CLI (very common: one gateway key reused across apps)
-        // matches first, so the reverse-derived "active" id points at the
-        // wrong app and editing the grok provider never re-applies.
-        p.app == CliApp::Grok
-            && p.kind == ProviderKind::Custom
-            && string_match(&p.base_url, Some(base_url.as_str()))
-            && p.api_key == api_key
-    });
     Ok(ActiveState {
         app: CliApp::Grok,
-        kind: if matched.is_some() {
-            ActiveKind::Custom
-        } else {
-            ActiveKind::Unmanaged
-        },
-        matched_provider_id: matched.map(|p| p.id.clone()),
+        kind: ActiveKind::Custom,
+        matched_provider_id: Some(p.id.clone()),
         live_snapshot: Some(LiveSnapshot {
             base_url: (!base_url.is_empty()).then_some(base_url),
             api_key_masked: (!api_key.is_empty()).then(|| mask_secret(api_key)),
             model: (!model.is_empty()).then(|| model.to_string()),
         }),
         live_path,
-        configured_provider_ids: Vec::new(),
+        configured_provider_ids,
     })
 }
 
@@ -2637,15 +2733,25 @@ fn opencode_termory_id(p: &Provider) -> String {
 }
 
 fn activate_opencode(p: &Provider, _all: &[Provider]) -> Result<(), Box<dyn Error>> {
-    // Primary model is required — without an entry in `models` map
-    // OpenCode's picker can't surface this provider. API key is
-    // optional (OpenCode supports env-var references and some
-    // gateways don't require auth) — we just omit options.apiKey
-    // when the user left it blank.
-    if p.model.trim().is_empty() {
-        return Err("OpenCode provider requires a primary model id.".into());
-    }
+    // OpenCode is multi-model (like grok): the `models` LIST is what
+    // populates its picker, and the top-level `model` is the OPTIONAL
+    // default (set separately via `set_opencode_default`). At least one
+    // model must exist — either an entry in the list OR a bare default
+    // (a gateway binding may carry only `model` with no list). When both
+    // are present the default must be one of the listed models. API key
+    // is optional (OpenCode supports env-var references and some gateways
+    // don't require auth) — we just omit options.apiKey when blank.
     reject_duplicate_model_ids(&p.models, "OpenCode")?;
+    let default_model = p.model.trim();
+    if default_model.is_empty() && p.models.is_empty() {
+        return Err("OpenCode provider requires at least one model.".into());
+    }
+    if !default_model.is_empty()
+        && !p.models.is_empty()
+        && !p.models.iter().any(|m| m.id.trim() == default_model)
+    {
+        return Err("OpenCode default model must be one of the provider's models.".into());
+    }
 
     let termory_id = opencode_termory_id(p);
     let npm = p.opencode_npm();
@@ -2690,12 +2796,12 @@ fn activate_opencode(p: &Provider, _all: &[Provider]) -> Result<(), Box<dyn Erro
         block.insert("options".into(), JsonValue::Object(opts));
     }
 
-    // models map: primary first (display name = its id), then the extra
-    // models the user added (id + name; blank name falls back to id).
-    // Keyed by id, so a duplicate id just overrides — including a list
-    // entry that re-declares the primary to give it a custom name.
-    // cc-switch writes each as `{name: "<label>"}` so the picker has a
-    // label.
+    // models map: built PURELY from the `models` list, in list order —
+    // `p.model` is only the optional default pointer now (chosen FROM the
+    // list, written separately by set_opencode_default), so it does NOT get
+    // injected here. cc-switch writes each as `{name: "<label>"}` (blank name
+    // falls back to id) so the picker has a label. Keyed by id, so a repeated
+    // id just overrides (dedup already rejects real duplicates).
     let mut models = serde_json::Map::new();
     let put = |models: &mut serde_json::Map<String, JsonValue>, id: &str, name: &str| {
         if id.is_empty() {
@@ -2706,9 +2812,13 @@ fn activate_opencode(p: &Provider, _all: &[Provider]) -> Result<(), Box<dyn Erro
         entry.insert("name".into(), JsonValue::String(label.to_string()));
         models.insert(id.to_string(), JsonValue::Object(entry));
     };
-    put(&mut models, p.model.trim(), "");
     for m in &p.models {
         put(&mut models, m.id.trim(), m.name.trim());
+    }
+    // Fallback for a gateway binding that carries only a `model` with no list
+    // (the model-only case) — write that single model so the slot isn't empty.
+    if models.is_empty() {
+        put(&mut models, p.model.trim(), "");
     }
     block.insert("models".into(), JsonValue::Object(models));
 
@@ -2730,9 +2840,18 @@ pub fn set_opencode_default(p: &Provider) -> Result<(), Box<dyn Error>> {
     if p.app != CliApp::Opencode || p.kind != ProviderKind::Custom {
         return Err("set_opencode_default only applies to OpenCode Custom providers.".into());
     }
-    if p.model.trim().is_empty() {
-        return Err("Provider needs a primary model id to be set as default.".into());
-    }
+    // The default model is optional in the editor now — when the user left
+    // it blank, promote the first listed model so "Set as default" still
+    // gives OpenCode a concrete startup pointer.
+    let default_model = if !p.model.trim().is_empty() {
+        p.model.trim()
+    } else {
+        p.models
+            .iter()
+            .map(|m| m.id.trim())
+            .find(|id| !id.is_empty())
+            .ok_or("Provider needs at least one model to be set as default.")?
+    };
     let termory_id = opencode_termory_id(p);
     let path = opencode_config_path()?;
     let mut root = load_json_object(&path)?;
@@ -2746,7 +2865,7 @@ pub fn set_opencode_default(p: &Provider) -> Result<(), Box<dyn Error>> {
     }
     root.insert(
         "model".into(),
-        JsonValue::String(format!("{termory_id}/{}", p.model.trim())),
+        JsonValue::String(format!("{termory_id}/{default_model}")),
     );
     write_json_object(&path, &root)
 }
@@ -5403,7 +5522,8 @@ base_url = "https://x.io/v1"
                 name: "Grok 3".into(),
             },
         ];
-        // ONE action: activate writes every model entry AND sets the default.
+        // Multi-slot: activate writes this provider's model entries but does
+        // NOT set the startup default (that's a separate set_grok_default).
         activate(&p, &[p.clone()]).unwrap();
         let text = fs::read_to_string(grok.join("config.toml")).unwrap();
         // One flat entry per model, keyed by `<provider-id>-<model-id>` (a
@@ -5425,10 +5545,15 @@ base_url = "https://x.io/v1"
         // (chat_completions per `ApiBackend::default()`); only an explicit
         // editor choice is written.
         assert!(!text.contains("api_backend"));
-        // Default points at the chosen model's entry key (set by activate).
-        assert!(text.contains("default = \"test-x-third-grok-4.5\""));
+        // Activate alone does NOT set the default (multi-slot split).
+        assert!(!text.contains("default ="));
         assert!(!text.contains("termory"));
         assert!(text.contains("yolo = false"));
+
+        // Promote to grok's startup default separately.
+        set_grok_default(&p).unwrap();
+        let text_def = fs::read_to_string(grok.join("config.toml")).unwrap();
+        assert!(text_def.contains("default = \"test-x-third-grok-4.5\""));
 
         let state = read_active_state(CliApp::Grok, &[p.clone()]).unwrap();
         assert_eq!(state.kind, ActiveKind::Custom);
@@ -5448,24 +5573,36 @@ base_url = "https://x.io/v1"
         let text_explicit = fs::read_to_string(grok.join("config.toml")).unwrap();
         assert!(text_explicit.contains("api_backend = \"responses\""));
 
-        // "Set Official" sweeps our entries + default → back to factory.
+        // "Set Official" clears the default but KEEPS the slot's entries
+        // (multi-slot — they stay selectable in grok's picker).
         deactivate(CliApp::Grok, &[p.clone()]).unwrap();
         let text2 = fs::read_to_string(grok.join("config.toml")).unwrap();
-        assert!(!text2.contains("test-x-third"));
-        assert!(!text2.contains("[model]"));
-        assert!(!text2.contains("default ="));
+        assert!(text2.contains("test-x-third-grok-4.5"), "slot entries stay");
+        assert!(!text2.contains("default ="), "default cleared");
         assert!(text2.contains("yolo = false"));
         let state2 = read_active_state(CliApp::Grok, &[p.clone()]).unwrap();
         assert_eq!(state2.kind, ActiveKind::Official);
+        // ...but the slot is still exposed as configured.
+        assert_eq!(
+            state2.configured_provider_ids,
+            vec!["test-x-third".to_string()]
+        );
+
+        // Deleting the provider removes its entries entirely → factory shape.
+        delete_provider_traces(&p).unwrap();
+        let text3 = fs::read_to_string(grok.join("config.toml")).unwrap();
+        assert!(!text3.contains("test-x-third"));
+        assert!(!text3.contains("[model]"));
+        assert!(text3.contains("yolo = false"));
 
         // The OAuth session file is byte-identical across the round-trip.
         assert_eq!(fs::read(grok.join("auth.json")).unwrap(), auth_before);
     }
 
     #[test]
-    fn grok_single_slot_activate_replaces_previous_provider() {
+    fn grok_multi_slot_providers_coexist_and_default_picks_one() {
         let _g = lock_home();
-        let tmp = tempdir("grok-single-slot");
+        let tmp = tempdir("grok-multi-slot");
         let _home = override_home(&tmp);
         let grok = tmp.join(".grok");
         fs::create_dir_all(&grok).unwrap();
@@ -5485,19 +5622,38 @@ base_url = "https://x.io/v1"
         }];
         let all = [a.clone(), b.clone()];
 
-        // Single-slot: activating B replaces A's entries (only one active).
+        // Multi-slot: enabling BOTH keeps both providers' entries in config.
         activate(&a, &all).unwrap();
         activate(&b, &all).unwrap();
         let text = fs::read_to_string(grok.join("config.toml")).unwrap();
-        assert!(!text.contains("test-aaa"));
-        assert!(text.contains("test-bbb-grok-3"));
-        assert!(text.contains("default = \"test-bbb-grok-3\""));
+        assert!(text.contains("test-aaa-grok-4.5"), "A's entry coexists");
+        assert!(text.contains("test-bbb-grok-3"), "B's entry coexists");
+        // Neither is the default until set explicitly.
+        assert!(!text.contains("default ="));
 
+        // Both show as configured; none in use yet.
+        let state0 = read_active_state(CliApp::Grok, &all).unwrap();
+        assert_eq!(state0.kind, ActiveKind::Official);
+        let mut ids = state0.configured_provider_ids.clone();
+        ids.sort();
+        assert_eq!(ids, vec!["test-aaa".to_string(), "test-bbb".to_string()]);
+
+        // Set B as default → B is in use, A still enabled.
+        set_grok_default(&b).unwrap();
+        let text2 = fs::read_to_string(grok.join("config.toml")).unwrap();
+        assert!(text2.contains("default = \"test-bbb-grok-3\""));
+        assert!(text2.contains("test-aaa-grok-4.5"), "A's slot survives");
         let state = read_active_state(CliApp::Grok, &all).unwrap();
         assert_eq!(state.matched_provider_id.as_deref(), Some("test-bbb"));
 
-        // Duplicate model ids in the list are rejected (would collide on
-        // the `[model."<pid>-<id>"]` key).
+        // Deleting A removes ONLY A's entries; B (the default) is untouched.
+        delete_provider_traces(&a).unwrap();
+        let text3 = fs::read_to_string(grok.join("config.toml")).unwrap();
+        assert!(!text3.contains("test-aaa"));
+        assert!(text3.contains("test-bbb-grok-3"));
+        assert!(text3.contains("default = \"test-bbb-grok-3\""));
+
+        // Duplicate model ids in ONE provider's list are still rejected.
         let mut dup = make_provider(CliApp::Grok, "dup", "https://d.example/v1", "key-d");
         dup.model = String::new();
         dup.models = vec![
@@ -5511,6 +5667,37 @@ base_url = "https://x.io/v1"
             },
         ];
         assert!(activate(&dup, &[dup.clone()]).is_err());
+    }
+
+    #[test]
+    fn grok_set_default_falls_back_to_first_model_when_no_default() {
+        let _g = lock_home();
+        let tmp = tempdir("grok-default-fallback");
+        let _home = override_home(&tmp);
+        let grok = tmp.join(".grok");
+        fs::create_dir_all(&grok).unwrap();
+
+        let mut p = make_provider(CliApp::Grok, "nd", "https://x.example/v1", "key-x");
+        p.model = String::new(); // no explicit default
+        p.models = vec![
+            ProviderModel {
+                id: "grok-4.5".into(),
+                name: String::new(),
+            },
+            ProviderModel {
+                id: "grok-3".into(),
+                name: String::new(),
+            },
+        ];
+        activate(&p, &[p.clone()]).unwrap();
+        // No default set yet → set_grok_default promotes the FIRST listed.
+        set_grok_default(&p).unwrap();
+        let text = fs::read_to_string(grok.join("config.toml")).unwrap();
+        assert!(text.contains("default = \"test-nd-grok-4.5\""));
+
+        // set_grok_default on a provider with no activated entries → error.
+        let other = make_provider(CliApp::Grok, "gone", "https://y.example/v1", "key-y");
+        assert!(set_grok_default(&other).is_err());
     }
 
     #[test]
@@ -5534,6 +5721,7 @@ base_url = "https://x.io/v1"
         let codex_same = make_provider(CliApp::Codex, "c", "https://gw.example/v1", "shared-key");
 
         activate(&g, &[g.clone()]).unwrap();
+        set_grok_default(&g).unwrap();
         // Codex provider listed BEFORE the grok one (would win without the
         // app filter).
         let state = read_active_state(CliApp::Grok, &[codex_same, g.clone()]).unwrap();
@@ -5674,9 +5862,15 @@ base_url = "https://x.io/v1"
             "https://api.packy.example",
             "sk-packy",
         );
+        // Grok-style shape: the default (`model`) is ONE OF the listed
+        // models, and the list is what populates OpenCode's picker.
         p.model = "claude-opus-4-7".into();
         p.npm = Some("@ai-sdk/anthropic".into());
         p.models = vec![
+            ProviderModel {
+                id: "claude-opus-4-7".into(),
+                ..Default::default()
+            },
             ProviderModel {
                 id: "claude-sonnet-4-5".into(),
                 ..Default::default()
@@ -5723,7 +5917,7 @@ base_url = "https://x.io/v1"
                 .and_then(|v| v.as_str()),
             Some("sk-packy")
         );
-        // models contains primary + extras, each as {name: "<id>"}.
+        // models map is built purely from the LIST, each as {name: "<id>"}.
         for m in ["claude-opus-4-7", "claude-sonnet-4-5", "claude-haiku-4-5"] {
             assert_eq!(
                 config
@@ -5732,8 +5926,10 @@ base_url = "https://x.io/v1"
                 Some(m)
             );
         }
-        // The primary model is written FIRST in the models map (relies on
-        // serde_json's preserve_order feature keeping insertion order).
+        // Map order == the `models` LIST order (list[0] first) — the default
+        // `model` is NOT injected/reordered anymore, it's just the default
+        // pointer. Here the list starts with opus. Relies on serde_json's
+        // preserve_order feature keeping insertion order.
         assert_eq!(
             config
                 .pointer(&format!("{block_ptr}/models"))
@@ -5813,6 +6009,67 @@ base_url = "https://x.io/v1"
                 .and_then(|v| v.as_str()),
             Some("GPT-5 Mini")
         );
+    }
+
+    #[test]
+    fn opencode_models_map_follows_list_order_not_default() {
+        // The default `model` is only the default POINTER — it must NOT be
+        // reordered to the front of the models map. Map order == list order.
+        let _g = lock_home();
+        let tmp = tempdir("opencode-list-order");
+        let _home = override_home(&tmp);
+        let mut p = make_provider(CliApp::Opencode, "order", "https://x.io", "sk-x");
+        // Default is the SECOND list entry — it must still land second.
+        p.model = "b".into();
+        p.models = vec![
+            ProviderModel {
+                id: "a".into(),
+                name: String::new(),
+            },
+            ProviderModel {
+                id: "b".into(),
+                name: String::new(),
+            },
+            ProviderModel {
+                id: "c".into(),
+                name: String::new(),
+            },
+        ];
+        activate(&p, &[p.clone()]).unwrap();
+        let termory_id = format!("termory-{}", p.id);
+        let config: JsonValue = serde_json::from_str(
+            &fs::read_to_string(tmp.join(".config/opencode/opencode.json")).unwrap(),
+        )
+        .unwrap();
+        let keys: Vec<&str> = config
+            .pointer(&format!("/provider/{termory_id}/models"))
+            .and_then(|v| v.as_object())
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, vec!["a", "b", "c"], "map keeps list order");
+    }
+
+    #[test]
+    fn opencode_model_only_binding_writes_single_model() {
+        // A gateway binding may carry only `model` with no list — the
+        // fallback writes that single model so the slot isn't empty.
+        let _g = lock_home();
+        let tmp = tempdir("opencode-model-only");
+        let _home = override_home(&tmp);
+        let mut p = make_provider(CliApp::Opencode, "mo", "https://x.io", "sk-x");
+        p.model = "solo".into();
+        p.models = Vec::new();
+        activate(&p, &[p.clone()]).unwrap();
+        let termory_id = format!("termory-{}", p.id);
+        let config: JsonValue = serde_json::from_str(
+            &fs::read_to_string(tmp.join(".config/opencode/opencode.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(config
+            .pointer(&format!("/provider/{termory_id}/models/solo"))
+            .is_some());
     }
 
     #[test]
@@ -5995,18 +6252,89 @@ base_url = "https://x.io/v1"
     }
 
     #[test]
-    fn opencode_activate_rejects_empty_model() {
+    fn opencode_activate_rejects_when_no_model_at_all() {
+        // OpenCode is multi-model now: a blank default is fine, but with NO
+        // default AND an EMPTY models list there's nothing to put in the
+        // picker, so activation must still fail cleanly.
         let _g = lock_home();
         let tmp = tempdir("opencode-no-model");
         let _home = override_home(&tmp);
         let mut p = make_provider(CliApp::Opencode, "no-model", "https://x.io", "sk-x");
         p.model = String::new();
+        p.models = Vec::new();
         let result = activate(&p, &[p.clone()]);
         assert!(result.is_err());
         assert!(
             !tmp.join(".config/opencode/opencode.json").exists(),
             "no partial opencode.json on model-missing failure"
         );
+    }
+
+    #[test]
+    fn opencode_activate_allows_models_list_without_a_default() {
+        // The new grok-style shape: a REQUIRED models list, OPTIONAL default.
+        // With a list but blank `model`, activation writes every model into
+        // the picker and no error.
+        let _g = lock_home();
+        let tmp = tempdir("opencode-list-no-default");
+        let _home = override_home(&tmp);
+        let mut p = make_provider(CliApp::Opencode, "list-only", "https://x.io", "sk-x");
+        p.model = String::new();
+        p.models = vec![
+            ProviderModel {
+                id: "gpt-5".into(),
+                name: "GPT-5".into(),
+            },
+            ProviderModel {
+                id: "gpt-5-mini".into(),
+                name: String::new(),
+            },
+        ];
+        activate(&p, &[p.clone()]).unwrap();
+
+        let termory_id = format!("termory-{}", p.id);
+        let config: JsonValue = serde_json::from_str(
+            &fs::read_to_string(tmp.join(".config/opencode/opencode.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            config
+                .pointer(&format!("/provider/{termory_id}/models/gpt-5"))
+                .is_some(),
+            "listed model surfaces in the picker"
+        );
+        assert!(config
+            .pointer(&format!("/provider/{termory_id}/models/gpt-5-mini"))
+            .is_some());
+        // No default chosen → set_opencode_default falls back to the first
+        // listed model rather than erroring.
+        set_opencode_default(&p).unwrap();
+        let config: JsonValue = serde_json::from_str(
+            &fs::read_to_string(tmp.join(".config/opencode/opencode.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            config.get("model").and_then(|v| v.as_str()),
+            Some(format!("{termory_id}/gpt-5").as_str()),
+            "blank default promotes the first listed model"
+        );
+    }
+
+    #[test]
+    fn opencode_activate_rejects_default_not_in_models_list() {
+        // When both a default and a non-empty list are present, the default
+        // must be one of them (mirrors grok).
+        let _g = lock_home();
+        let tmp = tempdir("opencode-bad-default");
+        let _home = override_home(&tmp);
+        let mut p = make_provider(CliApp::Opencode, "bad-default", "https://x.io", "sk-x");
+        p.model = "not-listed".into();
+        p.models = vec![ProviderModel {
+            id: "gpt-5".into(),
+            name: String::new(),
+        }];
+        assert!(activate(&p, &[p.clone()]).is_err());
+        assert!(!tmp.join(".config/opencode/opencode.json").exists());
     }
 
     #[test]

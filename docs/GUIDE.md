@@ -77,7 +77,7 @@ It uses Claude Desktop's own **third-party ("3P")** mechanism, not env vars: Ter
 
 ### Advanced settings (per-provider options)
 
-Beyond the basic fields, each provider has an **Advanced settings** section where you add your own config entries — any setting the CLI supports that Termory doesn't have a dedicated field for. Each entry you add is merged into that CLI's config when you activate the provider, and removed again when you switch away.
+Beyond the basic fields, each provider (except Grok Build — see below) has an **Advanced settings** section where you add your own config entries — any setting the CLI supports that Termory doesn't have a dedicated field for. Each entry you add is merged into that CLI's config when you activate the provider, and removed again when you switch away.
 
 **How to add one:**
 
@@ -120,7 +120,7 @@ Append `[1m]` to a value for its 1M-token context window, e.g. `claude-sonnet-4-
 
 *Managed (blocked):* `GOOGLE_GEMINI_BASE_URL`, `GEMINI_API_KEY`, `GEMINI_MODEL`.
 
-**OpenCode** → `~/.config/opencode/opencode.json`. OpenCode has two extra dedicated fields above the options — **AI SDK** (the npm package it loads, `@ai-sdk/openai-compatible` by default) and **Additional models** (extra model IDs for its picker). Advanced option keys are relative to the provider's `options` bag:
+**OpenCode** → `~/.config/opencode/opencode.json`. OpenCode has two extra dedicated fields above the options — **AI SDK** (the npm package it loads, `@ai-sdk/openai-compatible` by default) and a **Models** list (the model IDs for its picker; at least one is required) with an optional **Default model** chosen from that list. Advanced option keys are relative to the provider's `options` bag:
 
 | Key | Example value | Effect |
 |-----|---------------|--------|
@@ -128,6 +128,8 @@ Append `[1m]` to a value for its 1M-token context window, e.g. `claude-sonnet-4-
 | `headers.X-Token` | `abc123` | custom request header |
 
 *Managed (blocked):* `baseURL`, `apiKey`.
+
+**Grok Build** → `~/.grok/config.toml`. Grok is the one CLI with **no Advanced settings**: it uses a **Models** list (required) with an optional **Default model** and an **API Backend** dropdown, but its config is organized per-model, with no per-provider place for extra options. To tweak grok's own global settings, edit `~/.grok/config.toml` directly.
 
 ### Codex: keeping sessions after a switch
 

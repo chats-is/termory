@@ -31,6 +31,7 @@ import {
   blankProvider,
   codexVersionSegments,
   hasUpdate,
+  isMultiSlot,
   isSourceEnabled,
   providerFromBinding,
   resolveActiveProviderId
@@ -212,10 +213,8 @@ function quotaErrorToast(error: string) {
   }
 }
 
-// OpenCode is MULTI-SLOT: several provider blocks coexist in opencode.json
-// and one is separately promoted to the top-level default. Every other CLI
-// (incl. Grok) is single-slot — activating replaces the previous one.
-const isMultiSlot = (a: CliApp): boolean => a === "opencode";
+// isMultiSlot lives in provider-utils (shared with GatewaysPage + the backend
+// set_default dispatch): OpenCode + Grok are multi-slot.
 
 export function ProvidersPage({
   providers,
@@ -764,7 +763,7 @@ export function ProvidersPage({
         providersForApp: [synth]
       });
       if (isMultiSlot(synth.app)) {
-        await invoke("set_opencode_default_provider", { provider: synth });
+        await invoke("set_default_provider", { provider: synth });
       }
       markActive(synth.app, synth.id);
       toast.success(t("toast.nowInUse", { name: synth.name || t("providers.unnamed") }));
@@ -870,7 +869,7 @@ export function ProvidersPage({
         // Saving an enabled-but-not-default slot just re-applies its entries —
         // it must NOT be promoted to default (and the marker stays put).
         if (state?.matchedProviderId === next.id) {
-          await invoke("set_opencode_default_provider", { provider: next });
+          await invoke("set_default_provider", { provider: next });
           markActive(next.app, next.id);
         }
       } else {
@@ -974,7 +973,7 @@ export function ProvidersPage({
           provider: target,
           providersForApp
         });
-        await invoke("set_opencode_default_provider", { provider: target });
+        await invoke("set_default_provider", { provider: target });
       } else {
         await invoke("activate_provider", {
           provider: target,

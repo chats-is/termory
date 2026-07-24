@@ -46,6 +46,11 @@ import { INPUT_NO_AUTO } from "@/lib/utils";
 import { useT } from "@/i18n";
 import type { Provider } from "@/types";
 
+// Sentinel value for the multi-model "Default model" Select's "no default"
+// option (Radix Select forbids an empty-string item value). Maps back to
+// `undefined` on change.
+const NO_DEFAULT_MODEL = "__no_default__";
+
 // Default override rows seeded for a fresh Claude provider — the per-size
 // `/model` routing keys. Shown as editable templates; blank ones are
 // dropped on save. Append `[1m]` to a value to request the 1M context
@@ -159,27 +164,31 @@ export function ProviderEditor({
 
   // Universal required fields: name + baseUrl. apiKey is always
   // optional (OpenCode supports env-var references; empty is allowed
-  // and Termory just leaves the field unset). OpenCode additionally
-  // needs a primary model — without it OpenCode's picker can't surface
-  // the provider.
+  // and Termory just leaves the field unset).
   const isOpencode = draft.app === "opencode";
   // Claude Desktop direct mode writes a gateway profile (base URL + bearer
   // key) — it has no per-CLI model field and no overrides, and its bearer
   // key is REQUIRED (the backend rejects an empty key).
   const isClaudeDesktop = draft.app === "claude-desktop";
-  // Grok is MULTI-model like OpenCode: its `models` LIST is required (each
-  // becomes one flat `[model.<id>-<model>]` picker entry), and the primary
-  // `model` is the OPTIONAL default — it must be one of the listed models.
+  // Grok is grok's own MULTI-model shape. OpenCode now matches it: the
+  // `models` LIST is REQUIRED (each becomes one picker entry) and the
+  // primary `model` is the OPTIONAL default — it must be one of the listed
+  // models.
   const isGrok = draft.app === "grok";
-  // Only OpenCode requires a primary model; grok's primary is the optional
-  // default (validated against the list below).
-  const modelRequired = isOpencode;
-  // The ids in the models list — grok's default must be picked from these.
+  // OpenCode + Grok share the multi-model UX: required models list, optional
+  // default chosen from that list.
+  const isMultiModel = isOpencode || isGrok;
+  // The primary model is never a required free-text field anymore — for the
+  // multi-model apps it's the optional default, everyone else has no primary.
+  const modelRequired = false;
+  // The ids in the models list — the default must be picked from these.
   const modelListIds = modelRows.map((m) => m.id.trim()).filter(Boolean);
-  const grokModelsValid = !isGrok || modelListIds.length > 0;
-  const grokDefault = (draft.model ?? "").trim();
-  const grokDefaultValid =
-    !isGrok || grokDefault.length === 0 || modelListIds.includes(grokDefault);
+  const modelsListValid = !isMultiModel || modelListIds.length > 0;
+  const defaultModel = (draft.model ?? "").trim();
+  const defaultModelValid =
+    !isMultiModel ||
+    defaultModel.length === 0 ||
+    modelListIds.includes(defaultModel);
   // No duplicate model ids in the list — a repeated id collides (OpenCode's
   // `models` map key / grok's `[model."<id>-<model>"]` key), silently
   // dropping one. Only meaningful for the list-carrying apps.
@@ -195,9 +204,8 @@ export function ProviderEditor({
   const canSave =
     draft.name.trim().length > 0 &&
     (draft.baseUrl ?? "").trim().length > 0 &&
-    (!modelRequired || (draft.model ?? "").trim().length > 0) &&
-    grokModelsValid &&
-    grokDefaultValid &&
+    modelsListValid &&
+    defaultModelValid &&
     modelsUnique &&
     cdModelsValid &&
     duplicateKeys.length === 0 &&
@@ -298,7 +306,10 @@ export function ProviderEditor({
       model: draft.model?.trim() || undefined,
       npm,
       models: models.length > 0 ? models : undefined,
-      options: cleanedOverrides.length > 0 ? cleanedOverrides : undefined,
+      // Grok has no Advanced settings (its overrides are global config.toml,
+      // not per-provider) — never persist options for it.
+      options:
+        isGrok || cleanedOverrides.length === 0 ? undefined : cleanedOverrides,
       favicon
     });
   };
@@ -381,7 +392,7 @@ export function ProviderEditor({
             </div>
 
             {isOpencode && (
-              <div className="grid gap-2">
+              <div className="grid gap-2 sm:col-span-2">
                 <Label>{t("providers.aiSdk")} *</Label>
                 <Select
                   value={draft.npm ?? OPENCODE_DEFAULT_NPM}
@@ -421,11 +432,11 @@ export function ProviderEditor({
                     <SelectItem value="default">
                       {t("providers.apiBackendDefault")}
                     </SelectItem>
-                    <SelectItem value="responses">responses</SelectItem>
+                    <SelectItem value="responses">Responses</SelectItem>
                     <SelectItem value="chat_completions">
-                      chat_completions
+                      Chat Completions
                     </SelectItem>
-                    <SelectItem value="messages">messages</SelectItem>
+                    <SelectItem value="messages">Messages</SelectItem>
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
@@ -434,48 +445,28 @@ export function ProviderEditor({
               </div>
             )}
 
-            {/* Claude Desktop direct mode has no per-CLI model field — its
-                gateway profile routes Claude Desktop's own model menu. For
-                grok this field is the OPTIONAL default, chosen from the
-                models list below (not free-typed). */}
-            {!isClaudeDesktop && (
+            {/* Single-model apps (Claude / Codex / Gemini) keep their primary
+                "Model" field here. The multi-model apps (OpenCode + grok)
+                render their OPTIONAL "Default model" AFTER the models list
+                below — you pick the default out of that list, so the list
+                comes first. Claude Desktop has no per-CLI model field. */}
+            {!isClaudeDesktop && !isMultiModel && (
               <div className="grid gap-2 sm:col-span-2">
                 <Label>
-                  {isGrok
-                    ? t("providers.defaultModel")
-                    : `${t("providers.model")}${modelRequired ? " *" : ""}`}
+                  {`${t("providers.model")}${modelRequired ? " *" : ""}`}
                 </Label>
                 <ModelCombobox
-                  ariaLabel={
-                    isGrok
-                      ? t("providers.defaultModel")
-                      : `Model${modelRequired ? " *" : ""}`
-                  }
+                  ariaLabel={`Model${modelRequired ? " *" : ""}`}
                   value={draft.model ?? ""}
                   onValueChange={(v) => update("model", v)}
-                  options={isGrok ? modelListIds : modelOptions}
-                  loading={fetchingModels && !isGrok}
-                  ariaInvalid={
-                    isGrok
-                      ? !grokDefaultValid
-                      : modelRequired && !(draft.model ?? "").trim()
-                  }
+                  options={modelOptions}
+                  loading={fetchingModels}
+                  ariaInvalid={modelRequired && !(draft.model ?? "").trim()}
                 />
-                {isGrok && !grokDefaultValid && (
-                  <p className="text-xs text-destructive">
-                    {t("help.grokDefaultInvalid")}
-                  </p>
-                )}
-                {isGrok && grokDefaultValid && (
-                  <p className="text-xs text-muted-foreground">
-                    {t("help.grokDefault")}
-                  </p>
-                )}
-                {!isGrok && modelError && (
+                {modelError && (
                   <p className="text-xs text-destructive">{modelError}</p>
                 )}
-                {!isGrok &&
-                  !modelError &&
+                {!modelError &&
                   (fetchingModels || modelOptions.length > 0) && (
                     <p className="text-xs text-muted-foreground">
                       {fetchingModels
@@ -492,7 +483,7 @@ export function ProviderEditor({
             {(isOpencode || isClaudeDesktop || isGrok) && (
               <div className="grid gap-2 sm:col-span-2">
                 <Label>
-                  {`${t("providers.modelList")}${isGrok ? " *" : ""}`}
+                  {`${t("providers.modelList")}${isMultiModel ? " *" : ""}`}
                 </Label>
                 <p className="text-xs text-muted-foreground">
                   {t(
@@ -589,14 +580,67 @@ export function ProviderEditor({
               </div>
             )}
 
+            {/* Multi-model apps (OpenCode + grok): the OPTIONAL default model.
+                Restricted to the ids added in the models list above — a
+                strict picker, NOT free text (so the default can only ever be
+                one of the provider's own models). Rendered AFTER the list so
+                the options exist before you pick. */}
+            {isMultiModel && (
+              <div className="grid gap-2 sm:col-span-2">
+                <Label>{t("providers.defaultModel")}</Label>
+                {/* Radix Select restricted to the ids added in the list above.
+                    The first item (sentinel value) is "no default" — Radix
+                    forbids an empty-string item value, so it maps to
+                    `undefined` on change. */}
+                <Select
+                  value={draft.model?.trim() ? draft.model.trim() : NO_DEFAULT_MODEL}
+                  onValueChange={(v) =>
+                    update("model", v === NO_DEFAULT_MODEL ? undefined : v)
+                  }
+                >
+                  <SelectTrigger
+                    className="w-full"
+                    aria-label={t("providers.defaultModel")}
+                    aria-invalid={!defaultModelValid || undefined}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NO_DEFAULT_MODEL}>
+                      {t("providers.selectModel")}
+                    </SelectItem>
+                    {[...new Set(modelListIds)].map((id) => (
+                      <SelectItem key={id} value={id}>
+                        {id}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {defaultModelValid ? (
+                  <p className="text-xs text-muted-foreground">
+                    {t(isGrok ? "help.grokDefault" : "help.opencodeDefault")}
+                  </p>
+                ) : (
+                  <p className="text-xs text-destructive">
+                    {t("help.grokDefaultInvalid")}
+                  </p>
+                )}
+              </div>
+            )}
+
             {/* Advanced settings = the generic options escape hatch, merged
                 into the target config (incl. Claude Desktop's 3P profile
-                JSON — any other `inference*` key). Shown for every app. */}
-            <Collapsible
-              open={overridesOpen}
-              onOpenChange={setOverridesOpen}
-              className="grid gap-2 sm:col-span-2"
-            >
+                JSON — any other `inference*` key). NOT shown for grok: its
+                overrides are GLOBAL config.toml keys (not per-provider), so a
+                per-provider box is misleading and multiple grok providers
+                would clash on the same top-level namespace — edit
+                ~/.grok/config.toml directly for those. */}
+            {!isGrok && (
+              <Collapsible
+                open={overridesOpen}
+                onOpenChange={setOverridesOpen}
+                className="grid gap-2 sm:col-span-2"
+              >
               <CollapsibleTrigger className="flex w-full items-center justify-between gap-1.5 text-sm font-medium select-none [&[data-state=open]>svg]:rotate-90">{t("providers.advancedSettings")}<ChevronRight className="size-4 text-muted-foreground transition-transform" />
               </CollapsibleTrigger>
               <CollapsibleContent className="-mx-1.5 overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
@@ -712,7 +756,8 @@ export function ProviderEditor({
                   </Button>
                 </div>
               </CollapsibleContent>
-            </Collapsible>
+              </Collapsible>
+            )}
           </div>
 
           <DialogFooter>

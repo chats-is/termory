@@ -216,15 +216,15 @@ describe("GatewayEditor — save callback", () => {
     expect(saved.bindings).toEqual([]);
   });
 
-  it("blocks save when a checked OpenCode binding has no model", async () => {
+  it("blocks save when a checked OpenCode binding has no models", async () => {
     const { onSave } = setup();
     await fillCredsAndDetect();
 
     fireEvent.click(screen.getByLabelText("Apply OpenCode"));
-    // OpenCode requires a primary model id → save is blocked even though the
-    // checkbox is checked. (The inline error text lives inside the per-CLI
-    // collapsible, which isn't necessarily expanded; the disabled save button
-    // is the load-bearing assertion.)
+    // OpenCode now requires a models LIST (like Grok) → save is blocked with
+    // an empty list even though the checkbox is checked. (The inline error
+    // lives inside the per-CLI collapsible, which isn't necessarily expanded;
+    // the disabled save button is the load-bearing assertion.)
     expect(createBtn()).toBeDisabled();
     fireEvent.click(createBtn());
     expect(onSave).not.toHaveBeenCalled();

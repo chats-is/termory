@@ -31,7 +31,7 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 ### 切换当前供应商
 
 1. 打开**供应商**页,选择应用的标签页(Claude Code / Codex / Gemini / OpenCode / Grok Build / Claude Desktop)。
-2. 在想用的供应商上点**激活**(OpenCode 为**设为默认**)。
+2. 在想用的供应商上点**激活**(OpenCode 和 Grok Build 为**设为默认**)。
 3. 下次启动该 CLI 时就会使用新供应商——无需手动改配置。
 
 随时点**官方**即可切回你的原生登录。
@@ -79,7 +79,7 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 
 ### 高级设置(每个供应商的 options)
 
-除基本字段外,每个供应商都有**高级设置**区域,你可以在这里**自行添加**配置项——任何该 CLI 支持、而 Termory 没有专用字段的设置都行。你添加的每一项会在激活该供应商时合并进它的配置,切走时再移除。
+除基本字段外,每个供应商(Grok Build 除外——见下文)都有**高级设置**区域,你可以在这里**自行添加**配置项——任何该 CLI 支持、而 Termory 没有专用字段的设置都行。你添加的每一项会在激活该供应商时合并进它的配置,切走时再移除。
 
 **怎么添加:**
 
@@ -122,7 +122,7 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 
 *受管(禁止):* `GOOGLE_GEMINI_BASE_URL`、`GEMINI_API_KEY`、`GEMINI_MODEL`。
 
-**OpenCode** → `~/.config/opencode/opencode.json`。OpenCode 在 options 之上还有两个专用字段——**AI SDK**(它加载的 npm 包,默认 `@ai-sdk/openai-compatible`)和**更多模型**(在选择器里额外显示的模型 ID)。高级 option 的键相对于该供应商的 `options` 容器:
+**OpenCode** → `~/.config/opencode/opencode.json`。OpenCode 在 options 之上还有两个专用字段——**AI SDK**(它加载的 npm 包,默认 `@ai-sdk/openai-compatible`)和一个**模型列表**(选择器里的模型 ID,至少要有一个),再加一个从列表里选的可选**默认模型**。高级 option 的键相对于该供应商的 `options` 容器:
 
 | 键 | 示例值 | 作用 |
 |-----|--------|------|
@@ -130,6 +130,8 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 | `headers.X-Token` | `abc123` | 自定义请求头 |
 
 *受管(禁止):* `baseURL`、`apiKey`。
+
+**Grok Build** → `~/.grok/config.toml`。Grok 是唯一**没有高级设置**的 CLI:它用一个**模型列表**(必填)+ 可选**默认模型** + 一个 **API Backend** 下拉,但它的配置是按模型组织的,没有供应商级别的地方放额外选项。要调 grok 自己的全局设置,请直接编辑 `~/.grok/config.toml`。
 
 ### Codex:切换后保留会话
 

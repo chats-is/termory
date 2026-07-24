@@ -108,9 +108,9 @@ pub(crate) fn home_dir() -> Option<std::path::PathBuf> {
 use providers::{
     activate, deactivate, delete_provider_traces, detect_cli_versions,
     detect_gateway_apis as providers_detect_gateway_apis, detect_install_snapshot,
-    fetch_favicon as providers_fetch_favicon, fetch_models, read_active_state,
-    set_opencode_default, test_provider, ActiveState, CliApp, GatewayCapabilities, ModelListResult,
-    Provider, ProviderList, TestResult,
+    fetch_favicon as providers_fetch_favicon, fetch_models, read_active_state, set_default,
+    test_provider, ActiveState, CliApp, GatewayCapabilities, ModelListResult, Provider,
+    ProviderList, TestResult,
 };
 use sessions::{get_session, scan_sessions, search_sessions, SearchHit, SessionDetail};
 use tauri::Manager;
@@ -626,9 +626,9 @@ async fn provider_active_states(providers: ProviderList) -> Result<Vec<ActiveSta
 /// Activate a Custom provider — materializes it into the matching
 /// CLI's live config. Single-slot CLIs (Claude/Codex/Gemini) write
 /// directly into the CLI's primary slot (overwriting any previous
-/// Termory write). For OpenCode this only adds the provider's slot to
-/// opencode.json; promoting it to startup default is a separate call
-/// (`set_opencode_default_provider`).
+/// Termory write). For the multi-slot CLIs (OpenCode + Grok) this only adds
+/// the provider's slot/entries; promoting it to startup default is a
+/// separate call (`set_default_provider`).
 #[tauri::command]
 async fn activate_provider(
     app: tauri::AppHandle,
@@ -674,22 +674,18 @@ async fn follow_codex_sessions(
     .map_err(|err| err.to_string())?
 }
 
-/// Promote an already-activated OpenCode provider to OpenCode's startup
-/// default by writing `model = "<termory-id>/<primary>"` at the top of
-/// opencode.json. The provider must already be activated (its slot exists).
-/// OpenCode-only: it's the one multi-slot CLI with a separate enable /
-/// set-default step (Grok is single-slot — activating already sets its
-/// default).
+/// Promote an already-activated multi-slot provider to its CLI's startup
+/// default. OpenCode writes `model = "<termory-id>/<primary>"` at the top of
+/// opencode.json; Grok writes `models.default = "<pid>-<model>"` in
+/// config.toml. The provider must already be activated (its slot/entries
+/// exist). Multi-slot CLIs (OpenCode + Grok) have a separate enable vs.
+/// set-default step; single-slot CLIs set their default implicitly on
+/// activate.
 #[tauri::command]
-async fn set_opencode_default_provider(
-    app: tauri::AppHandle,
-    provider: Provider,
-) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        set_opencode_default(&provider).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|err| err.to_string())??;
+async fn set_default_provider(app: tauri::AppHandle, provider: Provider) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || set_default(&provider).map_err(|e| e.to_string()))
+        .await
+        .map_err(|err| err.to_string())??;
     let _ = tray::rebuild_menu(&app);
     Ok(())
 }
@@ -1066,7 +1062,7 @@ pub fn run() {
             activate_provider,
             deactivate_provider,
             delete_provider,
-            set_opencode_default_provider,
+            set_default_provider,
             recent_codex_projects,
             follow_codex_sessions,
             test_provider_api,

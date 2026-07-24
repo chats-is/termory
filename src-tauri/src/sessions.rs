@@ -1090,36 +1090,30 @@ fn scan_grok_sessions_in(root: &Path) -> Result<Vec<AppSession>, Box<dyn Error>>
             }
         }
     }
-    // Official empty-session rule (`dedup_empty_sessions`, session/merge.rs):
-    // with sessions sorted newest-first (`last_active_at` else `updated_at` —
-    // `effective_sort_time`), each cwd keeps only its MOST RECENT
-    // `num_messages == 0` session — the "new session" resume entry grok itself
-    // shows — and older empties drop. Cwd normalization = trailing-slash trim
-    // (official `normalize_cwd`).
-    scanned.sort_by(|a, b| b.sort_key.cmp(&a.sort_key));
-    let mut seen_empty_cwds: HashSet<String> = HashSet::new();
-    scanned.retain(|g| {
-        if !g.empty {
-            return true;
-        }
-        let cwd = g.session.project.trim_end_matches('/');
-        let key = if cwd.is_empty() { "/" } else { cwd };
-        seen_empty_cwds.insert(key.to_string())
-    });
+    // Drop ALL empty sessions (`num_messages == 0`). grok opens a fresh
+    // session dir on every CLI entry, so blank never-chatted shells abound —
+    // and a history browser has nothing to show for one (no user/assistant
+    // turns). This also means a cwd containing ONLY empty shells (opened grok,
+    // never used) doesn't surface as a noise project. NOTE: grok's own
+    // `sessions list` DOES surface one empty per cwd (its internal
+    // `dedup_empty_sessions`, session/merge.rs) as a "resume most recent"
+    // affordance — that's a picker concern, not history, so Termory diverges
+    // here on purpose (user decision 2026-07-24, reversing the earlier
+    // keep-one-per-cwd rule). Emptiness is the summary's `num_messages` (NOT
+    // `num_chat_messages`, which is 2 even for a fresh shell). Loading a single
+    // empty session by id still works — the filter is list-only.
+    scanned.retain(|g| !g.empty);
     Ok(scanned.into_iter().map(|g| g.session).collect())
 }
 
-/// One scanned grok session plus the two summary fields the list-level
-/// empty-session dedup needs but `AppSession` doesn't carry.
+/// One scanned grok session plus the emptiness flag the list-level filter
+/// needs but `AppSession` doesn't carry.
 struct GrokScanned {
     session: AppSession,
-    /// Official emptiness signal: `num_messages == 0` (the field the picker's
-    /// `dedup_empty_sessions` keys on — NOT `num_chat_messages`, which counts
-    /// chat_history lines and is 2 even for a fresh CLI-entry shell).
+    /// Emptiness signal: `num_messages == 0` (NOT `num_chat_messages`, which
+    /// counts chat_history lines and is 2 even for a fresh CLI-entry shell).
+    /// The list scan drops these; loading one by id is unaffected.
     empty: bool,
-    /// Official sort key: `last_active_at` else `updated_at`
-    /// (`effective_sort_time`, merge.rs). RFC 3339 strings sort lexically.
-    sort_key: String,
 }
 
 /// Detail-path adapter: just the `AppSession` for one session dir.
@@ -1183,16 +1177,13 @@ fn grok_scanned_from_summary(session_dir: &Path) -> Option<GrokScanned> {
         .or_else(|| str_of("session_summary"))
         .unwrap_or_default();
     let updated_at = str_of("updated_at");
-    // Official dedup inputs (see `GrokScanned`): `num_messages` is the
-    // emptiness signal, `last_active_at` else `updated_at` the sort key.
+    // Emptiness signal (`num_messages == 0`) — a blank never-chatted shell.
+    // The list scan drops these (see `scan_grok_sessions_in`).
     let empty = summary
         .get("num_messages")
         .and_then(Value::as_u64)
         .unwrap_or(0)
         == 0;
-    let sort_key = str_of("last_active_at")
-        .or_else(|| updated_at.clone())
-        .unwrap_or_default();
     let session = AppSession {
         id,
         source: "Grok".to_string(),
@@ -1210,11 +1201,7 @@ fn grok_scanned_from_summary(session_dir: &Path) -> Option<GrokScanned> {
         daily_tokens: extract.daily_tokens,
         ..Default::default()
     };
-    Some(GrokScanned {
-        session,
-        empty,
-        sort_key,
-    })
+    Some(GrokScanned { session, empty })
 }
 
 /// Read a grok session dir's cwd from its `summary.json` (`info.cwd`).
@@ -19594,9 +19581,8 @@ mod tests {
 
         // TWO empty shells (grok opens a new dir on every CLI entry — only the
         // system prompt + a synthetic system_reminder user turn, num_messages
-        // 0). Official `dedup_empty_sessions` (merge.rs): each cwd keeps ONLY
-        // its most recent empty (the "new session" resume entry); older
-        // empties drop.
+        // 0). A history browser drops ALL empties (`scan_grok_sessions_in`), so
+        // BOTH shells disappear — only the real session survives.
         let empty_chat = [
             r#"{"type":"system","content":"You are Grok."}"#,
             r#"{"type":"user","content":[{"type":"text","text":"<system-reminder>skills…</system-reminder>"}],"synthetic_reason":"system_reminder"}"#,
@@ -19619,11 +19605,11 @@ mod tests {
             fs::write(shell.join("chat_history.jsonl"), &empty_chat).unwrap();
         }
 
-        // Scanner keeps the real session + the NEWEST empty per cwd.
+        // Scanner keeps the real session ONLY — both empty shells are dropped.
         let mut scanned = scan_grok_sessions_in(&dir).unwrap();
         scanned.sort_by(|a, b| a.id.cmp(&b.id));
         let ids: Vec<&str> = scanned.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, vec!["uuid-1", "uuid-empty-new"]);
+        assert_eq!(ids, vec!["uuid-1"]);
         let real = scanned.iter().find(|s| s.id == "uuid-1").unwrap();
         assert!(real.path.ends_with("chat_history.jsonl"));
 

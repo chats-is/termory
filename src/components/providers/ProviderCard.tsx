@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { useT } from "@/i18n";
-import { maskKey } from "@/lib/provider-utils";
+import { isMultiSlot, maskKey } from "@/lib/provider-utils";
 import { OPENCODE_DEFAULT_NPM } from "@/constants";
 import type { Provider } from "@/types";
 
@@ -96,6 +96,9 @@ export function ProviderCard({
 }) {
   const t = useT();
   const isOpencode = provider.app === "opencode";
+  // OpenCode + Grok are multi-slot (shared helper): the primary action is
+  // "Set default" (the slot is enabled separately), not single-slot "Activate".
+  const multiSlot = isMultiSlot(provider.app);
   return (
     <Card
       className={cn(
@@ -153,7 +156,11 @@ export function ProviderCard({
                 )}
                 {provider.model && (
                   <>
-                    <dt className="text-muted-foreground">{t("providers.model")}</dt>
+                    <dt className="text-muted-foreground">
+                      {provider.app === "opencode" || provider.app === "grok"
+                        ? t("providers.defaultModel")
+                        : t("providers.model")}
+                    </dt>
                     <dd className="font-mono break-all">{provider.model}</dd>
                   </>
                 )}
@@ -256,7 +263,7 @@ export function ProviderCard({
                 onClick={onSetDefault}
                 disabled={settingDefault || !activatable}
               >
-                {isOpencode
+                {multiSlot
                   ? settingDefault
                     ? t("providers.setting")
                     : t("providers.setDefault")

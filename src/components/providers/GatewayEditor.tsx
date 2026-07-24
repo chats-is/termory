@@ -73,6 +73,10 @@ const CLAUDE_ROUTING_KEYS = [
 // disabled this long after a detection completes so it can't be spammed.
 const DETECT_COOLDOWN_MS = 5000;
 
+// Sentinel value for the multi-model "Default model" Select's "no default"
+// option (Radix Select forbids an empty-string item value). Maps to "".
+const NO_DEFAULT_MODEL = "__no_default__";
+
 type KV = { key: string; value: string };
 type ModelRow = { id: string; name: string };
 
@@ -265,12 +269,25 @@ export function GatewayEditor({
   const setBind = (app: CliApp, patch: Partial<BindDraft>) =>
     setBinds((cur) => ({ ...cur, [app]: { ...cur[app], ...patch } }));
 
-  // OpenCode can't surface a provider without a primary model id, so a
-  // checked OpenCode binding must have one (mirrors ProviderEditor).
-  const opencodeMissingModel =
-    binds.opencode.checked &&
-    protocols.opencode.length > 0 &&
-    binds.opencode.model.trim().length === 0;
+  // OpenCode + Grok are MULTI-model (unified): a checked binding needs a
+  // models LIST (each row → one picker entry); the `model` field is only the
+  // OPTIONAL default, chosen FROM the list (mirrors ProviderEditor).
+  const isMultiModel = (app: CliApp): boolean =>
+    app === "opencode" || app === "grok";
+  const boundMulti = (app: CliApp): boolean =>
+    binds[app].checked && protocols[app].length > 0;
+  const modelIdsFor = (app: CliApp): string[] =>
+    binds[app].models.map((m) => m.id.trim()).filter(Boolean);
+  const missingModelsFor = (app: CliApp): boolean =>
+    boundMulti(app) && modelIdsFor(app).length === 0;
+  const defaultInvalidFor = (app: CliApp): boolean => {
+    const d = binds[app].model.trim();
+    return boundMulti(app) && d.length > 0 && !modelIdsFor(app).includes(d);
+  };
+  const opencodeMissingModels = missingModelsFor("opencode");
+  const opencodeDefaultInvalid = defaultInvalidFor("opencode");
+  const grokMissingModels = missingModelsFor("grok");
+  const grokDefaultInvalid = defaultInvalidFor("grok");
 
   // Claude Desktop rejects non-Claude model names, so a checked Claude
   // Desktop binding can't carry an invalid (non-blank) model id.
@@ -278,17 +295,6 @@ export function GatewayEditor({
     binds["claude-desktop"].checked &&
     protocols["claude-desktop"].length > 0 &&
     binds["claude-desktop"].models.some((m) => !isClaudeSafeModelId(m.id));
-
-  // Grok is MULTI-model: a checked binding needs a models LIST (each row →
-  // one flat entry); the default (`model`) is optional but must be one of
-  // the listed models.
-  const grokBound = binds.grok.checked && protocols.grok.length > 0;
-  const grokModelIds = binds.grok.models.map((m) => m.id.trim()).filter(Boolean);
-  const grokMissingModels = grokBound && grokModelIds.length === 0;
-  const grokDefaultInvalid =
-    grokBound &&
-    binds.grok.model.trim().length > 0 &&
-    !grokModelIds.includes(binds.grok.model.trim());
   // No duplicate model ids within ANY binding's models list (a repeat would
   // silently override — grok's `[model."<id>-<model>"]`, OpenCode's `models`
   // map, Claude Desktop's `inferenceModels`). Applies to every list-carrying
@@ -304,7 +310,8 @@ export function GatewayEditor({
     name.trim().length > 0 &&
     baseUrl.trim().length > 0 &&
     // A gateway with no bindings is allowed (detect now, bind later).
-    !opencodeMissingModel &&
+    !opencodeMissingModels &&
+    !opencodeDefaultInvalid &&
     !grokMissingModels &&
     !grokDefaultInvalid &&
     !anyBindingDupModels &&
@@ -334,10 +341,15 @@ export function GatewayEditor({
         app,
         model: d.model.trim() || undefined
       };
-      // Advanced options — drop blank-key or blank-value rows.
-      const options = d.options
-        .map((o) => ({ key: o.key.trim(), value: o.value.trim() }))
-        .filter((o) => o.key && o.value);
+      // Advanced options — drop blank-key or blank-value rows. Grok has no
+      // Advanced settings (its overrides are global config.toml), so never
+      // persist options for a grok binding.
+      const options =
+        app === "grok"
+          ? []
+          : d.options
+              .map((o) => ({ key: o.key.trim(), value: o.value.trim() }))
+              .filter((o) => o.key && o.value);
       if (options.length) b.options = options;
       // OpenCode-only: the AI SDK package (store the EFFECTIVE one so the
       // derived protocol stays correct).
@@ -641,62 +653,33 @@ export function GatewayEditor({
                                   {t("providers.apiBackendDefault")}
                                 </SelectItem>
                                 <SelectItem value="responses">
-                                  responses
+                                  Responses
                                 </SelectItem>
                                 <SelectItem value="chat_completions">
-                                  chat_completions
+                                  Chat Completions
                                 </SelectItem>
-                                <SelectItem value="messages">messages</SelectItem>
+                                <SelectItem value="messages">Messages</SelectItem>
                               </SelectContent>
                             </Select>
                           </>
                         )}
 
-                        {/* Claude Desktop has no single primary model — its
-                            picker is driven by the model list below. */}
-                        {app !== "claude-desktop" && (
+                        {/* Single-model apps (Claude / Codex / Gemini): the
+                            primary Model field. Multi-model (OpenCode + Grok)
+                            render their OPTIONAL default AFTER the models list
+                            below; Claude Desktop's picker is the list only. */}
+                        {!isMultiModel(app) && app !== "claude-desktop" && (
                           <>
                             <Label className="text-xs">
-                              {app === "opencode"
-                                ? `${t("providers.model")} *`
-                                : app === "grok"
-                                  ? t("providers.defaultModel")
-                                  : t("providers.model")}
+                              {t("providers.model")}
                             </Label>
                             <ModelCombobox
-                              ariaLabel={
-                                app === "opencode"
-                                  ? `${t("providers.model")} *`
-                                  : app === "grok"
-                                    ? t("providers.defaultModel")
-                                    : t("providers.model")
-                              }
+                              ariaLabel={t("providers.model")}
                               value={draft.model}
                               onValueChange={(v) => setBind(app, { model: v })}
-                              options={
-                                app === "grok"
-                                  ? draft.models
-                                      .map((m) => m.id.trim())
-                                      .filter(Boolean)
-                                  : models
-                              }
-                              loading={detecting && app !== "grok"}
-                              ariaInvalid={
-                                app === "opencode"
-                                  ? !draft.model.trim()
-                                  : app === "grok" && grokDefaultInvalid
-                              }
+                              options={models}
+                              loading={detecting}
                             />
-                            {app === "opencode" && !draft.model.trim() && (
-                              <p className="text-xs text-destructive">
-                                OpenCode requires a primary model id.
-                              </p>
-                            )}
-                            {app === "grok" && grokDefaultInvalid && (
-                              <p className="text-xs text-destructive">
-                                {t("help.grokDefaultInvalid")}
-                              </p>
-                            )}
                           </>
                         )}
 
@@ -798,12 +781,12 @@ export function GatewayEditor({
                           </>
                         )}
 
-                        {/* OpenCode extra models (AI SDK shown above) AND grok's
-                            REQUIRED model list (each row → one picker entry). */}
-                        {(app === "opencode" || app === "grok") && (
+                        {/* OpenCode + Grok: the REQUIRED model list (each row →
+                            one picker entry). */}
+                        {isMultiModel(app) && (
                           <>
                             <Label className="text-xs mt-1">
-                              {`${t("providers.modelList")}${app === "grok" ? " *" : ""}`}
+                              {`${t("providers.modelList")} *`}
                             </Label>
                             <p className="text-xs text-muted-foreground">
                               {t(app === "grok" ? "help.grokModels" : "help.extraModels")}
@@ -889,9 +872,68 @@ export function GatewayEditor({
                           </>
                         )}
 
+                        {/* OpenCode + Grok: the OPTIONAL default model, chosen
+                            FROM the list above. Radix Select; the first item
+                            (sentinel value) is "no default" — Radix forbids an
+                            empty-string item value, so it maps to undefined. */}
+                        {isMultiModel(app) && (
+                          <>
+                            <Label className="text-xs mt-1">
+                              {t("providers.defaultModel")}
+                            </Label>
+                            <Select
+                              value={
+                                draft.model.trim()
+                                  ? draft.model.trim()
+                                  : NO_DEFAULT_MODEL
+                              }
+                              onValueChange={(v) =>
+                                setBind(app, {
+                                  model: v === NO_DEFAULT_MODEL ? "" : v
+                                })
+                              }
+                            >
+                              <SelectTrigger
+                                className="w-full h-8"
+                                aria-label={t("providers.defaultModel")}
+                                aria-invalid={defaultInvalidFor(app) || undefined}
+                              >
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value={NO_DEFAULT_MODEL}>
+                                  {t("providers.selectModel")}
+                                </SelectItem>
+                                {[...new Set(modelIdsFor(app))].map((id) => (
+                                  <SelectItem key={id} value={id}>
+                                    {id}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            {defaultInvalidFor(app) ? (
+                              <p className="text-xs text-destructive">
+                                {t("help.grokDefaultInvalid")}
+                              </p>
+                            ) : (
+                              <p className="text-xs text-muted-foreground">
+                                {t(
+                                  app === "grok"
+                                    ? "help.grokDefault"
+                                    : "help.opencodeDefault"
+                                )}
+                              </p>
+                            )}
+                          </>
+                        )}
 
                         {/* Advanced settings — same wording as ProviderEditor;
-                            Claude seeds the per-size routing keys. */}
+                            Claude seeds the per-size routing keys. NOT shown
+                            for grok: its overrides are GLOBAL config.toml keys
+                            (not per-provider), so a per-binding box is
+                            misleading — edit ~/.grok/config.toml directly. */}
+                        {app !== "grok" && (
+                          <>
                         <Label className="text-xs mt-1">{t("providers.advancedSettings")}</Label>
                         <p className="text-xs text-muted-foreground">
                           {t("help.overrideIntro", { app: CLI_APP_LABEL[app] })}{" "}
@@ -970,6 +1012,8 @@ export function GatewayEditor({
                         >
                           {t("providers.add")}
                         </Button>
+                          </>
+                        )}
                       </div>
                     </CollapsibleContent>
                   </Collapsible>

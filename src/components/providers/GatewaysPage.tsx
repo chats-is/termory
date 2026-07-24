@@ -26,6 +26,7 @@ import {
 } from "@/constants";
 import {
   blankGateway,
+  isMultiSlot,
   maskKey,
   providerFromBinding
 } from "@/lib/provider-utils";
@@ -196,7 +197,9 @@ export function GatewaysPage({
         const stillBound = next.bindings.find((nb) => nb.app === pb.app);
         const oldSynth = providerFromBinding(prev, pb);
         if (!stillBound) {
-          if (pb.app === "opencode") {
+          if (isMultiSlot(pb.app)) {
+            // Multi-slot: remove just THIS binding's slot/entries (leaves
+            // sibling slots). deactivate would only clear the default.
             await invoke("delete_provider", { provider: oldSynth });
           } else {
             await invoke("deactivate_provider", {
@@ -211,8 +214,8 @@ export function GatewaysPage({
             provider: newSynth,
             providersForApp: [newSynth]
           });
-          if (pb.app === "opencode") {
-            await invoke("set_opencode_default_provider", { provider: newSynth });
+          if (isMultiSlot(pb.app)) {
+            await invoke("set_default_provider", { provider: newSynth });
           }
         }
       }
@@ -238,7 +241,7 @@ export function GatewaysPage({
     for (const b of gateway.bindings) {
       const synth = providerFromBinding(gateway, b);
       try {
-        if (b.app === "opencode") {
+        if (isMultiSlot(b.app)) {
           await invoke("delete_provider", { provider: synth });
         } else if (isBindingActive(gateway, b)) {
           await invoke("deactivate_provider", {
@@ -261,8 +264,8 @@ export function GatewaysPage({
 
   const isBindingActive = (gateway: Gateway, b: GatewayBinding): boolean => {
     const state = activeStates[b.app];
-    if (b.app === "opencode") {
-      // OpenCode slots are keyed by id — no collision, reliable.
+    if (isMultiSlot(b.app)) {
+      // Multi-slot (OpenCode/Grok) slots are keyed by id — no collision.
       return (state?.configuredProviderIds ?? []).includes(b.id);
     }
     // Single-slot: "in use" only when Termory's marker points at THIS
@@ -289,8 +292,8 @@ export function GatewaysPage({
           provider: synth,
           providersForApp: [synth]
         });
-        if (b.app === "opencode") {
-          await invoke("set_opencode_default_provider", { provider: synth });
+        if (isMultiSlot(b.app)) {
+          await invoke("set_default_provider", { provider: synth });
         }
         markActive(b.app, synth.id);
         toast.success(t("toast.bindingActivated", { name: gateway.name, app: CLI_APP_LABEL[b.app] }));
@@ -318,7 +321,7 @@ export function GatewaysPage({
     const doDeactivate = async (): Promise<boolean> => {
       setBusy(synth.id);
       try {
-        if (b.app === "opencode") {
+        if (isMultiSlot(b.app)) {
           await invoke("delete_provider", { provider: synth });
         } else {
           await invoke("deactivate_provider", {
@@ -349,15 +352,16 @@ export function GatewaysPage({
     await doDeactivate();
   };
 
-  // OpenCode-only: add / remove the provider slot in opencode.json WITHOUT
-  // touching the top-level default (the two states are independent — see
-  // `read_active_opencode`). Mirrors ProvidersPage.toggleGatewayEnabled.
+  // Multi-slot only (OpenCode/Grok): add / remove the provider slot WITHOUT
+  // touching the startup default (the two states are independent — see
+  // `read_active_opencode` / `read_active_grok`). Mirrors
+  // ProvidersPage.toggleGatewayEnabled.
   const toggleBindingEnabled = async (gateway: Gateway, b: GatewayBinding) => {
-    if (b.app !== "opencode") return;
+    if (!isMultiSlot(b.app)) return;
     const synth = providerFromBinding(gateway, b);
-    const enabled = (activeStates.opencode?.configuredProviderIds ?? []).includes(
-      b.id
-    );
+    const enabled = (
+      activeStates[b.app]?.configuredProviderIds ?? []
+    ).includes(b.id);
     setBusy(synth.id);
     try {
       if (enabled) {
@@ -377,12 +381,12 @@ export function GatewaysPage({
     }
   };
 
-  // OpenCode-only: turn off the "in use" (default) state WITHOUT removing
-  // the slot — clears the top-level `model` pointer only (deactivate_opencode
-  // leaves enabled slots), so the binding stays configured but is no longer
-  // the startup default. Mirrors the single-slot "In use — turn off".
+  // Multi-slot only (OpenCode/Grok): turn off the "in use" (default) state
+  // WITHOUT removing the slot — clears the startup-default pointer only
+  // (deactivate leaves enabled slots), so the binding stays configured but is
+  // no longer the default. Mirrors the single-slot "In use — turn off".
   const clearBindingDefault = async (gateway: Gateway, b: GatewayBinding) => {
-    if (b.app !== "opencode") return;
+    if (!isMultiSlot(b.app)) return;
     const synth = providerFromBinding(gateway, b);
     setBusy(synth.id);
     try {
@@ -489,14 +493,14 @@ export function GatewaysPage({
                     {(visibleBindingsByGateway.get(gateway.id) ?? [])
                       .map((b) => {
                       const state = activeStates[b.app];
-                      const isOpencode = b.app === "opencode";
-                      // OpenCode has two independent states: the slot exists
-                      // in opencode.json (configured) AND it's the top-level
-                      // default (in use). Single-slot CLIs collapse to one.
+                      const isMulti = isMultiSlot(b.app);
+                      // Multi-slot (OpenCode/Grok) has two independent states:
+                      // the slot is configured AND it's the startup default
+                      // (in use). Single-slot CLIs collapse to one.
                       const configured =
-                        isOpencode &&
+                        isMulti &&
                         (state?.configuredProviderIds ?? []).includes(b.id);
-                      const isDefault = isOpencode
+                      const isDefault = isMulti
                         ? state?.matchedProviderId === b.id
                         : isBindingActive(gateway, b);
                       return (
@@ -522,7 +526,7 @@ export function GatewaysPage({
                               )}
                             </div>
                           </div>
-                          {isOpencode ? (
+                          {isMulti ? (
                             // Two-state: Set-as-default (or "In use" badge)
                             // + an enable/disable toggle for the slot.
                             <div className="flex items-center gap-1.5 shrink-0">
@@ -538,8 +542,8 @@ export function GatewaysPage({
                                     disabled={busy === b.id}
                                     aria-label={
                                       configured
-                                        ? t("providers.removeFromOpencode")
-                                        : t("providers.addToOpencode")
+                                        ? t("providers.disable")
+                                        : t("providers.enable")
                                     }
                                   >
                                     {busy === b.id ? (
@@ -553,8 +557,8 @@ export function GatewaysPage({
                                 </TooltipTrigger>
                                 <TooltipContent side="top">
                                   {configured
-                                    ? t("providers.addedToOpencode")
-                                    : t("providers.notInOpencode")}
+                                    ? t("providers.disable")
+                                    : t("providers.enable")}
                                 </TooltipContent>
                               </Tooltip>
                               {isDefault ? (

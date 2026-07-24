@@ -54,7 +54,7 @@ export const OPENCODE_NPM_OPTIONS: {
 }[] = [
   {
     value: "@ai-sdk/openai",
-    label: "OpenAI (Responses) (default)",
+    label: "OpenAI (Responses)",
     hint: "OpenAI Responses API (/v1/responses) — api.openai.com or a gateway that implements it."
   },
   {

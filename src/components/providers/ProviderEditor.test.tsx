@@ -57,6 +57,27 @@ describe("ProviderEditor — Advanced settings validation", () => {
     expect(saveBtn()).not.toBeDisabled();
   });
 
+  it("OpenCode requires a models LIST before save (default model is optional)", () => {
+    render(
+      <ProviderEditor
+        provider={blankProvider("opencode")}
+        isNew
+        onSave={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    fireEvent.change(screen.getByLabelText("Name *"), {
+      target: { value: "OC" }
+    });
+    // Name + Base URL present, models list empty → save stays disabled
+    // (OpenCode's `models` is now required; the default `model` is optional).
+    expect(saveBtn()).toBeDisabled();
+    fireEvent.change(screen.getAllByLabelText("Model ID")[0], {
+      target: { value: "gpt-5" }
+    });
+    expect(saveBtn()).not.toBeDisabled();
+  });
+
   it("blocks save on duplicate option keys", () => {
     render(
       <ProviderEditor
@@ -135,7 +156,10 @@ describe("ProviderEditor — save normalization", () => {
     ]);
   });
 
-  it("saves OpenCode extra models as {id,name} (trimmed)", async () => {
+  it("saves OpenCode models as {id,name} (trimmed); default model is optional", async () => {
+    // OpenCode is multi-model now (like grok): the `models` LIST is required
+    // and the primary `model` is only the OPTIONAL default. Filling one model
+    // row is enough to save — no separate primary "Model" field.
     const onSave = vi.fn();
     render(
       <ProviderEditor
@@ -148,9 +172,8 @@ describe("ProviderEditor — save normalization", () => {
     fireEvent.change(screen.getByLabelText("Name *"), {
       target: { value: "OC" }
     });
-    fireEvent.change(screen.getByLabelText("Model *"), {
-      target: { value: "gpt-5" }
-    });
+    // No "Model *" field anymore — the primary is the optional "Default model".
+    expect(screen.queryByLabelText("Model *")).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Model ID"), {
       target: { value: "  gpt-5-mini  " }
     });
@@ -162,6 +185,7 @@ describe("ProviderEditor — save normalization", () => {
     await waitFor(() => expect(onSave).toHaveBeenCalled());
     const saved = onSave.mock.calls[0][0];
     expect(saved.models).toEqual([{ id: "gpt-5-mini", name: "Mini" }]);
+    expect(saved.model).toBeUndefined();
   });
 });
 

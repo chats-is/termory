@@ -32,7 +32,7 @@
 use crate::config;
 use crate::providers::{
     activate, deactivate, detect_install_snapshot, gateway_providers, read_active_state,
-    set_opencode_default, CliApp, InstallSnapshot, Provider,
+    set_default, CliApp, InstallSnapshot, Provider,
 };
 use crate::sessions::{AppSession, ClaudeWorkStatus};
 use std::collections::HashMap;
@@ -1472,16 +1472,16 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         ("official", _) => deactivate(cli, &providers_for_app),
         ("custom", Some(pid)) => match providers_for_app.iter().find(|p| p.id == pid) {
             Some(p) => {
-                // For OpenCode, `activate` only adds the provider's slot
-                // to opencode.json — it does NOT make it the startup
-                // default, which is what the checkmark / inline title
-                // track. So also promote it to default (mirrors the
-                // Providers page flow). Single-slot CLIs (Claude / Codex
-                // / Gemini) need only `activate`, which writes their live
-                // config directly.
+                // For the multi-slot CLIs (OpenCode + Grok), `activate`
+                // only adds the provider's slot/entries — it does NOT make
+                // it the startup default, which is what the checkmark /
+                // inline title track. So also promote it to default
+                // (mirrors the Providers page flow). Single-slot CLIs
+                // (Claude / Codex / Gemini) need only `activate`, which
+                // writes their live config directly.
                 let activated = activate(p, &providers_for_app);
-                if activated.is_ok() && cli == CliApp::Opencode {
-                    set_opencode_default(p)
+                if activated.is_ok() && matches!(cli, CliApp::Opencode | CliApp::Grok) {
+                    set_default(p)
                 } else {
                     activated
                 }

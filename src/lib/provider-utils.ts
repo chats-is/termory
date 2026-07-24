@@ -171,6 +171,17 @@ export function hasUpdate(
   return a.hasPre && !b.hasPre;
 }
 
+/**
+ * MULTI-SLOT CLIs — several providers' entries coexist in the CLI config
+ * (OpenCode's `provider.*` blocks / Grok's flat `[model.*]` list) and one is
+ * separately promoted to the startup default (via `set_default_provider`).
+ * Claude / Codex / Gemini are single-slot (activating replaces the previous
+ * one). Mirror of the backend's `set_default` dispatch.
+ */
+export function isMultiSlot(app: CliApp): boolean {
+  return app === "opencode" || app === "grok";
+}
+
 export function newProviderId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
