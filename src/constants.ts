@@ -177,8 +177,10 @@ export const CLI_INSTALL: Record<
     methods: [
       { id: "npm", label: "npm", command: "npm install -g @openai/codex" },
       // Official standalone installer (chatgpt.com domain, redirects to
-      // the GitHub release install.sh) — installs a native CLI to
-      // ~/.local/bin/codex, already covered by cli_search_paths.
+      // releases.openai.com) — installs a native CLI to ~/.local/bin/codex
+      // on Unix (install.sh:8) but %LOCALAPPDATA%\Programs\OpenAI\Codex\bin
+      // on Windows (install.ps1:743); both are covered by cli_search_paths,
+      // as is the $CODEX_INSTALL_DIR override both scripts honor.
       {
         id: "curl",
         label: "curl",

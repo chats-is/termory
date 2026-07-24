@@ -164,14 +164,19 @@ async fn search_all_sessions(query: String) -> Result<Vec<SearchHit>, String> {
 }
 
 /// Detect which CLI binaries are reachable on `$PATH`. Result is
-/// fresh per call — the frontend re-checks on Providers page mount
-/// and before every action so newly-installed CLIs surface without
-/// an app restart.
+/// fully fresh per call — the frontend re-checks on Providers page
+/// mount and before every action so newly-installed CLIs surface
+/// without an app restart. This is the COLD path (a user-visible
+/// Recheck, off the main thread), so it clears the hot path's
+/// shell-probe cache first and eats the real ~1s-per-missing-CLI
+/// spawn: it's the explicit escape hatch for an install in a dir
+/// Termory neither scans nor watches.
 #[tauri::command]
 async fn detect_clis(
     app: tauri::AppHandle,
 ) -> Result<std::collections::HashMap<String, bool>, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        providers::clear_shell_probe_cache();
         let snapshot = detect_install_snapshot();
         // The page just paid for a fresh probe — hand the WHOLE snapshot
         // to the tray so a Providers-page Recheck also updates the menu

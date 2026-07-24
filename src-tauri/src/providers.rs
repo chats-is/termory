@@ -30,7 +30,8 @@ use std::error::Error;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use toml_edit::{value as toml_value, DocumentMut, Item};
 
@@ -133,27 +134,71 @@ impl CliApp {
 /// (`commands/misc.rs:584`) — covers every common installation method
 /// instead of relying on the inherited process `$PATH`.
 ///
-/// Order matters: shorter / user-level paths come first so we prefer
-/// per-user installs over system ones. Per-tool sections (opencode
-/// env vars + bun/go/XDG) only contribute when the tool requests them.
+/// Order matters — `find_cli_binary` takes the first stat hit:
+///   1. the installer env var `tool`'s own install script honors, if set
+///      (most user-specific signal there is, so it outranks everything)
+///   2. per-user dirs, then system dirs (prefer a per-user install)
+///   3. the process `$PATH` last, as a catch-all
+/// Per-tool sections (opencode's bun/go dirs, codex's Windows standalone
+/// bin dir, grok's `~/.grok/bin`) only contribute when `tool` asks.
+///
+/// EVERY entry must trace to a real installer — cite the script + line
+/// next to it. A `~/.codex/bin` once sat here for months purely because
+/// it LOOKED like `~/.grok/bin` and `~/.opencode/bin`; no codex
+/// installer has ever written there, and a later reader (reasonably)
+/// assumed the unexplained path was a legacy layout and wrote that
+/// guess down as fact. An unjustified entry is worse than a missing
+/// one: it costs a stat AND it manufactures false provenance.
 fn cli_search_paths(tool: &str) -> Vec<std::path::PathBuf> {
     use std::path::PathBuf;
     let mut paths: Vec<PathBuf> = Vec::new();
     let home = crate::home_dir().unwrap_or_default();
 
-    // Cross-platform user-level dir — `~/.npm-global/bin` resolves to
-    // `%USERPROFILE%\.npm-global\bin` on Windows; uncommon but valid
-    // when a user sets a custom npm prefix anywhere.
-    if !home.as_os_str().is_empty() {
-        push_unique(&mut paths, home.join(".npm-global/bin"));
+    // Installer-honored custom install dirs go FIRST. Each var is the
+    // one THAT tool's own install script reads, so if it's set the
+    // binary really is there — and an explicitly chosen dir has to beat
+    // every package-manager dir below, since `find_cli_binary` returns
+    // the first stat hit. Relative order within a tool follows its
+    // installer's own precedence (opencode: OPENCODE_INSTALL_DIR then
+    // XDG_BIN_DIR then its default). Unset vars contribute nothing, so
+    // this is inert for the common case.
+    let install_dir_vars: &[&str] = match tool {
+        "opencode" => &["OPENCODE_INSTALL_DIR", "XDG_BIN_DIR"],
+        "codex" => &["CODEX_INSTALL_DIR"],
+        "grok" => &["GROK_BIN_DIR"],
+        _ => &[],
+    };
+    for var in install_dir_vars {
+        if let Some(val) = std::env::var_os(var) {
+            push_unique(&mut paths, PathBuf::from(val));
+        }
     }
 
-    // Unix-only user-level dirs (XDG `~/.local/bin`, n version manager,
-    // Unix-style Volta layout). On Windows these are non-existent paths,
-    // so gating them avoids dead stat() calls and clarifies intent.
+    // Cross-platform user-level dirs.
+    //   - `~/.npm-global/bin` resolves to `%USERPROFILE%\.npm-global\bin`
+    //     on Windows; uncommon but valid when a user sets a custom npm
+    //     prefix anywhere.
+    //   - `~/.local/bin` is NOT unix-only. Claude Code's own launcher-path
+    //     helper reads, verbatim from the shipped binary (2.1.218):
+    //         if (platform === "win32")
+    //             return join(homedir(), ".local", "bin", "claude.exe")
+    //         return "~/.local/bin/claude"
+    //     i.e. the native installer (`claude.ai/install.ps1` → bootstrap.ps1
+    //     → `claude.exe install`, the powershell command our own InstallGuide
+    //     shows) lands in `%USERPROFILE%\.local\bin` on Windows too. It
+    //     appends that to the user PATH, but Windows doesn't propagate PATH
+    //     to running processes, so the PATH fallback alone leaves a fresh
+    //     install undetected.
+    if !home.as_os_str().is_empty() {
+        push_unique(&mut paths, home.join(".npm-global/bin"));
+        push_unique(&mut paths, home.join(".local/bin"));
+    }
+
+    // Unix-only user-level dirs (n version manager, Unix-style Volta
+    // layout). On Windows these are non-existent paths, so gating them
+    // avoids dead stat() calls and clarifies intent.
     #[cfg(unix)]
     if !home.as_os_str().is_empty() {
-        push_unique(&mut paths, home.join(".local/bin"));
         push_unique(&mut paths, home.join("n/bin"));
         push_unique(&mut paths, home.join(".volta/bin"));
         extend_mise_node_search_paths(&mut paths, &home);
@@ -192,6 +237,27 @@ fn cli_search_paths(tool: &str) -> Vec<std::path::PathBuf> {
             push_unique(&mut paths, localdata.join("Volta").join("bin"));
             // pnpm on Windows: %LOCALAPPDATA%\pnpm
             push_unique(&mut paths, localdata.join("pnpm"));
+            // winget `portable` packages (Claude Code's winget manifest is
+            // `InstallerType: portable`) keep the real payload under
+            // `WinGet\Packages\<id>\` and expose a shim from a Links dir
+            // that winget appends to PATH. Both dirs per winget-cli
+            // `AppInstallerCommonCore/Runtime.cpp:223-234`:
+            //   PortableLinksUserLocation    = LocalAppData\Microsoft\WinGet\Links
+            //   PortableLinksMachineLocation = ProgramFiles\WinGet\Links
+            // User scope first (the default for `winget install`).
+            push_unique(
+                &mut paths,
+                localdata.join("Microsoft").join("WinGet").join("Links"),
+            );
+        }
+        // %ProgramFiles% is FOLDERID_ProgramFiles for an x64 process, which
+        // Termory is (winget resolves the known folder; the env var is the
+        // equivalent without pulling in a Windows-API dependency).
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            push_unique(
+                &mut paths,
+                PathBuf::from(program_files).join("WinGet").join("Links"),
+            );
         }
     }
 
@@ -256,16 +322,10 @@ fn cli_search_paths(tool: &str) -> Vec<std::path::PathBuf> {
         }
     }
 
-    // opencode's curl installer respects $OPENCODE_INSTALL_DIR then
-    // $XDG_BIN_DIR, and defaults to ~/.opencode/bin (per the upstream
-    // install script). Also reachable via bun and go installs.
+    // opencode's curl installer defaults to ~/.opencode/bin when neither
+    // $OPENCODE_INSTALL_DIR nor $XDG_BIN_DIR is set (both handled at the
+    // top). Also reachable via bun and go installs.
     if tool == "opencode" {
-        if let Some(val) = std::env::var_os("OPENCODE_INSTALL_DIR") {
-            push_unique(&mut paths, PathBuf::from(val));
-        }
-        if let Some(val) = std::env::var_os("XDG_BIN_DIR") {
-            push_unique(&mut paths, PathBuf::from(val));
-        }
         if !home.as_os_str().is_empty() {
             push_unique(&mut paths, home.join("bin"));
             push_unique(&mut paths, home.join(".opencode/bin"));
@@ -281,21 +341,68 @@ fn cli_search_paths(tool: &str) -> Vec<std::path::PathBuf> {
         }
     }
 
-    // Grok Build's curl installer (x.ai/cli/install.sh) puts the binary
-    // at ~/.grok/bin (verified on the real install).
+    // Codex's standalone installer, with $CODEX_INSTALL_DIR unset (that
+    // one's handled at the top), splits by platform: `~/.local/bin` on
+    // Unix (`.audit-sources/codex/scripts/install/install.sh:8`, in the
+    // cross-platform section above) but
+    // `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin` on Windows
+    // (`.../install.ps1:741`) — a path nothing else in this list covers.
+    // The payload itself lives in `~/.codex/packages/standalone/`; only
+    // the visible bin dir named here is ever on PATH.
+    #[cfg(target_os = "windows")]
+    if tool == "codex" {
+        if let Some(localdata) = dirs::data_local_dir() {
+            push_unique(
+                &mut paths,
+                localdata
+                    .join("Programs")
+                    .join("OpenAI")
+                    .join("Codex")
+                    .join("bin"),
+            );
+        }
+    }
+
+    // Claude Code's LEGACY "local installer" form: `claude
+    // migrate-installer` moved the npm global install to
+    // `<claude-config>/local` (superseded by today's native
+    // `~/.local/bin`, but still live on machines that migrated and
+    // never re-installed). It is deliberately NOT on PATH — the
+    // installer exposes it through a shell alias instead, per the
+    // doctor's own repair text in the shipped binary (2.1.218):
+    //     Create alias: alias claude="~/.claude/local/claude"
+    // so neither the dir list nor the `$PATH` catch-all can see it and
+    // only the ~1s interactive-shell fallback would (aliases expand in
+    // `-i` shells). One stat is much cheaper than that spawn, and on
+    // Windows there IS no shell fallback at all. Honors
+    // `$CLAUDE_CONFIG_DIR` like every other Claude state path.
+    if tool == "claude" && !home.as_os_str().is_empty() {
+        push_unique(
+            &mut paths,
+            crate::sessions::claude_config_root(&home).join("local"),
+        );
+    }
+
+    // Grok Build's installer defaults to ~/.grok/bin on BOTH platforms
+    // when $GROK_BIN_DIR is unset, and confirmed against a real install.
+    // Cited from the LIVE scripts (`x.ai/cli/install.sh:157` /
+    // `install.ps1:153`) because `.audit-sources/grok-build` ships no
+    // installer — so unlike the other tools these line numbers can drift.
     if tool == "grok" {
         if !home.as_os_str().is_empty() {
             push_unique(&mut paths, home.join(".grok/bin"));
         }
     }
 
-    // Cross-platform per-user installer fallbacks (bun / cargo / codex
-    // curl). Bun and cargo on Windows install under %USERPROFILE%
-    // matching the same `~/.bun/bin`, `~/.cargo/bin` joins.
+    // Cross-platform per-user installer fallbacks. Both are generic
+    // (any `bun add -g` / `cargo install` binary lands there, whichever
+    // tool), and both resolve under %USERPROFILE% on Windows with the
+    // same joins. A third entry here, `~/.codex/bin`, was REMOVED: no
+    // codex installer or version ever used it — see the note on
+    // `cli_search_paths` about not inventing paths.
     if !home.as_os_str().is_empty() {
         push_unique(&mut paths, home.join(".bun/bin"));
         push_unique(&mut paths, home.join(".cargo/bin"));
-        push_unique(&mut paths, home.join(".codex/bin"));
     }
     // pnpm default locations are platform-specific.
     #[cfg(target_os = "macos")]
@@ -583,13 +690,69 @@ fn shell_version_fallback(_tool: &str) -> Option<String> {
     None
 }
 
+/// How long a shell-fallback verdict stays good. See
+/// [`shell_installed_cached`] for why staleness is harmless.
+const SHELL_PROBE_TTL: Duration = Duration::from_secs(600);
+
+static SHELL_PROBE: Mutex<Vec<(&'static str, Instant, bool)>> = Mutex::new(Vec::new());
+
+/// Cached "does the shell know this tool" verdict for the HOT path.
+///
+/// [`shell_version_fallback`] costs ~1s per call — it spawns an
+/// interactive login shell so the user's rc files get sourced. The
+/// catch is `find_cli_binary(..).is_some() || shell_version_fallback(..)`:
+/// the `||` only short-circuits on a HIT, so the spawn happens for
+/// every CLI the directory scan missed — i.e. for every tool the user
+/// does NOT have installed. [`detect_install_snapshot`] runs that on a
+/// hot path (every tray-menu open, every watcher burst, on the caller
+/// thread), so a user with two of the five CLIs was paying ~3s of shell
+/// spawns each time they opened the menu. Measured on a stock macOS
+/// zsh: 0.9-1.7s per miss.
+///
+/// Staleness is bounded where it matters: an install landing in ANY
+/// watched dir is found by `find_cli_binary` and never reaches this
+/// cache, so a fresh normal install still appears immediately. The
+/// cache can only delay an install in a dir we neither scan nor watch —
+/// which could not have been noticed promptly anyway — and the
+/// Providers-page Recheck clears it outright
+/// ([`clear_shell_probe_cache`]).
+fn shell_installed_cached(tool: &'static str) -> bool {
+    let now = Instant::now();
+    if let Ok(cache) = SHELL_PROBE.lock() {
+        if let Some((_, at, found)) = cache.iter().find(|(t, ..)| *t == tool) {
+            if now.duration_since(*at) < SHELL_PROBE_TTL {
+                return *found;
+            }
+        }
+    }
+    // Probe OUTSIDE the lock: this blocks for up to SUBPROCESS_TIMEOUT,
+    // and holding the mutex across it would serialize every other
+    // caller behind the slowest shell.
+    let found = shell_version_fallback(tool).is_some();
+    if let Ok(mut cache) = SHELL_PROBE.lock() {
+        cache.retain(|(t, ..)| *t != tool);
+        cache.push((tool, now, found));
+    }
+    found
+}
+
+/// Drop every cached shell-fallback verdict so the next probe re-runs
+/// for real. The explicit escape hatch behind the Providers page's
+/// Recheck (and the watcher's install-changed branch, where a bin dir
+/// we do NOT scan may have just gained a binary).
+pub fn clear_shell_probe_cache() {
+    if let Ok(mut cache) = SHELL_PROBE.lock() {
+        cache.clear();
+    }
+}
+
 /// Whether the Codex CLI binary is installed (path scan + shell
 /// fallback). Split out from [`detect_install_snapshot`] because Codex
 /// alone has TWO install forms — this CLI and the desktop app — and
 /// some features (account add via `codex login`, terminal resume /
 /// New Session) need the binary specifically.
 pub fn codex_cli_installed() -> bool {
-    find_cli_binary("codex").is_some() || shell_version_fallback("codex").is_some()
+    find_cli_binary("codex").is_some() || shell_installed_cached("codex")
 }
 
 /// The Codex DESKTOP app's bundle id. Since 2026-07-09 the Codex app
@@ -922,8 +1085,7 @@ pub fn detect_install_snapshot() -> InstallSnapshot {
             // by its on-disk config dir (and platform support) instead.
             CliApp::ClaudeDesktop => crate::claude_desktop::is_installed(),
             _ => {
-                find_cli_binary(app.bin_name()).is_some()
-                    || shell_version_fallback(app.bin_name()).is_some()
+                find_cli_binary(app.bin_name()).is_some() || shell_installed_cached(app.bin_name())
             }
         };
         map.insert(app, installed);
@@ -3882,6 +4044,181 @@ mod tests {
         assert!(
             matching.is_empty(),
             "claude search list contains ~/go/bin entries: {matching:?}"
+        );
+    }
+
+    #[test]
+    fn cli_search_paths_includes_local_bin_on_every_platform() {
+        // Claude Code's native installer targets `~/.local/bin` on ALL
+        // three platforms — on Windows that's
+        // `%USERPROFILE%\.local\bin\claude.exe` (claude.ai/install.ps1 →
+        // bootstrap.ps1 → `claude.exe install`). It used to be gated
+        // `#[cfg(unix)]`, which left the InstallGuide's own recommended
+        // Windows install undetected until the user re-logged in (the
+        // PATH fallback can't see a just-appended user PATH entry).
+        let paths = cli_search_paths("claude");
+        let has_local_bin = paths
+            .iter()
+            .any(|p| p.ends_with(std::path::Path::new(".local").join("bin")));
+        assert!(has_local_bin, "search list missing ~/.local/bin: {paths:?}");
+    }
+
+    #[test]
+    fn cli_search_paths_honors_installer_custom_dirs() {
+        // codex's install.sh:8 / install.ps1:744 read $CODEX_INSTALL_DIR
+        // and grok's install.sh:157 / install.ps1:153 read $GROK_BIN_DIR,
+        // exactly like opencode's $OPENCODE_INSTALL_DIR (already honored).
+        // A user who sets one gets the binary somewhere none of the fixed
+        // paths can see, on every platform.
+        let _lock = crate::testutils::lock_home();
+        let codex_dir = std::env::temp_dir().join("termory-test-codex-install-dir");
+        let grok_dir = std::env::temp_dir().join("termory-test-grok-bin-dir");
+        let _codex_var = crate::testutils::EnvVarGuard::set("CODEX_INSTALL_DIR", &codex_dir);
+        let _grok_var = crate::testutils::EnvVarGuard::set("GROK_BIN_DIR", &grok_dir);
+
+        let codex_paths = cli_search_paths("codex");
+        let grok_paths = cli_search_paths("grok");
+        // Per-tool sections stay scoped — codex's var must not leak into
+        // another tool's list.
+        let claude_paths = cli_search_paths("claude");
+
+        assert!(
+            codex_paths.contains(&codex_dir),
+            "CODEX_INSTALL_DIR ignored: {codex_paths:?}"
+        );
+        assert!(
+            grok_paths.contains(&grok_dir),
+            "GROK_BIN_DIR ignored: {grok_paths:?}"
+        );
+        assert!(
+            !claude_paths.contains(&codex_dir),
+            "CODEX_INSTALL_DIR leaked into claude's list: {claude_paths:?}"
+        );
+        // An explicitly set install dir must OUTRANK every package-manager
+        // dir — `find_cli_binary` returns the first hit, so a stale npm
+        // copy would otherwise win over the dir the user chose.
+        assert_eq!(
+            codex_paths.first(),
+            Some(&codex_dir),
+            "CODEX_INSTALL_DIR must be probed first: {codex_paths:?}"
+        );
+        assert_eq!(
+            grok_paths.first(),
+            Some(&grok_dir),
+            "GROK_BIN_DIR must be probed first: {grok_paths:?}"
+        );
+    }
+
+    /// The hot path (`detect_install_snapshot`: every tray-menu open,
+    /// every watcher burst) calls this for every CLI the dir scan
+    /// missed, and each miss is a ~1s interactive-shell spawn. Pin both
+    /// halves of the contract: a verdict is reused within the TTL, and
+    /// `clear_shell_probe_cache` really drops it.
+    #[test]
+    fn shell_probe_cache_reuses_verdict_until_cleared() {
+        let _lock = crate::testutils::lock_home();
+        // A name no shell can resolve → a stable `false` verdict, and
+        // the probe stays hermetic (nothing real is executed).
+        let tool = "termory-nonexistent-tool-probe";
+        let stamp = || {
+            SHELL_PROBE
+                .lock()
+                .ok()
+                .and_then(|c| c.iter().find(|(t, ..)| *t == tool).map(|(_, at, _)| *at))
+        };
+        clear_shell_probe_cache();
+
+        assert!(!shell_installed_cached(tool));
+        let first = stamp().expect("first call must record a verdict");
+
+        assert!(!shell_installed_cached(tool));
+        // A re-probe would overwrite the entry with a fresh Instant, so
+        // an unchanged stamp is proof the shell was NOT spawned again.
+        // (Deterministic — no wall-clock comparison to go flaky in CI.)
+        assert_eq!(
+            stamp(),
+            Some(first),
+            "second call re-probed instead of reusing the cached verdict"
+        );
+
+        clear_shell_probe_cache();
+        assert!(
+            stamp().is_none(),
+            "clear_shell_probe_cache must drop every verdict"
+        );
+    }
+
+    #[test]
+    fn cli_search_paths_includes_claude_legacy_local_install() {
+        // `claude migrate-installer`'s target. It's alias-exposed, never
+        // on PATH, so without this entry the ONLY thing that could find
+        // it is the ~1s interactive-shell fallback (and on Windows,
+        // nothing at all — there is no shell fallback there).
+        let _lock = crate::testutils::lock_home();
+        let home = tempdir("claude-local");
+        let _home_env = crate::testutils::override_home(&home);
+
+        let expected = home.join(".claude").join("local");
+        let paths = cli_search_paths("claude");
+        assert!(
+            paths.contains(&expected),
+            "claude search list missing the legacy local install: {paths:?}"
+        );
+        // Claude-scoped, like every other per-tool section.
+        let codex_paths = cli_search_paths("codex");
+        assert!(
+            !codex_paths.contains(&expected),
+            "claude-only dir leaked into codex's list: {codex_paths:?}"
+        );
+
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn cli_search_paths_claude_local_follows_config_dir_override() {
+        // Every other Claude state path honors $CLAUDE_CONFIG_DIR; the
+        // local install lives under that same root, so it must too.
+        let _lock = crate::testutils::lock_home();
+        let home = tempdir("claude-local-cfg");
+        let _home_env = crate::testutils::override_home(&home);
+        let cfg = home.join("custom-claude-home");
+        let _cfg_env = crate::testutils::EnvVarGuard::set("CLAUDE_CONFIG_DIR", &cfg);
+
+        let paths = cli_search_paths("claude");
+        assert!(
+            paths.contains(&cfg.join("local")),
+            "legacy local install must follow CLAUDE_CONFIG_DIR: {paths:?}"
+        );
+
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cli_search_paths_windows_includes_codex_and_winget_dirs() {
+        // Two Windows-only install landings that no other entry covers:
+        // codex's standalone installer (install.ps1:743) and winget's
+        // `portable` shim dir (Claude Code's manifest is that type).
+        let joined = |paths: Vec<std::path::PathBuf>| -> String {
+            paths
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        let codex = joined(cli_search_paths("codex"));
+        assert!(
+            codex.contains("Programs\\OpenAI\\Codex\\bin"),
+            "Windows codex search list missing the standalone bin dir: {codex}"
+        );
+        let claude = joined(cli_search_paths("claude"));
+        assert!(
+            claude.contains("Microsoft\\WinGet\\Links"),
+            "Windows search list missing the winget Links dir: {claude}"
+        );
+        assert!(
+            !claude.contains("Programs\\OpenAI\\Codex\\bin"),
+            "codex-only dir leaked into claude's list: {claude}"
         );
     }
 

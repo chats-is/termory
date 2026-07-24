@@ -240,6 +240,12 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
                 // the main thread.) Keep the probed map: the rescan
                 // below hands it to `refresh_recent_with` so the same
                 // burst doesn't probe PATH twice.
+                //
+                // Something in a bin dir really did change, so this is
+                // also the moment the cached shell-fallback verdicts
+                // stop being trustworthy — drop them and let this probe
+                // pay for the truth.
+                crate::providers::clear_shell_probe_cache();
                 Some(crate::tray::refresh_installed(&app_handle))
             } else {
                 None
@@ -429,7 +435,14 @@ fn watch_targets() -> Vec<PathBuf> {
 ///     with its own bin/ subdir where the CLI gets installed.
 ///
 /// Non-existent paths are silently skipped at registration time.
-/// Mirrors the install-side of `cli_search_paths` in `providers.rs`.
+///
+/// Mirrors the install-side of `cli_search_paths` in `providers.rs`,
+/// with two DELIBERATE omissions — dirs that are write-hot or enormous,
+/// where every unrelated event would cost an install re-probe: Linux
+/// `/usr/bin`, and `~/go/bin` + `$GOPATH/bin` (rewritten by every `go
+/// install`). A CLI installed only there still gets DETECTED (the
+/// search list is what `detect_clis` walks); it just won't auto-refresh
+/// until the next scan / tray open / Recheck.
 fn install_watch_targets() -> Vec<(PathBuf, RecursiveMode)> {
     let Some(home) = crate::home_dir() else {
         return Vec::new();
@@ -439,20 +452,54 @@ fn install_watch_targets() -> Vec<(PathBuf, RecursiveMode)> {
     // Cross-platform per-user bin dirs (these resolve correctly on
     // both Unix and Windows via `home.join()` — e.g. `.bun/bin` becomes
     // `%USERPROFILE%\.bun\bin` on Windows, where bun does install).
+    // `.local/bin` is cross-platform for the same reason as in
+    // `cli_search_paths`: Claude Code's own launcher-path helper returns
+    // `join(homedir(), ".local", "bin", "claude.exe")` on win32, so the
+    // native Windows installer lands there too — and without the watch
+    // there'd be no install event to auto-refresh detection.
     for sub in [
         ".opencode/bin",
         ".bun/bin",
         ".cargo/bin",
         ".npm-global/bin",
-        ".codex/bin",
+        ".grok/bin",
+        ".local/bin",
+        // opencode's `$XDG_BIN_DIR`-less home fallback. Unlike its
+        // `~/go/bin` sibling this one isn't write-hot, so there's no
+        // reason to leave it out.
+        "bin",
     ] {
         targets.push((home.join(sub), RecursiveMode::NonRecursive));
     }
 
-    // Unix-only per-user dirs (XDG, n, Unix Volta layout).
+    // Claude Code's legacy `claude migrate-installer` target (see
+    // `cli_search_paths`), under `$CLAUDE_CONFIG_DIR` when set.
+    targets.push((
+        crate::sessions::claude_config_root(&home).join("local"),
+        RecursiveMode::NonRecursive,
+    ));
+
+    // Installer-honored custom bin dirs. Each of these is read by the
+    // matching upstream install script, so a user who sets one gets
+    // their CLI somewhere none of the fixed paths above can see. Same
+    // set `cli_search_paths` consults (there it's per-tool; the watcher
+    // has no tool context, so all four are watched unconditionally).
+    for var in [
+        "OPENCODE_INSTALL_DIR",
+        "XDG_BIN_DIR",
+        "CODEX_INSTALL_DIR",
+        "GROK_BIN_DIR",
+    ] {
+        if let Some(val) = std::env::var_os(var) {
+            targets.push((PathBuf::from(val), RecursiveMode::NonRecursive));
+        }
+    }
+
+    // Unix-only per-user dirs (n, Unix Volta layout, mise's shim dir —
+    // the counterpart to the `installs/node` roots watched below).
     #[cfg(unix)]
     {
-        for sub in [".local/bin", "n/bin", ".volta/bin"] {
+        for sub in ["n/bin", ".volta/bin", ".local/share/mise/shims"] {
             targets.push((home.join(sub), RecursiveMode::NonRecursive));
         }
     }
@@ -504,10 +551,36 @@ fn install_watch_targets() -> Vec<(PathBuf, RecursiveMode)> {
             ));
             // pnpm on Windows: %LOCALAPPDATA%\pnpm
             targets.push((localdata.join("pnpm"), RecursiveMode::NonRecursive));
+            // winget `portable` packages shim into a Links dir (Claude
+            // Code's winget manifest is InstallerType: portable) —
+            // winget-cli `Runtime.cpp:223`.
+            targets.push((
+                localdata.join("Microsoft").join("WinGet").join("Links"),
+                RecursiveMode::NonRecursive,
+            ));
+            // Codex's Windows standalone installer's visible bin dir
+            // (`.audit-sources/codex/scripts/install/install.ps1:741`) —
+            // the Unix side lands in ~/.local/bin.
+            targets.push((
+                localdata
+                    .join("Programs")
+                    .join("OpenAI")
+                    .join("Codex")
+                    .join("bin"),
+                RecursiveMode::NonRecursive,
+            ));
             // fnm on Windows: %LOCALAPPDATA%\fnm\node-versions
             targets.push((
                 localdata.join("fnm").join("node-versions"),
                 RecursiveMode::Recursive,
+            ));
+        }
+        // Machine-scope winget Links dir (`winget install --scope machine`,
+        // winget-cli `Runtime.cpp:230`).
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            targets.push((
+                PathBuf::from(program_files).join("WinGet").join("Links"),
+                RecursiveMode::NonRecursive,
             ));
         }
         // NVM-Windows: $NVM_HOME or C:\nvm; recursive because each
@@ -571,6 +644,53 @@ fn event_touches_claude_desktop(event: &notify::Event, parents: &[PathBuf]) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The install-watch set is what makes a fresh CLI install
+    /// auto-refresh instead of waiting for the next scan / Recheck, and
+    /// it has to track `cli_search_paths`. Pin the entries that are easy
+    /// to lose to a `#[cfg(unix)]` gate or a mirror miss: `.local/bin`
+    /// (Claude Code's native installer lands there on Windows too) and
+    /// `.grok/bin` (grok's default, which the watcher lacked entirely
+    /// while the search list had it).
+    #[test]
+    fn install_watch_targets_cover_cross_platform_bin_dirs() {
+        let _lock = crate::testutils::lock_home();
+        let home = crate::home_dir().unwrap_or_default();
+        let targets = install_watch_targets();
+        let watched = |p: PathBuf| targets.iter().any(|(t, _)| t == &p);
+
+        for sub in [".local/bin", ".grok/bin", ".opencode/bin", "bin"] {
+            assert!(
+                watched(home.join(sub)),
+                "install watch set missing ~/{sub}: {targets:?}"
+            );
+        }
+        #[cfg(unix)]
+        assert!(
+            watched(home.join(".local/share/mise/shims")),
+            "install watch set missing mise shims: {targets:?}"
+        );
+    }
+
+    /// Same installer-honored env vars `cli_search_paths` reads. The
+    /// watcher has no tool context, so it watches all four.
+    #[test]
+    fn install_watch_targets_honor_installer_custom_dirs() {
+        let _lock = crate::testutils::lock_home();
+        let codex_dir = std::env::temp_dir().join("termory-watch-codex-install-dir");
+        let grok_dir = std::env::temp_dir().join("termory-watch-grok-bin-dir");
+        let _codex_var = crate::testutils::EnvVarGuard::set("CODEX_INSTALL_DIR", &codex_dir);
+        let _grok_var = crate::testutils::EnvVarGuard::set("GROK_BIN_DIR", &grok_dir);
+
+        let targets = install_watch_targets();
+        let watched = |p: &PathBuf| targets.iter().any(|(t, _)| t == p);
+
+        assert!(
+            watched(&codex_dir),
+            "CODEX_INSTALL_DIR not watched: {targets:?}"
+        );
+        assert!(watched(&grok_dir), "GROK_BIN_DIR not watched: {targets:?}");
+    }
 
     #[test]
     fn dynamic_paths_keeps_absolute_dedups_and_drops_empty_or_relative() {
