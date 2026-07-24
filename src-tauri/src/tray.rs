@@ -1481,7 +1481,7 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
                 // writes their live config directly.
                 let activated = activate(p, &providers_for_app);
                 if activated.is_ok() && matches!(cli, CliApp::Opencode | CliApp::Grok) {
-                    set_default(p)
+                    set_default(p, &providers_for_app)
                 } else {
                     activated
                 }

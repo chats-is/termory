@@ -215,7 +215,10 @@ export function GatewaysPage({
             providersForApp: [newSynth]
           });
           if (isMultiSlot(pb.app)) {
-            await invoke("set_default_provider", { provider: newSynth });
+            await invoke("set_default_provider", {
+              provider: newSynth,
+              providersForApp: synthProviders.filter((s) => s.app === pb.app)
+            });
           }
         }
       }
@@ -293,7 +296,10 @@ export function GatewaysPage({
           providersForApp: [synth]
         });
         if (isMultiSlot(b.app)) {
-          await invoke("set_default_provider", { provider: synth });
+          await invoke("set_default_provider", {
+            provider: synth,
+            providersForApp: synthProviders.filter((s) => s.app === b.app)
+          });
         }
         markActive(b.app, synth.id);
         toast.success(t("toast.bindingActivated", { name: gateway.name, app: CLI_APP_LABEL[b.app] }));

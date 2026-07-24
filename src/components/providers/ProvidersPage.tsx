@@ -733,6 +733,13 @@ export function ProvidersPage({
       ),
     [gateways, app]
   );
+  // Standalone providers + gateway-binding synths for this app — the full set
+  // Grok's set_grok_default needs to strip the previous default's global
+  // Advanced settings before applying the new default's.
+  const allProvidersForApp = React.useMemo(
+    () => [...providersForApp, ...gatewayBoundForApp.map((g) => g.synth)],
+    [providersForApp, gatewayBoundForApp]
+  );
   const activeState = activeStates[app];
   // The "in use" id. OpenCode's matchedProviderId is resolved by the live
   // default-slot id (not by creds), so it's already unambiguous — running it
@@ -763,7 +770,10 @@ export function ProvidersPage({
         providersForApp: [synth]
       });
       if (isMultiSlot(synth.app)) {
-        await invoke("set_default_provider", { provider: synth });
+        await invoke("set_default_provider", {
+          provider: synth,
+          providersForApp: allProvidersForApp
+        });
       }
       markActive(synth.app, synth.id);
       toast.success(t("toast.nowInUse", { name: synth.name || t("providers.unnamed") }));
@@ -869,7 +879,10 @@ export function ProvidersPage({
         // Saving an enabled-but-not-default slot just re-applies its entries —
         // it must NOT be promoted to default (and the marker stays put).
         if (state?.matchedProviderId === next.id) {
-          await invoke("set_default_provider", { provider: next });
+          await invoke("set_default_provider", {
+          provider: next,
+          providersForApp: allProvidersForApp
+        });
           markActive(next.app, next.id);
         }
       } else {
@@ -973,7 +986,10 @@ export function ProvidersPage({
           provider: target,
           providersForApp
         });
-        await invoke("set_default_provider", { provider: target });
+        await invoke("set_default_provider", {
+          provider: target,
+          providersForApp: allProvidersForApp
+        });
       } else {
         await invoke("activate_provider", {
           provider: target,

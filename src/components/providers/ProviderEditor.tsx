@@ -306,10 +306,7 @@ export function ProviderEditor({
       model: draft.model?.trim() || undefined,
       npm,
       models: models.length > 0 ? models : undefined,
-      // Grok has no Advanced settings (its overrides are global config.toml,
-      // not per-provider) — never persist options for it.
-      options:
-        isGrok || cleanedOverrides.length === 0 ? undefined : cleanedOverrides,
+      options: cleanedOverrides.length > 0 ? cleanedOverrides : undefined,
       favicon
     });
   };
@@ -630,17 +627,17 @@ export function ProviderEditor({
 
             {/* Advanced settings = the generic options escape hatch, merged
                 into the target config (incl. Claude Desktop's 3P profile
-                JSON — any other `inference*` key). NOT shown for grok: its
-                overrides are GLOBAL config.toml keys (not per-provider), so a
-                per-provider box is misleading and multiple grok providers
-                would clash on the same top-level namespace — edit
-                ~/.grok/config.toml directly for those. */}
-            {!isGrok && (
-              <Collapsible
-                open={overridesOpen}
-                onOpenChange={setOverridesOpen}
-                className="grid gap-2 sm:col-span-2"
-              >
+                JSON — any other `inference*` key). For GROK these are its
+                GLOBAL config.toml keys (`ui.*`, `models.temperature`,
+                `[session]`, …) — applied only when the provider is set as
+                DEFAULT (`set_grok_default`), so multiple enabled grok
+                providers never clash on the same top-level keys. Shown for
+                every app. */}
+            <Collapsible
+              open={overridesOpen}
+              onOpenChange={setOverridesOpen}
+              className="grid gap-2 sm:col-span-2"
+            >
               <CollapsibleTrigger className="flex w-full items-center justify-between gap-1.5 text-sm font-medium select-none [&[data-state=open]>svg]:rotate-90">{t("providers.advancedSettings")}<ChevronRight className="size-4 text-muted-foreground transition-transform" />
               </CollapsibleTrigger>
               <CollapsibleContent className="-mx-1.5 overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
@@ -756,8 +753,7 @@ export function ProviderEditor({
                   </Button>
                 </div>
               </CollapsibleContent>
-              </Collapsible>
-            )}
+            </Collapsible>
           </div>
 
           <DialogFooter>

@@ -279,6 +279,65 @@ describe("GatewayEditor — close", () => {
     expect(createBtn()).toBeDisabled();
   });
 
+  it("blocks save when a binding's Advanced setting uses a managed key", async () => {
+    // A grok binding with a valid model list but an option key a dedicated
+    // field owns (`models.default`) must block the save (mirrors ProviderEditor).
+    setup(
+      {
+        name: "GW",
+        baseUrl: "https://gw.example.com",
+        apiKey: "sk-x",
+        capabilities: ALL_CAPS,
+        bindings: [
+          {
+            id: "b1",
+            app: "grok",
+            models: [{ id: "grok-4", name: "" }],
+            options: [{ key: "models.default", value: "x" }]
+          }
+        ]
+      },
+      false
+    );
+    await waitFor(() =>
+      expect(screen.getByLabelText("Apply Grok Build")).not.toBeDisabled()
+    );
+    expect(
+      screen.getByRole("button", { name: /^save$/i })
+    ).toBeDisabled();
+  });
+
+  it("blocks save when a binding has duplicate option keys", async () => {
+    // Two option rows with the same key would overwrite each other → blocked
+    // (mirrors ProviderEditor's duplicate-key check).
+    setup(
+      {
+        name: "GW",
+        baseUrl: "https://gw.example.com",
+        apiKey: "sk-x",
+        capabilities: ALL_CAPS,
+        bindings: [
+          {
+            id: "b1",
+            app: "grok",
+            models: [{ id: "grok-4", name: "" }],
+            options: [
+              { key: "ui.compact_mode", value: "true" },
+              { key: "ui.compact_mode", value: "false" }
+            ]
+          }
+        ]
+      },
+      false
+    );
+    await waitFor(() =>
+      expect(screen.getByLabelText("Apply Grok Build")).not.toBeDisabled()
+    );
+    expect(
+      screen.getByRole("button", { name: /^save$/i })
+    ).toBeDisabled();
+  });
+
   it("save preserves a hidden tool's existing binding verbatim", async () => {
     // A gateway already bound to Codex, edited while Codex is toggled off
     // (visibleApps excludes it). Saving must carry the binding over — the

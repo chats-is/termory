@@ -682,10 +682,17 @@ async fn follow_codex_sessions(
 /// set-default step; single-slot CLIs set their default implicitly on
 /// activate.
 #[tauri::command]
-async fn set_default_provider(app: tauri::AppHandle, provider: Provider) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || set_default(&provider).map_err(|e| e.to_string()))
-        .await
-        .map_err(|err| err.to_string())??;
+async fn set_default_provider(
+    app: tauri::AppHandle,
+    provider: Provider,
+    providers_for_app: ProviderList,
+) -> Result<(), String> {
+    let providers_for_app = providers_for_app.0;
+    tauri::async_runtime::spawn_blocking(move || {
+        set_default(&provider, &providers_for_app).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())??;
     let _ = tray::rebuild_menu(&app);
     Ok(())
 }

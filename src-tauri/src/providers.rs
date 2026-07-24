@@ -1666,11 +1666,13 @@ pub fn delete_provider_traces(provider: &Provider) -> Result<(), Box<dyn Error>>
 /// Promote a multi-slot provider to its CLI's startup default. OpenCode and
 /// Grok are the multi-slot CLIs (separate enable vs. set-default steps); the
 /// single-slot CLIs set their default implicitly on activate, so this only
-/// dispatches those two.
-pub fn set_default(p: &Provider) -> Result<(), Box<dyn Error>> {
+/// dispatches those two. `all` = this app's providers, needed by Grok to
+/// strip the previous default's global Advanced settings before applying the
+/// new one's (OpenCode's options are per-block, so it ignores `all`).
+pub fn set_default(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>> {
     match p.app {
         CliApp::Opencode => set_opencode_default(p),
-        CliApp::Grok => set_grok_default(p),
+        CliApp::Grok => set_grok_default(p, all),
         other => Err(format!("set_default is only for multi-slot CLIs, not {other:?}").into()),
     }
 }
@@ -2014,7 +2016,7 @@ fn activate_codex(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>> 
         block.remove("env_key");
         // Clear every provider's override keys, then apply this one's.
         strip_toml_overrides(&mut doc, &override_keys(all, CliApp::Codex));
-        apply_toml_overrides(&mut doc, p);
+        apply_toml_overrides(&mut doc, p, CliApp::Codex);
         write_text_file(&config_path, &doc.to_string())
     })();
 
@@ -2419,7 +2421,15 @@ fn activate_grok(p: &Provider, _all: &[Provider]) -> Result<(), Box<dyn Error>> 
 /// writing `models.default = "<pid>-<model>"`. The provider's entries must
 /// already exist (enable first). When the provider has no explicit default
 /// model, the first listed model is promoted (mirrors `set_opencode_default`).
-pub fn set_grok_default(p: &Provider) -> Result<(), Box<dyn Error>> {
+///
+/// This is ALSO where grok's Advanced settings (`options`) are materialized:
+/// grok's overrides are GLOBAL config.toml keys (`ui.*`, `models.temperature`,
+/// `[session]`, … — everything shares one file with the user's own settings),
+/// so writing them on *enable* would let multiple enabled providers clash on
+/// the same top-level keys. Writing them here — only for the ONE default
+/// provider — sidesteps that: strip the union of all grok providers' option
+/// keys, then apply this provider's. `deactivate_grok` strips them on switch.
+pub fn set_grok_default(p: &Provider, all: &[Provider]) -> Result<(), Box<dyn Error>> {
     if p.app != CliApp::Grok || p.kind != ProviderKind::Custom {
         return Err("set_grok_default only applies to Grok Custom providers.".into());
     }
@@ -2443,13 +2453,17 @@ pub fn set_grok_default(p: &Provider) -> Result<(), Box<dyn Error>> {
         doc["models"] = toml_edit::table();
     }
     doc["models"]["default"] = toml_value(key.as_str());
+    // Global Advanced settings: only the default provider's are live. Strip the
+    // union (drops the previous default's), then apply this one's.
+    strip_toml_overrides(&mut doc, &override_keys(all, CliApp::Grok));
+    apply_toml_overrides(&mut doc, p, CliApp::Grok);
     atomic_write(&path, doc.to_string().as_bytes())
 }
 
 /// "Set Official" — clear a `models.default` that points at one of our grok
-/// providers' entries. Enabled slots STAY (like OpenCode's "Set Official"),
-/// so they remain selectable in grok's picker; only the startup default is
-/// dropped. A hand-written default is left alone.
+/// providers' entries, and strip that (default) provider's global Advanced
+/// settings. Enabled slots STAY (like OpenCode's "Set Official"), so they
+/// remain selectable in grok's picker; a hand-written default is left alone.
 fn deactivate_grok(all: &[Provider]) -> Result<(), Box<dyn Error>> {
     let path = grok_config_path()?;
     if !path.exists() {
@@ -2465,6 +2479,9 @@ fn deactivate_grok(all: &[Provider]) -> Result<(), Box<dyn Error>> {
         .unwrap_or(false);
     if default_is_ours {
         clear_grok_default(&mut doc);
+        // Our global Advanced settings are live ONLY while our provider is the
+        // default, so strip them here too (union covers whichever was live).
+        strip_toml_overrides(&mut doc, &override_keys(all, CliApp::Grok));
         atomic_write(&path, doc.to_string().as_bytes())?;
     }
     Ok(())
@@ -2472,7 +2489,8 @@ fn deactivate_grok(all: &[Provider]) -> Result<(), Box<dyn Error>> {
 
 /// Surgical per-provider cleanup: remove just this grok provider's entries,
 /// clear the startup default if it pointed here, and strip its own override
-/// keys. Sibling slots survive.
+/// keys (Advanced settings, live only while it was the default). Sibling
+/// slots survive.
 fn delete_grok_provider_entry(p: &Provider) -> Result<(), Box<dyn Error>> {
     if p.app != CliApp::Grok || p.kind != ProviderKind::Custom {
         return Ok(());
@@ -2491,8 +2509,14 @@ fn delete_grok_provider_entry(p: &Provider) -> Result<(), Box<dyn Error>> {
     if default_ours {
         clear_grok_default(&mut doc);
         changed = true;
+        // This provider was the default → its global Advanced settings are
+        // live in config.toml; strip them. (If it wasn't the default, its
+        // options were never written, so this is skipped.)
+        let ovr = override_keys(std::slice::from_ref(p), CliApp::Grok);
+        if !ovr.is_empty() {
+            strip_toml_overrides(&mut doc, &ovr);
+        }
     }
-    // No override cleanup — grok has no per-provider Advanced settings.
     if changed {
         atomic_write(&path, doc.to_string().as_bytes())?;
     }
@@ -3825,10 +3849,13 @@ fn infer_toml_item(raw: &str) -> Item {
     toml_value(raw)
 }
 
-/// Apply a provider's overrides into a TOML document (Codex config.toml).
-fn apply_toml_overrides(doc: &mut DocumentMut, p: &Provider) {
+/// Apply a provider's overrides into a TOML document (Codex config.toml /
+/// Grok config.toml). `app` selects the managed-key set so the correct
+/// dedicated-field keys are skipped (Codex's `model_provider`/… vs Grok's
+/// `models.default`/`model.*`).
+fn apply_toml_overrides(doc: &mut DocumentMut, p: &Provider, app: CliApp) {
     for o in &p.options {
-        if override_key_is_managed(CliApp::Codex, o.key.trim()) {
+        if override_key_is_managed(app, o.key.trim()) {
             continue;
         }
         let segs = dot_path(&o.key);
@@ -5551,7 +5578,7 @@ base_url = "https://x.io/v1"
         assert!(text.contains("yolo = false"));
 
         // Promote to grok's startup default separately.
-        set_grok_default(&p).unwrap();
+        set_grok_default(&p, &[p.clone()]).unwrap();
         let text_def = fs::read_to_string(grok.join("config.toml")).unwrap();
         assert!(text_def.contains("default = \"test-x-third-grok-4.5\""));
 
@@ -5639,7 +5666,7 @@ base_url = "https://x.io/v1"
         assert_eq!(ids, vec!["test-aaa".to_string(), "test-bbb".to_string()]);
 
         // Set B as default → B is in use, A still enabled.
-        set_grok_default(&b).unwrap();
+        set_grok_default(&b, &all).unwrap();
         let text2 = fs::read_to_string(grok.join("config.toml")).unwrap();
         assert!(text2.contains("default = \"test-bbb-grok-3\""));
         assert!(text2.contains("test-aaa-grok-4.5"), "A's slot survives");
@@ -5691,13 +5718,128 @@ base_url = "https://x.io/v1"
         ];
         activate(&p, &[p.clone()]).unwrap();
         // No default set yet → set_grok_default promotes the FIRST listed.
-        set_grok_default(&p).unwrap();
+        set_grok_default(&p, &[p.clone()]).unwrap();
         let text = fs::read_to_string(grok.join("config.toml")).unwrap();
         assert!(text.contains("default = \"test-nd-grok-4.5\""));
 
         // set_grok_default on a provider with no activated entries → error.
         let other = make_provider(CliApp::Grok, "gone", "https://y.example/v1", "key-y");
-        assert!(set_grok_default(&other).is_err());
+        assert!(set_grok_default(&other, &[other.clone()]).is_err());
+    }
+
+    #[test]
+    fn grok_options_applied_on_set_default_and_stripped_on_switch() {
+        // Grok's Advanced settings are GLOBAL config.toml keys, applied ONLY
+        // when the provider is the default (set_grok_default) — NOT on enable —
+        // and stripped on "Set Official". A managed key (models.default) is
+        // ignored.
+        let _g = lock_home();
+        let tmp = tempdir("grok-global-opts");
+        let _home = override_home(&tmp);
+        let grok = tmp.join(".grok");
+        fs::create_dir_all(&grok).unwrap();
+        fs::write(grok.join("config.toml"), "[ui]\nyolo = false\n").unwrap();
+
+        let mut p = make_provider(CliApp::Grok, "g", "https://x.example/v1", "key-x");
+        p.model = "grok-4.5".into();
+        p.models = vec![ProviderModel {
+            id: "grok-4.5".into(),
+            name: String::new(),
+        }];
+        p.options = vec![
+            ProviderOption {
+                key: "ui.compact_mode".into(),
+                value: "true".into(),
+            },
+            ProviderOption {
+                key: "models.temperature".into(),
+                value: "0.7".into(),
+            },
+            // managed → ignored (Termory owns the default pointer)
+            ProviderOption {
+                key: "models.default".into(),
+                value: "hacked".into(),
+            },
+        ];
+
+        // Enable: entries written, options NOT applied yet.
+        activate(&p, &[p.clone()]).unwrap();
+        let after_enable = fs::read_to_string(grok.join("config.toml")).unwrap();
+        assert!(!after_enable.contains("compact_mode = true"));
+        assert!(!after_enable.contains("temperature"));
+
+        // Set default: options now applied to config.toml top-level.
+        set_grok_default(&p, &[p.clone()]).unwrap();
+        let after_default = fs::read_to_string(grok.join("config.toml")).unwrap();
+        assert!(after_default.contains("compact_mode = true"));
+        assert!(after_default.contains("temperature = 0.7"));
+        // managed key ignored: models.default points at the model entry, not "hacked".
+        assert!(after_default.contains("default = \"test-g-grok-4.5\""));
+        assert!(!after_default.contains("hacked"));
+
+        // Set Official: options stripped, slot entries stay.
+        deactivate(CliApp::Grok, &[p.clone()]).unwrap();
+        let after_official = fs::read_to_string(grok.join("config.toml")).unwrap();
+        assert!(!after_official.contains("compact_mode"));
+        assert!(!after_official.contains("temperature"));
+        assert!(
+            after_official.contains("g-grok-4.5"),
+            "slot entries survive"
+        );
+        assert!(
+            after_official.contains("yolo = false"),
+            "user config untouched"
+        );
+    }
+
+    #[test]
+    fn grok_switch_default_strips_previous_default_options() {
+        // Switching the default from A to B strips A's global Advanced settings
+        // and applies B's — only the CURRENT default provider's options are live.
+        let _g = lock_home();
+        let tmp = tempdir("grok-switch-opts");
+        let _home = override_home(&tmp);
+        let grok = tmp.join(".grok");
+        fs::create_dir_all(&grok).unwrap();
+
+        let mut a = make_provider(CliApp::Grok, "aaa", "https://a.example/v1", "key-a");
+        a.model = "grok-4.5".into();
+        a.models = vec![ProviderModel {
+            id: "grok-4.5".into(),
+            name: String::new(),
+        }];
+        a.options = vec![ProviderOption {
+            key: "ui.compact_mode".into(),
+            value: "true".into(),
+        }];
+
+        let mut b = make_provider(CliApp::Grok, "bbb", "https://b.example/v1", "key-b");
+        b.model = "grok-3".into();
+        b.models = vec![ProviderModel {
+            id: "grok-3".into(),
+            name: String::new(),
+        }];
+        b.options = vec![ProviderOption {
+            key: "models.temperature".into(),
+            value: "0.7".into(),
+        }];
+
+        let all = [a.clone(), b.clone()];
+        activate(&a, &all).unwrap();
+        set_grok_default(&a, &all).unwrap();
+        let after_a = fs::read_to_string(grok.join("config.toml")).unwrap();
+        assert!(
+            after_a.contains("compact_mode = true"),
+            "A's options applied"
+        );
+
+        // Switch the default to B.
+        activate(&b, &all).unwrap();
+        set_grok_default(&b, &all).unwrap();
+        let after_b = fs::read_to_string(grok.join("config.toml")).unwrap();
+        assert!(!after_b.contains("compact_mode"), "A's options stripped");
+        assert!(after_b.contains("temperature = 0.7"), "B's options applied");
+        assert!(after_b.contains("default = \"test-bbb-grok-3\""));
     }
 
     #[test]
@@ -5721,7 +5863,7 @@ base_url = "https://x.io/v1"
         let codex_same = make_provider(CliApp::Codex, "c", "https://gw.example/v1", "shared-key");
 
         activate(&g, &[g.clone()]).unwrap();
-        set_grok_default(&g).unwrap();
+        set_grok_default(&g, &[g.clone()]).unwrap();
         // Codex provider listed BEFORE the grok one (would win without the
         // app filter).
         let state = read_active_state(CliApp::Grok, &[codex_same, g.clone()]).unwrap();

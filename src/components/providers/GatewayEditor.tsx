@@ -49,6 +49,7 @@ import {
   appProtocols,
   isClaudeSafeModelId,
   newGatewayId,
+  isManagedOptionKey,
   npmForProtocol,
   overrideHelpFor
 } from "@/lib/provider-utils";
@@ -306,6 +307,36 @@ export function GatewayEditor({
   };
   const anyBindingDupModels = CLI_APPS.some(bindingModelsDup);
 
+  // An Advanced-settings option key that a dedicated field already owns is
+  // silently skipped by the backend at write time, so block the save and
+  // tell the user (mirrors ProviderEditor's managed-key check). Uses the
+  // rendered rows so Claude's protected routing template — which is NOT
+  // managed — passes.
+  const bindingManagedKey = (app: CliApp): boolean => {
+    if (!binds[app].checked || protocols[app].length === 0) return false;
+    return optionRows(app).some((o) => {
+      const k = o.key.trim();
+      return !!k && isManagedOptionKey(app, k);
+    });
+  };
+  const anyBindingManagedKey = CLI_APPS.some(bindingManagedKey);
+
+  // Duplicate non-blank option keys silently overwrite each other on write
+  // (last wins), so block the save — mirrors ProviderEditor's `duplicateKeys`.
+  const bindingDupKeys = (app: CliApp): string[] => {
+    if (!binds[app].checked || protocols[app].length === 0) return [];
+    const seen = new Set<string>();
+    const dups = new Set<string>();
+    for (const o of optionRows(app)) {
+      const k = o.key.trim();
+      if (!k) continue;
+      if (seen.has(k)) dups.add(k);
+      else seen.add(k);
+    }
+    return [...dups];
+  };
+  const anyBindingDupKeys = CLI_APPS.some((app) => bindingDupKeys(app).length > 0);
+
   const canSave =
     name.trim().length > 0 &&
     baseUrl.trim().length > 0 &&
@@ -315,6 +346,8 @@ export function GatewayEditor({
     !grokMissingModels &&
     !grokDefaultInvalid &&
     !anyBindingDupModels &&
+    !anyBindingManagedKey &&
+    !anyBindingDupKeys &&
     !cdBindingInvalidModel;
 
   const handleSave = async () => {
@@ -341,15 +374,10 @@ export function GatewayEditor({
         app,
         model: d.model.trim() || undefined
       };
-      // Advanced options — drop blank-key or blank-value rows. Grok has no
-      // Advanced settings (its overrides are global config.toml), so never
-      // persist options for a grok binding.
-      const options =
-        app === "grok"
-          ? []
-          : d.options
-              .map((o) => ({ key: o.key.trim(), value: o.value.trim() }))
-              .filter((o) => o.key && o.value);
+      // Advanced options — drop blank-key or blank-value rows.
+      const options = d.options
+        .map((o) => ({ key: o.key.trim(), value: o.value.trim() }))
+        .filter((o) => o.key && o.value);
       if (options.length) b.options = options;
       // OpenCode-only: the AI SDK package (store the EFFECTIVE one so the
       // derived protocol stays correct).
@@ -927,13 +955,10 @@ export function GatewayEditor({
                           </>
                         )}
 
-                        {/* Advanced settings — same wording as ProviderEditor;
-                            Claude seeds the per-size routing keys. NOT shown
-                            for grok: its overrides are GLOBAL config.toml keys
-                            (not per-provider), so a per-binding box is
-                            misleading — edit ~/.grok/config.toml directly. */}
-                        {app !== "grok" && (
-                          <>
+                        {/* Advanced settings — same wording as ProviderEditor.
+                            For grok these are its GLOBAL config.toml keys,
+                            applied when the binding is set as DEFAULT
+                            (`set_grok_default`). Shown for every app. */}
                         <Label className="text-xs mt-1">{t("providers.advancedSettings")}</Label>
                         <p className="text-xs text-muted-foreground">
                           {t("help.overrideIntro", { app: CLI_APP_LABEL[app] })}{" "}
@@ -999,6 +1024,26 @@ export function GatewayEditor({
                             </div>
                           );
                         })}
+                        {bindingManagedKey(app) && (
+                          <p className="text-xs text-destructive">
+                            {t("errors.managedKeys", {
+                              keys: optionRows(app)
+                                .map((o) => o.key.trim())
+                                .filter((k) => k && isManagedOptionKey(app, k))
+                                .map((k) => `"${k}"`)
+                                .join(", ")
+                            })}
+                          </p>
+                        )}
+                        {bindingDupKeys(app).length > 0 && (
+                          <p className="text-xs text-destructive">
+                            {t("errors.duplicateKeys", {
+                              keys: bindingDupKeys(app)
+                                .map((k) => `"${k}"`)
+                                .join(", ")
+                            })}
+                          </p>
+                        )}
                         <Button
                           type="button"
                           variant="outline"
@@ -1012,8 +1057,6 @@ export function GatewayEditor({
                         >
                           {t("providers.add")}
                         </Button>
-                          </>
-                        )}
                       </div>
                     </CollapsibleContent>
                   </Collapsible>

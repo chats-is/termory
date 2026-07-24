@@ -77,7 +77,7 @@ It uses Claude Desktop's own **third-party ("3P")** mechanism, not env vars: Ter
 
 ### Advanced settings (per-provider options)
 
-Beyond the basic fields, each provider (except Grok Build — see below) has an **Advanced settings** section where you add your own config entries — any setting the CLI supports that Termory doesn't have a dedicated field for. Each entry you add is merged into that CLI's config when you activate the provider, and removed again when you switch away.
+Beyond the basic fields, each provider has an **Advanced settings** section where you add your own config entries — any setting the CLI supports that Termory doesn't have a dedicated field for. Each entry you add is merged into that CLI's config when you activate the provider (for Grok, when you **set it as default** — see below), and removed again when you switch away.
 
 **How to add one:**
 
@@ -129,7 +129,12 @@ Append `[1m]` to a value for its 1M-token context window, e.g. `claude-sonnet-4-
 
 *Managed (blocked):* `baseURL`, `apiKey`.
 
-**Grok Build** → `~/.grok/config.toml`. Grok is the one CLI with **no Advanced settings**: it uses a **Models** list (required) with an optional **Default model** and an **API Backend** dropdown, but its config is organized per-model, with no per-provider place for extra options. To tweak grok's own global settings, edit `~/.grok/config.toml` directly.
+**Grok Build** → `~/.grok/config.toml`. Grok's Advanced settings are grok's own **global** config keys — `ui.compact_mode`, `models.temperature`, `[session]` settings, etc. Because they're global (grok has no per-provider config section), they're applied **only when you set the provider as default** (and removed when you switch away or set Official), so several enabled grok providers never fight over the same keys. *Managed (blocked):* `models.default` and the `[model.*]` entry fields Termory owns.
+
+| Key | Example value | Effect |
+|-----|---------------|--------|
+| `models.temperature` | `0.7` | sampling temperature for all models |
+| `ui.compact_mode` | `true` | compact TUI layout |
 
 ### Codex: keeping sessions after a switch
 
