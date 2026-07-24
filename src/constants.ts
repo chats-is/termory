@@ -118,14 +118,20 @@ export const CLI_INSTALL: Record<
     url: "https://code.claude.com/docs",
     methods: [
       {
+        id: "npm",
+        label: "npm",
+        command: "npm install -g @anthropic-ai/claude-code"
+      },
+      {
         id: "native",
         label: "curl",
         command: "curl -fsSL https://claude.ai/install.sh | bash"
       },
       {
-        id: "npm",
-        label: "npm",
-        command: "npm install -g @anthropic-ai/claude-code"
+        id: "brew",
+        label: "brew",
+        command: "brew install --cask claude-code",
+        platforms: ["mac"]
       },
       {
         id: "powershell",
@@ -138,12 +144,6 @@ export const CLI_INSTALL: Record<
         label: "cmd",
         command: "curl -fsSL https://claude.ai/install.cmd -o install.cmd && install.cmd && del install.cmd",
         platforms: ["windows"]
-      },
-      {
-        id: "brew",
-        label: "brew",
-        command: "brew install --cask claude-code",
-        platforms: ["mac"]
       },
       {
         id: "winget",
@@ -167,9 +167,10 @@ export const CLI_INSTALL: Record<
       }
     ]
   },
-  // Method tabs across every CLI share ONE canonical order:
-  // Native → npm → curl → brew → PowerShell → CMD → package-manager-specific
-  // methods → App/Download.
+  // Method tabs across every CLI share ONE canonical order. Labels are all
+  // lowercase and there is no separate "Native" entry — claude's native
+  // installer IS its `curl` tab — so npm always leads where it exists:
+  // npm → curl → brew → bun → paru → powershell → cmd → winget → app/download.
   codex: {
     binary: "codex",
     url: "https://developers.openai.com/codex",
