@@ -791,9 +791,7 @@ async fn refresh_doc_tokens(doc: &mut JsonValue) -> Result<(), RefreshError> {
     // Primary: `codex --version`. Fallback: `~/.codex/version.json` latest_version
     // (written by Codex itself — a real version string). Both are real Codex
     // version numbers so the User-Agent is never fabricated.
-    let codex_version = crate::providers::detect_cli_versions()
-        .remove(&crate::providers::CliApp::Codex)
-        .flatten()
+    let codex_version = crate::providers::detect_cli_version(crate::providers::CliApp::Codex)
         .or_else(|| crate::providers::codex_latest_known_version())
         .unwrap_or_else(|| "unknown".to_string());
     let os = os_info::get();

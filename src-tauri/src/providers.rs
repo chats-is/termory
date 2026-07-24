@@ -1097,29 +1097,35 @@ pub fn detect_install_snapshot() -> InstallSnapshot {
     }
 }
 
-/// Run each installed CLI with `--version` and return the parsed
-/// version string. Spawns one subprocess per CLI so the frontend
-/// calls this on page-load + Recheck only, never inside hot paths.
+/// One CLI's installed version. Costs a subprocess (`--version`, plus
+/// the interactive-shell fallback when the binary isn't in the search
+/// list), so callers that need a SINGLE tool must use this rather than
+/// running [`detect_cli_versions`] and indexing the result — that would
+/// probe all six apps to read one.
 ///
-/// The Codex entry is the CLI binary's version ONLY (None when just
-/// the desktop app is installed) — the app's bundle version rides in
-/// the `detect_codex_installs` IPC, and the frontend composes the
+/// The Codex value is the CLI binary's version ONLY (None when just the
+/// desktop app is installed) — the app's bundle version rides in the
+/// `detect_codex_installs` IPC, and the frontend composes the
 /// "CLI vX · App vY" display from both.
-pub fn detect_cli_versions() -> std::collections::HashMap<CliApp, Option<String>> {
-    let mut out = std::collections::HashMap::new();
-    for app in CliApp::all() {
-        // Claude Desktop is a GUI app with no `--version` — read its app
-        // bundle version instead of probing a binary.
-        if !app.is_cli() {
-            out.insert(app, crate::claude_desktop::version());
-            continue;
-        }
-        let v = find_cli_binary(app.bin_name())
-            .and_then(|p| query_version_at(&p))
-            .or_else(|| shell_version_fallback(app.bin_name()));
-        out.insert(app, v);
+pub fn detect_cli_version(app: CliApp) -> Option<String> {
+    // Claude Desktop is a GUI app with no `--version` — read its app
+    // bundle version instead of probing a binary.
+    if !app.is_cli() {
+        return crate::claude_desktop::version();
     }
-    out
+    find_cli_binary(app.bin_name())
+        .and_then(|p| query_version_at(&p))
+        .or_else(|| shell_version_fallback(app.bin_name()))
+}
+
+/// Every installed CLI's version. Spawns one subprocess per CLI, so the
+/// frontend calls this on page-load + Recheck only, never inside hot
+/// paths. For a single tool use [`detect_cli_version`].
+pub fn detect_cli_versions() -> std::collections::HashMap<CliApp, Option<String>> {
+    CliApp::all()
+        .into_iter()
+        .map(|app| (app, detect_cli_version(app)))
+        .collect()
 }
 
 /// Pull the first `MAJOR.MINOR[.PATCH][-suffix]` token out of free-form
