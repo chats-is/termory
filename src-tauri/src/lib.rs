@@ -488,34 +488,8 @@ async fn claude_project_registered(path: String) -> Result<bool, String> {
 /// Exit) and rebuild the menu. The frontend calls this on language load/change
 /// so the menu bar follows the app language (CLI / provider names stay as-is).
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
-async fn set_tray_labels(
-    app: tauri::AppHandle,
-    open: String,
-    official: String,
-    exit: String,
-    five_hour: String,
-    weekly: String,
-    monthly: String,
-    new_session: String,
-    choose_folder: String,
-    status_busy: String,
-    status_waiting: String,
-    credits: String,
-) -> Result<(), String> {
-    tray::set_labels(
-        open,
-        official,
-        exit,
-        five_hour,
-        weekly,
-        monthly,
-        new_session,
-        choose_folder,
-        status_busy,
-        status_waiting,
-        credits,
-    );
+async fn set_tray_labels(app: tauri::AppHandle, labels: tray::TrayLabels) -> Result<(), String> {
+    tray::set_labels(labels);
     let _ = tray::rebuild_menu(&app);
     Ok(())
 }
@@ -637,7 +611,17 @@ async fn activate_provider(
 ) -> Result<(), String> {
     let providers_for_app = providers_for_app.0;
     tauri::async_runtime::spawn_blocking(move || {
-        activate(&provider, &providers_for_app).map_err(|e| e.to_string())
+        let cli = provider.app;
+        let id = provider.id.clone();
+        activate(&provider, &providers_for_app).map_err(|e| e.to_string())?;
+        // Record the activation marker HERE, before the rebuild below, so the
+        // menu is built with it. The page also writes it (`markActive`), but
+        // only AFTER this call returns — leaving the freshly-built menu
+        // resolving with the PREVIOUS marker, which checkmarks the wrong row
+        // whenever two entries share one endpoint (the case the marker exists
+        // for). Writing it first also makes the page's write a no-op, so
+        // `write_app_config` sees no change and skips its own rebuild.
+        config::set_active_provider_marker(cli.key(), Some(&id)).map_err(|e| e.to_string())
     })
     .await
     .map_err(|err| err.to_string())??;
@@ -725,7 +709,11 @@ async fn deactivate_provider(
     let providers_for_app = providers_for_app.0;
     tauri::async_runtime::spawn_blocking(move || {
         let cli = CliApp::parse(&app).ok_or_else(|| format!("unknown app: {app}"))?;
-        deactivate(cli, &providers_for_app).map_err(|e| e.to_string())
+        deactivate(cli, &providers_for_app).map_err(|e| e.to_string())?;
+        // Official has no provider id, so the marker is REMOVED. Written here
+        // for the same reason as in `activate_provider`: the rebuild below must
+        // see it, and it makes the page's own `markActive(app, null)` a no-op.
+        config::set_active_provider_marker(cli.key(), None).map_err(|e| e.to_string())
     })
     .await
     .map_err(|err| err.to_string())??;
@@ -801,6 +789,15 @@ async fn write_app_config(
         // Did `sources` actually change? Compare the on-disk value to the
         // incoming one before we overwrite it.
         let sources_changed = key == "sources" && obj.get("sources") != Some(&value);
+        // Same question for the per-CLI activation markers. The tray READS
+        // these to disambiguate a standalone provider from a gateway binding
+        // that share creds, so a marker change is a tray-visible change — and
+        // the Providers page always writes it AFTER the activate/deactivate
+        // IPC that rebuilt the menu (`markActive` follows `activate_provider`),
+        // so without a rebuild here the tray would keep resolving with the
+        // PREVIOUS marker until some unrelated rebuild happened to fire.
+        let markers_changed = key == config::ACTIVE_PROVIDER_IDS_KEY
+            && obj.get(config::ACTIVE_PROVIDER_IDS_KEY) != Some(&value);
         obj.insert(key, value);
         config::write_config(&cfg).map_err(|e| e.to_string())?;
 
@@ -822,10 +819,23 @@ async fn write_app_config(
             }
             let _ = tray::rebuild_menu(&app);
         }
+        if markers_changed {
+            let _ = tray::rebuild_menu(&app);
+        }
         Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Take the provider switch the tray deferred to the page (Codex
+/// official↔custom, which needs the "follow sessions?" prompt the tray can't
+/// show). Returns `None` when nothing is pending; the request is cleared by
+/// this call, so the page can poll it on mount AND on the event without
+/// running it twice.
+#[tauri::command]
+async fn take_pending_tray_switch() -> Result<Option<tray::PendingSwitch>, String> {
+    Ok(tray::take_pending_switch())
 }
 
 /// Read ~/.termory/providers.json. Returns an empty `[]` if missing.
@@ -876,12 +886,18 @@ async fn read_app_gateways() -> Result<serde_json::Value, String> {
 /// Atomically write the `gateways` array (preserving the sibling
 /// `providers` array), file mode 0600 on Unix.
 #[tauri::command]
-async fn write_app_gateways(value: serde_json::Value) -> Result<(), String> {
+async fn write_app_gateways(app: tauri::AppHandle, value: serde_json::Value) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         config::write_gateways(&value).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    // The tray lists each CLI's gateway BINDINGS alongside its standalone
+    // providers, so adding / editing / unbinding a gateway changes the menu
+    // exactly like `write_app_providers` does — this is its sibling and needs
+    // the same rebuild.
+    let _ = tray::rebuild_menu(&app);
+    Ok(())
 }
 
 /// Read ~/.termory/favorites.json. Returns an empty `[]` if missing.
@@ -922,32 +938,42 @@ async fn list_accounts(app: String) -> Result<accounts::AccountsState, String> {
 
 /// Snapshot the CLI's current official login into the store (upsert by account).
 #[tauri::command]
-async fn save_account(app: String) -> Result<(), String> {
+async fn save_account(handle: tauri::AppHandle, app: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let cli = CliApp::parse(&app).ok_or_else(|| format!("unknown app: {app}"))?;
         accounts::save_current_account(cli).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    // The tray lists the saved logins, so any change to the store must
+    // rebuild it — otherwise the menu keeps the pre-change rows.
+    let _ = tray::rebuild_menu(&handle);
+    Ok(())
 }
 
 /// Restore a saved snapshot into the live CLI credential.
 /// Validates/refreshes tokens in memory before writing auth.json.
 #[tauri::command]
-async fn switch_account(id: String) -> Result<(), String> {
+async fn switch_account(handle: tauri::AppHandle, id: String) -> Result<(), String> {
     accounts::switch_account(id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // Moves the tray's account checkmark (and can change which provider
+    // state reverse-derives, since auth.json is part of it).
+    let _ = tray::rebuild_menu(&handle);
+    Ok(())
 }
 
 /// Delete a saved snapshot. Never touches the live credential.
 #[tauri::command]
-async fn delete_account(id: String) -> Result<(), String> {
+async fn delete_account(handle: tauri::AppHandle, id: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         accounts::delete_account(id).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    let _ = tray::rebuild_menu(&handle);
+    Ok(())
 }
 
 /// Spawn `codex login`, wait for the browser login to complete, then
@@ -958,19 +984,31 @@ async fn login_and_save_codex_account(
     app: tauri::AppHandle,
     cancel_state: tauri::State<'_, accounts::CodexLoginCancel>,
 ) -> Result<String, String> {
-    accounts::login_and_save_codex_account(app, &cancel_state).await
+    let id = accounts::login_and_save_codex_account(app.clone(), &cancel_state).await?;
+    // A new saved login → a new row in the tray's account list, and the live
+    // login moved to it.
+    let _ = tray::rebuild_menu(&app);
+    Ok(id)
 }
 
 #[tauri::command]
 async fn cancel_codex_login(
+    app: tauri::AppHandle,
     cancel_state: tauri::State<'_, accounts::CodexLoginCancel>,
 ) -> Result<(), String> {
-    accounts::cancel_codex_login(&cancel_state).await
+    accounts::cancel_codex_login(&cancel_state).await?;
+    // Cancelling rolls auth.json back to the previous login, so the tray's
+    // account checkmark has to follow.
+    let _ = tray::rebuild_menu(&app);
+    Ok(())
 }
 
 #[tauri::command]
-fn mark_account_relogin(id: String, needed: bool) -> Result<(), String> {
-    accounts::mark_account_relogin(&id, needed).map_err(|e| e.to_string())
+fn mark_account_relogin(handle: tauri::AppHandle, id: String, needed: bool) -> Result<(), String> {
+    accounts::mark_account_relogin(&id, needed).map_err(|e| e.to_string())?;
+    // Drives the ⚠ suffix on the tray's account rows.
+    let _ = tray::rebuild_menu(&handle);
+    Ok(())
 }
 
 pub fn run() {
@@ -1066,6 +1104,7 @@ pub fn run() {
             detect_codex_installs,
             provider_active_state,
             provider_active_states,
+            take_pending_tray_switch,
             activate_provider,
             deactivate_provider,
             delete_provider,

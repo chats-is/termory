@@ -32,10 +32,11 @@
 use crate::config;
 use crate::providers::{
     activate, deactivate, detect_install_snapshot, gateway_providers, read_active_state,
-    set_default, CliApp, InstallSnapshot, Provider,
+    set_default, CliApp, InstallSnapshot, Provider, ProviderKind,
 };
 use crate::sessions::{AppSession, ClaudeWorkStatus};
 use std::collections::HashMap;
+use std::error::Error;
 use std::sync::Mutex;
 use tauri::{
     menu::{
@@ -152,6 +153,45 @@ struct CliRow {
 
 static CLI_ROWS: Mutex<Vec<CliRow>> = Mutex::new(Vec::new());
 
+/// A saved-login row's live handle, kept so an account switch can move the
+/// checkmark IN PLACE. A full `set_menu` closes an open menu on macOS, and the
+/// switch lands seconds late (it refreshes tokens over the network first) —
+/// which is exactly when the user has reopened the menu to see whether it
+/// worked. Rebuilding there would shut the menu in their face on every switch.
+struct AccountRow {
+    cli: CliApp,
+    id: String,
+    item: tauri::menu::CheckMenuItem<Wry>,
+}
+
+static ACCOUNT_ROWS: Mutex<Vec<AccountRow>> = Mutex::new(Vec::new());
+
+/// A provider switch the tray started but deliberately did NOT perform,
+/// because it needs the Providers page's prompt (currently only Codex's
+/// official↔custom switch, which asks which projects' sessions should follow).
+/// The page picks it up via the `take_pending_tray_switch` IPC — on the
+/// `termory:tray-switch-request` event, and again on mount so a request made
+/// while the frontend was still loading isn't lost.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingSwitch {
+    /// CliApp key ("codex").
+    pub app: String,
+    /// The provider id to switch to, or `None` for Official.
+    pub provider_id: Option<String>,
+}
+
+static PENDING_SWITCH: Mutex<Option<PendingSwitch>> = Mutex::new(None);
+
+/// Emitted when a switch is waiting for the page — see [`PendingSwitch`].
+/// Mirrored in src/constants.ts.
+pub const TRAY_SWITCH_REQUEST_EVENT: &str = "termory:tray-switch-request";
+
+/// Hand the pending switch to the prompt window, clearing it (take-once).
+pub fn take_pending_switch() -> Option<PendingSwitch> {
+    PENDING_SWITCH.lock().ok().and_then(|mut s| s.take())
+}
+
 /// The dynamic "recent" region (session rows + separators + the "New
 /// Session" submenu) starts at this fixed index — right after the
 /// always-present "Open" row and its separator.
@@ -230,8 +270,13 @@ fn cli_row_title(base: &str, shows_quota: bool, cli: CliApp, labels: &TrayLabels
 /// frontend pushes the translated strings via the `set_tray_labels` IPC when the
 /// app language loads or changes; until then English is used. CLI and provider
 /// names are brand / user data and stay untranslated.
-#[derive(Clone)]
-struct TrayLabels {
+///
+/// Deserialized straight from the IPC payload as ONE object: passing a dozen
+/// positional `String`s meant any reordering silently mislabelled the menu, and
+/// a struct makes each label name-matched instead.
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrayLabels {
     open: String,
     official: String,
     exit: String,
@@ -243,6 +288,10 @@ struct TrayLabels {
     status_busy: String,
     status_waiting: String,
     credits: String,
+    /// Stand-in for a provider saved without a name — mirrors the Providers
+    /// page's `p.name || t("providers.unnamed")`, so a nameless row is a
+    /// readable placeholder here instead of a blank, unclickable-looking line.
+    unnamed: String,
 }
 
 impl Default for TrayLabels {
@@ -259,6 +308,20 @@ impl Default for TrayLabels {
             status_busy: "Working".to_string(),
             status_waiting: "Needs input".to_string(),
             credits: "Credits".to_string(),
+            unnamed: "(unnamed)".to_string(),
+        }
+    }
+}
+
+impl TrayLabels {
+    /// A provider's menu label: its name, else the localized placeholder —
+    /// the Providers page's `p.name || t("providers.unnamed")`.
+    fn provider_name<'a>(&'a self, p: &'a Provider) -> &'a str {
+        let name = p.name.trim();
+        if name.is_empty() {
+            &self.unnamed
+        } else {
+            name
         }
     }
 }
@@ -275,34 +338,9 @@ fn tray_labels() -> TrayLabels {
 
 /// Store the localized static labels (called from the `set_tray_labels` IPC).
 /// The caller rebuilds the menu so the new labels take effect.
-#[allow(clippy::too_many_arguments)]
-pub fn set_labels(
-    open: String,
-    official: String,
-    exit: String,
-    five_hour: String,
-    weekly: String,
-    monthly: String,
-    new_session: String,
-    choose_folder: String,
-    status_busy: String,
-    status_waiting: String,
-    credits: String,
-) {
+pub fn set_labels(labels: TrayLabels) {
     if let Ok(mut g) = TRAY_LABELS.lock() {
-        *g = Some(TrayLabels {
-            open,
-            official,
-            exit,
-            five_hour,
-            weekly,
-            monthly,
-            new_session,
-            choose_folder,
-            status_busy,
-            status_waiting,
-            credits,
-        });
+        *g = Some(labels);
     }
 }
 
@@ -440,6 +478,489 @@ fn spawn_quota_fetch(app: &AppHandle, cli: CliApp) {
     });
 }
 
+/// A CLI row's title before the quota suffix: the in-use choice inline, e.g.
+/// "Claude Code · Official" / "Codex · OpenRouter". An UNMANAGED config names
+/// neither — the CLI points somewhere Termory doesn't know — so the row carries
+/// no suffix at all rather than claiming a choice the user didn't make here.
+fn cli_base_title(
+    cli: CliApp,
+    set: &CliProviders,
+    active: &ActiveChoice,
+    labels: &TrayLabels,
+) -> String {
+    let name = active
+        .id
+        .as_deref()
+        .and_then(|id| set.row(id))
+        .map(|r| labels.provider_name(&r.provider))
+        .or(active.official.then_some(labels.official.as_str()));
+    match name {
+        Some(name) => format!("{} · {}", cli_label(cli), name),
+        None => cli_label(cli).to_string(),
+    }
+}
+
+/// Would `cli`'s row title differ from what the visible menu shows? Used to
+/// decide whether an in-place refresh is enough or the menu must be rebuilt.
+///
+/// An account switch REWRITES auth.json, which Codex's active-state derivation
+/// reads (`auth_mode` / `OPENAI_API_KEY` live there) — so restoring a snapshot
+/// taken while a custom provider was active moves the Official/provider
+/// checkmarks too, not just the account row. Reads config from disk, so keep it
+/// off the main thread.
+fn cli_row_title_is_stale(cli: CliApp) -> bool {
+    let providers =
+        crate::providers::providers_from_json(config::read_providers().unwrap_or_default());
+    let set = CliProviders::resolve(cli, &providers, &gateway_providers());
+    let active = set.active_choice(cli, &config::active_provider_markers());
+    let fresh = cli_base_title(cli, &set, &active, &tray_labels());
+    CLI_ROWS
+        .lock()
+        .ok()
+        .map(|rows| {
+            rows.iter()
+                .find(|r| r.cli == cli)
+                // No cached row for this CLI: nothing to update in place.
+                .is_none_or(|r| r.base_title != fresh)
+        })
+        .unwrap_or(true)
+}
+
+/// A saved login's menu label: the display label, plus a ⚠ when its refresh
+/// token was revoked. Shared by the build and the in-place refresh so the two
+/// can't render the same account differently.
+fn account_row_label(a: &crate::accounts::TrayAccount) -> String {
+    if a.needs_relogin {
+        format!("{} ⚠", a.label)
+    } else {
+        a.label.clone()
+    }
+}
+
+/// Push the current saved-login state onto the cached row handles. Returns
+/// false when the cache can't express it — no rows, or the SET of accounts
+/// changed (added / removed / reordered) — leaving the caller to rebuild.
+fn apply_account_rows(rows: &[AccountRow]) -> bool {
+    if rows.is_empty() {
+        return false;
+    }
+    let mut clis: Vec<CliApp> = Vec::new();
+    for row in rows {
+        if !clis.contains(&row.cli) {
+            clis.push(row.cli);
+        }
+    }
+    for cli in clis {
+        let live = crate::accounts::tray_accounts(cli);
+        let cached: Vec<&AccountRow> = rows.iter().filter(|r| r.cli == cli).collect();
+        if live.len() != cached.len() || live.iter().zip(&cached).any(|(a, r)| a.id != r.id) {
+            return false;
+        }
+        for (a, row) in live.iter().zip(&cached) {
+            if row.item.set_text(account_row_label(a)).is_err()
+                || row.item.set_checked(a.active).is_err()
+                || row.item.set_enabled(!a.needs_relogin).is_err()
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Move the account checkmark (and the ⚠ / disabled state) WITHOUT rebuilding.
+/// `set_menu` closes an open menu on macOS, and an account switch completes
+/// seconds after the click — reopening the menu to check the result is the
+/// normal next action, so a rebuild there would dismiss it every time. Same
+/// technique the quota suffix uses (`update_cli_row_title`). Falls back to a
+/// full rebuild when the account SET changed, which the handles can't express.
+fn refresh_accounts(app: &AppHandle) {
+    let handle = app.clone();
+    let queued = app.run_on_main_thread(move || {
+        let updated = ACCOUNT_ROWS
+            .lock()
+            .ok()
+            .map(|rows| apply_account_rows(&rows))
+            .unwrap_or(false);
+        if !updated {
+            if let Err(err) = do_rebuild_menu(&handle) {
+                log::error!("tray account rebuild failed: {err}");
+            }
+        }
+    });
+    if let Err(err) = queued {
+        log::error!("tray account refresh could not reach the main thread: {err}");
+    }
+}
+
+/// Reflect a landed account switch in the menu, preferring the in-place update
+/// so a menu the user reopened to check the result isn't dismissed.
+///
+/// The switch replaced auth.json, which the provider derivation also reads — so
+/// when that moved the row's title (a snapshot taken while a custom provider
+/// was active restores its api-key fields), only a rebuild can express it, and
+/// showing the truth beats keeping the menu open. Switching between two plain
+/// official logins leaves the title identical, which is the common case.
+fn settle_account_change(app: &AppHandle, cli: CliApp) {
+    if cli_row_title_is_stale(cli) {
+        if let Err(err) = rebuild_menu(app) {
+            log::error!("tray menu rebuild after account switch failed: {err}");
+        }
+    } else {
+        refresh_accounts(app);
+    }
+}
+
+/// Restore a saved official login (Codex) from the tray. Async because
+/// `switch_account` refreshes the tokens over the network BEFORE writing
+/// auth.json — a failure leaves the live credential untouched, and we then
+/// mirror the Providers page by flagging the entry as needing re-login (its
+/// refresh token was revoked), which renders as the ⚠ suffix on the next build.
+///
+/// On success the quota belongs to a DIFFERENT account, so force a refetch:
+/// that also emits `quota-changed`, which an open Providers page already
+/// listens to for reloading its account list — no extra event needed.
+fn spawn_account_switch(app: &AppHandle, id: String) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // Switching OVERWRITES auth.json, so a live login that was never
+        // snapshotted would be gone for good. The Providers page guards this by
+        // warning in its confirm dialog ("the current login isn't saved") — a
+        // native menu row has no dialog to warn in, so snapshot it instead: the
+        // account stays recoverable either way, which is what the warning is
+        // for. Idempotent, and the same call the `codex login` flow makes.
+        if let Err(err) = crate::accounts::auto_save_unsaved_live_account() {
+            log::warn!("tray account switch: snapshotting the live login failed: {err}");
+        }
+        match crate::accounts::switch_account(id.clone()).await {
+            Ok(()) => {
+                let _ = crate::accounts::mark_account_relogin(&id, false);
+                settle_account_change(&handle, CliApp::Codex);
+                force_quota_refresh(&handle, CliApp::Codex);
+            }
+            Err(err) => {
+                log::error!("tray account switch failed for {id}: {err}");
+                let _ = crate::accounts::mark_account_relogin(&id, true);
+                // The failure only flags the entry — auth.json was left
+                // untouched, so nothing but the account row can have moved.
+                refresh_accounts(&handle);
+            }
+        }
+    });
+}
+
+/// Codex-only, and ONLY when the user turned on Settings → "follow all
+/// projects silently" (`config::codex_keep_all_sessions`): after a bucket-CHANGING
+/// switch, re-tag EVERY project holding off-target sessions so `codex resume`
+/// still lists them. Without that setting this never runs — the switch is handed
+/// to the page's `CodexFollowDialog` instead, which asks first.
+///
+/// Both buckets are fixed (Official is always `openai`, a Termory-written custom
+/// provider is always `termory`), so only official↔custom changes anything.
+///
+/// Runs on a blocking worker: it opens sqlite and rewrites rollout JSONL files
+/// that routinely run 100+ MB — never on the menu-event (main) thread.
+///
+/// The caller has already established that the bucket changes; `to_official`
+/// names the side just switched TO.
+fn spawn_codex_follow_all(to_official: bool) {
+    let target = codex_bucket(to_official);
+    tauri::async_runtime::spawn_blocking(move || {
+        let projects = match codex_follow_candidates(target) {
+            Ok(list) => list,
+            Err(err) => {
+                log::warn!("tray codex follow: listing projects failed: {err}");
+                return;
+            }
+        };
+        if projects.is_empty() {
+            return;
+        }
+        match crate::codex_follow::follow_projects(&projects, target) {
+            // Nothing to refresh: the re-tag changes which threads `codex
+            // resume` lists, and Termory's own Codex scan never filters on
+            // `model_provider` — so no menu rebuild and no re-scan.
+            Ok(res) => log::info!(
+                "tray codex follow: re-tagged {} thread(s) into {target}",
+                res.moved
+            ),
+            // A running Codex holds the DB lock — the switch itself already
+            // landed, and the user can re-switch after quitting Codex.
+            Err(err) => log::warn!("tray codex follow failed: {err}"),
+        }
+    });
+}
+
+/// Codex's OFFICIAL thread bucket — both official logins default to this
+/// built-in provider id, so switching back to Official always lands here.
+/// Mirror of `CODEX_OFFICIAL_PROVIDER_ID` in ProvidersPage.tsx.
+const CODEX_OFFICIAL_BUCKET: &str = "openai";
+
+/// The `model_provider` bucket a switch lands in. Both are fixed — every
+/// Termory-written custom provider shares the one `termory` id — so the target
+/// follows from the direction alone.
+fn codex_bucket(to_official: bool) -> &'static str {
+    if to_official {
+        CODEX_OFFICIAL_BUCKET
+    } else {
+        crate::providers::TERMORY_PROVIDER_ID
+    }
+}
+
+/// Projects holding at least one session OUTSIDE `target` — i.e. the ones a
+/// switch would hide from `codex resume` unless they follow. Same filter as the
+/// page's `maybePromptThenActivate`; limit 0 = every project, no cap.
+///
+/// Opens sqlite, so callers must be on a blocking worker.
+fn codex_follow_candidates(target: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    Ok(crate::codex_follow::recent_projects(0)?
+        .into_iter()
+        .filter(|p| p.providers.iter().any(|id| id != target))
+        .map(|p| p.project)
+        .collect())
+}
+
+/// A bucket-CHANGING Codex switch with the silent-follow setting OFF.
+///
+/// The page only prompts when some project actually HAS off-target sessions —
+/// with none there is nothing to follow, so it just switches. Matching that
+/// means answering "are there candidates?", which opens sqlite and therefore
+/// cannot run on the menu-event (main) thread; hence this worker:
+///   * candidates → park the request, show the app, let the page prompt;
+///   * none → apply the switch right here, exactly as a non-Codex click would.
+///
+/// A listing FAILURE prompts: switching silently could drop a project's
+/// history from `codex resume`, while a needless prompt costs one dialog.
+fn spawn_codex_bucket_switch(
+    app: &AppHandle,
+    cli: CliApp,
+    set: CliProviders,
+    provider_id: Option<String>,
+) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let to_official = provider_id.is_none();
+        let needs_prompt = match codex_follow_candidates(codex_bucket(to_official)) {
+            Ok(candidates) => !candidates.is_empty(),
+            Err(err) => {
+                log::warn!("tray codex switch: listing projects failed: {err}");
+                true
+            }
+        };
+        if !needs_prompt {
+            apply_switch(&handle, cli, &set, provider_id.as_deref());
+            return;
+        }
+        if let Ok(mut slot) = PENDING_SWITCH.lock() {
+            *slot = Some(PendingSwitch {
+                app: cli.key().to_string(),
+                provider_id,
+            });
+        }
+        // A native check item TOGGLES ITSELF when clicked (muda/NSMenuItem
+        // checkbox behaviour); the writing path discards that by rebuilding
+        // right after. This branch writes nothing, so without a rebuild the
+        // clicked row stays lit ON TOP of the row that's really active —
+        // "Official and a provider both checked" — and cancelling the prompt
+        // leaves it that way.
+        if let Err(err) = rebuild_menu(&handle) {
+            log::error!("tray menu rebuild failed: {err}");
+        }
+        let win = handle.clone();
+        let _ = handle.run_on_main_thread(move || show_main_window(&win));
+        use tauri::Emitter;
+        let _ = handle.emit(TRAY_SWITCH_REQUEST_EVENT, ());
+    });
+}
+
+/// The write half of a provider switch: activate / deactivate, record the
+/// activation marker, rebuild the menu, and tell an open Providers page to
+/// re-derive. Shared by the direct click and the deferred Codex path above so
+/// both leave identical state. `provider_id = None` → Official.
+fn apply_switch(app: &AppHandle, cli: CliApp, set: &CliProviders, provider_id: Option<&str>) {
+    let target = provider_id.and_then(|pid| set.row(pid));
+    if provider_id.is_some() && target.is_none() {
+        // The provider vanished from the library between click and write.
+        let _ = rebuild_menu(app);
+        return;
+    }
+    if let Err(err) = set.switch_to(cli, target) {
+        log::error!("tray activation failed for {}: {err}", cli.key());
+    } else if let Err(err) = config::set_active_provider_marker(cli.key(), provider_id) {
+        // Mirror of the Providers page's `markActive`: records which provider is
+        // now in use so the creds-collision disambiguation resolves to the one
+        // the user just clicked. Official clears it.
+        log::warn!("tray marker write failed for {}: {err}", cli.key());
+    }
+    if let Err(err) = rebuild_menu(app) {
+        log::error!("tray menu rebuild failed: {err}");
+    }
+    // Tell any open Providers page to re-derive active state from disk.
+    use tauri::Emitter;
+    let _ = app.emit("termory:providers-changed", ());
+}
+
+/// One switchable row in a CLI's submenu.
+#[derive(Clone)]
+struct ProviderRow {
+    provider: Provider,
+    /// A gateway binding's synthesized provider rather than a standalone one.
+    /// It decides which strip set the activation gets — see [`CliProviders`].
+    from_gateway: bool,
+}
+
+/// Everything the tray needs to RENDER one CLI's provider submenu and to RUN a
+/// click on it, resolved once. Deliberately shaped after the Providers page's
+/// per-CLI memos so the two surfaces can't drift — that page is the reference
+/// for both what is listed and what a switch writes:
+///
+/// | here | ProvidersPage.tsx |
+/// |---|---|
+/// | `rows` | `customProviders` ++ `gatewayBoundForApp` (the listed choices, and the candidate set `effectiveActiveId` matches against) |
+/// | `standalone` | `providersForApp` (the strip set `activate_provider` gets for a standalone provider) |
+/// | `all` | `allProvidersForApp` (what `deactivate_provider` and Grok's `set_default_provider` get) |
+///
+/// Note `rows` keeps only `kind == Custom` standalone entries (an Official-kind
+/// record is not a switch target) while `standalone` keeps every kind, because
+/// the strip set is a union of option KEYS to clean — narrowing it would leave
+/// a sibling's keys behind in the live config.
+#[derive(Clone)]
+struct CliProviders {
+    rows: Vec<ProviderRow>,
+    standalone: Vec<Provider>,
+    all: Vec<Provider>,
+}
+
+/// What a CLI's live config currently points at.
+#[derive(Default)]
+struct ActiveChoice {
+    /// The in-use provider's id — the page's `effectiveActiveId`. `None` for
+    /// Official AND for unmanaged.
+    id: Option<String>,
+    /// The live config is Termory's Official state (nothing injected) — the
+    /// page's `activeState.kind === "official"`, which is what drives ITS
+    /// Official card's "in use" badge.
+    ///
+    /// **Not the same as `id.is_none()`**: an UNMANAGED config — a third-party
+    /// endpoint matching no provider in the library (cc-switch, a hand-edited
+    /// config) — also yields no id, and reading that as Official would tick
+    /// the Official row, title the CLI `· Official`, and hang the official
+    /// account's QUOTA off someone else's endpoint. Under unmanaged the page
+    /// marks nothing as in use, and so does the tray.
+    official: bool,
+}
+
+impl CliProviders {
+    /// `providers` = the whole library, `gateways` = every binding synth (both
+    /// read once per menu build / click, then split per CLI here).
+    fn resolve(cli: CliApp, providers: &[Provider], gateways: &[Provider]) -> Self {
+        let standalone: Vec<Provider> =
+            providers.iter().filter(|p| p.app == cli).cloned().collect();
+        let bindings: Vec<Provider> = gateways.iter().filter(|p| p.app == cli).cloned().collect();
+        let rows = standalone
+            .iter()
+            .filter(|p| p.kind == ProviderKind::Custom)
+            .map(|p| ProviderRow {
+                provider: p.clone(),
+                from_gateway: false,
+            })
+            .chain(bindings.iter().map(|p| ProviderRow {
+                provider: p.clone(),
+                from_gateway: true,
+            }))
+            .collect();
+        let mut all = standalone.clone();
+        all.extend(bindings);
+        Self {
+            rows,
+            standalone,
+            all,
+        }
+    }
+
+    fn row(&self, id: &str) -> Option<&ProviderRow> {
+        self.rows.iter().find(|r| r.provider.id == id)
+    }
+
+    /// What's in use for this CLI — the SINGLE place the tray answers it, so
+    /// the menu it renders and the decisions it makes off that state can't
+    /// diverge. One `read_active_state` call per CLI per build.
+    ///
+    /// `id` follows the page's `effectiveActiveId`: the `active_provider_ids`
+    /// marker wins only while the marked provider still matches the live config
+    /// snapshot, else the reverse-derived match. Multi-slot (OpenCode/Grok)
+    /// skip the marker — their `matched_provider_id` comes from the live
+    /// default pointer, which carries the id already. NOTE this deliberately
+    /// does NOT read the marker raw: the marker is a RECORD of Termory's last
+    /// switch, so on its own it goes stale the moment the live config is
+    /// changed by anything else.
+    ///
+    /// A read failure claims nothing (no id, not official) rather than
+    /// asserting a state we couldn't determine.
+    fn active_choice(&self, cli: CliApp, markers: &HashMap<String, String>) -> ActiveChoice {
+        let candidates: Vec<Provider> = self.rows.iter().map(|r| r.provider.clone()).collect();
+        let Ok(state) = read_active_state(cli, &candidates) else {
+            return ActiveChoice::default();
+        };
+        let id = if matches!(cli, CliApp::Opencode | CliApp::Grok) {
+            state.matched_provider_id.clone()
+        } else {
+            crate::providers::resolve_active_provider_id(
+                &state,
+                markers.get(cli.key()).map(String::as_str),
+                &candidates,
+            )
+        };
+        ActiveChoice {
+            id,
+            official: state.kind == crate::providers::ActiveKind::Official,
+        }
+    }
+
+    /// Run the switch the clicked row asks for, writing exactly what the
+    /// Providers page's `performOfficial` / `performSetAsDefault` /
+    /// `performActivateGateway` write for the same choice.
+    fn switch_to(&self, cli: CliApp, target: Option<&ProviderRow>) -> Result<(), Box<dyn Error>> {
+        let Some(row) = target else {
+            // "Official" — clear Termory's writes. Gets `all` so OpenCode /
+            // Grok can also recognise (and clear) a default pointing at a
+            // gateway binding's slot.
+            return deactivate(cli, &self.all);
+        };
+        // A gateway binding activates with itself as the whole strip set, the
+        // convention every GatewaysPage call uses; a standalone provider gets
+        // the app's standalone list, so keys dropped from a sibling are cleaned.
+        let strip_set: &[Provider] = if row.from_gateway {
+            std::slice::from_ref(&row.provider)
+        } else {
+            &self.standalone
+        };
+        activate(&row.provider, strip_set)?;
+        // Multi-slot (OpenCode + Grok): `activate` only adds the slot/entries —
+        // being the STARTUP DEFAULT (what the checkmark and inline title track)
+        // is a second write, exactly as the page does it. Single-slot CLIs set
+        // their default implicitly on activate.
+        if matches!(cli, CliApp::Opencode | CliApp::Grok) {
+            set_default(&row.provider, &self.all)?;
+        }
+        Ok(())
+    }
+}
+
+/// Does `cli`'s cached row carry the quota suffix? False when the row is
+/// absent (uninstalled / disabled) or a non-Official choice is live.
+fn cli_row_shows_quota(cli: CliApp) -> bool {
+    CLI_ROWS
+        .lock()
+        .ok()
+        .map(|rows| {
+            rows.iter()
+                .find(|r| r.cli == cli)
+                .is_some_and(|r| r.shows_quota)
+        })
+        .unwrap_or(false)
+}
+
 /// Async, rate-limited quota fetch + tray update for every CLI in
 /// `quota::SUPPORTED`. Used by the menu-open (tray click) hook and the
 /// one-shot warm-up at startup.
@@ -447,8 +968,20 @@ pub fn trigger_quota_refresh(app: &AppHandle) {
     // Settings → Tools: don't fetch quota for a disabled tool — its CLI
     // row (where the numbers would show) is hidden anyway.
     let disabled = crate::config::disabled_sources();
+    // Nor for a CLI whose row won't display it: the quota belongs to the
+    // OFFICIAL login, so a row showing a custom provider (or an unmanaged
+    // config) suppresses it — fetching would spend a network round-trip on a
+    // number nothing renders. Read off the cached `CliRow.shows_quota`, the
+    // same flag `build_menu` computed, so this stays free of disk I/O: the
+    // callers are the tray-click handler and startup, both on the main thread.
+    // An EMPTY cache means the menu hasn't been built yet (startup warm-up) —
+    // fetch then, so the first build has numbers to show.
+    let rows_built = CLI_ROWS.lock().map(|r| !r.is_empty()).unwrap_or(false);
     for &cli in crate::quota::SUPPORTED {
-        if disabled.contains(cli_key(cli)) {
+        if disabled.contains(cli.key()) {
+            continue;
+        }
+        if rows_built && !cli_row_shows_quota(cli) {
             continue;
         }
         {
@@ -486,7 +1019,7 @@ pub fn force_quota_refresh(app: &AppHandle, cli: CliApp) {
     }
     // Settings → Tools: a disabled tool's credential churn shouldn't
     // trigger fetches (its tray row is hidden).
-    if crate::config::disabled_sources().contains(cli_key(cli)) {
+    if crate::config::disabled_sources().contains(cli.key()) {
         return;
     }
     {
@@ -599,7 +1132,7 @@ fn terminal_clis(installed: &InstallSnapshot) -> Vec<CliApp> {
     // thread) — no config-file I/O here on the main thread; the recent
     // SESSION rows are already filtered upstream by scan_sessions.
     let mut clis = terminal_clis_in(&installed.map, installed.codex_terminal);
-    clis.retain(|c| !installed.disabled.contains(cli_key(*c)));
+    clis.retain(|c| !installed.disabled.contains(c.key()));
     clis
 }
 
@@ -1204,7 +1737,7 @@ fn build_recent_region(
                 // ':'-free cli key) so the click is decoupled from
                 // RECENT entirely — no stale-index hazard.
                 let item = MenuItemBuilder::with_id(
-                    format!("tray:new:{}:{}", cli_key(cli), target.project),
+                    format!("tray:new:{}:{}", cli.key(), target.project),
                     cli_label(cli),
                 )
                 .build(app)?;
@@ -1217,11 +1750,9 @@ fn build_recent_region(
         }
         let mut pick_sub = SubmenuBuilder::new(app, &labels.choose_folder);
         for cli in installed_clis {
-            let item = MenuItemBuilder::with_id(
-                format!("tray:newpick:{}", cli_key(*cli)),
-                cli_label(*cli),
-            )
-            .build(app)?;
+            let item =
+                MenuItemBuilder::with_id(format!("tray:newpick:{}", cli.key()), cli_label(*cli))
+                    .build(app)?;
             pick_sub = pick_sub.item(&item);
         }
         sub = sub.item(&pick_sub.build()?);
@@ -1268,69 +1799,111 @@ fn build_menu(app: &AppHandle, installed: &InstallSnapshot) -> tauri::Result<Men
     // (Uninstalled CLIs get no provider submenu — nothing to switch.)
     let gateways = gateway_providers();
 
+    // Per-CLI activation markers (config.json `active_provider_ids`, written
+    // by the Providers page). Used to disambiguate a standalone provider and
+    // a gateway binding that share identical creds — the SAME rule the
+    // Providers page applies (`resolveActiveProviderId`); without it the tray
+    // reverse-derives to whichever matches first and checkmarks the wrong one.
+    let markers = config::active_provider_markers();
+
     // Settings → Tools: disabled tools get no provider-switch submenu
     // (the disabled set rides in the snapshot — no config I/O here).
     let mut cli_rows: Vec<CliRow> = Vec::new();
+    let mut account_rows: Vec<AccountRow> = Vec::new();
     for cli in CliApp::all() {
         if !installed.map.get(&cli).copied().unwrap_or(false)
-            || installed.disabled.contains(cli_key(cli))
+            || installed.disabled.contains(cli.key())
         {
             continue;
         }
         // The user's standalone providers PLUS this CLI's gateway bindings
         // (synthesized into the same Provider shape), so both appear as
         // switchable choices and the active checkmark lands on whichever is
-        // live.
-        let mut providers_for_app: Vec<Provider> =
-            providers.iter().filter(|p| p.app == cli).cloned().collect();
-        providers_for_app.extend(gateways.iter().filter(|p| p.app == cli).cloned());
-        // Reverse-derive the active provider id. Anything other than
-        // `Some(matching id)` (None, or matched-by-config-but-not-in-list)
-        // falls back to "Official is the active row".
-        let active_id = read_active_state(cli, &providers_for_app)
-            .ok()
-            .and_then(|s| s.matched_provider_id);
+        // live — the same list, in the same order, as the Providers page.
+        let set = CliProviders::resolve(cli, &providers, &gateways);
+        // The menu bar previously used `matched_provider_id` alone, i.e. field
+        // matching only, so a standalone provider and a gateway binding sharing
+        // one endpoint were indistinguishable and it checkmarked whichever came
+        // first — disagreeing with the page.
+        let active = set.active_choice(cli, &markers);
+        let active_id = active.id.clone();
 
         // First-level title shows the currently-active choice inline
-        // (e.g. "Claude Code · Official"), using the same rule as the
-        // checkmarks below: matched provider name, else "Official".
-        let active_name = active_id
-            .as_deref()
-            .and_then(|id| providers_for_app.iter().find(|p| p.id == id))
-            .map(|p| p.name.as_str())
-            .unwrap_or(labels.official.as_str());
+        // (e.g. "Claude Code · Official"): the in-use provider's name, else
+        // "Official". An UNMANAGED config names neither — the CLI points
+        // somewhere Termory doesn't know — so the row carries no suffix at
+        // all rather than claiming a choice the user didn't make here.
+        let base_title = cli_base_title(cli, &set, &active, &labels);
         // Quota-capable CLI with Official active: the title carries
-        // the official-account plan + quota suffix. Suppressed while a
-        // custom provider is active — the quota belongs to the
-        // official login, and gluing it onto a custom provider's name
-        // would read as that provider's usage.
-        let base_title = format!("{} · {}", cli_label(cli), active_name);
-        let shows_quota = crate::quota::supports_quota(cli) && active_id.is_none();
+        // the official-account plan + quota suffix. Suppressed while
+        // anything else is live — the quota belongs to the official login,
+        // and gluing it onto a custom (or unknown) endpoint's row would
+        // read as that endpoint's usage.
+        let shows_quota = crate::quota::supports_quota(cli) && active.official;
         let title = cli_row_title(&base_title, shows_quota, cli, &labels);
         let mut sub = SubmenuBuilder::new(app, title);
 
-        let official = CheckMenuItemBuilder::with_id(
-            format!("tray:{}:official", cli_key(cli)),
-            &labels.official,
-        )
-        .checked(active_id.is_none())
-        .build(app)?;
+        let official =
+            CheckMenuItemBuilder::with_id(format!("tray:{}:official", cli.key()), &labels.official)
+                // Same rule as the page's Official card (`activeState.kind ===
+                // "official"`), NOT "no provider matched" — see `ActiveChoice`.
+                .checked(active.official)
+                .build(app)?;
         sub = sub.item(&official);
 
-        if !providers_for_app.is_empty() {
-            let sep = PredefinedMenuItem::separator(app)?;
-            sub = sub.item(&sep);
+        // Saved official logins (Codex only — the one CLI with snapshot
+        // management), directly under Official: they are that login's accounts,
+        // not more providers, and the Providers page likewise carries them on
+        // the Official card, above the provider list. The separator alone marks
+        // the group — no title row, so the menu stays a plain list of things you
+        // can click. A ⚠ suffix marks an entry whose refresh token was revoked
+        // (the page's "needs re-login" badge — switching to it will fail until
+        // the user re-authenticates there).
+        //
+        // Each group opens with its own separator, so a CLI with no accounts,
+        // no providers, or neither still gets exactly the rules it needs.
+        let accounts = crate::accounts::tray_accounts(cli);
+        if !accounts.is_empty() {
+            sub = sub.item(&PredefinedMenuItem::separator(app)?);
+            for a in &accounts {
+                let item = CheckMenuItemBuilder::with_id(
+                    format!("tray:{}:account:{}", cli.key(), a.id),
+                    account_row_label(a),
+                )
+                .checked(a.active)
+                // Only a revoked refresh token disables a row — it can be fixed
+                // only by re-authenticating on the Providers page, so the click
+                // would just fail. The LIVE row stays enabled: greying out the
+                // account in use reads as "unavailable" next to its own
+                // checkmark, and it's the one row that should look normal.
+                // Clicking it is a no-op, guarded in the handler the same way
+                // the page guards it (`if (account.active) return`).
+                .enabled(!a.needs_relogin)
+                .build(app)?;
+                sub = sub.item(&item);
+                // Keep the handle so a switch can update this row without a
+                // menu-closing rebuild — see AccountRow.
+                account_rows.push(AccountRow {
+                    cli,
+                    id: a.id.clone(),
+                    item,
+                });
+            }
         }
 
-        for p in &providers_for_app {
-            let is_active = active_id.as_deref() == Some(p.id.as_str());
-            let item = CheckMenuItemBuilder::with_id(
-                format!("tray:{}:custom:{}", cli_key(cli), p.id),
-                &p.name,
-            )
-            .checked(is_active)
-            .build(app)?;
-            sub = sub.item(&item);
+        if !set.rows.is_empty() {
+            sub = sub.item(&PredefinedMenuItem::separator(app)?);
+            for row in &set.rows {
+                let p = &row.provider;
+                let is_active = active_id.as_deref() == Some(p.id.as_str());
+                let item = CheckMenuItemBuilder::with_id(
+                    format!("tray:{}:custom:{}", cli.key(), p.id),
+                    labels.provider_name(p),
+                )
+                .checked(is_active)
+                .build(app)?;
+                sub = sub.item(&item);
+            }
         }
 
         let sub = sub.build()?;
@@ -1349,6 +1922,9 @@ fn build_menu(app: &AppHandle, installed: &InstallSnapshot) -> tauri::Result<Men
 
     if let Ok(mut rows) = CLI_ROWS.lock() {
         *rows = cli_rows;
+    }
+    if let Ok(mut rows) = ACCOUNT_ROWS.lock() {
+        *rows = account_rows;
     }
 
     // Separate Exit from the content above ONLY when there IS content. With
@@ -1459,49 +2035,94 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         return;
     };
 
+    // Switching the official LOGIN, not the provider — a different axis, so it
+    // returns before any provider state is read or written.
+    if kind == "account" {
+        // Rebuild FIRST: the click already toggled the row's native checkmark,
+        // and the switch below starts with a network token refresh that can take
+        // seconds — until it lands, two account rows would show as checked.
+        if let Err(err) = rebuild_menu(app) {
+            log::error!("tray menu rebuild failed: {err}");
+        }
+        if let Some(id) = provider_id {
+            // Clicking the account that's ALREADY live does nothing — the same
+            // guard the page applies (`switchTo`: `if (account.active) return`).
+            // Without it the row would run a full token refresh + auth.json
+            // rewrite to land exactly where it already was. The rebuild above
+            // has already restored its checkmark after the native toggle.
+            let already_live = crate::accounts::tray_accounts(cli)
+                .iter()
+                .any(|a| a.id == id && a.active);
+            if !already_live {
+                spawn_account_switch(app, id.to_string());
+            }
+        }
+        return;
+    }
+
+    // The clicked row → the same list the menu was built from, resolved once:
+    // every branch below (park-direction check, the write, the marker) reads
+    // this one answer, so they cannot disagree with each other or with what the
+    // user saw. `None` target = the "Official" row.
     let providers: Vec<Provider> =
         crate::providers::providers_from_json(config::read_providers().unwrap_or_default());
-    // Standalone providers + this CLI's gateway bindings, so a click on a
-    // gateway row resolves to its synthesized provider and activates via the
-    // same path.
-    let mut providers_for_app: Vec<Provider> =
-        providers.iter().filter(|p| p.app == cli).cloned().collect();
-    providers_for_app.extend(gateway_providers().into_iter().filter(|p| p.app == cli));
-
-    let result = match (kind, provider_id) {
-        ("official", _) => deactivate(cli, &providers_for_app),
-        ("custom", Some(pid)) => match providers_for_app.iter().find(|p| p.id == pid) {
-            Some(p) => {
-                // For the multi-slot CLIs (OpenCode + Grok), `activate`
-                // only adds the provider's slot/entries — it does NOT make
-                // it the startup default, which is what the checkmark /
-                // inline title track. So also promote it to default
-                // (mirrors the Providers page flow). Single-slot CLIs
-                // (Claude / Codex / Gemini) need only `activate`, which
-                // writes their live config directly.
-                let activated = activate(p, &providers_for_app);
-                if activated.is_ok() && matches!(cli, CliApp::Opencode | CliApp::Grok) {
-                    set_default(p, &providers_for_app)
-                } else {
-                    activated
-                }
+    let set = CliProviders::resolve(cli, &providers, &gateway_providers());
+    let target = match (kind, provider_id) {
+        ("official", _) => None,
+        ("custom", Some(pid)) => match set.row(pid) {
+            Some(row) => Some(row),
+            // Row names a provider that's gone from the library: nothing to
+            // switch to, but the click lit its checkmark — rebuild to drop it.
+            None => {
+                let _ = rebuild_menu(app);
+                return;
             }
-            None => return,
         },
-        _ => return,
+        _ => {
+            let _ = rebuild_menu(app);
+            return;
+        }
     };
+    // Direction for the Codex bucket check below. Uses the in-use ID, matching
+    // the page's own prompt conditions (`effectiveActiveId === null` ⇒ treat as
+    // official) — so an unmanaged config prompts on the way OUT to a custom
+    // provider, exactly as the page does. This is a different question from the
+    // Official ROW's checkmark, which follows `ActiveChoice::official`.
+    let was_official = set
+        .active_choice(cli, &config::active_provider_markers())
+        .id
+        .is_none();
+    let to_official = target.is_none();
 
-    if let Err(err) = result {
-        log::error!("tray activation failed for {app_key}: {err}");
+    // Codex tags every thread with the `model_provider` active at creation and
+    // `codex resume` only lists threads matching the CURRENT one — so an
+    // official↔custom switch hides a project's prior sessions unless they're
+    // re-tagged, and the Providers page ASKS which projects should follow
+    // (`CodexFollowDialog`) before switching. Unless the user opted into
+    // following everything silently (Settings → `codex_keep_all_sessions`), such a
+    // switch is deferred to `spawn_codex_bucket_switch`, which decides between
+    // handing it to the page and just doing it — see there.
+    //
+    // The direction comes from the SAME validated answer the menu renders — NOT
+    // the raw marker. The marker records Termory's last switch, so after an
+    // external change (cc-switch / a hand-edited config.toml) it can claim
+    // "custom" while the live config is Official: the bucket would then really
+    // change, yet `was_official != to_official` would be false and we'd switch
+    // with no prompt and no follow, dropping the project's earlier sessions
+    // from `codex resume`.
+    let bucket_changes = cli == CliApp::Codex && was_official != to_official;
+    if bucket_changes && !config::codex_keep_all_sessions() {
+        let provider_id = target.map(|r| r.provider.id.clone());
+        spawn_codex_bucket_switch(app, cli, set.clone(), provider_id);
+        return;
     }
 
-    if let Err(err) = rebuild_menu(app) {
-        log::error!("tray menu rebuild failed: {err}");
+    apply_switch(app, cli, &set, target.map(|r| r.provider.id.as_str()));
+    // Only reachable with the silent-follow setting ON (the deferred path
+    // returned above), which is the one case the tray re-tags by itself.
+    if bucket_changes {
+        spawn_codex_follow_all(to_official);
     }
-
-    // Tell any open Providers page to re-derive active state from disk.
-    use tauri::Emitter;
-    let _ = app.emit("termory:providers-changed", ());
 }
 
 /// CLI display names — kept in sync with the Providers page tabs
@@ -1518,20 +2139,143 @@ fn cli_label(cli: CliApp) -> &'static str {
     }
 }
 
-fn cli_key(cli: CliApp) -> &'static str {
-    match cli {
-        CliApp::Claude => "claude",
-        CliApp::Codex => "codex",
-        CliApp::Gemini => "gemini",
-        CliApp::Opencode => "opencode",
-        CliApp::ClaudeDesktop => "claude-desktop",
-        CliApp::Grok => "grok",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn provider(id: &str, app: &str, kind: &str, name: &str) -> Provider {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "app": app, "kind": kind, "name": name,
+            "baseUrl": "https://api.example.com", "apiKey": "sk-test"
+        }))
+        .expect("provider fixture")
+    }
+
+    #[test]
+    fn cli_providers_mirrors_the_page_lists() {
+        let library = vec![
+            provider("c1", "claude", "custom", "Anthropic Proxy"),
+            // Official-kind + other-app entries are not switch targets.
+            provider("legacy", "claude", "official", "Legacy"),
+            provider("x1", "codex", "custom", "Other CLI"),
+            provider("c2", "claude", "custom", "OpenRouter"),
+        ];
+        let gateways = vec![
+            provider("bind-claude", "claude", "custom", "My Gateway"),
+            provider("bind-codex", "codex", "custom", "My Gateway"),
+        ];
+        let set = CliProviders::resolve(CliApp::Claude, &library, &gateways);
+
+        // Rows = the page's `customProviders` ++ `gatewayBoundForApp`: this
+        // CLI's CUSTOM standalone providers in library order, then its gateway
+        // bindings — which is also the order the submenu renders.
+        let rows: Vec<(&str, bool)> = set
+            .rows
+            .iter()
+            .map(|r| (r.provider.id.as_str(), r.from_gateway))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![("c1", false), ("c2", false), ("bind-claude", true)]
+        );
+
+        // `standalone` (the page's `providersForApp`) keeps EVERY kind — it is
+        // the option-key strip set, so narrowing it would leave a sibling's
+        // keys behind in the live config.
+        let standalone: Vec<&str> = set.standalone.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(standalone, vec!["c1", "legacy", "c2"]);
+
+        // `all` (the page's `allProvidersForApp`) adds the gateway synths.
+        let all: Vec<&str> = set.all.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(all, vec!["c1", "legacy", "c2", "bind-claude"]);
+
+        // A gateway row is flagged so its activation gets itself as the whole
+        // strip set, the convention every GatewaysPage call uses.
+        assert!(set.row("bind-claude").expect("gateway row").from_gateway);
+        assert!(!set.row("c2").expect("standalone row").from_gateway);
+        // An Official-kind entry is never a clickable row.
+        assert!(set.row("legacy").is_none());
+    }
+
+    #[test]
+    fn provider_name_falls_back_to_the_unnamed_placeholder() {
+        let labels = TrayLabels::default();
+        assert_eq!(
+            labels.provider_name(&provider("a", "claude", "custom", "Kimi")),
+            "Kimi"
+        );
+        // Blank / whitespace-only names would otherwise render an empty menu
+        // row, so they show the placeholder — same as the Providers page.
+        assert_eq!(
+            labels.provider_name(&provider("b", "claude", "custom", "   ")),
+            "(unnamed)"
+        );
+    }
+
+    #[test]
+    fn cli_base_title_names_the_choice_and_stays_bare_when_unmanaged() {
+        let labels = TrayLabels::default();
+        let library = vec![provider("p1", "codex", "custom", "OpenRouter")];
+        let set = CliProviders::resolve(CliApp::Codex, &library, &[]);
+
+        // Official: the localized "Official" suffix.
+        let official = ActiveChoice {
+            id: None,
+            official: true,
+        };
+        assert_eq!(
+            cli_base_title(CliApp::Codex, &set, &official, &labels),
+            "Codex · Official"
+        );
+
+        // A custom provider in use: its name.
+        let custom = ActiveChoice {
+            id: Some("p1".into()),
+            official: false,
+        };
+        assert_eq!(
+            cli_base_title(CliApp::Codex, &set, &custom, &labels),
+            "Codex · OpenRouter"
+        );
+
+        // UNMANAGED — the live config points somewhere Termory doesn't know, so
+        // the row names NEITHER choice rather than claiming "Official".
+        let unmanaged = ActiveChoice {
+            id: None,
+            official: false,
+        };
+        assert_eq!(
+            cli_base_title(CliApp::Codex, &set, &unmanaged, &labels),
+            "Codex"
+        );
+
+        // A marker naming a provider that's gone from the library falls back
+        // the same way — there is no row to take the name from.
+        let stale = ActiveChoice {
+            id: Some("deleted".into()),
+            official: false,
+        };
+        assert_eq!(
+            cli_base_title(CliApp::Codex, &set, &stale, &labels),
+            "Codex"
+        );
+    }
+
+    #[test]
+    fn account_row_label_marks_a_revoked_token() {
+        let base = crate::accounts::TrayAccount {
+            id: "acct".into(),
+            label: "a@example.com".into(),
+            active: false,
+            needs_relogin: false,
+        };
+        assert_eq!(account_row_label(&base), "a@example.com");
+        let revoked = crate::accounts::TrayAccount {
+            needs_relogin: true,
+            ..base
+        };
+        assert_eq!(account_row_label(&revoked), "a@example.com ⚠");
+    }
 
     #[test]
     fn quota_label_formats_known_generated_and_missing_windows() {

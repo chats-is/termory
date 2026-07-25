@@ -392,6 +392,9 @@ export const en = {
   "settings.sources": "Tools",
   "settings.sources.desc":
     "Turn a tool off to hide it everywhere — provider tabs, records, search, stats, and the menu bar. Its data on disk is untouched.",
+  "settings.switching": "Provider switching",
+  "settings.switching.keepSessions": "Keep all sessions on a Codex switch",
+  "settings.switching.keepSessionsDesc": "Codex lists resumable sessions per provider, so switching between Official and a third-party API hides the others. Off: you're asked which projects should follow. On: every project follows automatically, with no prompt — a switch from the menu bar then completes without opening Termory.",
   "settings.startup": "Startup",
   "settings.startup.launchAtLogin": "Launch at login",
   "settings.startup.desc": "Start Termory automatically when you log in — tray only, no window.",

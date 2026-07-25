@@ -371,6 +371,9 @@ export const zhHans: Record<MessageKey, string> = {
   "settings.sources": "工具",
   "settings.sources.desc":
     "关闭某个工具后,它在所有位置都会隐藏——供应商标签页、记录、搜索、统计和菜单栏。磁盘上的数据不受影响。",
+  "settings.switching": "供应商切换",
+  "settings.switching.keepSessions": "切换 Codex 时保留所有会话",
+  "settings.switching.keepSessionsDesc": "Codex 按供应商分别列出可恢复的会话,所以在官方与第三方 API 之间切换会让另一边的会话不再出现。关闭:每次询问你哪些项目需要跟随。开启:所有项目自动跟随、不再提示——此时从菜单栏切换无需打开 Termory 即可完成。",
   "settings.startup": "启动",
   "settings.startup.launchAtLogin": "开机自动启动",
   "settings.startup.desc": "登录系统时自动启动 Termory（仅驻菜单栏，不弹出窗口）。",

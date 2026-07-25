@@ -99,6 +99,17 @@ export const ACTIVE_STATE_REFRESH_EVENT = "termory:providers-refresh";
 // QUOTA_CHANGED_EVENT in src-tauri/src/quota.rs.
 export const QUOTA_CHANGED_EVENT = "termory:quota-changed";
 
+// A provider switch the TRAY started but handed to the page because it needs
+// the "follow sessions?" prompt the tray can't show (Codex official↔custom).
+// The page fetches the request with the `take_pending_tray_switch` IPC.
+// Mirror of tray::TRAY_SWITCH_REQUEST_EVENT in src-tauri/src/tray.rs.
+export const TRAY_SWITCH_REQUEST_EVENT = "termory:tray-switch-request";
+
+// config.json key: follow ALL projects silently on a Codex bucket switch,
+// instead of asking which ones (Settings toggle, default off). Mirror of
+// `config::CODEX_KEEP_ALL_SESSIONS_KEY` in src-tauri/src/config.rs.
+export const CODEX_KEEP_ALL_SESSIONS_KEY = "codex_keep_all_sessions";
+
 // Install instructions surfaced in the Providers page InstallGuide when
 // the corresponding CLI binary is missing from PATH. Commands are
 // pulled from each tool's official README (.audit-sources/<tool>/).

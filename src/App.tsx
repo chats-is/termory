@@ -69,7 +69,12 @@ import {
 } from "@/lib/favorites";
 import { isSourceEnabled, orderSources, visibleSources } from "@/lib/provider-utils";
 import { addSetValue, toggleSetValue } from "@/lib/set-utils";
-import { CLI_APPS, RAIL_ROUTE_ORDER, CLI_APP_SOURCE_BADGE } from "@/constants";
+import {
+  CLI_APPS,
+  RAIL_ROUTE_ORDER,
+  CLI_APP_SOURCE_BADGE,
+  TRAY_SWITCH_REQUEST_EVENT
+} from "@/constants";
 import { usePersistentState } from "@/hooks/usePersistentState";
 import {
   ContextMenu,
@@ -174,22 +179,30 @@ export function App() {
   React.useEffect(() => {
     if (!localeReady) return;
     void invoke("set_tray_labels", {
-      open: t("tray.open"),
-      official: t("tray.official"),
-      exit: t("tray.exit"),
-      // Quota window labels on the CLI rows — tray-specific abbreviations
-      // (5h / W / M), shorter than the Providers card rings' quotaXShort.
-      fiveHour: t("tray.quotaFiveHour"),
-      weekly: t("tray.quotaWeekly"),
-      monthly: t("tray.quotaMonthly"),
-      // Pay-as-you-go "Credits" label on the CLI rows (Claude / grok).
-      credits: t("tray.credits"),
-      // "New Session" submenu title + its "Choose Folder…" tail.
-      newSession: t("tray.newSession"),
-      chooseFolder: t("tray.chooseFolder"),
-      // Recent-session live work status suffixes (Claude only).
-      statusBusy: t("tray.statusBusy"),
-      statusWaiting: t("tray.statusWaiting")
+      // One object, name-matched to the Rust `TrayLabels` struct — every key
+      // is required, so a missing one fails loudly instead of silently
+      // shifting the labels the way positional args did.
+      labels: {
+        open: t("tray.open"),
+        official: t("tray.official"),
+        exit: t("tray.exit"),
+        // Quota window labels on the CLI rows — tray-specific abbreviations
+        // (5h / W / M), shorter than the Providers card rings' quotaXShort.
+        fiveHour: t("tray.quotaFiveHour"),
+        weekly: t("tray.quotaWeekly"),
+        monthly: t("tray.quotaMonthly"),
+        // Pay-as-you-go "Credits" label on the CLI rows (Claude / grok).
+        credits: t("tray.credits"),
+        // "New Session" submenu title + its "Choose Folder…" tail.
+        newSession: t("tray.newSession"),
+        chooseFolder: t("tray.chooseFolder"),
+        // Recent-session live work status suffixes (Claude only).
+        statusBusy: t("tray.statusBusy"),
+        statusWaiting: t("tray.statusWaiting"),
+        // Placeholder for a provider row whose name is empty, matching the
+        // Providers page's `p.name || t("providers.unnamed")`.
+        unnamed: t("providers.unnamed")
+      }
     }).catch(() => {});
   }, [t, localeReady]);
   const [sessions, setSessions] = React.useState<AppSession[]>([]);
@@ -321,6 +334,16 @@ export function App() {
     },
     [setFavorites]
   );
+  // A provider switch the TRAY parked because it needs a prompt the native menu
+  // can't host (Codex official↔custom). Claimed HERE, not in ProvidersPage:
+  // that page only mounts on `route === "providers"`, so a window sitting on any
+  // other route would never pick the request up and the switch would be silently
+  // dropped. We route to Providers and hand it down.
+  const [traySwitch, setTraySwitch] = React.useState<{
+    app: CliApp;
+    providerId: string | null;
+  } | null>(null);
+
   const [route, setRouteImmediate] = React.useState<Route>(() => readRouteFromHash());
   const [, startTransition] = React.useTransition();
   const setRoute = React.useCallback(
@@ -330,6 +353,30 @@ export function App() {
     []
   );
   const [lastRefreshedAt, setLastRefreshedAt] = React.useState<number | null>(null);
+
+  // Pick up a tray-parked switch (see `traySwitch`). Polls on mount AND on the
+  // event: the tray shows this window and only then emits, so with a cold
+  // frontend the event can precede our listener; the IPC clears the request, so
+  // polling twice can't run it twice.
+  React.useEffect(() => {
+    const claim = async () => {
+      try {
+        const req = await invoke<{ app: CliApp; providerId: string | null } | null>(
+          "take_pending_tray_switch"
+        );
+        if (!req) return;
+        setRoute("providers");
+        setTraySwitch(req);
+      } catch {
+        /* nothing pending */
+      }
+    };
+    void claim();
+    const un = listen(TRAY_SWITCH_REQUEST_EVENT, () => void claim());
+    return () => {
+      void un.then((fn) => fn()).catch(() => {});
+    };
+  }, [setRoute]);
 
   // Sync route ↔ URL hash so refresh / back-forward / deeplink work.
   React.useEffect(() => {
@@ -1085,6 +1132,8 @@ export function App() {
                 setApp={setProvidersApp}
                 sourceToggles={sourceToggles}
                 sourceOrder={orderedCliApps}
+                traySwitch={traySwitch}
+                onTraySwitchDone={() => setTraySwitch(null)}
               />
             )}
             {route === "settings" && (

@@ -78,6 +78,16 @@ async function writeConfigKey(key: string, value: unknown): Promise<void> {
   }
 }
 
+/// Drop the cached config.json so the next `getConfig` re-reads it from disk.
+/// Needed when the BACKEND writes config.json behind our back — the tray's
+/// provider switch writes the `active_provider_ids` marker itself (mirroring
+/// the Providers page's `markActive`), and the module cache has no way to know.
+/// Only affects future reads; React state already loaded from a previous read
+/// is untouched, so callers re-read the keys they care about themselves.
+export function invalidateConfigCache(): void {
+  configPromise = null;
+}
+
 /// Strip "", null, undefined leaf values from a Provider record so
 /// providers.json only persists the fields the user actually filled.
 /// Non-string falsy values (0, false) are kept — they only matter if a

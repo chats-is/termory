@@ -165,6 +165,73 @@ pub fn write_config(value: &JsonValue) -> Result<(), Box<dyn Error>> {
     write_json_atomic_0600(&config_path()?, value)
 }
 
+/// config.json key holding the per-CLI activation markers (`{ cli: providerId }`).
+/// Written by the Providers page's `markActive` and by the tray's own switch;
+/// read by BOTH reverse-derivations to disambiguate a standalone provider and a
+/// gateway binding that share creds. MIRROR of the frontend's `"active_provider_ids"`
+/// usePersistentState key in App.tsx.
+pub const ACTIVE_PROVIDER_IDS_KEY: &str = "active_provider_ids";
+
+/// config.json key for "follow ALL projects silently on a Codex bucket switch".
+/// Default OFF: the switch normally asks which projects should follow. MIRROR of
+/// `CODEX_KEEP_ALL_SESSIONS_KEY` in src/constants.ts.
+pub const CODEX_KEEP_ALL_SESSIONS_KEY: &str = "codex_keep_all_sessions";
+
+/// Whether the user opted into silent, all-projects session following. When on,
+/// a Codex official↔custom switch re-tags every project with off-target
+/// sessions and never prompts (so the tray doesn't need to open the app).
+pub fn codex_keep_all_sessions() -> bool {
+    read_config()
+        .ok()
+        .and_then(|v| v.get(CODEX_KEEP_ALL_SESSIONS_KEY).and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
+/// Read every per-CLI activation marker: `{ cli_key: provider_id }` — the id of
+/// the provider Termory last activated for that CLI. Only a CUSTOM provider has
+/// an id, so an ABSENT entry means the last switch was to Official.
+///
+/// This is a RECORD of the last switch, not the live state: readers pass it
+/// through `providers::resolve_active_provider_id`, which only honours the id
+/// while the marked provider still matches the live config snapshot (see there).
+pub fn active_provider_markers() -> std::collections::HashMap<String, String> {
+    read_config()
+        .ok()
+        .and_then(|v| v.get(ACTIVE_PROVIDER_IDS_KEY).cloned())
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+/// Update the per-CLI activation marker (`active_provider_ids` in config.json)
+/// with a read-modify-write that preserves every other key — the SAME per-key
+/// merge `write_app_config` does. The Providers page writes this marker on
+/// switch (`markActive`); the tray must write it too so the two paths leave
+/// identical state and both reverse-derivations disambiguate a standalone
+/// provider vs a gateway binding that share creds. `id = None` removes the
+/// CLI's entry (Set Official).
+pub fn set_active_provider_marker(cli_key: &str, id: Option<&str>) -> Result<(), Box<dyn Error>> {
+    let mut cfg = read_config()?;
+    let obj = cfg
+        .as_object_mut()
+        .ok_or_else(|| "config.json is not a JSON object".to_string())?;
+    let markers = obj
+        .entry(ACTIVE_PROVIDER_IDS_KEY)
+        .or_insert_with(|| JsonValue::Object(Map::new()));
+    if !markers.is_object() {
+        *markers = JsonValue::Object(Map::new());
+    }
+    let map = markers.as_object_mut().expect("reset to object above");
+    match id {
+        Some(id) => {
+            map.insert(cli_key.to_string(), JsonValue::String(id.to_string()));
+        }
+        None => {
+            map.remove(cli_key);
+        }
+    }
+    write_config(&cfg)
+}
+
 // ===================================================================
 // providers.json — Provider library (contains API keys)
 // ===================================================================
@@ -318,6 +385,77 @@ mod tests {
         dir.push(format!("termory-appconfig-{tag}-{nanos}"));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn set_active_provider_marker_upserts_and_removes_preserving_other_keys() {
+        let _g = lock_home();
+        let tmp = tempdir("marker");
+        let _h = override_home(&tmp);
+        // A pre-existing unrelated key must survive the marker merge.
+        write_config(&serde_json::json!({ "records_pane": "sessions" })).unwrap();
+
+        set_active_provider_marker("codex", Some("bind-codex")).unwrap();
+        set_active_provider_marker("gemini", Some("g-1")).unwrap();
+        let cfg = read_config().unwrap();
+        assert_eq!(cfg["records_pane"], serde_json::json!("sessions"));
+        assert_eq!(
+            cfg["active_provider_ids"]["codex"],
+            serde_json::json!("bind-codex")
+        );
+        assert_eq!(
+            cfg["active_provider_ids"]["gemini"],
+            serde_json::json!("g-1")
+        );
+
+        // None removes just that CLI's entry (Set Official), leaving siblings.
+        set_active_provider_marker("codex", None).unwrap();
+        let cfg = read_config().unwrap();
+        assert!(cfg["active_provider_ids"].get("codex").is_none());
+        assert_eq!(
+            cfg["active_provider_ids"]["gemini"],
+            serde_json::json!("g-1")
+        );
+        assert_eq!(cfg["records_pane"], serde_json::json!("sessions"));
+    }
+
+    #[test]
+    fn codex_keep_all_sessions_defaults_off_and_reads_the_flag() {
+        let _g = lock_home();
+        let tmp = tempdir("follow-all");
+        let _h = override_home(&tmp);
+
+        // Absent key → OFF: the switch asks which projects should follow.
+        assert!(!codex_keep_all_sessions());
+        write_config(&serde_json::json!({ "codex_keep_all_sessions": true })).unwrap();
+        assert!(codex_keep_all_sessions());
+        write_config(&serde_json::json!({ "codex_keep_all_sessions": false })).unwrap();
+        assert!(!codex_keep_all_sessions());
+        // A non-bool value must not be read as ON.
+        write_config(&serde_json::json!({ "codex_keep_all_sessions": "yes" })).unwrap();
+        assert!(!codex_keep_all_sessions());
+    }
+
+    #[test]
+    fn active_provider_marker_reads_back_the_id_and_absence_means_official() {
+        let _g = lock_home();
+        let tmp = tempdir("marker-read");
+        let _h = override_home(&tmp);
+
+        // Nothing recorded → no CLI has a last-switch record.
+        assert!(active_provider_markers().is_empty());
+
+        // A recorded id is what tells two providers sharing one endpoint apart
+        // (field matching alone cannot) — callers still validate it against the
+        // live snapshot via `resolve_active_provider_id`.
+        set_active_provider_marker("codex", Some("prov-a")).unwrap();
+        assert_eq!(
+            active_provider_markers().get("codex").map(String::as_str),
+            Some("prov-a")
+        );
+        // Only a CUSTOM provider has an id: back to Official = entry removed.
+        set_active_provider_marker("codex", None).unwrap();
+        assert!(active_provider_markers().get("codex").is_none());
     }
 
     #[test]

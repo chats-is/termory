@@ -91,6 +91,20 @@ impl CliApp {
         }
     }
 
+    /// The wire key for this app — the exact inverse of [`CliApp::parse`], and
+    /// the same string the frontend's `CliApp` union uses. Keys config maps
+    /// (`sources`, `active_provider_ids`) and tray menu ids.
+    pub fn key(self) -> &'static str {
+        match self {
+            CliApp::Claude => "claude",
+            CliApp::Codex => "codex",
+            CliApp::Gemini => "gemini",
+            CliApp::Opencode => "opencode",
+            CliApp::ClaudeDesktop => "claude-desktop",
+            CliApp::Grok => "grok",
+        }
+    }
+
     /// Name of the binary this CLI ships as, looked up on `$PATH`.
     /// Claude Desktop has no CLI binary — installation is detected via
     /// its config dir (`claude_desktop::is_installed`), so this name is
@@ -1616,6 +1630,25 @@ pub struct GatewayCapabilities {
 pub fn activate(provider: &Provider, providers_for_app: &[Provider]) -> Result<(), Box<dyn Error>> {
     if provider.kind == ProviderKind::Official {
         return Err("activate() does not accept Official kind — call deactivate() instead.".into());
+    }
+    // A provider's Base URL is its whole point, and BOTH editors already refuse
+    // to save without one (`ProviderEditor.canSave` / `GatewayEditor.canSave`),
+    // so an empty one means hand-edited providers.json or a bug — never a user
+    // choice. Reject it HERE, at the one dispatch every caller goes through.
+    //
+    // Without this the per-CLI writers took the empty string as "clear this
+    // field" (their write-when-non-empty / strip-when-empty rule, which exists
+    // so a CLEARED field doesn't leave a stale value behind): activating such a
+    // provider stripped the base URL while still writing the API key, leaving
+    // the CLI pointed at the OFFICIAL endpoint holding a third party's token —
+    // a half-switched state that reads as "activated" everywhere in the UI.
+    // Grok and Claude Desktop already errored; the other four did not.
+    if provider.base_url.trim().is_empty() {
+        return Err(format!(
+            "Provider \"{}\" is missing a Base URL",
+            provider.name.trim()
+        )
+        .into());
     }
     match provider.app {
         CliApp::Claude => activate_claude(provider, providers_for_app),
@@ -3989,6 +4022,36 @@ pub(crate) fn string_match(provider_value: &str, live_value: Option<&str>) -> bo
     provider_value.trim() == live.trim()
 }
 
+/// Rust mirror of the frontend `resolveActiveProviderId` — the SAME rule, not
+/// shared code: prefer the per-CLI activation marker (`active_provider_ids` in
+/// config.json, written by `markActive` after a successful switch) when the
+/// marked provider's `base_url` / `api_key` still match the live snapshot;
+/// otherwise fall back to the reverse-derived `matched_provider_id`.
+///
+/// The marker is what tells identical-endpoint entries apart — a standalone
+/// provider and a gateway binding can carry the same `base_url` + `api_key`, so
+/// field matching alone picks whichever comes first. The live-snapshot check is
+/// what keeps a STALE marker (the live config changed since) from lying.
+///
+/// Single-slot CLIs only. OpenCode/Grok already resolve by id: theirs is in the
+/// live config's startup-default pointer.
+pub(crate) fn resolve_active_provider_id(
+    state: &ActiveState,
+    marker: Option<&str>,
+    candidates: &[Provider],
+) -> Option<String> {
+    if let (Some(marker), Some(live)) = (marker, state.live_snapshot.as_ref()) {
+        if let Some(m) = candidates.iter().find(|c| c.id == marker) {
+            let base_ok = m.base_url == live.base_url.clone().unwrap_or_default();
+            let key_ok = mask_secret(&m.api_key) == live.api_key_masked.clone().unwrap_or_default();
+            if base_ok && key_ok {
+                return Some(marker.to_string());
+            }
+        }
+    }
+    state.matched_provider_id.clone()
+}
+
 /// Reject a models LIST that repeats a model id. A duplicate would silently
 /// override wherever the target keys by id — grok's
 /// `[model."<pid>-<id>"]`, OpenCode's `models` map, Claude Desktop's
@@ -4015,6 +4078,23 @@ pub(crate) fn reject_duplicate_model_ids(
 mod tests {
     use super::*;
     use crate::testutils::{lock_home, override_home, EnvVarGuard};
+
+    #[test]
+    fn cli_app_key_round_trips_through_parse() {
+        // `key()` is the inverse of `parse()`, and both mirror the frontend's
+        // `CliApp` union. They key config maps (`sources`,
+        // `active_provider_ids`) and tray menu ids, so a drift between them
+        // would silently orphan a tool's settings.
+        for app in CliApp::all() {
+            assert_eq!(
+                CliApp::parse(app.key()),
+                Some(app),
+                "key() must parse back to itself for {app:?}"
+            );
+        }
+        // The one non-lowercase key, spelled out so a rename can't slip by.
+        assert_eq!(CliApp::ClaudeDesktop.key(), "claude-desktop");
+    }
 
     #[test]
     fn codex_root_honors_codex_home_env() {
@@ -4712,6 +4792,48 @@ mod tests {
             options: Vec::new(),
             api_backend: None,
         }
+    }
+
+    #[test]
+    fn activate_rejects_a_provider_without_a_base_url() {
+        let _g = lock_home();
+        let tmp = tempdir("no-base-url");
+        let _home = override_home(&tmp);
+        fs::create_dir_all(tmp.join(".claude")).unwrap();
+
+        // Both editors refuse to save without a Base URL, so this only comes
+        // from a hand-edited providers.json — and it must not half-switch the
+        // CLI. Before the guard the per-CLI writers read "" as "clear this
+        // field": the base URL was stripped while the API key was still
+        // written, leaving Claude pointed at the OFFICIAL endpoint holding a
+        // third party's token.
+        let mut p = make_provider(CliApp::Claude, "no-base", "", "sk-live");
+        let err = activate(&p, &[p.clone()]).expect_err("empty base URL is rejected");
+        assert!(
+            err.to_string().contains("missing a Base URL"),
+            "unexpected error: {err}"
+        );
+        // Whitespace is not a Base URL either.
+        p.base_url = "   ".into();
+        assert!(activate(&p, &[p.clone()]).is_err());
+        // Nothing was written to the CLI's live config.
+        assert!(
+            !tmp.join(".claude/settings.json").exists(),
+            "a rejected activation must not touch settings.json"
+        );
+
+        // The same provider with a Base URL activates normally.
+        p.base_url = "https://api.example.com".into();
+        activate(&p, &[p.clone()]).unwrap();
+        let settings: JsonValue =
+            serde_json::from_str(&fs::read_to_string(tmp.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            settings
+                .pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(|v| v.as_str()),
+            Some("https://api.example.com")
+        );
     }
 
     #[test]
@@ -6111,7 +6233,12 @@ base_url = "https://x.io/v1"
         let tmp = tempdir("opencode-dedup");
         let _home = override_home(&tmp);
 
-        let mut p = make_provider(CliApp::Opencode, "dedup", "", "sk-dedup");
+        let mut p = make_provider(
+            CliApp::Opencode,
+            "dedup",
+            "https://api.example.com",
+            "sk-dedup",
+        );
         p.model = "gpt-5".into();
         // Primary repeated + an actual extra (with a custom display name).
         p.models = vec![
@@ -6335,10 +6462,10 @@ base_url = "https://x.io/v1"
         let tmp = tempdir("opencode-set-default");
         let _home = override_home(&tmp);
 
-        let mut a = make_provider(CliApp::Opencode, "a", "", "sk-a");
+        let mut a = make_provider(CliApp::Opencode, "a", "https://api.example.com", "sk-a");
         a.id = "aaa".into();
         a.model = "model-a".into();
-        let mut b = make_provider(CliApp::Opencode, "b", "", "sk-b");
+        let mut b = make_provider(CliApp::Opencode, "b", "https://api.example.com", "sk-b");
         b.id = "bbb".into();
         b.model = "model-b".into();
 
@@ -6386,7 +6513,7 @@ base_url = "https://x.io/v1"
         let _g = lock_home();
         let tmp = tempdir("opencode-default-rejects");
         let _home = override_home(&tmp);
-        let p = make_provider(CliApp::Opencode, "p", "", "sk-p");
+        let p = make_provider(CliApp::Opencode, "p", "https://api.example.com", "sk-p");
         // Never activated.
         let result = set_opencode_default(&p);
         assert!(result.is_err());
@@ -6612,7 +6739,12 @@ base_url = "https://x.io/v1"
         let prior_auth = r#"{"github-copilot":{"type":"oauth","refresh":"rt"}}"#;
         fs::write(tmp.join(".local/share/opencode/auth.json"), prior_auth).unwrap();
 
-        let mut p = make_provider(CliApp::Opencode, "termory-one", "", "sk-termory");
+        let mut p = make_provider(
+            CliApp::Opencode,
+            "termory-one",
+            "https://api.example.com",
+            "sk-termory",
+        );
         p.model = "claude-opus-4-7".into();
         p.npm = Some("@ai-sdk/anthropic".into());
         activate(&p, &[p.clone()]).unwrap();
@@ -6712,7 +6844,7 @@ base_url = "https://x.io/v1"
         let tmp = tempdir("opencode-deactivate-user-model");
         let _home = override_home(&tmp);
 
-        let mut p = make_provider(CliApp::Opencode, "t", "", "sk-t");
+        let mut p = make_provider(CliApp::Opencode, "t", "https://api.example.com", "sk-t");
         p.model = "m".into();
         activate(&p, &[p.clone()]).unwrap();
 
@@ -6748,10 +6880,10 @@ base_url = "https://x.io/v1"
         let tmp = tempdir("opencode-delete-inactive");
         let _home = override_home(&tmp);
 
-        let mut a = make_provider(CliApp::Opencode, "a", "", "sk-a");
+        let mut a = make_provider(CliApp::Opencode, "a", "https://api.example.com", "sk-a");
         a.id = "aaa".into();
         a.model = "model-a".into();
-        let mut b = make_provider(CliApp::Opencode, "b", "", "sk-b");
+        let mut b = make_provider(CliApp::Opencode, "b", "https://api.example.com", "sk-b");
         b.id = "bbb".into();
         b.model = "model-b".into();
         activate(&a, &[a.clone(), b.clone()]).unwrap();

@@ -28,7 +28,12 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { Button } from "@/components/ui/button";
 import { BrandIcon } from "@/components/BrandIcon";
-import { CLI_APPS, CLI_APP_LABEL, CLI_APP_SOURCE_BADGE } from "@/constants";
+import {
+  CLI_APPS,
+  CLI_APP_LABEL,
+  CLI_APP_SOURCE_BADGE,
+  CODEX_KEEP_ALL_SESSIONS_KEY
+} from "@/constants";
 import { isSourceEnabled } from "@/lib/provider-utils";
 import type { CliApp } from "@/types";
 import { Card, CardContent } from "@/components/ui/card";
@@ -192,6 +197,26 @@ export function SettingsPage({
     }
   };
 
+  // Settings → provider switching: skip the Codex "which projects should
+  // follow?" prompt and re-tag every project instead. Persisted in config.json
+  // (`codex_keep_all_sessions`) and read INDEPENDENTLY by the Rust tray, so the tray
+  // can complete such a switch without opening the app.
+  const [keepSessions, setKeepSessions] = React.useState(false);
+  React.useEffect(() => {
+    void (async () => {
+      setKeepSessions((await getConfig<boolean>(CODEX_KEEP_ALL_SESSIONS_KEY)) === true);
+    })();
+  }, []);
+  const toggleKeepSessions = async (next: boolean) => {
+    setKeepSessions(next);
+    try {
+      await setConfig(CODEX_KEEP_ALL_SESSIONS_KEY, next);
+    } catch (err) {
+      setKeepSessions(!next);
+      toast.error(String(err));
+    }
+  };
+
   // Launch-at-login toggle (tauri-plugin-autostart). State seeds from
   // the OS-side truth on mount; toggling writes through immediately.
   const [autostart, setAutostart] = React.useState(false);
@@ -307,6 +332,22 @@ export function SettingsPage({
                   })}
                 </SortableContext>
               </DndContext>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection title={t("settings.switching")}>
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-col gap-0.5 min-w-0">
+                <div className="text-sm">{t("settings.switching.keepSessions")}</div>
+                <div className="text-xs text-muted-foreground">
+                  {t("settings.switching.keepSessionsDesc")}
+                </div>
+              </div>
+              <Switch
+                checked={keepSessions}
+                onCheckedChange={(v) => void toggleKeepSessions(v)}
+                aria-label={t("settings.switching.keepSessions")}
+              />
             </div>
           </SettingsSection>
 

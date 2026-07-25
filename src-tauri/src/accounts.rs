@@ -104,6 +104,52 @@ pub fn list_accounts(app: CliApp) -> Result<AccountsState, Box<dyn Error>> {
     }
 }
 
+/// One saved login as the menu-bar tray renders it: a checkable row.
+pub struct TrayAccount {
+    pub id: String,
+    /// Single-line display label (`name · email`, whichever parts exist).
+    pub label: String,
+    /// Matches the live login — the tray checkmarks this row.
+    pub active: bool,
+    pub needs_relogin: bool,
+}
+
+/// Saved logins for the tray's account submenu. Codex-only — it's the one CLI
+/// with snapshot management (`list_accounts` is display-only for the others),
+/// so every other app returns `[]` and the tray renders no account section.
+/// A read failure also yields `[]`: no accounts.json just means "nothing saved".
+pub fn tray_accounts(app: CliApp) -> Vec<TrayAccount> {
+    if app != CliApp::Codex {
+        return Vec::new();
+    }
+    let Ok(state) = list_codex_accounts() else {
+        return Vec::new();
+    };
+    state
+        .accounts
+        .into_iter()
+        .map(|a| {
+            // Same primary label as the Providers page card (name, else email),
+            // plus the email as the disambiguator when both exist — two logins
+            // can share a display name, and the email is what identifies them.
+            let name = a.name.trim();
+            let email = a.email.as_deref().map(str::trim).unwrap_or("");
+            let label = match (name.is_empty(), email.is_empty()) {
+                (false, false) if name != email => format!("{name} · {email}"),
+                (false, _) => name.to_string(),
+                (true, false) => email.to_string(),
+                (true, true) => a.id.clone(),
+            };
+            TrayAccount {
+                id: a.id,
+                label,
+                active: a.active,
+                needs_relogin: a.needs_relogin,
+            }
+        })
+        .collect()
+}
+
 /// Snapshot the CLI's current official login into the store.
 /// Upserts by id so re-saving refreshes the token payload.
 pub fn save_current_account(app: CliApp) -> Result<(), Box<dyn Error>> {
@@ -305,6 +351,14 @@ pub async fn login_and_save_codex_account(
     }
 
     Ok(new_id)
+}
+
+/// Snapshot the live login if it isn't in the store yet, so a flow that is
+/// about to overwrite auth.json can't destroy it. Codex-only, like the rest of
+/// snapshot management. Used by the `codex login` flow and by the tray's
+/// account switch (which, unlike the Providers page, has no dialog to warn in).
+pub(crate) fn auto_save_unsaved_live_account() -> Result<Option<String>, Box<dyn Error>> {
+    auto_save_unsaved_live_codex_account()
 }
 
 /// If there is a live Codex login that is not yet recorded in the store,
@@ -1435,6 +1489,43 @@ mod tests {
 
         std::fs::write(&cfg, "# cli_auth_credentials_store = \"auto\"\n").unwrap();
         assert_eq!(codex_storage_warning(), None, "commented line is ignored");
+    }
+
+    #[test]
+    fn tray_accounts_labels_rows_and_marks_the_live_one() {
+        let _g = lock_home();
+        let tmp = tempdir("tray-accounts");
+        let _h = override_home(&tmp);
+
+        // Non-Codex CLIs have no snapshot management → no account rows.
+        assert!(tray_accounts(CliApp::Claude).is_empty());
+        // No accounts.json yet.
+        assert!(tray_accounts(CliApp::Codex).is_empty());
+
+        // Save an email-only login, then a second one that is the LIVE login.
+        write_codex_auth(&tmp, "first@example.com", "pro", "acct-first");
+        save_current_account(CliApp::Codex).unwrap();
+        write_codex_auth(&tmp, "second@example.com", "plus", "acct-second");
+        save_current_account(CliApp::Codex).unwrap();
+
+        let rows = tray_accounts(CliApp::Codex);
+        assert_eq!(rows.len(), 2);
+        // The fake token carries no `name` claim → label falls back to email.
+        let live = rows.iter().find(|r| r.active).expect("one row is live");
+        assert_eq!(live.label, "second@example.com");
+        assert!(!live.needs_relogin);
+        let other = rows.iter().find(|r| !r.active).unwrap();
+        assert_eq!(other.label, "first@example.com");
+
+        // A revoked refresh token flags the row (rendered with a ⚠ suffix).
+        mark_account_relogin(&other.id, true).unwrap();
+        let rows = tray_accounts(CliApp::Codex);
+        assert!(
+            rows.iter()
+                .find(|r| r.id == other.id)
+                .unwrap()
+                .needs_relogin
+        );
     }
 
     #[test]

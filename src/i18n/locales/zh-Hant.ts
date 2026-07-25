@@ -371,6 +371,9 @@ export const zhHant: Record<MessageKey, string> = {
   "settings.sources": "工具",
   "settings.sources.desc":
     "關閉某個工具後,它在所有位置都會隱藏——供應商標籤頁、記錄、搜尋、統計與選單列。磁碟上的資料不受影響。",
+  "settings.switching": "供應商切換",
+  "settings.switching.keepSessions": "切換 Codex 時保留所有工作階段",
+  "settings.switching.keepSessionsDesc": "Codex 依供應商分別列出可繼續的工作階段,因此在官方與第三方 API 之間切換會讓另一邊的不再出現。關閉:每次詢問你哪些專案需要跟隨。開啟:所有專案自動跟隨、不再提示——此時從選單列切換無需開啟 Termory 即可完成。",
   "settings.startup": "啟動",
   "settings.startup.launchAtLogin": "開機自動啟動",
   "settings.startup.desc": "登入系統時自動啟動 Termory（僅駐選單列，不彈出視窗）。",

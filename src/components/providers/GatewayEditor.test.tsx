@@ -89,8 +89,8 @@ const createBtn = () => screen.getByRole("button", { name: /^create$/i });
 // Fill name + base URL + key, which triggers the debounced auto-detect, then
 // wait for at least one CLI bind checkbox to become enabled (caps arrived).
 async function fillCredsAndDetect() {
-  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "GW" } });
-  fireEvent.change(screen.getByLabelText("Base URL"), {
+  fireEvent.change(screen.getByLabelText("Name *"), { target: { value: "GW" } });
+  fireEvent.change(screen.getByLabelText("Base URL *"), {
     target: { value: "https://gw.example.com" }
   });
   fireEvent.change(screen.getByLabelText("API key"), {
@@ -115,8 +115,8 @@ describe("GatewayEditor — rendering", () => {
       screen.getByRole("heading", { name: /add provider/i })
     ).toBeInTheDocument();
     expect(screen.getByText("AI Gateway")).toBeInTheDocument();
-    expect(screen.getByLabelText("Name")).toBeInTheDocument();
-    expect(screen.getByLabelText("Base URL")).toBeInTheDocument();
+    expect(screen.getByLabelText("Name *")).toBeInTheDocument();
+    expect(screen.getByLabelText("Base URL *")).toBeInTheDocument();
     expect(screen.getByLabelText("API key")).toBeInTheDocument();
   });
 
@@ -130,11 +130,11 @@ describe("GatewayEditor — rendering", () => {
   it("disables save until a name and base URL are entered", () => {
     setup();
     expect(createBtn()).toBeDisabled();
-    fireEvent.change(screen.getByLabelText("Name"), {
+    fireEvent.change(screen.getByLabelText("Name *"), {
       target: { value: "GW" }
     });
     expect(createBtn()).toBeDisabled();
-    fireEvent.change(screen.getByLabelText("Base URL"), {
+    fireEvent.change(screen.getByLabelText("Base URL *"), {
       target: { value: "https://gw.example.com" }
     });
     expect(createBtn()).not.toBeDisabled();
@@ -201,10 +201,10 @@ describe("GatewayEditor — save callback", () => {
 
   it("strips a pasted /v1 suffix from the saved base URL", async () => {
     const { onSave } = setup();
-    fireEvent.change(screen.getByLabelText("Name"), {
+    fireEvent.change(screen.getByLabelText("Name *"), {
       target: { value: "GW" }
     });
-    fireEvent.change(screen.getByLabelText("Base URL"), {
+    fireEvent.change(screen.getByLabelText("Base URL *"), {
       target: { value: "https://gw.example.com/v1" }
     });
     // No binding needed — a gateway with zero bindings is allowed.

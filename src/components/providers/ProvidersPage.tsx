@@ -5,6 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Check, Copy, Loader2, Plug, Plus, RadioTower, UserPlus } from "lucide-react";
 import { toast } from "sonner";
+import { getConfig, invalidateConfigCache } from "@/config";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -25,6 +26,7 @@ import {
   CLI_APPS,
   CLI_APP_LABEL,
   CLI_APP_SOURCE_BADGE,
+  CODEX_KEEP_ALL_SESSIONS_KEY,
   QUOTA_CHANGED_EVENT
 } from "@/constants";
 import {
@@ -226,7 +228,9 @@ export function ProvidersPage({
   app,
   setApp,
   sourceToggles = {},
-  sourceOrder
+  sourceOrder,
+  traySwitch,
+  onTraySwitchDone
 }: {
   providers: Provider[];
   setProviders: React.Dispatch<React.SetStateAction<Provider[]>>;
@@ -243,6 +247,11 @@ export function ProvidersPage({
   sourceToggles?: Partial<Record<CliApp, boolean>>;
   /** Tab order = the Settings → Tools drag order (App-resolved). */
   sourceOrder?: readonly CliApp[];
+  /** A switch the tray parked for us, claimed by App.tsx (always mounted,
+   * unlike this route-gated page). Null when nothing is pending. */
+  traySwitch?: { app: CliApp; providerId: string | null } | null;
+  /** Clear it once we've started running it (take-once). */
+  onTraySwitchDone?: () => void;
 }) {
   const t = useT();
   // Record / clear the "last activated" marker for a CLI (see
@@ -585,6 +594,25 @@ export function ProvidersPage({
     }
   }, [providers, gatewaySynth]);
 
+  // Re-read the per-CLI activation markers from disk. The TRAY writes them
+  // itself when switching (mirroring `markActive`), and a backend write can't
+  // invalidate our module cache — so without this the page keeps a stale
+  // marker and, when a standalone provider and a gateway binding share creds,
+  // labels the wrong one "in use". Bails out when nothing changed so the
+  // write-back effect in usePersistentState doesn't fire a pointless write.
+  const refreshMarkers = React.useCallback(async () => {
+    invalidateConfigCache();
+    let stored: Record<string, string> = {};
+    try {
+      stored = (await getConfig<Record<string, string>>("active_provider_ids")) ?? {};
+    } catch {
+      return;
+    }
+    setActiveProviderIds((cur) =>
+      JSON.stringify(cur) === JSON.stringify(stored) ? cur : stored
+    );
+  }, [setActiveProviderIds]);
+
   // Re-derive on mount AND whenever the visible tab changes — switching
   // from the Gateways tab (where a binding may have just been activated)
   // back to a CLI tab must pick up that change in the per-CLI list.
@@ -696,8 +724,11 @@ export function ProvidersPage({
     });
     // The menu-bar tray switches providers via its own handler and
     // emits this after writing the CLI's live config — re-derive so an
-    // open Providers page reflects a tray switch even when unfocused.
+    // open Providers page reflects a tray switch even when unfocused. The
+    // tray also wrote the activation marker, so re-read that too (the
+    // creds-collision label depends on it).
     const unlistenTrayPromise = listen("termory:providers-changed", () => {
+      void refreshMarkers();
       void refreshActive();
     });
     const peerHandler = () => void refreshActive();
@@ -707,7 +738,7 @@ export function ProvidersPage({
       void unlistenTrayPromise.then((fn) => fn()).catch(() => {});
       window.removeEventListener(ACTIVE_STATE_REFRESH_EVENT, peerHandler);
     };
-  }, [refreshActive]);
+  }, [refreshActive, refreshMarkers]);
 
   const providersForApp = React.useMemo(
     () => providers.filter((p) => p.app === app),
@@ -1038,6 +1069,28 @@ export function ProvidersPage({
       await base.activate();
       return;
     }
+    // Settings → "follow all projects silently": the user opted out of being
+    // asked, so switch and re-tag everything. Applies here too, not just to the
+    // tray, so the setting means the same thing wherever you switch from. Read
+    // per switch (not cached in state) so a change made while this page is open
+    // takes effect immediately — the Rust side reads the same key per switch.
+    invalidateConfigCache();
+    const keepSessions =
+      (await getConfig<boolean>(CODEX_KEEP_ALL_SESSIONS_KEY).catch(() => false)) === true;
+    if (keepSessions) {
+      const activated = await base.activate();
+      if (!activated) return;
+      try {
+        const moved = await invoke<{ moved: number }>("follow_codex_sessions", {
+          projects: candidates.map((p) => p.project),
+          targetProviderId: base.providerId
+        });
+        toast.success(t("providers.followDone", { count: String(moved.moved) }));
+      } catch (err) {
+        toast.error(String(err));
+      }
+      return;
+    }
     setFollowTarget({ ...base, projects: candidates });
   };
 
@@ -1118,6 +1171,68 @@ export function ProvidersPage({
     }
     await performOfficial();
   };
+
+  // ── Switch handed over by the tray ──────────────────────────────────────
+  // A native menu can't host the Codex "follow sessions?" dialog, so for an
+  // official↔custom Codex switch the tray writes NOTHING and parks the request,
+  // then shows this app (even if its window was closed). App.tsx claims it — it
+  // is always mounted, whereas this page only exists on the Providers route —
+  // and hands it down.
+  //
+  // We prompt UNCONDITIONALLY and do NOT re-derive the direction: the tray
+  // already established that the bucket changes (the only case it parks), and
+  // re-deriving read `effectiveActiveId`, whose marker map is still `{}` right
+  // after the window opened, as "already Official" — skipping the prompt.
+  //
+  // `startedRef` guards against running the same request twice: React
+  // StrictMode invokes effect bodies twice in dev, and the queued
+  // `onTraySwitchDone` is not yet visible to that second pass — without it a
+  // `codex_keep_all_sessions` switch would activate and re-tag twice. It holds the
+  // request OBJECT, not a value token: App.tsx mints a fresh object per claim,
+  // so repeating the very same switch (click Official, cancel the dialog, click
+  // Official again) is a new object and runs, while a re-render of the one
+  // in-flight request is skipped. Keying on `app:providerId` instead silently
+  // dropped that second, identical click.
+  const traySwitchStartedRef = React.useRef<object | null>(null);
+  React.useEffect(() => {
+    if (!traySwitch) return;
+    if (app !== traySwitch.app) {
+      setView("providers");
+      setApp(traySwitch.app);
+      return;
+    }
+    const { providerId } = traySwitch;
+    if (traySwitchStartedRef.current === traySwitch) return;
+
+    if (providerId === null) {
+      traySwitchStartedRef.current = traySwitch;
+      onTraySwitchDone?.();
+      void maybePromptThenActivate({
+        providerId: CODEX_OFFICIAL_PROVIDER_ID,
+        label: t("providers.official"),
+        activate: () => performOfficial()
+      });
+      return;
+    }
+    // The library arrives via its own async read, so on a cold start (tray-only
+    // launch) this list can still be empty. Consume the request only once the
+    // target is actually resolved — clearing it first would discard the switch
+    // permanently, with no activation and no error.
+    const target = [...customProviders, ...gatewayBoundForApp.map((g) => g.synth)].find(
+      (p) => p.id === providerId
+    );
+    if (!target) return;
+    traySwitchStartedRef.current = traySwitch;
+    onTraySwitchDone?.();
+    void maybePromptThenActivate({
+      providerId: CODEX_CUSTOM_PROVIDER_ID,
+      label: target.name || t("providers.unnamed"),
+      activate: () => performSetAsDefault(target)
+    });
+    // The handlers are re-created each render; the ref + take-once above make
+    // this run exactly once per parked request.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [traySwitch, app, customProviders, gatewayBoundForApp, setApp]);
 
   // Unified handler for both "Add Account" (reloginId=undefined) and
   // "Re-login" (reloginId=the saved account's id). Mutual exclusion is

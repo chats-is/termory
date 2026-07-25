@@ -84,10 +84,9 @@ function formatReset(iso: string, t: Translate, withZone: boolean): string | nul
 }
 
 // "in 4 hr 42 min" / "in 6 days" — the live countdown appended after the
-// absolute reset time. Shown on ONE window only (see constraintTierName): the
-// one actually constraining usage, whether it resets in hours or days. null
-// once the boundary is past (stale data) so the caller keeps just the
-// absolute form.
+// absolute reset time. Shown on ONE window only (see waitingOnTierName): the
+// one you're actually waiting on. null once the boundary is past (stale data)
+// so the caller keeps just the absolute form.
 function formatResetCountdown(iso: string, t: Translate): string | null {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return null;
@@ -96,21 +95,92 @@ function formatResetCountdown(iso: string, t: Translate): string | null {
   return dur ? t("providers.quotaResetsCountdown", { duration: dur }) : null;
 }
 
-// The single "constraint" window — the highest-utilization tier, i.e. the one
-// deciding when you can use more (whether that's hours OR days out). Only this
-// window shows the countdown; the rest keep just their absolute reset time.
-// Nothing is a constraint until something's been used, so this returns null
-// while every tier is still at 0.
-export function constraintTierName(
-  tiers: { name: string; utilization: number }[]
+// A window counts as spent once utilization reaches 100 — the API reports a
+// 0-100 percent, and at 100 that window grants nothing until it resets.
+const SPENT_PCT = 100;
+
+// ACCOUNT-WIDE windows: spending one stops all work until it resets. Everything
+// else is MODEL-SCOPED (Claude's `weekly_scoped` brand-name weeklies — "Fable",
+// "Opus" — the legacy `seven_day_opus`/`seven_day_sonnet`, and Gemini's
+// per-model buckets), where spending one only rules out THAT model.
+//
+// Listed from this side on purpose: model names are dynamic (any model Anthropic
+// ships surfaces as a tier under its brand name, with no per-model code), so
+// they can't be enumerated — while the account-wide ids are a fixed set plus the
+// generated `{n}_hour` / `{n}_day` forms `tierLabels` already humanizes. A new
+// model therefore lands on the model-scoped side by default, which is correct.
+//
+// A new ACCOUNT-WIDE window does need adding here (Anthropic spells its ids in
+// words, so expect the `thirty_day` shape rather than `30_day`). That upkeep is
+// the intended workflow — `tierLabels` needs the same edit to give it a name.
+const ACCOUNT_WIDE_TIERS = new Set(["five_hour", "seven_day", "30_day"]);
+const GENERATED_WINDOW = /^\d+_(hour|day)$/;
+
+function isAccountWide(name: string): boolean {
+  return ACCOUNT_WIDE_TIERS.has(name) || GENERATED_WINDOW.test(name);
+}
+
+// The ONE window that shows the live countdown: the one you're actually
+// WAITING ON. Every other window keeps just its absolute reset time.
+//
+// Two cases, because "how long until I can work again" has two different
+// answers depending on whether anything is spent (user decision 2026-07-25):
+//
+//   * Nothing blocking → the SOONEST-resetting window. You aren't blocked, so
+//     the meaningful number is when capacity next tops up — a 5h window
+//     resetting at 2pm, not a weekly five days out that merely sits at a higher
+//     percent.
+//   * Something blocking → the LATEST-resetting BLOCKING window. Every one of
+//     them has to clear before you can work again, so the last is when you're
+//     actually free. A spent weekly keeps blocking through several 5h resets,
+//     and the 5h countdown would promise capacity that isn't coming.
+//
+// "Blocking" is not the same as "spent": a spent MODEL-SCOPED window (see
+// isAccountWide) leaves every other model usable, so it blocks nothing on its
+// own — counting it would answer "wait 5 days" to someone who can switch model
+// and work right now.
+//
+// So whenever account-wide windows exist, THEY decide, and model-scoped ones
+// never do. Model-scoped windows take over only when there are no account-wide
+// windows at all AND every one of them is spent — the Gemini shape, whose
+// per-model buckets are the whole picture, so all-spent really does mean no
+// model is left. (A "every model-scoped window is spent" rule without the
+// account-wide check is WRONG for Claude: its scoped weeklies cover only some
+// models — Opus, Fable — so Sonnet stays usable with no window of its own.)
+//
+// Both earlier rules got this wrong in one direction each: "highest
+// utilization" put a 5-day weekly countdown above a 5h window resetting the
+// same afternoon, and plain "soonest reset" pointed at a 5h window while a
+// spent weekly was the real wait.
+//
+// Returns null until the account has been used at all (any tier above 0) —
+// nothing to wait for on a completely fresh account. That check spans all
+// tiers, since the usage may sit on a different tier than the chosen one.
+// Windows without a usable reset time can't carry a countdown and are skipped.
+export function waitingOnTierName(
+  tiers: { name: string; utilization: number; resetsAt?: string | null }[]
 ): string | null {
-  let best: { name: string; u: number } | null = null;
-  for (const tier of tiers) {
-    if (tier.utilization > 0 && (!best || tier.utilization > best.u)) {
-      best = { name: tier.name, u: tier.utilization };
-    }
-  }
-  return best?.name ?? null;
+  if (!tiers.some((tier) => tier.utilization > 0)) return null;
+  const usable = tiers.flatMap((tier) => {
+    if (!tier.resetsAt) return [];
+    const at = new Date(tier.resetsAt).getTime();
+    return Number.isNaN(at) ? [] : [{ name: tier.name, at, pct: tier.utilization }];
+  });
+  if (usable.length === 0) return null;
+  const isSpent = (tier: { pct: number }) => tier.pct >= SPENT_PCT;
+  const accountWide = usable.filter((t) => isAccountWide(t.name));
+  const modelScoped = usable.filter((t) => !isAccountWide(t.name));
+  const spentAccountWide = accountWide.filter(isSpent);
+  const blocking =
+    spentAccountWide.length > 0
+      ? spentAccountWide
+      : accountWide.length === 0 && modelScoped.every(isSpent)
+        ? modelScoped
+        : [];
+  // Strict comparisons keep the FIRST window on a tie, in both branches.
+  return blocking.length > 0
+    ? blocking.reduce((best, tier) => (tier.at > best.at ? tier : best)).name
+    : usable.reduce((best, tier) => (tier.at < best.at ? tier : best)).name;
 }
 
 const NOT_USED_TIERS = new Set(["seven_day_opus", "seven_day_sonnet"]);
@@ -172,8 +242,8 @@ function QuotaTierItem({
   name: string;
   utilization: number;
   resetsAt?: string;
-  // Only the constraint window (highest utilization) gets the countdown;
-  // the rest show just the absolute reset time.
+  // Only the window you're waiting on (see waitingOnTierName) gets the
+  // countdown; the rest show just the absolute reset time.
   showCountdown: boolean;
 }) {
   const t = useT();
@@ -564,7 +634,7 @@ export function OfficialAccountsSection({
                     failure keeps the last good tiers visible. */}
                 {(quota?.tiers.length ?? 0) > 0 &&
                   (() => {
-                    const constraint = constraintTierName(quota!.tiers);
+                    const waitingOn = waitingOnTierName(quota!.tiers);
                     return quota!.tiers.map((tier) => (
                       <QuotaTierItem
                         key={tier.name}
@@ -572,7 +642,7 @@ export function OfficialAccountsSection({
                         name={tier.name}
                         utilization={tier.utilization}
                         resetsAt={tier.resetsAt}
-                        showCountdown={tier.name === constraint}
+                        showCountdown={tier.name === waitingOn}
                       />
                     ));
                   })()}

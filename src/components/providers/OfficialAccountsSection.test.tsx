@@ -11,7 +11,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import type { AccountsState, SubscriptionQuota } from "@/types";
 import {
   OfficialAccountsSection,
-  constraintTierName
+  waitingOnTierName
 } from "./OfficialAccountsSection";
 
 class ResizeObserverStub {
@@ -437,42 +437,139 @@ describe("OfficialAccountsSection — quota rings in active row", () => {
   });
 });
 
-describe("constraintTierName", () => {
+describe("waitingOnTierName", () => {
+  const soon = "2026-07-25T14:00:00Z";
+  const later = "2026-07-31T00:00:00Z";
+
   it("returns null for no tiers or all-zero utilization", () => {
-    expect(constraintTierName([])).toBeNull();
+    expect(waitingOnTierName([])).toBeNull();
     expect(
-      constraintTierName([
-        { name: "five_hour", utilization: 0 },
-        { name: "seven_day", utilization: 0 }
+      waitingOnTierName([
+        { name: "five_hour", utilization: 0, resetsAt: soon },
+        { name: "seven_day", utilization: 0, resetsAt: later }
       ])
     ).toBeNull();
   });
 
-  it("picks the single window that's been used", () => {
+  it("picks the soonest-resetting window while nothing is spent", () => {
+    // 5h at 29% resets this afternoon while the weekly sits at 46% five days
+    // out — neither blocks, so the 5h top-up is the actionable wait.
     expect(
-      constraintTierName([
-        { name: "five_hour", utilization: 0 },
-        { name: "seven_day", utilization: 12 }
+      waitingOnTierName([
+        { name: "five_hour", utilization: 29, resetsAt: soon },
+        { name: "seven_day", utilization: 46, resetsAt: later }
+      ])
+    ).toBe("five_hour");
+  });
+
+  it("switches to the spent window once one is exhausted", () => {
+    // 5h spent, weekly still has room → waiting on the 5h reset.
+    expect(
+      waitingOnTierName([
+        { name: "five_hour", utilization: 100, resetsAt: soon },
+        { name: "seven_day", utilization: 46, resetsAt: later }
+      ])
+    ).toBe("five_hour");
+    // Weekly spent while the 5h still has room → the 5h reset frees nothing,
+    // so the wait is the weekly, even though it resets much later.
+    expect(
+      waitingOnTierName([
+        { name: "five_hour", utilization: 30, resetsAt: soon },
+        { name: "seven_day", utilization: 100, resetsAt: later }
       ])
     ).toBe("seven_day");
   });
 
-  it("picks the highest-utilization window across several", () => {
-    // 5h nearly full but the weekly is the real constraint here.
+  it("ignores a spent MODEL-scoped window while other models are usable", () => {
+    // Claude Max with the Fable weekly burned: Sonnet still works, so nothing
+    // is blocked and the countdown stays on the next top-up. Counting Fable
+    // would answer "wait 5 days" to someone who can work right now.
     expect(
-      constraintTierName([
-        { name: "five_hour", utilization: 40 },
-        { name: "seven_day", utilization: 88 },
-        { name: "Fable", utilization: 5 }
+      waitingOnTierName([
+        { name: "five_hour", utilization: 30, resetsAt: soon },
+        { name: "seven_day", utilization: 40, resetsAt: later },
+        { name: "Fable", utilization: 100, resetsAt: later }
+      ])
+    ).toBe("five_hour");
+    // Gemini's windows are model-scoped throughout — one spent bucket just
+    // means using another model.
+    expect(
+      waitingOnTierName([
+        { name: "gemini_pro", utilization: 100, resetsAt: later },
+        { name: "gemini_flash", utilization: 20, resetsAt: soon }
+      ])
+    ).toBe("gemini_flash");
+  });
+
+  it("blocks on model-scoped windows once EVERY one is spent", () => {
+    // No model left to switch to, so the last of them is the real wait.
+    expect(
+      waitingOnTierName([
+        { name: "gemini_flash", utilization: 100, resetsAt: soon },
+        { name: "gemini_pro", utilization: 100, resetsAt: later }
+      ])
+    ).toBe("gemini_pro");
+  });
+
+  it("treats generated {n}_hour / {n}_day ids as account-wide", () => {
+    // Codex derives these from the window seconds; they are account-wide, so a
+    // spent one blocks even though it is not in the literal id set.
+    expect(
+      waitingOnTierName([
+        { name: "3_hour", utilization: 100, resetsAt: soon },
+        { name: "14_day", utilization: 20, resetsAt: later }
+      ])
+    ).toBe("3_hour");
+  });
+
+  it("picks the LAST of several spent windows", () => {
+    // Both spent: the 5h clears this afternoon but the weekly still blocks
+    // until the 31st, so that is when work resumes.
+    expect(
+      waitingOnTierName([
+        { name: "five_hour", utilization: 100, resetsAt: soon },
+        { name: "seven_day", utilization: 100, resetsAt: later }
       ])
     ).toBe("seven_day");
   });
 
-  it("keeps the first window on a tie", () => {
+  it("still picks the soonest when the usage sits on another window", () => {
+    // Fresh 5h window, weekly already used — the countdown belongs on the 5h
+    // boundary, and the all-zero guard must look across every tier.
     expect(
-      constraintTierName([
-        { name: "five_hour", utilization: 50 },
-        { name: "seven_day", utilization: 50 }
+      waitingOnTierName([
+        { name: "five_hour", utilization: 0, resetsAt: soon },
+        { name: "seven_day", utilization: 12, resetsAt: later }
+      ])
+    ).toBe("five_hour");
+  });
+
+  it("ignores windows with a missing or unparseable reset time", () => {
+    expect(
+      waitingOnTierName([
+        { name: "Fable", utilization: 5 },
+        { name: "five_hour", utilization: 40, resetsAt: "not-a-date" },
+        { name: "seven_day", utilization: 88, resetsAt: later }
+      ])
+    ).toBe("seven_day");
+    // No window has a usable reset time at all.
+    expect(
+      waitingOnTierName([{ name: "five_hour", utilization: 40 }])
+    ).toBeNull();
+  });
+
+  it("keeps the first window on an identical reset time", () => {
+    expect(
+      waitingOnTierName([
+        { name: "five_hour", utilization: 50, resetsAt: soon },
+        { name: "seven_day", utilization: 90, resetsAt: soon }
+      ])
+    ).toBe("five_hour");
+    // Same tie-break on the spent branch.
+    expect(
+      waitingOnTierName([
+        { name: "five_hour", utilization: 100, resetsAt: soon },
+        { name: "seven_day", utilization: 100, resetsAt: soon }
       ])
     ).toBe("five_hour");
   });

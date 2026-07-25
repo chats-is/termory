@@ -456,20 +456,22 @@ export function GatewayEditor({
 
         <div className="flex flex-col gap-3 -mx-6 max-h-[65vh] overflow-y-auto px-6 py-1">
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="gateway-name">{t("providers.name")}</Label>
+            <Label htmlFor="gateway-name">{t("providers.name")} *</Label>
             <Input {...INPUT_NO_AUTO}
               id="gateway-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder={t("providers.namePlaceholder")}
               autoFocus
+              required
             />
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="gateway-base">{t("providers.baseUrl")}</Label>
+            <Label htmlFor="gateway-base">{t("providers.baseUrl")} *</Label>
             <Input {...INPUT_NO_AUTO}
               id="gateway-base"
+              className="font-mono"
               value={baseUrl}
               onChange={(e) => {
                 setBaseUrl(e.target.value);
@@ -478,6 +480,7 @@ export function GatewayEditor({
                 setDetectError(null);
               }}
               placeholder={t("providers.gwUrlPlaceholder")}
+              required
             />
             <p className="text-xs text-muted-foreground">
               {t("help.gatewayHost")}
@@ -498,7 +501,7 @@ export function GatewayEditor({
                   setDetectError(null);
                 }}
                 placeholder={t("providers.apiKeyPlaceholder")}
-                className="pr-9"
+                className="font-mono pr-9"
               />
               <Tooltip>
                 <TooltipTrigger asChild>

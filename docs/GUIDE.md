@@ -138,7 +138,9 @@ Append `[1m]` to a value for its 1M-token context window, e.g. `claude-sonnet-4-
 
 ### Codex: keeping sessions after a switch
 
-Codex tags every session with the provider active when it was created, and `codex resume` only lists sessions matching the *current* provider — so switching can hide a project's earlier sessions. When you switch Codex between Official and a custom provider, Termory offers to **"Keep earlier sessions?"**: pick the projects whose sessions should follow into the new provider, and Termory re-tags them so `codex resume` keeps listing them. The other CLIs list resume history by project path and don't need this.
+Codex tags every session with the provider active when it was created, and `codex resume` only lists sessions matching the *current* provider — so switching can hide a project's earlier sessions. When you switch Codex between Official and a custom provider, Termory offers to **"Keep earlier sessions?"**: pick the projects whose sessions should follow into the new provider, and Termory re-tags them so `codex resume` keeps listing them. If no project has sessions on the other side, there's nothing to move and it just switches. The other CLIs list resume history by project path and don't need this.
+
+Don't want to be asked? **Settings → Provider switching → Keep all sessions on a Codex switch** makes every project follow automatically, with no prompt — and that's also what lets a Codex switch complete straight from the menu bar without opening the window.
 
 ### AI Gateways
 
@@ -255,6 +257,7 @@ The Settings page (`⌘6`) has these sections:
 |---------|--------------|
 | **Appearance** | Theme — System / Light / Dark. |
 | **Tools** | Turn each tool (Claude Code / Claude Desktop / Codex / Gemini / OpenCode / Grok Build) on or off. A disabled tool disappears everywhere — provider tabs, records, search, stats, and the menu bar — the moment you toggle it; its data on disk is untouched and everything comes back when you re-enable it. The last enabled tool can't be turned off. **Gemini is off by default** (Google deprecated Gemini CLI for individual accounts in June 2026) — flip it on if you still use it or want to browse its history. |
+| **Provider switching** | **Keep all sessions on a Codex switch** — Codex lists resumable sessions per provider, so moving between Official and a third-party API hides the other side's. Off (default), Termory asks which projects should follow. On, every project follows automatically with no prompt — which also lets a switch from the menu bar finish without opening the window. |
 | **Startup** | **Launch at login** — start Termory automatically when you log in (tray only, no window). |
 | **Language** | English / 简体中文 / 繁體中文. Changes apply immediately. |
 | **Terminal** | Which terminal opens when you resume a session. Only terminals found on this machine are listed; "auto" uses your OS default. |
@@ -280,7 +283,9 @@ The tray lets you act without opening the window:
 
 - **Recent sessions** — up to 5 most recent; click to resume in your terminal. A Claude session that's currently running shows its live status next to the title (**· Working** / **· Needs input**).
 - **New Session** — open a CLI fresh in a recent project folder, or pick a new folder (**Choose Folder…**).
-- **Per-CLI submenus** — switch each CLI's active provider; the official quota shows inline (🟢/🟡/🔴 by pressure).
+- **Per-CLI submenus** — switch each CLI's active provider; the official quota shows inline (🟢/🟡/🔴 by pressure) while Official is the active choice.
+- **Codex accounts** — your saved ChatGPT logins sit right under **Official** in the Codex submenu; click one to switch. The live one is checkmarked, and a login whose tokens expired shows **⚠** and can't be picked — re-authenticate on the Providers page first. Switching from here snapshots the current login first, so nothing is lost even if you never pressed **Save current**.
+- Switching **Codex** between Official and a third-party provider needs the "which projects should follow?" question, which a menu can't ask — so Termory opens the window for it. Turn on **Settings → Provider switching → Keep all sessions on a Codex switch** and it finishes in the menu bar instead.
 
 Closing the window doesn't quit Termory — it keeps running in the tray. Use **Open** to bring the window back, **Exit** to quit fully.
 
