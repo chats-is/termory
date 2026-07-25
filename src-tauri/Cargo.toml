@@ -1,6 +1,6 @@
 [package]
 name = "termory"
-version = "1.2.8"
+version = "1.3.0"
 description = "Local history browser for AI CLIs (Claude Code, Codex, Gemini, OpenCode), with per-app API provider switching: the four CLIs plus Claude Desktop (a Codex switch covers its CLI and app together; Claude Desktop is managed separately from Claude Code)"
 authors = ["John Ma"]
 license = "MIT"
