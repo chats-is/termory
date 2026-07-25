@@ -1397,7 +1397,7 @@ fn quota_glyph(utilization: f64) -> &'static str {
 /// standard windows, "{n}h" / "{n}d" for generated `{n}_hour` /
 /// `{n}_day` ids (Codex non-standard window lengths, e.g. the free
 /// plan's 30-day window — mirrors `tierLabels` in
-/// ProviderOfficialCard.tsx), raw id otherwise.
+/// OfficialAccountsSection.tsx), raw id otherwise.
 fn tray_tier_label(name: &str, labels: &TrayLabels) -> String {
     match name {
         "five_hour" => labels.five_hour.clone(),
