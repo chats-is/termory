@@ -390,7 +390,11 @@ export function ProviderEditor({
 
             {isOpencode && (
               <div className="grid gap-2 sm:col-span-2">
-                <Label>{t("providers.aiSdk")} *</Label>
+                {/* No `*`: this is a Select that always holds a value
+                    (defaulting to OPENCODE_DEFAULT_NPM), so it can't be left
+                    blank and `canSave` doesn't check it. Marking it required
+                    would promise a validation that doesn't exist. */}
+                <Label>{t("providers.aiSdk")}</Label>
                 <Select
                   value={draft.npm ?? OPENCODE_DEFAULT_NPM}
                   onValueChange={(v) => update("npm", v)}
