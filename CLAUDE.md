@@ -193,7 +193,7 @@ GitHub Actions workflow at `.github/workflows/release.yml` is triggered when a `
 - Linux x86_64 (`x86_64-unknown-linux-gnu`) — with apt deps for webkit2gtk-4.1, soup-3.0, javascriptcoregtk-4.1, etc.
 - Windows x86_64 (`x86_64-pc-windows-msvc`)
 
-A draft GitHub Release is created with the platform installers attached plus `latest.json` (the updater manifest). Review & publish the draft.
+A GitHub Release is created with the platform installers attached plus `latest.json` (the updater manifest), and is published AUTOMATICALLY once all four platform builds succeed — it stays a draft only if one of them fails.
 
 ### In-app updater (`tauri-plugin-updater`)
 
@@ -221,7 +221,9 @@ Then:
 2. Add GitHub repo secrets:
    - `TAURI_SIGNING_PRIVATE_KEY` = contents of `~/.tauri/termory.key` (the private file)
    - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` = the password you set during generation
-3. Tag and push: `git tag v0.2.0 && git push --tags` — the workflow builds, signs, and publishes a draft release.
+3. Tag and push: `git tag v0.2.0 && git push --tags` — the workflow builds, signs, and **publishes the release automatically**. The draft is only an intermediate state: a `publish` job (`needs: [create-release, build]`) flips it to public once every platform build has uploaded, so `…/releases/latest/download/latest.json` resolves for the in-app updater. Only a FAILED matrix job leaves it a draft. **Pushing a tag is therefore not reversible in practice** — users' auto-updaters can pick it up within minutes.
+
+**Never choose a MAJOR or MINOR bump on your own (LOCKED).** Default to a PATCH bump (`1.3.0` → `1.3.1`) and, when anything about the release seems to warrant more than that, ASK — do not decide from the diff. "It adds a user-visible feature, so semver says MINOR" is exactly the reasoning that has been overruled twice: this project's version line is a product decision, not a mechanical read of what changed. Tagging is effectively irreversible (see the auto-publish note below), so the cost of asking is one message and the cost of guessing is a public release under the wrong number.
 
 **Version bump (LOCKED) — before tagging, bump the `version` in ALL FIVE files to the SAME value so every layer self-reports correctly:**
 
