@@ -36,7 +36,7 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 
 随时点**官方**即可切回你的原生登录。
 
-两点作用范围说明:切换 **Codex** 会同时作用于 Codex CLI 和 Codex 桌面应用——2026 年年中起该应用已并入统一的 **ChatGPT** 桌面应用(Chat / Work / Codex 三模式),两者共用同一份配置与登录;只装其中一个就能用:只装桌面应用时 Codex 标签页照常工作,Official 卡片的版本行会标明装的是哪种形态(如 `v0.144.6 (CLI) · v26.715.31925 (App)`),CLI 与桌面应用哪一个有新版本,徽章就出现在对应那一段后面。而 **Claude Desktop** 是独立的标签页、独立的供应商库——与 Claude Code 完全分开管理。
+两点作用范围说明:切换 **Codex** 会同时作用于 Codex CLI 和 Codex 桌面应用——2026 年年中起该应用已并入统一的 **ChatGPT** 桌面应用(Chat / Work / Codex 三模式),两者共用同一份配置与登录;只装其中一个就能用:只装桌面应用时 Codex 标签页照常工作,Official 卡片的版本行会标明装的是哪种形态(如 `v0.144.6 (CLI) · v26.715.31925 (App)`),CLI 与桌面应用哪一个有新版本,徽章就出现在对应那一段后面(CLI 那一个可点击升级,见[更新 CLI](#更新-cli))。而 **Claude Desktop** 是独立的标签页、独立的供应商库——与 Claude Code 完全分开管理。
 
 ### 添加或编辑供应商
 
@@ -153,6 +153,26 @@ Codex 给每个会话打上创建时所用供应商的标记,而 `codex resume` 
 3. **应用**到格式匹配的每个 CLI(一个网关 → 多个 CLI,一把密钥)。
 
 已绑定的网关也会出现在各 CLI 的供应商列表中(仅可查看 / 激活——编辑请到 AI Gateways 标签)。
+
+### 更新 CLI
+
+当某个 CLI 有新版本发布时,Official 卡片的版本号后面会出现琥珀色的 **↑ New v0.145.0** 徽章。**点击徽章,Termory 就地把这个 CLI 升级到新版本**——运行期间徽章显示 **↑ 更新中**,完成后版本号刷新、徽章消失。
+
+Termory 跑的是各 CLI 自带的升级命令,所以你当初用什么方式安装的(npm、Homebrew、官方安装脚本……),它就照那个方式升级:
+
+| CLI | 实际执行 |
+|---|---|
+| Claude Code | `claude update` |
+| Codex | `codex update` |
+| OpenCode | `opencode upgrade` |
+| Grok Build | `grok update` |
+| Gemini | Gemini 没有自带的更新子命令,Termory 会按你的实际安装方式选择命令——例如 `npm install -g @google/gemini-cli` 或 `brew upgrade gemini-cli` |
+
+升级通过登录 shell 执行,所以装在版本管理器里的工具(nvm、Volta、Homebrew)和你在终端里一样能被找到。
+
+如果失败,徽章会变成**红色**,并且在提示消失后依然保持红色,这样卡片上仍能看出出过问题。悬停可以看到失败原因和确切的命令,你可以自己在终端里跑一遍——这对 Termory 无法自动处理的情况很有用,比如全局 npm 目录需要 `sudo`。点击红色徽章可以重试。
+
+**Codex 标签页里只有 CLI 那一段的徽章可点。** 桌面应用会自行更新(也没有命令行入口),所以它的徽章仅作提示——升级 CLI 不会影响它。
 
 ### 官方额度
 

@@ -88,7 +88,75 @@ export type VersionSegment = {
   /** Newer available version (bare, e.g. `0.143.0`) for THIS component,
    *  else null/absent — drives the badge that follows this segment. */
   latest?: string | null;
+  /** Shell command that upgrades THIS component (backend
+   *  `cli_upgrade_commands`). Absent for self-updating GUI apps — the
+   *  Codex desktop app and Claude Desktop — whose badge stays
+   *  informational. Per-segment for the same reason `latest` is: an app
+   *  can render several components with different upgrade paths. */
+  upgradeCommand?: string | null;
 };
+
+/** Everything the update badge renders, decided in one place.
+ *
+ *  Takes the SEGMENT, not the app. `upgrading` / `error` are per-app,
+ *  but a card can show several segments and only those carrying an
+ *  upgrade command are upgradable at all — Codex renders CLI + App and
+ *  the desktop app self-updates via Sparkle. A segment with no command
+ *  therefore ignores app state entirely and stays informational. */
+export type UpdateBadgeState = {
+  label: "version" | "updating";
+  tone: "amber" | "red";
+  clickable: boolean;
+  disabled: boolean;
+  /** Note there is no "updating" tooltip: a `disabled` button dispatches
+   *  no hover events, so Radix's tooltip cannot open while an upgrade
+   *  runs. The badge's own label carries that state instead. */
+  tooltip: "command" | "failed" | "info";
+};
+
+export function updateBadgeState(
+  segment: Pick<VersionSegment, "upgradeCommand">,
+  opts: { upgrading?: boolean; error?: string; canUpgrade?: boolean } = {}
+): UpdateBadgeState {
+  if (!segment.upgradeCommand || opts.canUpgrade === false) {
+    return {
+      label: "version",
+      tone: "amber",
+      clickable: false,
+      disabled: false,
+      tooltip: "info"
+    };
+  }
+  if (opts.upgrading) {
+    // Stays a button so it can be visibly disabled rather than swapping
+    // element type mid-run. `tooltip` is unreachable while disabled (see
+    // the type) — "command" is simply the value it returns to on finish.
+    return {
+      label: "updating",
+      tone: "amber",
+      clickable: true,
+      disabled: true,
+      tooltip: "command"
+    };
+  }
+  if (opts.error) {
+    // Red persists after the failure toast is gone; clicking retries.
+    return {
+      label: "version",
+      tone: "red",
+      clickable: true,
+      disabled: false,
+      tooltip: "failed"
+    };
+  }
+  return {
+    label: "version",
+    tone: "amber",
+    clickable: true,
+    disabled: false,
+    tooltip: "command"
+  };
+}
 
 /** Compose the Codex Official card's version segments from its two
  * install forms — `v0.144.6 (CLI)` + `v26.715.31925 (App)` (whichever
@@ -107,23 +175,36 @@ export function codexVersionSegments(
   installs: CodexInstalls | null,
   t: Translate,
   cliLatest?: string | null,
-  appLatest?: string | null
+  appLatest?: string | null,
+  cliUpgradeCommand?: string | null
 ): VersionSegment[] {
   if (!installs) {
-    return cliVersion ? [{ text: `v${cliVersion}`, latest: cliLatest }] : [];
+    return cliVersion
+      ? [
+          {
+            text: `v${cliVersion}`,
+            latest: cliLatest,
+            upgradeCommand: cliUpgradeCommand
+          }
+        ]
+      : [];
   }
   const segments: VersionSegment[] = [];
   if (installs.cli) {
     segments.push({
       text: cliVersion ? `v${cliVersion}` : "—",
       label: t("providers.codexVersionCli"),
-      latest: cliLatest
+      latest: cliLatest,
+      upgradeCommand: cliUpgradeCommand
     });
   }
   if (installs.app) {
     segments.push({
       text: installs.appVersion ? `v${installs.appVersion}` : "—",
       label: t("providers.codexVersionApp"),
+      // No upgradeCommand: the desktop app self-updates via Sparkle and
+      // has no CLI entry point. `codex update` upgrades the npm CLI,
+      // which is the separately versioned product on the segment above.
       // Gated on knowing the INSTALLED version too — with no baseline
       // there is nothing to be behind of, and the appcast's newest entry
       // would otherwise always look like an available update.

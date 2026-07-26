@@ -1,5 +1,5 @@
 import React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { render as rtlRender, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -12,6 +12,20 @@ const baseProps = {
   versions: [{ text: "v2.0.0" }],
   onSetDefault: vi.fn()
 };
+
+// Clicking a badge hovers it first, which opens its Radix Tooltip —
+// and Radix's Popper needs a ResizeObserver that jsdom doesn't ship.
+// Without this the click throws instead of firing onUpgrade. (Local to
+// this file, per the project's shim convention.)
+beforeAll(() => {
+  if (!("ResizeObserver" in globalThis)) {
+    globalThis.ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+  }
+});
 
 function render(ui: React.ReactElement) {
   return rtlRender(<TooltipProvider>{ui}</TooltipProvider>);
@@ -105,6 +119,152 @@ describe("ProviderOfficialCard", () => {
     const text = line.textContent ?? "";
     expect(text.indexOf("New v0.143.0")).toBeGreaterThan(text.indexOf("(CLI)"));
     expect(text.indexOf("New v0.143.0")).toBeLessThan(text.indexOf("(App)"));
+  });
+
+  // Upgrade STATE rules (which segment reacts, tone, disabled) live in
+  // `updateBadgeState` and are table-tested in provider-utils.test.ts.
+  // These cover only that the card renders that state correctly.
+
+  it("renders an idle update badge as a button that upgrades on click", async () => {
+    const user = userEvent.setup();
+    const onUpgrade = vi.fn();
+    render(
+      <ProviderOfficialCard
+        {...baseProps}
+        versions={[
+          { text: "v2.0.0", latest: "2.1.216", upgradeCommand: "claude update" }
+        ]}
+        onUpgrade={onUpgrade}
+      />
+    );
+    await user.click(screen.getByRole("button", { name: /New v2\.1\.216/ }));
+    // No argument: the backend derives what to run from the app alone.
+    expect(onUpgrade).toHaveBeenCalledWith();
+  });
+
+  it("renders a segment with no upgrade command as a plain badge", () => {
+    render(
+      <ProviderOfficialCard
+        {...baseProps}
+        versions={[{ text: "v2.0.0", latest: "2.1.216" }]}
+        onUpgrade={vi.fn()}
+      />
+    );
+    expect(screen.getByText("New v2.1.216")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /New v2\.1\.216/ })).toBeNull();
+  });
+
+  it("reads 'Updating' and goes disabled while an upgrade runs", async () => {
+    const user = userEvent.setup();
+    const onUpgrade = vi.fn();
+    render(
+      <ProviderOfficialCard
+        {...baseProps}
+        versions={[
+          { text: "v2.0.0", latest: "2.1.216", upgradeCommand: "claude update" }
+        ]}
+        onUpgrade={onUpgrade}
+        upgrading
+      />
+    );
+    // The label swaps rather than showing a spinner.
+    expect(screen.queryByText("New v2.1.216")).toBeNull();
+    const badge = screen.getByRole("button", { name: /Updating/ });
+    expect(badge).toBeDisabled();
+    await user.click(badge);
+    expect(onUpgrade).not.toHaveBeenCalled();
+  });
+
+  it("renders a failed badge red and still clickable", async () => {
+    const user = userEvent.setup();
+    const onUpgrade = vi.fn();
+    render(
+      <ProviderOfficialCard
+        {...baseProps}
+        versions={[
+          { text: "v2.0.0", latest: "2.1.216", upgradeCommand: "claude update" }
+        ]}
+        onUpgrade={onUpgrade}
+        upgradeError="EACCES: permission denied"
+      />
+    );
+    const badge = screen.getByRole("button", { name: /New v2\.1\.216/ });
+    expect(badge.className).toContain("text-destructive");
+    await user.click(badge);
+    expect(onUpgrade).toHaveBeenCalledTimes(1);
+  });
+
+  it("never grows a row for upgrade state", () => {
+    // All of it rides on the badge; the card's layout must not shift.
+    const versions = [
+      { text: "v2.0.0", latest: "2.1.216", upgradeCommand: "claude update" }
+    ];
+    const rows = (ui: React.ReactElement) =>
+      render(ui).container.querySelectorAll("p").length;
+    const idle = rows(
+      <ProviderOfficialCard {...baseProps} versions={versions} onUpgrade={vi.fn()} />
+    );
+    expect(
+      rows(
+        <ProviderOfficialCard
+          {...baseProps}
+          versions={versions}
+          onUpgrade={vi.fn()}
+          upgrading
+        />
+      )
+    ).toBe(idle);
+    expect(
+      rows(
+        <ProviderOfficialCard
+          {...baseProps}
+          versions={versions}
+          onUpgrade={vi.fn()}
+          upgradeError="EACCES: permission denied"
+        />
+      )
+    ).toBe(idle);
+  });
+
+  it("confines upgrade state to Codex's upgradable segment", () => {
+    // Codex renders CLI + App; only the CLI is upgradable. Upgrading it
+    // must not make the App segment read "Updating".
+    render(
+      <ProviderOfficialCard
+        {...baseProps}
+        app="codex"
+        versions={[
+          {
+            text: "v0.144.6",
+            label: "CLI",
+            latest: "0.145.0",
+            upgradeCommand: "codex update"
+          },
+          { text: "v26.707.31428", label: "App", latest: "26.721.30844" }
+        ]}
+        onUpgrade={vi.fn()}
+        upgrading
+      />
+    );
+    expect(screen.getAllByText("Updating")).toHaveLength(1);
+    expect(screen.getByText("New v26.721.30844")).toBeInTheDocument();
+  });
+
+  it("offers no terminal button anywhere on a failed card", () => {
+    // The terminal is only ever TEXT inside the tooltip (Radix's
+    // floating content doesn't render under jsdom, so no test here
+    // inspects tooltip contents).
+    render(
+      <ProviderOfficialCard
+        {...baseProps}
+        versions={[
+          { text: "v2.0.0", latest: "2.1.216", upgradeCommand: "claude update" }
+        ]}
+        onUpgrade={vi.fn()}
+        upgradeError="EACCES: permission denied"
+      />
+    );
+    expect(screen.queryByRole("button", { name: /terminal/i })).toBeNull();
   });
 
   it("renders the actions slot before the Activate button", () => {

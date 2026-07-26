@@ -153,6 +153,10 @@ let cachedLatestVersions: Record<CliApp, string | null> = {
   grok: null
 };
 let cachedCodexAppLatest: string | null = null;
+// Per-CLI upgrade command (`cli_upgrade_commands`), keyed by CliApp
+// string; apps with no command-line upgrade are absent. Cached like the
+// maps above so a route remount doesn't blank the badge tooltip.
+let cachedUpgradeCommands: Record<string, string> = {};
 // Codex's two install forms (CLI binary vs the merged ChatGPT/Codex
 // desktop app). Null until the first `detect_codex_installs` resolves;
 // cached like the maps above so route remounts don't flash the
@@ -303,6 +307,19 @@ export function ProvidersPage({
   const [codexAppLatest, setCodexAppLatest] = React.useState<string | null>(
     cachedCodexAppLatest
   );
+  const [upgradeCommands, setUpgradeCommands] = React.useState<
+    Record<string, string>
+  >(cachedUpgradeCommands);
+  // Which CLIs have an upgrade running, and why the last one failed.
+  // Deliberately NOT module-cached, unlike the maps above: a run belongs
+  // to this mount, and a stale `true` restored after a route change
+  // would claim an upgrade is running when it isn't.
+  const [upgrades, setUpgrades] = React.useState<
+    Partial<Record<CliApp, boolean>>
+  >({});
+  const [upgradeErrors, setUpgradeErrors] = React.useState<
+    Partial<Record<CliApp, string>>
+  >({});
 
   // Mirror state into the module-level cache on every change so the
   // next mount has the fresh truth as its initial value.
@@ -324,6 +341,9 @@ export function ProvidersPage({
   React.useEffect(() => {
     cachedCodexAppLatest = codexAppLatest;
   }, [codexAppLatest]);
+  React.useEffect(() => {
+    cachedUpgradeCommands = upgradeCommands;
+  }, [upgradeCommands]);
   const [toggling, setToggling] = React.useState<string | null>(null);
   const [testing, setTesting] = React.useState<string | null>(null);
   const [settingDefault, setSettingDefault] = React.useState<string | null>(null);
@@ -485,7 +505,25 @@ export function ProvidersPage({
   // of the app lifetime. After that, refreshes update the value
   // silently — no skeleton flash — because the user already has
   // accurate numbers on screen.
+  // Upgrade commands for the badge tooltip. Local probe, so unlike the
+  // latest-version check it DOES need the same triggers as the installed
+  // versions: Gemini's command is derived from its resolved binary path,
+  // so a reinstall under a different package manager must re-derive it.
+  // Kept as its own callback with its own catch — a tooltip detail must
+  // never be able to blank the version line.
+  const refreshUpgradeCommands = React.useCallback(async () => {
+    try {
+      setUpgradeCommands(
+        await invoke<Record<string, string>>("cli_upgrade_commands")
+      );
+    } catch {
+      /* best-effort — the tooltip just omits the command */
+    }
+  }, []);
+
   const refreshVersions = React.useCallback(async () => {
+    // Fired alongside, never awaited with, the probes below.
+    void refreshUpgradeCommands();
     if (!versionsEverResolved) {
       setVersionsLoading(true);
     }
@@ -504,7 +542,7 @@ export function ProvidersPage({
       versionsEverResolved = true;
       setVersionsLoading(false);
     }
-  }, []);
+  }, [refreshUpgradeCommands]);
 
   // Latest available versions (network). Runs independently of
   // `refreshVersions` so the slower fetch never blocks the installed-
@@ -522,6 +560,37 @@ export function ProvidersPage({
       /* network best-effort — leave previous state on error */
     }
   }, []);
+
+  // Run the upgrade in-app. The backend goes through an interactive
+  // login shell so nvm / brew shims resolve; its stdin is null, so a
+  // command wanting input fails fast rather than hanging — the badge
+  // then goes red and its tooltip names the command to run by hand.
+  const handleUpgrade = React.useCallback(() => {
+      const target = app;
+      setUpgrades((prev) => ({ ...prev, [target]: true }));
+      // Clear any previous failure so the badge returns to amber while
+      // the retry runs.
+      setUpgradeErrors((prev) => ({ ...prev, [target]: undefined }));
+      void (async () => {
+        try {
+          await invoke("run_cli_upgrade", { app: target });
+          // Re-probe so the version line updates and the badge drops
+          // away once installed === latest.
+          await refreshVersions();
+          toast.success(t("providers.updateDone", { app: CLI_APP_LABEL[target] }));
+        } catch (err) {
+          // Shown twice on purpose: a toast for the moment it happens,
+          // and the badge turning red — which outlives the toast, so the
+          // card still says something went wrong.
+          setUpgradeErrors((prev) => ({ ...prev, [target]: String(err) }));
+          toast.error(t("providers.updateFailed", { app: CLI_APP_LABEL[target] }), {
+            description: String(err)
+          });
+        } finally {
+          setUpgrades((prev) => ({ ...prev, [target]: false }));
+        }
+      })();
+  }, [app, t, refreshVersions]);
 
   const handleRecheckInstall = async () => {
     setRechecking(true);
@@ -1388,20 +1457,27 @@ export function ProvidersPage({
                       const latest = hasUpdate(versions[app], latestVersions[app])
                         ? latestVersions[app]
                         : null;
+                      // Absent for the self-updating GUI apps, which
+                      // keeps their badge informational.
+                      const upgradeCommand = upgradeCommands[app] ?? null;
                       if (app === "codex") {
                         return codexVersionSegments(
                           versions.codex,
                           codexInstalls,
                           t,
                           latest,
-                          codexAppLatest
+                          codexAppLatest,
+                          upgradeCommand
                         );
                       }
                       return versions[app]
-                        ? [{ text: `v${versions[app]}`, latest }]
+                        ? [{ text: `v${versions[app]}`, latest, upgradeCommand }]
                         : [];
                     })()}
                     versionLoading={versionsLoading}
+                    onUpgrade={handleUpgrade}
+                    upgrading={upgrades[app]}
+                    upgradeError={upgradeErrors[app]}
                     actions={app === "codex" ? (
                       codexLoggingIn ? (
                         <div className="flex items-center gap-2 shrink-0">

@@ -18,6 +18,7 @@ import {
   protocolForNpm,
   providerFromBinding,
   resolveActiveProviderId,
+  updateBadgeState,
   gatewayBaseForProtocol
 } from "./provider-utils";
 import type {
@@ -659,5 +660,110 @@ describe("visibleSources / isGatewayBindableApp", () => {
       "openai-compatible"
     ]);
     expect(appProtocols(caps({ openai: true })).grok).toEqual([]);
+  });
+});
+
+describe("updateBadgeState", () => {
+  const upgradable = { upgradeCommand: "codex update" };
+  // Codex's desktop-app segment: a newer version exists, but there is no
+  // way to upgrade it from here (Sparkle self-updates it).
+  const displayOnly = { upgradeCommand: undefined };
+
+  it("is idle and clickable with nothing going on", () => {
+    expect(updateBadgeState(upgradable)).toEqual({
+      label: "version",
+      tone: "amber",
+      clickable: true,
+      disabled: false,
+      tooltip: "command"
+    });
+  });
+
+  it("swaps the label and disables itself while upgrading", () => {
+    expect(updateBadgeState(upgradable, { upgrading: true })).toEqual({
+      label: "updating",
+      tone: "amber",
+      clickable: true,
+      disabled: true,
+      // No "updating" tooltip exists — a disabled button can't open one.
+      tooltip: "command"
+    });
+  });
+
+  it("goes red and stays retryable after a failure", () => {
+    expect(updateBadgeState(upgradable, { error: "EACCES" })).toEqual({
+      label: "version",
+      tone: "red",
+      clickable: true,
+      disabled: false,
+      tooltip: "failed"
+    });
+  });
+
+  it("prefers the running state over a previous failure", () => {
+    // A retry is in flight — show it as running, not as still-failed.
+    const state = updateBadgeState(upgradable, {
+      upgrading: true,
+      error: "EACCES"
+    });
+    expect(state.label).toBe("updating");
+    expect(state.tone).toBe("amber");
+  });
+
+  // The rule Codex's two segments exist for: per-app state must never
+  // leak onto a segment that cannot be upgraded.
+  it.each([
+    ["idle", {}],
+    ["upgrading", { upgrading: true }],
+    ["failed", { error: "EACCES" }],
+    ["upgrading after a failure", { upgrading: true, error: "EACCES" }]
+  ])("stays informational when %s", (_name, opts) => {
+    expect(updateBadgeState(displayOnly, opts)).toEqual({
+      label: "version",
+      tone: "amber",
+      clickable: false,
+      disabled: false,
+      tooltip: "info"
+    });
+  });
+
+  it("is informational when the card wires up no upgrade handler", () => {
+    expect(
+      updateBadgeState(upgradable, { upgrading: true, canUpgrade: false })
+    ).toEqual({
+      label: "version",
+      tone: "amber",
+      clickable: false,
+      disabled: false,
+      tooltip: "info"
+    });
+  });
+});
+
+describe("codexVersionSegments — upgrade command", () => {
+  const installs = (cli: boolean, app: boolean, appVersion?: string | null) =>
+    ({ cli, app, appVersion }) as CodexInstalls;
+
+  it("gives the command to the CLI segment only", () => {
+    // `codex update` upgrades the npm CLI. The desktop app is a
+    // separately versioned product that self-updates via Sparkle.
+    const segments = codexVersionSegments(
+      "0.144.6",
+      installs(true, true, "26.707.31428"),
+      tEn,
+      "0.145.0",
+      "26.721.30844",
+      "codex update"
+    );
+    expect(segments[0].upgradeCommand).toBe("codex update");
+    expect(segments[1].upgradeCommand).toBeUndefined();
+  });
+
+  it("carries the command on the pre-detection fallback segment", () => {
+    expect(
+      codexVersionSegments("0.144.6", null, tEn, "0.145.0", null, "codex update")
+    ).toEqual([
+      { text: "v0.144.6", latest: "0.145.0", upgradeCommand: "codex update" }
+    ]);
   });
 });

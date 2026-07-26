@@ -176,6 +176,11 @@ export const en = {
   "providers.updateAvailable": "New {version}",
   "providers.updateAvailableHint":
     "A newer version is available — update with your installer.",
+  "providers.updateClickToRun": "Click to update:",
+  "providers.updateRunning": "Updating",
+  "providers.updateDone": "{app} updated",
+  "providers.updateFailed": "Couldn't update {app}",
+  "providers.updateRunItYourself": "You can run this in a terminal:",
   "providers.followTitle": "Keep earlier sessions?",
   "providers.followDesc":
     "Codex lists resume history per provider, so after activating {label} this project's earlier sessions won't show in codex resume. Pick which recent projects' sessions to keep so codex resume still finds them.",

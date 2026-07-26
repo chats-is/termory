@@ -34,7 +34,7 @@ Two cross-cutting topics — **[Privacy & your data](#privacy--your-data)** and 
 
 Click **Official** to go back to your native login at any time.
 
-Two app-scoping notes: switching **Codex** applies to the Codex CLI and the Codex desktop app together — since mid-2026 that app is the unified **ChatGPT** desktop app (Chat / Work / Codex), and the two share one config and login. Either install alone is enough: the Codex tab works with just the desktop app, and the Official card's version line shows what's present (e.g. `v0.144.6 (CLI) · v26.715.31925 (App)`), with a "new version" badge on whichever of the two — CLI or app — has an update. **Claude Desktop** is its own tab with its own provider library — managed entirely separately from Claude Code.
+Two app-scoping notes: switching **Codex** applies to the Codex CLI and the Codex desktop app together — since mid-2026 that app is the unified **ChatGPT** desktop app (Chat / Work / Codex), and the two share one config and login. Either install alone is enough: the Codex tab works with just the desktop app, and the Official card's version line shows what's present (e.g. `v0.144.6 (CLI) · v26.715.31925 (App)`), with a "new version" badge on whichever of the two — CLI or app — has an update (the CLI's is clickable to upgrade; see [Updating a CLI](#updating-a-cli)). **Claude Desktop** is its own tab with its own provider library — managed entirely separately from Claude Code.
 
 ### Adding or editing a provider
 
@@ -151,6 +151,26 @@ A **gateway** is a single `{base URL, API key}` that may speak several API forma
 3. **Apply** it to each CLI whose format matches (one gateway → many CLIs, one key).
 
 Bound gateways also appear in each CLI's provider list (view/activate only — edit them from the Gateways tab).
+
+### Updating a CLI
+
+When a newer version of a CLI is published, an amber **↑ New v0.145.0** badge appears after its version on the Official card. **Click the badge and Termory upgrades that CLI in place** — the badge reads **↑ Updating** while it runs, then the version line refreshes and the badge disappears.
+
+Termory runs each CLI's own upgrade command, so it respects however you installed it (npm, Homebrew, the official install script, …):
+
+| CLI | What runs |
+|---|---|
+| Claude Code | `claude update` |
+| Codex | `codex update` |
+| OpenCode | `opencode upgrade` |
+| Grok Build | `grok update` |
+| Gemini | Gemini has no update subcommand, so Termory picks the command matching your install — e.g. `npm install -g @google/gemini-cli` or `brew upgrade gemini-cli` |
+
+The upgrade runs through a login shell, so tools that live in a version manager (nvm, Volta, Homebrew) resolve the same way they do in your terminal.
+
+If it fails, the badge turns **red** and stays that way after the toast disappears, so the card still shows something went wrong. Hover it for the reason plus the exact command, which you can run in your own terminal — useful for the cases Termory can't handle unattended, like a global npm directory that needs `sudo`. Clicking a red badge retries.
+
+**On the Codex tab only the CLI segment is clickable.** The desktop app updates itself (and has no command-line entry point), so its badge is informational — upgrading the CLI never touches it.
 
 ### Official quota
 

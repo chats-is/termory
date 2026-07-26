@@ -8,6 +8,7 @@ mod sessions;
 mod terminal;
 mod tray;
 mod updates;
+mod upgrade;
 mod watcher;
 
 /// Shared test infrastructure. The `HOME_LOCK` mutex serializes every
@@ -201,6 +202,25 @@ async fn detect_terminals() -> Result<Vec<terminal::TerminalOption>, String> {
     tauri::async_runtime::spawn_blocking(terminal::detect)
         .await
         .map_err(|err| err.to_string())
+}
+
+/// Every app's upgrade command, keyed by CliApp string, for the update
+/// badge's tooltip. Apps with no command-line upgrade (the self-updating
+/// GUI apps) are absent. Cheap: constants, plus one path stat +
+/// canonicalize for Gemini.
+#[tauri::command]
+async fn cli_upgrade_commands() -> Result<std::collections::HashMap<String, String>, String> {
+    tauri::async_runtime::spawn_blocking(upgrade::upgrade_commands)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Run `app`'s upgrade in-app, resolving when it finishes. Runs through
+/// an interactive login shell so it resolves the nvm / brew shims a GUI
+/// process's bare PATH lacks (see the `upgrade` module docs).
+#[tauri::command]
+async fn run_cli_upgrade(app: providers::CliApp) -> Result<(), String> {
+    upgrade::run_upgrade(app).await
 }
 
 /// Open a recorded session in the user's chosen terminal and resume it in its
@@ -1073,6 +1093,8 @@ pub fn run() {
             detect_terminals,
             resume_session_in_terminal,
             new_session_in_terminal,
+            cli_upgrade_commands,
+            run_cli_upgrade,
             migrate_claude_project,
             migrate_claude_session,
             migrate_claude_memory,

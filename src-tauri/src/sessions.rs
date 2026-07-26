@@ -8939,7 +8939,7 @@ fn opencode_v2_patch_file_verb_path(file: &Value) -> Option<(&'static str, Strin
 ///
 /// Anything else is left as-is so we don't accidentally strip user
 /// content that happens to contain a `0x1b` byte.
-fn strip_ansi(input: &str) -> String {
+pub(crate) fn strip_ansi(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {

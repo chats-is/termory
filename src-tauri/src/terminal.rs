@@ -92,7 +92,7 @@ fn session_launch_command_with(source: &str, id: &str, codex: &str) -> Option<St
 /// branch is macOS-only because `codex_bundled_cli` statically returns
 /// None everywhere else — no Windows quoting path exists (or is
 /// needed) here.
-fn codex_shell_invocation() -> String {
+pub(crate) fn codex_shell_invocation() -> String {
     if crate::providers::find_cli_binary("codex").is_some() {
         return "codex".to_string();
     }
