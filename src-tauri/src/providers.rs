@@ -946,24 +946,41 @@ fn codex_app_info() -> Option<CodexAppInfo> {
 /// which only the cold-path `detect_codex_installs` IPC (Providers
 /// page load + Recheck) consumes.
 ///
-/// `bundled_cli` has no Windows equivalent: MSIX packages install into
-/// the ACL-restricted `C:\Program Files\WindowsApps\`, unreadable by a
-/// normal process, so there's no way to reach a bundled binary the way
-/// `<bundle>/Contents/Resources/codex` works on macOS —
-/// `codex_binary()` stays standalone-CLI-only on this platform.
+/// `bundled_cli` is `None` on Windows BY DECISION, not impossibility
+/// (2026-07-26, real-hardware probe): the package DOES ship the full
+/// CLI at `<InstallLocation>\app\resources\codex.exe` (337 MB, alpha
+/// channel), and a normal non-elevated process CAN read/copy it — the
+/// WindowsApps ACL denies only ROOT enumeration and IN-PLACE execution
+/// (running it directly fails Access denied; a copied-out binary runs).
+/// Using it would need a per-app-version managed copy, which was
+/// deliberately not built — `codex_binary()` stays standalone-CLI-only
+/// on this platform.
+///
+/// Package-family prefixes for the Codex/ChatGPT desktop app, STABLE
+/// FIRST — the order is the preference order everywhere both could
+/// match. The Store ships two listings sharing the publisher: "ChatGPT"
+/// (identity `OpenAI.Codex`) and "ChatGPT (Beta)" (identity
+/// `OpenAI.CodexBeta`, a SEPARATE package family — verified in the
+/// msstore catalog 2026-07-26). A Beta-only install is still the Codex
+/// desktop app, so both count as installed. The trailing `_` keeps the
+/// match anchored to the family-name shape (`<Name>_<publisherhash>`)
+/// so `OpenAI.Codex_` can never accidentally swallow `OpenAI.CodexBeta_`
+/// or an unrelated `OpenAI.CodexSomething` identity.
 #[cfg_attr(not(windows), allow(dead_code))]
-const CODEX_APPX_PACKAGE_PREFIX: &str = "OpenAI.Codex_";
+const CODEX_APPX_PACKAGE_PREFIXES: [&str; 2] = ["OpenAI.Codex_", "OpenAI.CodexBeta_"];
 
-/// Whether the Codex/ChatGPT MSIX package is installed for the current
-/// user, by scanning `<local_app_data>\Packages\` for a
-/// `OpenAI.Codex_<publisherhash>` dir (the PackageFamilyName — the
-/// publisher-hash suffix varies per signing identity, so match the
-/// prefix, never a hardcoded hash). This per-user Packages dir is
-/// readable (unlike `WindowsApps\`) and is the SAME mechanism Claude
-/// Desktop's Windows detection uses (`msix_package_roaming_parents`).
-/// Path-injected + compiled off-Windows so it's unit-testable on any
-/// host (mirrors claude_desktop.rs). Best-effort: still unverified on
-/// real Windows hardware.
+/// Whether the Codex/ChatGPT MSIX package (stable or Beta) is installed
+/// for the current user, by scanning `<local_app_data>\Packages\` for an
+/// `OpenAI.Codex_<publisherhash>` / `OpenAI.CodexBeta_<publisherhash>`
+/// dir (the PackageFamilyName — the publisher-hash suffix varies per
+/// signing identity, so match the prefix, never a hardcoded hash). This
+/// per-user Packages dir is readable (unlike `WindowsApps\`, whose
+/// ROOT blocks enumeration) and is the SAME mechanism Claude
+/// Desktop's Windows detection uses
+/// (`msix_package_roaming_parents`). Path-injected + compiled
+/// off-Windows so it's unit-testable on any host (mirrors
+/// claude_desktop.rs). Verified on real Windows hardware 2026-07-26
+/// (stable package `OpenAI.Codex_2p2nqsd0c76g0`).
 #[cfg_attr(not(windows), allow(dead_code))]
 fn codex_appx_installed_in(local_app_data: &std::path::Path) -> bool {
     std::fs::read_dir(local_app_data.join("Packages"))
@@ -976,7 +993,7 @@ fn codex_appx_installed_in(local_app_data: &std::path::Path) -> bool {
             // prefix match pays for the `is_dir` stat.
             e.file_name()
                 .to_str()
-                .is_some_and(|n| n.starts_with(CODEX_APPX_PACKAGE_PREFIX))
+                .is_some_and(|n| CODEX_APPX_PACKAGE_PREFIXES.iter().any(|p| n.starts_with(p)))
                 && e.path().is_dir()
         })
 }
@@ -999,14 +1016,37 @@ fn parse_appx_package_version(full_name: &str) -> Option<String> {
     full_name.split('_').nth(1).map(|s| s.to_string())
 }
 
+/// Choose which `PackageFullName` line to report from a
+/// `Get-AppxPackage -Name 'OpenAI.Codex*'` wildcard query: the STABLE
+/// package when present, else the Beta — the prefix array's order.
+/// Lines matching neither identity (the wildcard could catch an
+/// unrelated future `OpenAI.CodexSomething`) are ignored rather than
+/// mis-parsed. Split out so the preference is testable off-Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn pick_appx_full_name(stdout: &str) -> Option<String> {
+    let lines: Vec<&str> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    CODEX_APPX_PACKAGE_PREFIXES
+        .iter()
+        .find_map(|prefix| lines.iter().find(|l| l.starts_with(prefix)))
+        .map(|l| (*l).to_string())
+}
+
 /// The installed Codex/ChatGPT MSIX package version via PowerShell's
 /// `Get-AppxPackage` — the supported way to read package identity
 /// without touching the ACL-restricted `WindowsApps` directory. Queries
-/// the CURRENT USER's packages only (no `-AllUsers`, so no elevation).
-/// COLD PATH ONLY (`detect_codex_installs` IPC) — never call from
+/// the CURRENT USER's packages only (no `-AllUsers`, so no elevation),
+/// with the `OpenAI.Codex*` wildcard so the Beta package
+/// (`OpenAI.CodexBeta`) is found too; `pick_appx_full_name` prefers
+/// stable when both are installed. COLD PATH ONLY
+/// (`detect_codex_installs` IPC) — never call from
 /// `detect_install_snapshot` (see [`codex_appx_installed_in`] for why).
 /// Best-effort: any failure (PowerShell missing, package absent,
-/// timeout) is just `None`, never an error.
+/// timeout) is just `None`, never an error. Verified on real Windows
+/// hardware 2026-07-26 (returned `OpenAI.Codex_26.721.4979.0_x64__…`).
 #[cfg(windows)]
 fn codex_appx_version() -> Option<String> {
     let mut cmd = std::process::Command::new("powershell.exe");
@@ -1014,19 +1054,13 @@ fn codex_appx_version() -> Option<String> {
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        &format!(
-            "(Get-AppxPackage -Name '{}' | Select-Object -First 1 -ExpandProperty PackageFullName)",
-            CODEX_APPX_PACKAGE_PREFIX.trim_end_matches('_')
-        ),
+        "(Get-AppxPackage -Name 'OpenAI.Codex*' | Select-Object -ExpandProperty PackageFullName)",
     ]);
     let output = output_with_timeout(cmd)?;
     if !output.status.success() {
         return None;
     }
-    let full_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if full_name.is_empty() {
-        return None;
-    }
+    let full_name = pick_appx_full_name(&String::from_utf8_lossy(&output.stdout))?;
     parse_appx_package_version(&full_name)
 }
 
@@ -4908,12 +4942,40 @@ mod tests {
         fs::create_dir_all(packages.join("Claude_pzs8sxrjxfjjc")).unwrap();
         assert!(!codex_appx_installed_in(&local));
 
+        // A Beta-only install counts too — "ChatGPT (Beta)" is the
+        // separate `OpenAI.CodexBeta` package family (msstore catalog).
+        fs::create_dir_all(packages.join("OpenAI.CodexBeta_2p2nqsd0c76g0")).unwrap();
+        assert!(codex_appx_installed_in(&local));
+
         // The real PackageFamilyName shape: OpenAI.Codex_<publisherhash>
         // (hash varies per signing identity → prefix match).
         fs::create_dir_all(packages.join("OpenAI.Codex_2p2nqsd0c76g0")).unwrap();
         assert!(codex_appx_installed_in(&local));
 
         fs::remove_dir_all(&local).unwrap();
+    }
+
+    #[test]
+    fn pick_appx_full_name_prefers_stable_over_beta_and_rejects_strays() {
+        // Both installed → stable wins regardless of line order.
+        assert_eq!(
+            pick_appx_full_name(
+                "OpenAI.CodexBeta_26.800.1.0_x64__2p2nqsd0c76g0\r\nOpenAI.Codex_26.721.4979.0_x64__2p2nqsd0c76g0\r\n"
+            ),
+            Some("OpenAI.Codex_26.721.4979.0_x64__2p2nqsd0c76g0".to_string())
+        );
+        // Beta alone is still reported.
+        assert_eq!(
+            pick_appx_full_name("OpenAI.CodexBeta_26.800.1.0_x64__2p2nqsd0c76g0"),
+            Some("OpenAI.CodexBeta_26.800.1.0_x64__2p2nqsd0c76g0".to_string())
+        );
+        // Wildcard strays matching neither identity are ignored, not
+        // mis-parsed; empty output is None.
+        assert_eq!(
+            pick_appx_full_name("OpenAI.CodexSomething_1.0.0.0_x64__hash"),
+            None
+        );
+        assert_eq!(pick_appx_full_name("  \r\n"), None);
     }
 
     #[cfg(unix)]

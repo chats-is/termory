@@ -554,10 +554,11 @@ fn current_paths() -> Result<Paths, Box<dyn Error>> {
         // Resolve the real install folders — the Windows dir isn't always
         // exactly `Claude` / `Claude-3p` (cc-switch fuzzy-matches `Claude*`),
         // so pick the actual folder when the exact name is absent. The 3p
-        // dir is resolved INDEPENDENTLY: a fresh Windows install
-        // pre-creates `%LOCALAPPDATA%\Claude-3p` while the normal config
-        // dir may land under Roaming, so prefer wherever a `*-3p` dir
-        // already exists (see `select_threep_dir`).
+        // dir is resolved INDEPENDENTLY: the MSIX install form pre-creates
+        // `%LOCALAPPDATA%\Claude-3p` while the normal config dir may land
+        // under Roaming, so prefer wherever a `*-3p` dir already exists
+        // (see `select_threep_dir`; the Squirrel form pre-creates nothing —
+        // observed 2026-07-26 — and falls to the normal parent's sibling).
         Ok(paths_from_dirs(
             &pick_windows_claude_dir(&parent, false),
             &select_threep_dir(&candidates, &parent),
@@ -598,13 +599,19 @@ fn windows_config_parents() -> Vec<PathBuf> {
     let local = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| fallback("Local"));
-    // The claude.ai Windows installer ships an MSIX-PACKAGED app, whose
-    // AppData is VIRTUALIZED: the app writes %APPDATA%\Claude but the
-    // real on-disk location (the one an unpackaged app like Termory can
-    // see) is Packages\Claude_<publisherhash>\LocalCache\Roaming\Claude
-    // (verified on real hardware). Those parents come FIRST — when a
+    // The claude.ai Windows installer has shipped TWO forms over time
+    // (there is no Microsoft Store listing — the exe is the only
+    // official channel, confirmed 2026-07-26): an MSIX-PACKAGED app
+    // whose AppData is VIRTUALIZED — the app writes %APPDATA%\Claude
+    // but the real on-disk location (the one an unpackaged app like
+    // Termory can see) is
+    // Packages\Claude_<publisherhash>\LocalCache\Roaming\Claude
+    // (verified on real hardware) — and, as of 1.24012.1, a plain
+    // Squirrel.Windows install (%LOCALAPPDATA%\AnthropicClaude binary
+    // dir + UN-virtualized %APPDATA%\Claude config, verified on real
+    // hardware 2026-07-26). The MSIX parents come FIRST — when a
     // package exists it IS the install; the raw Roaming/Local parents
-    // remain for unpackaged installs.
+    // cover the Squirrel/unpackaged form.
     let mut parents = msix_package_roaming_parents(&local);
     parents.push(roaming);
     parents.push(local);
@@ -653,9 +660,10 @@ fn select_config_parent(candidates: &[PathBuf]) -> PathBuf {
 
 /// The `Claude-3p` dir, resolved independently of the normal config
 /// dir: the first candidate parent where a `*-3p` dir already EXISTS
-/// wins (a fresh Windows install pre-creates `%LOCALAPPDATA%\Claude-3p`
-/// even before the normal dir appears), else `<normal parent>\Claude-3p`
-/// so both dirs stay siblings for fresh writes.
+/// wins (the MSIX install form pre-creates `%LOCALAPPDATA%\Claude-3p`
+/// even before the normal dir appears; the Squirrel form pre-creates
+/// nothing), else `<normal parent>\Claude-3p` so both dirs stay
+/// siblings for fresh writes.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn select_threep_dir(candidates: &[PathBuf], normal_parent: &Path) -> PathBuf {
     candidates
