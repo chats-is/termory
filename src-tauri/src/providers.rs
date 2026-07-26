@@ -602,17 +602,55 @@ pub(crate) fn hide_console(cmd: &mut std::process::Command) {
 /// spawn failure, non-zero exit, or timeout. Polls `try_wait` every
 /// 50ms — accurate enough for a 5s budget and avoids a watchdog
 /// thread.
-fn output_with_timeout(mut cmd: std::process::Command) -> Option<std::process::Output> {
+fn output_with_timeout(cmd: std::process::Command) -> Option<std::process::Output> {
+    output_with_timeout_stdin(cmd, None)
+}
+
+/// [`output_with_timeout`] with an optional stdin payload.
+///
+/// Exists because `security -i` — the form Claude Code itself uses to write
+/// the Keychain (macOsKeychainStorage.ts:117) — reads its command from stdin
+/// so the credential never appears in `argv` where a process monitor could
+/// see it. The plain helper hard-wires `Stdio::null()`, which would make that
+/// command read EOF and write nothing.
+///
+/// The timeout matters more here than for a version probe: a LOCKED Keychain
+/// makes `security` put up an unlock dialog and block until it is answered,
+/// so an untimed call would hang the calling thread indefinitely.
+///
+/// `input` is written and the pipe closed before the wait loop. Safe against
+/// deadlock for our payload sizes — a pipe buffers 64 KB and the largest
+/// thing we send is a few KB of hex.
+pub(crate) fn output_with_timeout_stdin(
+    mut cmd: std::process::Command,
+    input: Option<&[u8]>,
+) -> Option<std::process::Output> {
+    use std::io::Write;
     use std::process::Stdio;
     // Every caller is a silent probe (`--version` queries, shell
-    // fallback) — never a window the user should see.
+    // fallback, Keychain reads/writes) — never a window the user should see.
     hide_console(&mut cmd);
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .spawn()
         .ok()?;
+    if let Some(bytes) = input {
+        // Take the handle so it drops (closing the pipe) before we wait —
+        // `security -i` keeps reading until EOF.
+        if let Some(mut stdin) = child.stdin.take() {
+            if stdin.write_all(bytes).is_err() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
     let start = std::time::Instant::now();
     loop {
         match child.try_wait() {

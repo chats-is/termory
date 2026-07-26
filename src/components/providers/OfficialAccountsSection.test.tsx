@@ -405,7 +405,9 @@ describe("OfficialAccountsSection — quota rings in active row", () => {
     expect(screen.queryByLabelText("Refresh usage")).toBeNull();
   });
 
-  it("renders quota in the single current-account row for display-only apps (Claude)", async () => {
+  it("renders quota in the single current-account row for display-only apps (Gemini)", async () => {
+    // Gemini is the remaining display-only quota app — Claude gained full
+    // management (its `saved: true` now always has a matching accounts entry).
     mockList(
       makeState({
         current: { name: "John", email: "john@example.com", plan: null, saved: true },
@@ -414,8 +416,8 @@ describe("OfficialAccountsSection — quota rings in active row", () => {
     );
     render(
       <OfficialAccountsSection
-        app="claude"
-        quota={makeQuota({ app: "claude" })}
+        app="gemini"
+        quota={makeQuota({ app: "gemini" })}
         onRefreshQuota={vi.fn()}
       />
     );
@@ -485,7 +487,7 @@ describe("OfficialAccountsSection — quota rings in active row", () => {
     );
     render(
       <OfficialAccountsSection
-        app="claude"
+        app="gemini"
         quota={makeQuota({ plan: "Max" })}
         onRefreshQuota={vi.fn()}
       />
@@ -493,6 +495,20 @@ describe("OfficialAccountsSection — quota rings in active row", () => {
     await screen.findByText("John");
     // CSS `uppercase` is visual-only; the DOM contains the raw plan string.
     expect(screen.getByText("Max")).toBeInTheDocument();
+  });
+
+  it("treats Claude as managed: unsaved current row offers Save current", async () => {
+    mockList(
+      makeState({
+        current: { name: "John", email: "john@example.com", plan: "Max", saved: false },
+        accounts: []
+      })
+    );
+    render(<OfficialAccountsSection app="claude" />);
+    await screen.findByText("John");
+    // Managed UI: the unsaved live login gets the snapshot affordance the
+    // display-only rendering never shows.
+    expect(screen.getByRole("button", { name: "Save current" })).toBeInTheDocument();
   });
 });
 

@@ -1,4 +1,5 @@
 mod accounts;
+mod claude_auth;
 mod claude_desktop;
 mod codex_follow;
 mod config;
@@ -1023,6 +1024,31 @@ async fn cancel_codex_login(
     Ok(())
 }
 
+/// Add a Claude account via the headless `claude auth login` (browser
+/// roundtrip, fallback URL emitted as `claude:login-url`), then auto-save
+/// the resulting credential and restore the previous login — the same flow
+/// shape as `login_and_save_codex_account`.
+#[tauri::command]
+async fn login_and_save_claude_account(
+    app: tauri::AppHandle,
+    cancel_state: tauri::State<'_, accounts::ClaudeLoginCancel>,
+) -> Result<String, String> {
+    let id = accounts::login_and_save_claude_account(app.clone(), &cancel_state).await?;
+    let _ = tray::rebuild_menu(&app);
+    Ok(id)
+}
+
+#[tauri::command]
+async fn cancel_claude_login(
+    app: tauri::AppHandle,
+    cancel_state: tauri::State<'_, accounts::ClaudeLoginCancel>,
+) -> Result<(), String> {
+    accounts::cancel_claude_login(&cancel_state).await?;
+    // Cancelling restores the previous login, so the tray follows.
+    let _ = tray::rebuild_menu(&app);
+    Ok(())
+}
+
 #[tauri::command]
 fn mark_account_relogin(handle: tauri::AppHandle, id: String, needed: bool) -> Result<(), String> {
     accounts::mark_account_relogin(&id, needed).map_err(|e| e.to_string())?;
@@ -1152,6 +1178,8 @@ pub fn run() {
             delete_account,
             login_and_save_codex_account,
             cancel_codex_login,
+            login_and_save_claude_account,
+            cancel_claude_login,
             mark_account_relogin,
         ])
         .on_window_event(|window, event| {
@@ -1188,6 +1216,7 @@ pub fn run() {
             // directory mutates. Failure is non-fatal — the app still
             // works with only the launch-time scan.
             app.manage(accounts::CodexLoginCancel(std::sync::Mutex::new(None)));
+            app.manage(accounts::ClaudeLoginCancel(std::sync::Mutex::new(None)));
             let handle = app.handle().clone();
             match watcher::start(handle) {
                 Ok(watcher_handle) => {

@@ -26,9 +26,13 @@
 //! plan decoded from the `tokens.id_token` JWT — **minus the fields
 //! provider management owns**, see `PROVIDER_OWNED_AUTH_FIELDS`.
 //!
-//! Claude (which on macOS keeps its credential in the Keychain, not a
-//! file) is a later phase; the `app` field on each stored account leaves
-//! room for it.
+//! ## Phase 2 — Claude Code (Keychain-first)
+//!
+//! Claude's credential store is two-tier (macOS Keychain over
+//! `.credentials.json`), handled by the `claude_auth` module; the account
+//! IDENTITY lives separately in `~/.claude.json` `oauthAccount`. See the
+//! "Claude Code — full multi-account management" section below for the
+//! snapshot shape and the deliberate `~/.claude.json` write exception.
 
 use base64::Engine;
 use serde::Serialize;
@@ -165,15 +169,31 @@ pub struct TrayAccount {
     pub needs_relogin: bool,
 }
 
-/// Saved logins for the tray's account submenu. Codex-only — it's the one CLI
+/// Saved logins for the tray's account submenu. Codex + Claude — the CLIs
 /// with snapshot management (`list_accounts` is display-only for the others),
 /// so every other app returns `[]` and the tray renders no account section.
 /// A read failure also yields `[]`: no accounts.json just means "nothing saved".
 pub fn tray_accounts(app: CliApp) -> Vec<TrayAccount> {
-    if app != CliApp::Codex {
-        return Vec::new();
-    }
-    let Ok(state) = list_codex_accounts() else {
+    let state = match app {
+        CliApp::Codex => list_codex_accounts(),
+        CliApp::Claude => {
+            // Perf gate for the tray HOT PATH (`build_menu` runs on the main
+            // thread): resolving the live Claude login spawns `security(1)`
+            // on macOS. With nothing saved there are no rows to render, so
+            // skip the whole live read — a user who never touches Claude
+            // multi-account pays zero for it (same rule as the Windows
+            // `Get-AppxPackage` split in providers.rs).
+            let has_saved = read_store()
+                .map(|s| s.iter().any(|e| str_field(e, "app") == Some("claude")))
+                .unwrap_or(false);
+            if !has_saved {
+                return Vec::new();
+            }
+            list_claude_accounts()
+        }
+        _ => return Vec::new(),
+    };
+    let Ok(state) = state else {
         return Vec::new();
     };
     state
@@ -206,6 +226,7 @@ pub fn tray_accounts(app: CliApp) -> Vec<TrayAccount> {
 pub fn save_current_account(app: CliApp) -> Result<(), Box<dyn Error>> {
     match app {
         CliApp::Codex => save_codex_account(),
+        CliApp::Claude => save_claude_account(),
         _ => Err(unsupported(app)),
     }
 }
@@ -226,6 +247,7 @@ pub async fn switch_account(id: String) -> Result<(), Box<dyn Error>> {
     let app = str_field(entry, "app").map(String::from);
     match app.as_deref() {
         Some("codex") => switch_codex(&payload).await,
+        Some("claude") => switch_claude(&payload).await,
         other => Err(format!("Unsupported account app: {}", other.unwrap_or("?")).into()),
     }
 }
@@ -245,7 +267,38 @@ pub async fn switch_account(id: String) -> Result<(), Box<dyn Error>> {
 /// `login_and_save_codex_account` call.
 pub struct CodexLoginCancel(pub std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>);
 
+/// RAII reservation of a login-cancel slot. `reserve` fails when a login is
+/// already in flight — the backend re-entrancy guard the frontend's
+/// `loggingIn` flags can't fully provide (two clicks in one React batch both
+/// read the stale flag) — and the slot self-clears on Drop, so no early-exit
+/// path can leak a stale notify. A leaked notify used to be merely a dead
+/// `cancel_*_login`; with this guard it would block every future login, so
+/// the Drop-based clear is load-bearing, not tidiness. (The codex flow's
+/// spawn-failure path really did leak the slot before this.)
+struct LoginSlot<'a> {
+    slot: &'a std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>,
+}
+impl<'a> LoginSlot<'a> {
+    fn reserve(
+        slot: &'a std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>,
+    ) -> Result<(Self, std::sync::Arc<tokio::sync::Notify>), String> {
+        let mut s = slot.lock().unwrap();
+        if s.is_some() {
+            return Err("A login is already in progress".into());
+        }
+        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        *s = Some(notify.clone());
+        Ok((LoginSlot { slot }, notify))
+    }
+}
+impl Drop for LoginSlot<'_> {
+    fn drop(&mut self) {
+        *self.slot.lock().unwrap() = None;
+    }
+}
+
 pub const CODEX_LOGIN_URL_EVENT: &str = "codex:login-url";
+pub const CLAUDE_LOGIN_URL_EVENT: &str = "claude:login-url";
 
 pub async fn login_and_save_codex_account(
     app: tauri::AppHandle,
@@ -256,20 +309,20 @@ pub async fn login_and_save_codex_account(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
+    // Reserve the cancel slot (also the re-entrancy guard); self-clears on
+    // every exit path via Drop.
+    let (_login_slot, cancel_notify) = LoginSlot::reserve(&cancel_state.0)?;
+
     // If there is a live Codex login that is not yet saved, auto-save it so
     // we can restore it after the new login completes.
     let prev_active_id: Option<String> =
-        auto_save_unsaved_live_codex_account().map_err(|e| e.to_string())?;
+        auto_save_unsaved_live_account(CliApp::Codex).map_err(|e| e.to_string())?;
 
     // Snapshot original auth.json for rollback.
     let original_auth: Option<Vec<u8>> = std::fs::read(&auth_path).ok();
 
     // Clear auth.json — codex's logout_with_revoke will find nothing to revoke.
     atomic_write_0600(&auth_path, b"{}").map_err(|e| e.to_string())?;
-
-    // Set up a cancel token so `cancel_codex_login` can interrupt the select!.
-    let cancel_notify = std::sync::Arc::new(tokio::sync::Notify::new());
-    *cancel_state.0.lock().unwrap() = Some(cancel_notify.clone());
 
     // Spawn `codex login` (non-interactive; the browser handles the UI).
     // Resolve the real binary via the same scan `detect_clis` uses: a bare
@@ -346,7 +399,6 @@ pub async fn login_and_save_codex_account(
             Err(e) => {
                 stderr_task.abort();
                 restore_auth(&auth_path, original_auth.as_deref());
-                *cancel_state.0.lock().unwrap() = None;
                 return Err(format!("codex login error: {e}"));
             }
         },
@@ -354,18 +406,15 @@ pub async fn login_and_save_codex_account(
             let _ = child.kill().await;
             stderr_task.abort();
             restore_auth(&auth_path, original_auth.as_deref());
-            *cancel_state.0.lock().unwrap() = None;
             return Err("codex login timed out after 5 minutes".into());
         },
         _ = cancel_notify.notified() => {
             let _ = child.kill().await;
             stderr_task.abort();
             restore_auth(&auth_path, original_auth.as_deref());
-            *cancel_state.0.lock().unwrap() = None;
             return Err("Login cancelled".into());
         },
     };
-    *cancel_state.0.lock().unwrap() = None;
 
     let stderr_msg = stderr_task.await.unwrap_or_default();
 
@@ -404,12 +453,30 @@ pub async fn login_and_save_codex_account(
     Ok(new_id)
 }
 
-/// Snapshot the live login if it isn't in the store yet, so a flow that is
-/// about to overwrite auth.json can't destroy it. Codex-only, like the rest of
-/// snapshot management. Used by the `codex login` flow and by the tray's
-/// account switch (which, unlike the Providers page, has no dialog to warn in).
-pub(crate) fn auto_save_unsaved_live_account() -> Result<Option<String>, Box<dyn Error>> {
-    auto_save_unsaved_live_codex_account()
+/// Snapshot `app`'s live login if it isn't in the store yet, so a flow that
+/// is about to overwrite the credential can't destroy it. Used by the
+/// `codex login` flow and by the tray's account switch (which, unlike the
+/// Providers page, has no dialog to warn in). Non-managed apps are a no-op.
+pub(crate) fn auto_save_unsaved_live_account(
+    app: CliApp,
+) -> Result<Option<String>, Box<dyn Error>> {
+    match app {
+        CliApp::Codex => auto_save_unsaved_live_codex_account(),
+        CliApp::Claude => {
+            let Some(live) = read_claude_live()? else {
+                return Ok(None);
+            };
+            let id = live.id;
+            let store = read_store()?;
+            if !store.iter().any(|e| {
+                str_field(e, "app") == Some("claude") && str_field(e, "id") == Some(id.as_str())
+            }) {
+                save_claude_account()?;
+            }
+            Ok(Some(id))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// If there is a live Codex login that is not yet recorded in the store,
@@ -586,49 +653,745 @@ struct CodexLive {
 }
 
 // ===================================================================
-// Claude account (display-only — reads ~/.claude.json `oauthAccount`)
+// Claude Code — full multi-account management (Phase 2)
 // ===================================================================
+//
+// The credential itself lives behind `claude_auth` (Keychain-first on
+// macOS, `.credentials.json` elsewhere — see that module for why writing
+// only the file cannot work on macOS). The account's IDENTITY (email /
+// display name / uuid) is NOT in the credential: Claude keeps it in
+// `~/.claude.json` under `oauthAccount`, populated by `/api/oauth/profile`
+// at login and never re-derived from the token. A snapshot therefore
+// carries BOTH — `payload: { credentials, oauthAccount }` — and a switch
+// restores both, otherwise the CLI (and Termory's own account list) would
+// keep showing the previous login's name.
+//
+// Writing `oauthAccount` back is a deliberate, narrow exception to the
+// "Termory never writes ~/.claude.json" rule: the switch is exactly the
+// user-triggered credential overwrite this feature exists for, and leaving
+// the identity stale is the worse outcome. Only that ONE key is replaced;
+// everything else in the document is preserved byte-for-byte at the JSON
+// level (preserve_order keeps the key order), and the write is atomic.
+//
+// Like Codex, a switch validates the snapshot by refreshing its tokens in
+// memory first (`refresh_claude_doc_tokens` — official endpoint/body per
+// services/oauth/client.ts:146). An `AuthFailure` flags the entry
+// `needsRelogin` BACKEND-side (Codex leaves that to the frontend; here a
+// string Err can't distinguish a dead token from a locked-Keychain write
+// error, and flagging the latter would trap the row) and leaves the live
+// credential untouched; transient failures fall back to the snapshot
+// verbatim. Anthropic ROTATES the refresh token on every refresh (the
+// #30337 comment in fallbackStorage.ts), so a successful refresh persists
+// to the STORE before the live write — see
+// `persist_refreshed_claude_snapshot`.
+
+/// Parsed view of the live Claude login: the credential document plus the
+/// identity read from `~/.claude.json`.
+struct ClaudeLive {
+    /// Stable per-account identity: `oauthAccount.accountUuid` → email.
+    /// No hash fallback — the credential doc rotates on every token refresh,
+    /// so hashing it would mint a new "account" per refresh. A login without
+    /// identity (no oauthAccount) is treated as not listable/savable.
+    id: String,
+    name: Option<String>,
+    email: Option<String>,
+    plan: Option<String>,
+    /// `{"claudeAiOauth": {...}}` as read from the store.
+    credentials: JsonValue,
+    /// The `oauthAccount` object, verbatim.
+    oauth_account: JsonValue,
+}
+
+/// The global config file holding `oauthAccount` — official resolution
+/// (`getGlobalClaudeFile`, env.ts:14-26): a legacy `<config-dir>/.config.json`
+/// wins when it exists; else `$CLAUDE_CONFIG_DIR/.claude.json` when the var
+/// is set, else `~/.claude.json`. Hardcoding the home form paired one
+/// profile's credentials with another profile's identity under a custom
+/// `CLAUDE_CONFIG_DIR` — and worse, the switch then WROTE the identity into
+/// a file that profile's claude never reads.
+fn claude_json_path() -> Result<std::path::PathBuf, Box<dyn Error>> {
+    let config_dir = crate::claude_auth::config_dir().ok_or("home directory not available")?;
+    let legacy = config_dir.join(".config.json");
+    if legacy.exists() {
+        return Ok(legacy);
+    }
+    match std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
+        Some(_) => Ok(config_dir.join(".claude.json")),
+        None => {
+            let home = crate::home_dir().ok_or("home directory not available")?;
+            Ok(home.join(".claude.json"))
+        }
+    }
+}
+
+fn read_claude_live() -> Result<Option<ClaudeLive>, Box<dyn Error>> {
+    let Some(credentials) = crate::claude_auth::read_credentials() else {
+        return Ok(None);
+    };
+    // A credential without an OAuth block is an API-key-era file — not a
+    // login this feature manages.
+    let Some(oauth) = credentials
+        .get("claudeAiOauth")
+        .or_else(|| credentials.get("claude.ai_oauth"))
+        .filter(|v| !v.is_null())
+    else {
+        return Ok(None);
+    };
+    let plan = oauth
+        .get("subscriptionType")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(title_case_plan);
+
+    let path = claude_json_path()?;
+    let account = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<JsonValue>(&raw).ok())
+        .and_then(|doc| doc.get("oauthAccount").cloned())
+        .filter(|v| v.is_object());
+    let Some(account) = account else {
+        // Logged in but no profile record (very old login) — no stable
+        // identity to key a snapshot on.
+        return Ok(None);
+    };
+    let field = |k: &str| {
+        account
+            .get(k)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    let email = field("emailAddress");
+    let Some(id) = field("accountUuid").or_else(|| email.clone()) else {
+        return Ok(None);
+    };
+    Ok(Some(ClaudeLive {
+        id,
+        name: field("displayName"),
+        email,
+        plan,
+        credentials,
+        oauth_account: account,
+    }))
+}
 
 fn list_claude_accounts() -> Result<AccountsState, Box<dyn Error>> {
-    let home = crate::home_dir().ok_or("home directory not available")?;
-    let path = home.join(".claude.json");
-    if !path.exists() {
-        return Ok(AccountsState {
-            current: None,
-            accounts: Vec::new(),
-            storage_warning: None,
+    let live = read_claude_live()?;
+    let current_id = live.as_ref().map(|l| l.id.as_str());
+    let store = read_store()?;
+
+    let mut accounts = Vec::new();
+    let mut current_saved = false;
+    for e in &store {
+        if str_field(e, "app") != Some("claude") {
+            continue;
+        }
+        let active = current_id.is_some() && current_id == str_field(e, "id");
+        if active {
+            current_saved = true;
+        }
+        let needs_relogin = e
+            .get("needsRelogin")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        accounts.push(SavedAccountView {
+            id: str_field(e, "id").unwrap_or_default().to_string(),
+            name: str_field(e, "name").unwrap_or_default().to_string(),
+            email: str_field(e, "email").map(String::from),
+            plan: str_field(e, "plan").map(String::from),
+            saved_at: str_field(e, "savedAt").unwrap_or_default().to_string(),
+            active,
+            needs_relogin,
         });
     }
-    let content = std::fs::read_to_string(&path)?;
-    let doc: serde_json::Value = serde_json::from_str(&content).unwrap_or(serde_json::Value::Null);
-    let oauth = doc.get("oauthAccount");
-    let email = oauth
-        .and_then(|o| o.get("emailAddress"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-    let name = oauth
-        .and_then(|o| o.get("displayName"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-    if email.is_none() && name.is_none() {
-        return Ok(AccountsState {
-            current: None,
-            accounts: Vec::new(),
-            storage_warning: None,
-        });
-    }
+
+    let current = live.map(|l| CurrentAccount {
+        name: l.name,
+        email: l.email,
+        plan: l.plan,
+        saved: current_saved,
+    });
+
     Ok(AccountsState {
-        current: Some(CurrentAccount {
-            name,
-            email,
-            plan: None,
-            saved: true,
-        }),
-        accounts: Vec::new(),
+        current,
+        accounts,
         storage_warning: None,
     })
+}
+
+fn save_claude_account() -> Result<(), Box<dyn Error>> {
+    let live = read_claude_live()?
+        .ok_or("No Claude login with account info found to save (run `claude` and log in first)")?;
+
+    let id = live.id.clone();
+    let mut store = read_store()?;
+
+    let entry = json!({
+        "id": id,
+        "app": "claude",
+        // The list row needs a non-empty primary label; email is the
+        // reliable one (displayName is optional on AccountInfo).
+        "name": live.name.clone().or_else(|| live.email.clone()).unwrap_or_else(|| "Claude".into()),
+        "email": live.email,
+        "plan": live.plan,
+        "payload": {
+            "credentials": live.credentials,
+            "oauthAccount": live.oauth_account,
+        },
+        "savedAt": now_rfc3339(),
+    });
+
+    match store
+        .iter_mut()
+        .find(|e| str_field(e, "id") == Some(id.as_str()))
+    {
+        Some(slot) => *slot = entry,
+        None => store.push(entry),
+    }
+    write_store(store)
+}
+
+/// Set (`Some`) or remove (`None`) ONLY the `oauthAccount` key of
+/// `~/.claude.json`, leaving every other key untouched. Atomic (tmp +
+/// rename); the file's existing permission bits are preserved — it is
+/// Claude's own file (typically 0644), not a Termory 0600 store. A missing
+/// file with `None` is a no-op (don't mint an empty `{}` config).
+fn update_claude_oauth_account(account: Option<&JsonValue>) -> Result<(), Box<dyn Error>> {
+    let path = claude_json_path()?;
+    // A read or PARSE failure must abort, never degrade to an empty object:
+    // this file is Claude's whole global config (projects, permissions,
+    // onboarding), a running claude can leave it mid-write, and writing the
+    // degraded doc back would TRUNCATE it to just `oauthAccount`. Same rule
+    // as `claude_desktop::read_json_or_empty` ("PROPAGATES a parse error …
+    // never truncates"). Only a genuinely missing file starts fresh.
+    let mut doc = match std::fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str::<JsonValue>(&raw).map_err(|e| {
+            format!(
+                "{} is not valid JSON — refusing to rewrite it (is claude mid-write?): {e}",
+                path.display()
+            )
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if account.is_none() {
+                return Ok(()); // nothing to remove, don't mint an empty config
+            }
+            JsonValue::Object(serde_json::Map::new())
+        }
+        Err(e) => return Err(format!("Failed to read {}: {e}", path.display()).into()),
+    };
+    if !doc.is_object() {
+        return Err(format!(
+            "{} does not hold a JSON object — refusing to rewrite it",
+            path.display()
+        )
+        .into());
+    }
+    #[cfg(unix)]
+    let prior_mode = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(&path)
+            .ok()
+            .map(|m| m.permissions().mode())
+    };
+    if let JsonValue::Object(o) = &mut doc {
+        match account {
+            Some(a) => {
+                o.insert("oauthAccount".into(), a.clone());
+            }
+            None => {
+                o.remove("oauthAccount");
+            }
+        }
+    }
+    atomic_write_0600(&path, serde_json::to_string(&doc)?.as_bytes())?;
+    #[cfg(unix)]
+    if let Some(mode) = prior_mode {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode));
+    }
+    Ok(())
+}
+
+fn write_claude_oauth_account(account: &JsonValue) -> Result<(), Box<dyn Error>> {
+    update_claude_oauth_account(Some(account))
+}
+
+/// The identity a Claude snapshot payload keys on — same precedence as
+/// `read_claude_live` (`accountUuid` → email).
+fn claude_payload_id(payload: &JsonValue) -> Option<String> {
+    let account = payload.get("oauthAccount")?;
+    ["accountUuid", "emailAddress"]
+        .iter()
+        .find_map(|k| account.get(k).and_then(|v| v.as_str()))
+        .map(String::from)
+}
+
+/// POST the saved refresh_token to Claude's token endpoint and merge the
+/// refreshed tokens into the credential doc's `claudeAiOauth` block — the
+/// Claude mirror of `refresh_doc_tokens`. Endpoint + client_id + body shape
+/// per the official `refreshOAuthToken` (services/oauth/client.ts:146-169,
+/// constants/oauth.ts:91,99): plain JSON POST, 15s timeout, `scope` = the
+/// full claude.ai set when the snapshot is a claude.ai login (the backend
+/// allows scope expansion on refresh — official comment), else the
+/// snapshot's own scopes.
+///
+/// On success the doc is mutated: accessToken / refreshToken (the server
+/// ROTATES it; absent in the response = keep the old one, official default
+/// `refresh_token: newRefreshToken = refreshToken`) / `expiresAt` =
+/// now + expires_in seconds, in MILLIS (official `Date.now() + expiresIn *
+/// 1000`) / scopes reparsed. `subscriptionType` etc. stay untouched.
+/// On failure the doc is unchanged; 4xx-except-429 = AuthFailure.
+async fn refresh_claude_doc_tokens(doc: &mut JsonValue) -> Result<(), RefreshError> {
+    const CLAUDE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+    const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+    const CLAUDE_AI_OAUTH_SCOPES: &[&str] = &[
+        "user:profile",
+        "user:inference",
+        "user:sessions:claude_code",
+        "user:mcp_servers",
+        "user:file_upload",
+    ];
+
+    let oauth = doc
+        .get("claudeAiOauth")
+        .ok_or_else(|| RefreshError::Transient("No claudeAiOauth block in credential".into()))?;
+    let refresh_token = oauth
+        .get("refreshToken")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| RefreshError::Transient("No refreshToken in saved credential".into()))?
+        .to_string();
+    let stored_scopes: Vec<String> = oauth
+        .get("scopes")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    // `shouldUseClaudeAIAuth` = scopes include user:inference
+    // (services/oauth/client.ts:38); for those the official sends the full
+    // default set so scope expansion applies, otherwise the token's own.
+    let scope = if stored_scopes.iter().any(|s| s == "user:inference") || stored_scopes.is_empty() {
+        CLAUDE_AI_OAUTH_SCOPES.join(" ")
+    } else {
+        stored_scopes.join(" ")
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| RefreshError::Transient(e.to_string()))?;
+    let resp = client
+        .post(CLAUDE_TOKEN_URL)
+        .json(&json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": CLAUDE_CLIENT_ID,
+            "scope": scope,
+        }))
+        .send()
+        .await
+        .map_err(|e| RefreshError::Transient(e.to_string()))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let msg = serde_json::from_str::<JsonValue>(&body)
+            .ok()
+            .and_then(|v| {
+                v.get("error_description")
+                    .or_else(|| v.get("message"))
+                    .and_then(|m| m.as_str())
+                    .map(String::from)
+            })
+            .unwrap_or(body);
+        // Same split as the Codex arm: 4xx (except 429) = the refresh token
+        // is dead (revoked / rotated away) → permanent; else transient.
+        return if status.is_client_error() && status.as_u16() != 429 {
+            Err(RefreshError::AuthFailure(format!(
+                "Token refresh failed ({status}): {msg}"
+            )))
+        } else {
+            Err(RefreshError::Transient(format!(
+                "Token refresh failed ({status}): {msg}"
+            )))
+        };
+    }
+
+    let body: JsonValue = resp
+        .json()
+        .await
+        .map_err(|e| RefreshError::Transient(e.to_string()))?;
+    let access = body
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| RefreshError::Transient("Refresh response missing access_token".into()))?
+        .to_string();
+    let expires_in = body.get("expires_in").and_then(|v| v.as_i64());
+    let new_rt = body
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let new_scopes = body.get("scope").and_then(|v| v.as_str()).map(|s| {
+        JsonValue::Array(
+            s.split(' ')
+                .filter(|p| !p.is_empty())
+                .map(|p| JsonValue::String(p.into()))
+                .collect(),
+        )
+    });
+
+    if let Some(oauth) = doc.get_mut("claudeAiOauth").and_then(|v| v.as_object_mut()) {
+        oauth.insert("accessToken".into(), JsonValue::String(access));
+        if let Some(rt) = new_rt {
+            oauth.insert("refreshToken".into(), JsonValue::String(rt));
+        }
+        if let Some(secs) = expires_in {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            oauth.insert("expiresAt".into(), JsonValue::from(now_ms + secs * 1000));
+        }
+        if let Some(scopes) = new_scopes {
+            oauth.insert("scopes".into(), scopes);
+        }
+    }
+    Ok(())
+}
+
+/// Overwrite the STORED snapshot's credential payload for `id` (app claude).
+/// Called right after a successful refresh, BEFORE the live write: the
+/// refresh rotated the refresh_token server-side, so from that moment the
+/// in-memory doc holds the only working copy — parking it in the store first
+/// means a failed live write (fs error) loses nothing; the retry just works.
+fn persist_refreshed_claude_snapshot(id: &str, cred: &JsonValue) -> Result<(), Box<dyn Error>> {
+    let mut store = read_store()?;
+    if let Some(entry) = store
+        .iter_mut()
+        .find(|e| str_field(e, "app") == Some("claude") && str_field(e, "id") == Some(id))
+    {
+        if let Some(payload) = entry.get_mut("payload") {
+            payload["credentials"] = cred.clone();
+        }
+        write_store(store)?;
+    }
+    Ok(())
+}
+
+/// Restore a saved Claude snapshot: validate/refresh the tokens in memory
+/// first (mirrors `switch_codex` — an `AuthFailure` flags the entry
+/// `needsRelogin` and leaves the live credential untouched; a transient
+/// failure falls back to the snapshot as-is so an outage doesn't block
+/// switching), then write the credential (Keychain/file via `claude_auth`)
+/// and the matching `oauthAccount` identity.
+async fn switch_claude(payload: &JsonValue) -> Result<(), Box<dyn Error>> {
+    let credentials = payload
+        .get("credentials")
+        .filter(|v| v.is_object())
+        .ok_or("Saved Claude account has no credential payload")?;
+    let account = payload
+        .get("oauthAccount")
+        .filter(|v| v.is_object())
+        .ok_or("Saved Claude account has no oauthAccount payload")?;
+
+    // Fail fast on a locked Keychain BEFORE the refresh: refreshing rotates
+    // the snapshot's refresh_token server-side, so a refresh followed by an
+    // un-writable Keychain would burn the only working copy.
+    #[cfg(all(target_os = "macos", not(test)))]
+    if crate::claude_auth::keychain_locked() {
+        return Err(
+            "macOS keychain is locked — unlock it (open Keychain Access) and try again".into(),
+        );
+    }
+
+    // Re-snapshot the OUTGOING login first when it's already in the store:
+    // Claude rotates the refresh token on every refresh, so the entry saved
+    // days ago likely holds a dead RT — the live credential is the only copy
+    // that still works. Only refreshes an EXISTING entry (never adds one; an
+    // unsaved live login stays the user's explicit choice, guarded by the
+    // page's confirm warning / the tray's auto-save).
+    if let Ok(Some(live)) = read_claude_live() {
+        let store = read_store()?;
+        if store
+            .iter()
+            .any(|e| str_field(e, "id") == Some(live.id.as_str()))
+        {
+            save_claude_account()?;
+        }
+    }
+
+    let mut cred = credentials.clone();
+    match refresh_claude_doc_tokens(&mut cred).await {
+        Ok(()) => {
+            // Rotated tokens exist only in memory — park them in the store
+            // before anything else can fail.
+            if let Some(id) = claude_payload_id(payload) {
+                persist_refreshed_claude_snapshot(&id, &cred)?;
+            }
+        }
+        Err(RefreshError::AuthFailure(e)) => {
+            // The snapshot's refresh token is dead. Flag the entry HERE
+            // (unlike Codex, where the frontend flags): the frontend can't
+            // tell an auth failure from a write failure through the string
+            // Err, and flagging a locked-keychain victim would trap the row
+            // behind a disabled Switch button.
+            if let Some(id) = claude_payload_id(payload) {
+                let _ = mark_account_relogin(&id, true);
+            }
+            return Err(format!("Account needs re-login (refresh token revoked): {e}").into());
+        }
+        Err(RefreshError::Transient(_)) => {} // outage / rate-limit / no RT — proceed with snapshot
+    }
+
+    crate::claude_auth::write_credentials(&cred)?;
+    // Credential landed; a failure past this point leaves creds=B with
+    // identity=A on display. Surface it rather than pretending success.
+    write_claude_oauth_account(account)
+        .map_err(|e| format!("Credentials switched, but updating ~/.claude.json failed: {e}"))?;
+    // Upsert the snapshot so `savedAt` reflects this switch (mirrors
+    // switch_codex's tail).
+    save_claude_account()?;
+    Ok(())
+}
+
+/// Tauri-managed state allowing `cancel_claude_login` to abort an in-flight
+/// `login_and_save_claude_account` — the Claude sibling of `CodexLoginCancel`.
+pub struct ClaudeLoginCancel(pub std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>);
+
+/// Restore the pre-login Claude state after a failed / cancelled add-account
+/// flow. `None` originals mean "was absent" and clear the tier.
+fn restore_claude_auth(original_cred: Option<&JsonValue>, original_oauth: Option<&JsonValue>) {
+    match original_cred {
+        Some(doc) => {
+            if let Err(e) = crate::claude_auth::write_credentials(doc) {
+                log::error!("claude login rollback: restoring credentials failed: {e}");
+            }
+        }
+        None => {
+            let _ = crate::claude_auth::delete_credentials();
+        }
+    }
+    if let Err(e) = update_claude_oauth_account(original_oauth) {
+        log::error!("claude login rollback: restoring oauthAccount failed: {e}");
+    }
+}
+
+/// Add a Claude account — the same shape as `login_and_save_codex_account`:
+/// `claude auth login` is a HEADLESS subcommand (main.tsx:5747 →
+/// cli/handlers/auth.ts `authLogin`): it opens the browser, prints the
+/// fallback URL on STDOUT ("If the browser didn't open, visit: {url}"),
+/// captures the OAuth callback on a local server, installs the new
+/// credential + `oauthAccount` (`installOAuthTokens`), and EXITS. So the
+/// flow is: auto-save the live login → snapshot originals → spawn → wait
+/// (5-min timeout, cancellable) → save the new account → restore the
+/// previous one. Returns the new account's store id.
+///
+/// Unlike Codex there is NO pre-clear of the live credential:
+/// `installOAuthTokens` starts with `performLogout` (logout.tsx:20), which
+/// is PURELY LOCAL — `removeApiKey` + `secureStorage.delete()` + cache/
+/// config clears, no server-side token revocation — so saved snapshots'
+/// tokens survive the new login untouched (the pre-clear Codex needs to
+/// dodge its `logout_with_revoke` has nothing to dodge here). The rollback
+/// originals still matter: a login killed AFTER the exchange may have
+/// already wiped/replaced the local state.
+pub async fn login_and_save_claude_account(
+    app: tauri::AppHandle,
+    cancel_state: &ClaudeLoginCancel,
+) -> Result<String, String> {
+    // Fail fast on a locked Keychain — claude's own login and the restore
+    // both write it.
+    #[cfg(all(target_os = "macos", not(test)))]
+    if crate::claude_auth::keychain_locked() {
+        return Err(
+            "macOS keychain is locked — unlock it (open Keychain Access) and try again".into(),
+        );
+    }
+
+    // Reserve the cancel slot (also the re-entrancy guard); self-clears on
+    // every exit path via Drop.
+    let (_login_slot, cancel_notify) = LoginSlot::reserve(&cancel_state.0)?;
+
+    // Snapshot the live login UNCONDITIONALLY (its id is what gets restored
+    // afterwards) — `claude auth login` wipes local storage (`performLogout`)
+    // before installing the new one, and that wipe destroys the only FRESH
+    // copy of the outgoing tokens: Claude rotates the refresh token on every
+    // refresh, so an entry saved days ago holds a dead RT and the restore
+    // below would AuthFailure into needsRelogin. Same rule, same reason as
+    // `switch_claude`'s re-snapshot-outgoing step — an only-if-missing
+    // auto-save is NOT enough here.
+    let prev_active_id = match read_claude_live().map_err(|e| e.to_string())? {
+        Some(live) => {
+            save_claude_account().map_err(|e| e.to_string())?;
+            Some(live.id)
+        }
+        None => None,
+    };
+
+    // Originals for rollback (cancel / timeout / failure after the wipe).
+    let original_cred = crate::claude_auth::read_credentials();
+    let original_oauth = std::fs::read_to_string(claude_json_path().map_err(|e| e.to_string())?)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<JsonValue>(&raw).ok())
+        .and_then(|doc| doc.get("oauthAccount").cloned())
+        .filter(|v| v.is_object());
+
+    // Spawn `claude auth login`. Resolve the real binary via the same scan
+    // detection uses (a bare name misses `.cmd` shims on Windows — see the
+    // codex spawn above), PATH augmented so the shim finds its runtime.
+    let resolved = crate::providers::find_cli_binary("claude");
+    let program: std::ffi::OsString = resolved
+        .as_deref()
+        .map(|p| p.as_os_str().to_os_string())
+        .unwrap_or_else(|| "claude".into());
+    let mut cmd = tokio::process::Command::new(&program);
+    if let Some(path) = resolved
+        .as_deref()
+        .and_then(crate::providers::augmented_path_for)
+    {
+        cmd.env("PATH", path);
+    }
+    cmd.args(["auth", "login"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    cmd.creation_flags(crate::providers::CREATE_NO_WINDOW);
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                "claude is not installed or not in PATH".to_string()
+            } else {
+                format!("Failed to launch claude: {e}")
+            };
+            return Err(msg);
+        }
+    };
+
+    // stdout: the auth URL rides a "…visit: https://…" line
+    // (cli/handlers/auth.ts:199) — emit it as soon as it appears so the
+    // frontend can show the copyable-URL dialog without waiting.
+    let stdout_pipe = child.stdout.take().expect("stdout piped");
+    let app_clone = app.clone();
+    let stdout_task: tokio::task::JoinHandle<String> = tokio::spawn(async move {
+        use tauri::Emitter as _;
+        use tokio::io::AsyncBufReadExt as _;
+        let reader = tokio::io::BufReader::new(stdout_pipe);
+        let mut lines = reader.lines();
+        let mut collected = String::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let trimmed = line.trim();
+            if let Some(url) = trimmed
+                .split_once("visit:")
+                .map(|(_, rest)| rest.trim())
+                .filter(|u| u.starts_with("https://"))
+            {
+                let _ = app_clone.emit(CLAUDE_LOGIN_URL_EVENT, url.to_string());
+            }
+            if !collected.is_empty() {
+                collected.push('\n');
+            }
+            collected.push_str(trimmed);
+        }
+        collected
+    });
+    let stderr_pipe = child.stderr.take().expect("stderr piped");
+    let stderr_task: tokio::task::JoinHandle<String> = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt as _;
+        let mut buf = String::new();
+        let mut reader = stderr_pipe;
+        let _ = reader.read_to_string(&mut buf).await;
+        buf
+    });
+
+    // Wait up to 5 minutes for the browser roundtrip to complete.
+    let status = tokio::select! {
+        r = child.wait() => match r {
+            Ok(s) => s,
+            Err(e) => {
+                stdout_task.abort();
+                stderr_task.abort();
+                restore_claude_auth(original_cred.as_ref(), original_oauth.as_ref());
+                return Err(format!("claude auth login error: {e}"));
+            }
+        },
+        _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
+            let _ = child.kill().await;
+            stdout_task.abort();
+            stderr_task.abort();
+            restore_claude_auth(original_cred.as_ref(), original_oauth.as_ref());
+            return Err("claude login timed out after 5 minutes".into());
+        },
+        _ = cancel_notify.notified() => {
+            let _ = child.kill().await;
+            stdout_task.abort();
+            stderr_task.abort();
+            restore_claude_auth(original_cred.as_ref(), original_oauth.as_ref());
+            return Err("Login cancelled".into());
+        },
+    };
+
+    let stdout_msg = stdout_task.await.unwrap_or_default();
+    let stderr_msg = stderr_task.await.unwrap_or_default();
+
+    if !status.success() {
+        restore_claude_auth(original_cred.as_ref(), original_oauth.as_ref());
+        let detail = if stderr_msg.trim().is_empty() {
+            stdout_msg
+        } else {
+            stderr_msg
+        };
+        return Err(format!(
+            "claude auth login failed (exit {}): {}",
+            status.code().unwrap_or(-1),
+            detail.trim()
+        ));
+    }
+
+    // Save the new account (reads the fresh credential claude just wrote).
+    if let Err(e) = save_claude_account() {
+        restore_claude_auth(original_cred.as_ref(), original_oauth.as_ref());
+        return Err(format!("Login succeeded but could not save account: {e}"));
+    }
+
+    // Capture the new account's id before restoring the previous login.
+    let new_id = read_claude_live()
+        .ok()
+        .flatten()
+        .map(|live| live.id)
+        .unwrap_or_default();
+
+    // Restore the previously active account (same tail as the codex flow —
+    // the login process has exited, so nothing is running on the new login).
+    if let Some(prev_id) = prev_active_id {
+        if let Err(e) = switch_account(prev_id.clone()).await {
+            // Don't fail the overall operation — the new account was saved.
+            // NO unconditional needsRelogin here: `switch_claude` already
+            // flags the entry itself when the failure is an AuthFailure, and
+            // everything else (locked Keychain mid-flow, fs error) is a
+            // WRITE failure — flagging those would trap a healthy account
+            // behind a disabled Switch button (the same misdiagnosis rule
+            // as the frontend's per-app catch split).
+            log::warn!("Failed to restore previous claude account {prev_id}: {e}");
+        }
+    }
+
+    Ok(new_id)
+}
+
+/// Fire the cancel notify for an in-flight `login_and_save_claude_account`.
+pub async fn cancel_claude_login(cancel_state: &ClaudeLoginCancel) -> Result<(), String> {
+    let notify = cancel_state.0.lock().unwrap().take();
+    match notify {
+        Some(n) => {
+            n.notify_one();
+            Ok(())
+        }
+        None => Err("No claude login in progress".into()),
+    }
 }
 
 // ===================================================================
@@ -1161,7 +1924,10 @@ fn stable_hash(s: &str) -> u64 {
 /// Atomic temp+rename write with mode 0600 on Unix — credentials must not
 /// land world-readable. Mirrors `config::write_json_atomic_0600` but for
 /// raw bytes (the verbatim auth.json payload).
-fn atomic_write_0600(path: &std::path::Path, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
+pub(crate) fn atomic_write_0600(
+    path: &std::path::Path,
+    bytes: &[u8],
+) -> Result<(), Box<dyn Error>> {
     use std::io::Write;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1593,7 +2359,9 @@ mod tests {
 
         // The tray's unattended snapshot therefore has nothing to add.
         assert_eq!(
-            auto_save_unsaved_live_account().unwrap().as_deref(),
+            auto_save_unsaved_live_account(CliApp::Codex)
+                .unwrap()
+                .as_deref(),
             Some(before.accounts[0].id.as_str()),
         );
         assert_eq!(list_accounts(CliApp::Codex).unwrap().accounts.len(), 1);
@@ -1711,7 +2479,7 @@ mod tests {
         // so clear the store to exercise it).
         let payload_from_save = read_store().unwrap()[0]["payload"].clone();
         write_store(Vec::new()).unwrap();
-        auto_save_unsaved_live_account().unwrap();
+        auto_save_unsaved_live_account(CliApp::Codex).unwrap();
         let payload_from_auto_save = read_store().unwrap()[0]["payload"].clone();
 
         for (label, payload) in [
@@ -1930,5 +2698,290 @@ mod tests {
                 .needs_relogin,
             "flag should be cleared"
         );
+    }
+
+    // ================================================================
+    // Claude
+    // ================================================================
+    //
+    // In test builds `claude_auth` is file-only (the Keychain tier is
+    // compiled out — see that module), so these exercise the full
+    // save/switch flow against `.credentials.json` + `~/.claude.json`
+    // under an overridden HOME. That covers every OS's file path and the
+    // whole accounts layer; the macOS Keychain read/write itself is the
+    // one seam left to real-machine verification.
+
+    /// Write a Claude login: the credential file plus the `oauthAccount`
+    /// identity in `~/.claude.json` (which also carries unrelated keys the
+    /// switch must preserve).
+    fn write_claude_login(home: &Path, token: &str, uuid: &str, email: &str, name: &str) {
+        // Deliberately NO refreshToken: the switch's refresh attempt then
+        // short-circuits as Transient and proceeds offline — the same trick
+        // `write_codex_auth` uses to keep the roundtrip tests network-free.
+        let cred = json!({
+            "claudeAiOauth": {
+                "accessToken": token,
+                "expiresAt": 1_800_000_000_000_i64,
+                "scopes": ["user:inference"],
+                "subscriptionType": "max",
+            }
+        });
+        let dir = home.join(".claude");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".credentials.json"), cred.to_string()).unwrap();
+
+        let claude_json = json!({
+            "firstStartTime": "2026-01-01T00:00:00Z",
+            "projects": { "/Users/me/proj": { "allowedTools": [] } },
+            "oauthAccount": {
+                "accountUuid": uuid,
+                "emailAddress": email,
+                "displayName": name,
+                "organizationUuid": "org-1",
+            },
+        });
+        std::fs::write(home.join(".claude.json"), claude_json.to_string()).unwrap();
+    }
+
+    #[test]
+    fn claude_live_reads_identity_and_requires_oauth_account() {
+        let _g = lock_home();
+        let tmp = tempdir("claude-live");
+        let _h = override_home(&tmp);
+        let _cfg = EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
+
+        // No login at all → None, and save errors.
+        assert!(read_claude_live().unwrap().is_none());
+        assert!(save_claude_account().is_err());
+
+        write_claude_login(&tmp, "at-1", "uuid-a", "a@example.com", "Alice");
+        let live = read_claude_live().unwrap().expect("live login");
+        assert_eq!(live.id, "uuid-a");
+        assert_eq!(live.email.as_deref(), Some("a@example.com"));
+        assert_eq!(live.name.as_deref(), Some("Alice"));
+        assert_eq!(live.plan.as_deref(), Some("Max"));
+
+        // Credential present but identity gone (no oauthAccount) → not
+        // listable/savable: the id would have no stable source.
+        std::fs::write(tmp.join(".claude.json"), "{}").unwrap();
+        assert!(read_claude_live().unwrap().is_none());
+        assert!(save_claude_account().is_err());
+    }
+
+    #[tokio::test]
+    async fn claude_save_switch_roundtrip_restores_credentials_and_identity() {
+        let _g = lock_home();
+        let tmp = tempdir("claude-roundtrip");
+        let _h = override_home(&tmp);
+        let _cfg = EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
+
+        // Login A, save. Capture A's on-disk shapes for the final compare.
+        write_claude_login(&tmp, "at-a", "uuid-a", "a@example.com", "Alice");
+        save_current_account(CliApp::Claude).unwrap();
+        let cred_a = std::fs::read_to_string(tmp.join(".claude/.credentials.json")).unwrap();
+
+        // Login B (simulates `claude /login` with another account), save.
+        write_claude_login(&tmp, "at-b", "uuid-b", "b@example.com", "Bob");
+        save_current_account(CliApp::Claude).unwrap();
+
+        let state = list_accounts(CliApp::Claude).unwrap();
+        assert_eq!(state.accounts.len(), 2);
+        assert!(
+            state
+                .accounts
+                .iter()
+                .any(|a| a.id == "uuid-b" && a.active && a.plan.as_deref() == Some("Max")),
+            "B is the live login"
+        );
+        assert!(state.current.as_ref().unwrap().saved);
+
+        // Switch back to A.
+        switch_account("uuid-a".into()).await.unwrap();
+
+        // Credential restored byte-equivalent at the JSON level.
+        let cred_now: JsonValue = serde_json::from_str(
+            &std::fs::read_to_string(tmp.join(".claude/.credentials.json")).unwrap(),
+        )
+        .unwrap();
+        let cred_a: JsonValue = serde_json::from_str(&cred_a).unwrap();
+        assert_eq!(cred_now, cred_a, "A's credential document restored");
+
+        // Identity followed, and the unrelated ~/.claude.json keys survived.
+        let cj: JsonValue =
+            serde_json::from_str(&std::fs::read_to_string(tmp.join(".claude.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            cj.pointer("/oauthAccount/emailAddress")
+                .and_then(|v| v.as_str()),
+            Some("a@example.com")
+        );
+        assert_eq!(
+            cj.pointer("/oauthAccount/displayName")
+                .and_then(|v| v.as_str()),
+            Some("Alice")
+        );
+        assert_eq!(
+            cj.pointer("/firstStartTime").and_then(|v| v.as_str()),
+            Some("2026-01-01T00:00:00Z"),
+            "unrelated top-level keys must be preserved"
+        );
+        assert!(
+            cj.pointer("/projects/~1Users~1me~1proj").is_some(),
+            "projects map must be preserved"
+        );
+
+        let state = list_accounts(CliApp::Claude).unwrap();
+        assert!(
+            state.accounts.iter().any(|a| a.id == "uuid-a" && a.active),
+            "A is active after the switch"
+        );
+    }
+
+    /// The outgoing login's snapshot is refreshed before the overwrite:
+    /// Claude rotates the refresh token, so the store's copy from save time
+    /// may be dead while the live file holds the only working one.
+    #[tokio::test]
+    async fn claude_switch_resnapshots_the_outgoing_login_first() {
+        let _g = lock_home();
+        let tmp = tempdir("claude-resnap");
+        let _h = override_home(&tmp);
+        let _cfg = EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
+
+        // A saved, then B saved while B is live.
+        write_claude_login(&tmp, "at-a", "uuid-a", "a@example.com", "Alice");
+        save_current_account(CliApp::Claude).unwrap();
+        write_claude_login(&tmp, "at-b-old", "uuid-b", "b@example.com", "Bob");
+        save_current_account(CliApp::Claude).unwrap();
+
+        // Claude itself refreshes B's tokens after our save — the live file
+        // moves ahead of the snapshot.
+        write_claude_login(&tmp, "at-b-fresh", "uuid-b", "b@example.com", "Bob");
+
+        switch_account("uuid-a".into()).await.unwrap();
+
+        let store = read_store().unwrap();
+        let b = store
+            .iter()
+            .find(|e| str_field(e, "id") == Some("uuid-b"))
+            .expect("B still in store");
+        assert_eq!(
+            b.pointer("/payload/credentials/claudeAiOauth/accessToken")
+                .and_then(|v| v.as_str()),
+            Some("at-b-fresh"),
+            "B's snapshot must hold the live (freshest) tokens, not the save-time ones"
+        );
+    }
+
+    /// The login-cancel slot doubles as the backend re-entrancy guard, and
+    /// its Drop-based clear is what keeps an early-exit path (the codex
+    /// flow's spawn failure used to leak it) from blocking every future
+    /// login.
+    #[test]
+    fn login_slot_blocks_reentry_and_clears_on_drop() {
+        let slot: std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Notify>>> =
+            std::sync::Mutex::new(None);
+        let (guard, _notify) = LoginSlot::reserve(&slot).expect("first reserve");
+        assert!(slot.lock().unwrap().is_some(), "slot reserved");
+        assert!(
+            LoginSlot::reserve(&slot).is_err(),
+            "a second concurrent login must be refused"
+        );
+        drop(guard);
+        assert!(slot.lock().unwrap().is_none(), "drop must clear the slot");
+        let (_g, _n) = LoginSlot::reserve(&slot).expect("cleared slot accepts a new login");
+    }
+
+    /// A corrupt (or mid-write) `~/.claude.json` must ABORT the identity
+    /// write, never degrade to an empty doc — writing that back would
+    /// truncate Claude's whole global config to just `oauthAccount` (the
+    /// same never-truncate rule as `claude_desktop::read_json_or_empty`).
+    #[test]
+    fn claude_json_rewrite_refuses_a_corrupt_file() {
+        let _g = lock_home();
+        let tmp = tempdir("claude-corrupt-cj");
+        let _h = override_home(&tmp);
+        let _cfg = EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
+
+        let path = tmp.join(".claude.json");
+        // A torn write: valid prefix, truncated mid-object.
+        std::fs::write(&path, r#"{"projects": {"/a": {"allowed"#).unwrap();
+        let account = json!({ "accountUuid": "u", "emailAddress": "a@b.c" });
+        let err = update_claude_oauth_account(Some(&account))
+            .expect_err("corrupt file must refuse the rewrite");
+        assert!(
+            err.to_string().contains("refusing"),
+            "actionable message, got: {err}"
+        );
+        // And a non-object document refuses too.
+        std::fs::write(&path, "[1,2,3]").unwrap();
+        assert!(update_claude_oauth_account(Some(&account)).is_err());
+        // The file is untouched in both cases.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[1,2,3]");
+    }
+
+    /// `~/.claude.json` resolution follows the official `getGlobalClaudeFile`
+    /// (env.ts:14-26): `<config-dir>/.config.json` wins when present, else
+    /// `$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`.
+    #[test]
+    fn claude_json_path_honors_config_dir_and_legacy_file() {
+        let _g = lock_home();
+        let tmp = tempdir("claude-cj-path");
+        let _h = override_home(&tmp);
+        {
+            let _cfg = EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
+            assert_eq!(claude_json_path().unwrap(), tmp.join(".claude.json"));
+        }
+        let custom = tmp.join("custom-cc");
+        std::fs::create_dir_all(&custom).unwrap();
+        let _cfg = EnvVarGuard::set("CLAUDE_CONFIG_DIR", &custom);
+        assert_eq!(claude_json_path().unwrap(), custom.join(".claude.json"));
+        // Legacy .config.json inside the config dir takes precedence.
+        std::fs::write(custom.join(".config.json"), "{}").unwrap();
+        assert_eq!(claude_json_path().unwrap(), custom.join(".config.json"));
+    }
+
+    /// The add-account flow's logout + rollback rides on
+    /// `update_claude_oauth_account(None)` — pin its two contracts: removing
+    /// ONLY the key (other keys survive), and not minting a `{}` config
+    /// where none existed.
+    #[test]
+    fn claude_oauth_account_clear_is_narrow_and_no_ops_on_missing_file() {
+        let _g = lock_home();
+        let tmp = tempdir("claude-oauth-clear");
+        let _h = override_home(&tmp);
+        let _cfg = EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
+
+        // Missing file + None → no file appears.
+        update_claude_oauth_account(None).unwrap();
+        assert!(!tmp.join(".claude.json").exists());
+
+        write_claude_login(&tmp, "at-a", "uuid-a", "a@example.com", "Alice");
+        update_claude_oauth_account(None).unwrap();
+        let cj: JsonValue =
+            serde_json::from_str(&std::fs::read_to_string(tmp.join(".claude.json")).unwrap())
+                .unwrap();
+        assert!(cj.get("oauthAccount").is_none(), "key removed");
+        assert!(
+            cj.get("firstStartTime").is_some() && cj.get("projects").is_some(),
+            "unrelated keys survive the clear"
+        );
+    }
+
+    #[test]
+    fn tray_accounts_includes_claude_rows() {
+        let _g = lock_home();
+        let tmp = tempdir("claude-tray");
+        let _h = override_home(&tmp);
+        let _cfg = EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
+
+        write_claude_login(&tmp, "at-a", "uuid-a", "a@example.com", "Alice");
+        save_current_account(CliApp::Claude).unwrap();
+
+        let rows = tray_accounts(CliApp::Claude);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "Alice · a@example.com");
+        assert!(rows[0].active);
+        // Display-only apps still contribute no rows.
+        assert!(tray_accounts(CliApp::Gemini).is_empty());
     }
 }

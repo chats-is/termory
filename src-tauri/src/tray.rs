@@ -629,38 +629,44 @@ fn settle_account_change(app: &AppHandle, cli: CliApp) {
     }
 }
 
-/// Restore a saved official login (Codex) from the tray. Async because
-/// `switch_account` refreshes the tokens over the network BEFORE writing
-/// auth.json — a failure leaves the live credential untouched, and we then
-/// mirror the Providers page by flagging the entry as needing re-login (its
-/// refresh token was revoked), which renders as the ⚠ suffix on the next build.
+/// Restore a saved official login (Codex / Claude) from the tray. Async
+/// because a switch can do network work before writing (Codex refreshes the
+/// tokens first) — a failure leaves the live credential untouched, and for
+/// Codex we then mirror the Providers page by flagging the entry as needing
+/// re-login (its refresh token was revoked), which renders as the ⚠ suffix on
+/// the next build. Claude switches don't validate tokens (the CLI refreshes
+/// natively on next launch), so a failure there is a WRITE error — flagging
+/// it as a token problem would misdiagnose, so only Codex flags.
 ///
 /// On success the quota belongs to a DIFFERENT account, so force a refetch:
 /// that also emits `quota-changed`, which an open Providers page already
 /// listens to for reloading its account list — no extra event needed.
-fn spawn_account_switch(app: &AppHandle, id: String) {
+fn spawn_account_switch(app: &AppHandle, cli: CliApp, id: String) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        // Switching OVERWRITES auth.json, so a live login that was never
-        // snapshotted would be gone for good. The Providers page guards this by
-        // warning in its confirm dialog ("the current login isn't saved") — a
-        // native menu row has no dialog to warn in, so snapshot it instead: the
-        // account stays recoverable either way, which is what the warning is
-        // for. Idempotent, and the same call the `codex login` flow makes.
-        if let Err(err) = crate::accounts::auto_save_unsaved_live_account() {
+        // Switching OVERWRITES the live credential, so a live login that was
+        // never snapshotted would be gone for good. The Providers page guards
+        // this by warning in its confirm dialog ("the current login isn't
+        // saved") — a native menu row has no dialog to warn in, so snapshot it
+        // instead: the account stays recoverable either way, which is what the
+        // warning is for. Idempotent, and the same call the `codex login` flow
+        // makes.
+        if let Err(err) = crate::accounts::auto_save_unsaved_live_account(cli) {
             log::warn!("tray account switch: snapshotting the live login failed: {err}");
         }
         match crate::accounts::switch_account(id.clone()).await {
             Ok(()) => {
                 let _ = crate::accounts::mark_account_relogin(&id, false);
-                settle_account_change(&handle, CliApp::Codex);
-                force_quota_refresh(&handle, CliApp::Codex);
+                settle_account_change(&handle, cli);
+                force_quota_refresh(&handle, cli);
             }
             Err(err) => {
                 log::error!("tray account switch failed for {id}: {err}");
-                let _ = crate::accounts::mark_account_relogin(&id, true);
-                // The failure only flags the entry — auth.json was left
-                // untouched, so nothing but the account row can have moved.
+                if cli == CliApp::Codex {
+                    let _ = crate::accounts::mark_account_relogin(&id, true);
+                }
+                // The failure only flags the entry — the live credential was
+                // left untouched, so nothing but the account row can have moved.
                 refresh_accounts(&handle);
             }
         }
@@ -2099,7 +2105,7 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
                 .iter()
                 .any(|a| a.id == id && a.active);
             if !already_live {
-                spawn_account_switch(app, id.to_string());
+                spawn_account_switch(app, cli, id.to_string());
             }
         }
         return;

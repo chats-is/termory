@@ -350,8 +350,11 @@ export function ProvidersPage({
   // Codex "Add account" — state lives here so the button can live in the card.
   const [codexLoggingIn, setCodexLoggingIn] = React.useState(false);
   const [codexAccountTrigger, setCodexAccountTrigger] = React.useState(0);
+  const [claudeLoggingIn, setClaudeLoggingIn] = React.useState(false);
+  const [claudeAccountTrigger, setClaudeAccountTrigger] = React.useState(0);
   const [activeReloginId, setActiveReloginId] = React.useState<string | null>(null);
   const [codexLoginUrl, setCodexLoginUrl] = React.useState<string | null>(null);
+  const [claudeLoginUrl, setClaudeLoginUrl] = React.useState<string | null>(null);
   const [codexLoginUrlCopied, setCodexLoginUrlCopied] = React.useState(false);
   // When set, the switch-time Codex "bring sessions along?" picker is open.
   // The prompt appears BEFORE activation; `activate` runs only after the user
@@ -1307,7 +1310,9 @@ export function ProvidersPage({
   // "Re-login" (reloginId=the saved account's id). Mutual exclusion is
   // enforced by the codexLoggingIn guard so both buttons share one lock.
   const handleCodexLogin = async (reloginId?: string) => {
-    if (codexLoggingIn) return;
+    // Guard against BOTH flows: the shared login-URL dialog and the shared
+    // activeReloginId assume one login at a time across CLIs.
+    if (codexLoggingIn || claudeLoggingIn) return;
     // Login spawns a codex binary (standalone CLI or the desktop app's
     // bundled copy) — bail only when neither exists.
     if (codexCliMissing) {
@@ -1337,6 +1342,39 @@ export function ProvidersPage({
       setCodexLoginUrl(null);
       setCodexLoginUrlCopied(false);
       setCodexAccountTrigger((n) => n + 1);
+      void refreshActive();
+    }
+  };
+
+  // Claude's twin of handleCodexLogin — same headless flow: the backend
+  // spawns `claude auth login` (browser roundtrip), emits the fallback URL,
+  // saves the new login and restores the previous one. No missing-CLI case:
+  // the tab shows the InstallGuide instead when claude isn't installed.
+  const handleClaudeLogin = async (reloginId?: string) => {
+    if (claudeLoggingIn || codexLoggingIn) return;
+    setClaudeLoggingIn(true);
+    setActiveReloginId(reloginId ?? null);
+    setClaudeLoginUrl(null);
+    setCodexLoginUrlCopied(false);
+    const unlisten = await listen<string>("claude:login-url", (event) => {
+      setClaudeLoginUrl(event.payload);
+    });
+    try {
+      await invoke<string>("login_and_save_claude_account");
+      toast.success(t("toast.accountAdded"));
+      void refreshQuota("claude", true);
+    } catch (err) {
+      const msg = String(err);
+      if (!msg.includes("Login cancelled")) {
+        toast.error(msg);
+      }
+    } finally {
+      unlisten();
+      setClaudeLoggingIn(false);
+      setActiveReloginId(null);
+      setClaudeLoginUrl(null);
+      setCodexLoginUrlCopied(false);
+      setClaudeAccountTrigger((n) => n + 1);
       void refreshActive();
     }
   };
@@ -1527,6 +1565,32 @@ export function ProvidersPage({
                           {t("providers.accountAdd")}
                         </Button>
                       )
+                    ) : app === "claude" ? (
+                      claudeLoggingIn ? (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <Loader2 className="size-4 animate-spin text-muted-foreground" />
+                          <span className="text-sm text-muted-foreground">{t("providers.accountAdding")}</span>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void invoke("cancel_claude_login")}
+                          >
+                            {t("common.cancel")}
+                          </Button>
+                        </div>
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void handleClaudeLogin()}
+                          className="shrink-0 gap-1.5"
+                        >
+                          <UserPlus className="size-4" />
+                          {t("providers.accountAdd")}
+                        </Button>
+                      )
                     ) : undefined}
                     onSetDefault={() => void setOfficialAsDefault()}
                   />
@@ -1546,10 +1610,30 @@ export function ProvidersPage({
                         ? () => void refreshQuota(app, true)
                         : undefined
                     }
-                    externalTrigger={app === "codex" ? codexAccountTrigger : undefined}
-                    loginInProgress={app === "codex" ? codexLoggingIn : undefined}
-                    activeReloginId={app === "codex" ? activeReloginId : undefined}
-                    onRelogin={app === "codex" ? (id) => void handleCodexLogin(id) : undefined}
+                    externalTrigger={
+                      app === "codex"
+                        ? codexAccountTrigger
+                        : app === "claude"
+                          ? claudeAccountTrigger
+                          : undefined
+                    }
+                    loginInProgress={
+                      app === "codex"
+                        ? codexLoggingIn
+                        : app === "claude"
+                          ? claudeLoggingIn
+                          : undefined
+                    }
+                    activeReloginId={
+                      app === "codex" || app === "claude" ? activeReloginId : undefined
+                    }
+                    onRelogin={
+                      app === "codex"
+                        ? (id) => void handleCodexLogin(id)
+                        : app === "claude"
+                          ? (id) => void handleClaudeLogin(id)
+                          : undefined
+                    }
                     reloginUnavailable={app === "codex" ? codexCliMissing : undefined}
                   />
                 )}
@@ -1639,53 +1723,68 @@ export function ProvidersPage({
         onClose={() => setFollowTarget(null)}
       />
 
-      {/* Codex login URL dialog — shown while codex login is in progress and the auth URL has been emitted */}
-      <Dialog open={codexLoginUrl !== null} onOpenChange={(open) => { if (!open) setCodexLoginUrl(null); }}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>{t("providers.codexLoginDialogTitle")}</DialogTitle>
-            <DialogDescription>{t("providers.codexLoginDialogDesc")}</DialogDescription>
-          </DialogHeader>
-          <div className="relative rounded-md border bg-muted/50 px-3 py-2 pr-10">
-            <span className="break-all font-mono text-xs select-all">
-              {codexLoginUrl}
-            </span>
-            <Tooltip>
-              <TooltipTrigger asChild>
+      {/* Login URL dialog — shown while a codex/claude account login is in
+          progress and its auth URL has been emitted. One dialog, two
+          sources: only one login can run at a time (each handler guards on
+          its own loggingIn flag and the buttons live on different tabs). */}
+      {(() => {
+        const loginUrl = codexLoginUrl ?? claudeLoginUrl;
+        const isCodexLogin = codexLoginUrl !== null;
+        const closeLoginUrl = () =>
+          isCodexLogin ? setCodexLoginUrl(null) : setClaudeLoginUrl(null);
+        return (
+          <Dialog open={loginUrl !== null} onOpenChange={(open) => { if (!open) closeLoginUrl(); }}>
+            <DialogContent className="max-w-md">
+              <DialogHeader>
+                <DialogTitle>
+                  {t(isCodexLogin ? "providers.codexLoginDialogTitle" : "providers.claudeLoginDialogTitle")}
+                </DialogTitle>
+                <DialogDescription>{t("providers.codexLoginDialogDesc")}</DialogDescription>
+              </DialogHeader>
+              <div className="relative rounded-md border bg-muted/50 px-3 py-2 pr-10">
+                <span className="break-all font-mono text-xs select-all">
+                  {loginUrl}
+                </span>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      className="absolute right-1 top-1"
+                      aria-label={t("common.copy")}
+                      onClick={() => {
+                        if (loginUrl) {
+                          void navigator.clipboard.writeText(loginUrl).then(() => {
+                            setCodexLoginUrlCopied(true);
+                            setTimeout(() => setCodexLoginUrlCopied(false), 1500);
+                          });
+                        }
+                      }}
+                    >
+                      {codexLoginUrlCopied ? <Check className="size-4" /> : <Copy className="size-4" />}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">{t("common.copy")}</TooltipContent>
+                </Tooltip>
+              </div>
+              <DialogFooter className="flex-row items-center gap-3">
+                <p className="flex-1 text-xs text-muted-foreground">{t("providers.codexLoginDialogWaiting")}</p>
                 <Button
                   type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  className="absolute right-1 top-1"
-                  aria-label={t("common.copy")}
-                  onClick={() => {
-                    if (codexLoginUrl) {
-                      void navigator.clipboard.writeText(codexLoginUrl).then(() => {
-                        setCodexLoginUrlCopied(true);
-                        setTimeout(() => setCodexLoginUrlCopied(false), 1500);
-                      });
-                    }
-                  }}
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    void invoke(isCodexLogin ? "cancel_codex_login" : "cancel_claude_login")
+                  }
                 >
-                  {codexLoginUrlCopied ? <Check className="size-4" /> : <Copy className="size-4" />}
+                  {t("common.cancel")}
                 </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top">{t("common.copy")}</TooltipContent>
-            </Tooltip>
-          </div>
-          <DialogFooter className="flex-row items-center gap-3">
-            <p className="flex-1 text-xs text-muted-foreground">{t("providers.codexLoginDialogWaiting")}</p>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => void invoke("cancel_codex_login")}
-            >
-              {t("common.cancel")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        );
+      })()}
     </div>
   );
 }

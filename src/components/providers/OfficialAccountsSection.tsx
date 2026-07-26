@@ -19,7 +19,7 @@ import {
   TooltipContent,
   TooltipTrigger
 } from "@/components/ui/tooltip";
-import { QUOTA_CHANGED_EVENT } from "@/constants";
+import { CLI_APP_LABEL, QUOTA_CHANGED_EVENT } from "@/constants";
 import { formatCountdown, formatCurrency, formatResetTime } from "@/lib/format";
 import { quotaLevel, type QuotaLevel } from "@/lib/quota-utils";
 import { cn } from "@/lib/utils";
@@ -456,7 +456,12 @@ export function OfficialAccountsSection({
   const current: CurrentAccount | null = state?.current ?? null;
   const accounts = state?.accounts ?? [];
 
-  const isManaged = app === "codex";
+  // Full snapshot management (save / switch / delete). Codex + Claude; the
+  // "Add account" (spawn `codex login`) and re-login flows stay Codex-only —
+  // their props are only passed for codex, so the buttons simply don't render
+  // elsewhere. A second Claude account is added by logging in via the CLI and
+  // saving here (the unsaved-current row's save button).
+  const isManaged = app === "codex" || app === "claude";
 
   // Nothing to show until state loads; for display-only apps also bail out
   // when there is no current account.
@@ -481,8 +486,16 @@ export function OfficialAccountsSection({
       current && !current.saved
         ? `\n\n${t("providers.accountSwitchWarnUnsaved")}`
         : "";
+    // A RUNNING claude holds ~/.claude.json in memory and writes the whole
+    // document back on any config change — its stale `oauthAccount` would
+    // silently undo the identity half of the switch (and later snapshots
+    // would then pair the new credentials with the old identity). There is
+    // no lock to detect it by (unlike the sqlite CLIs' `map_db_locked`), so
+    // the confirm carries the hint instead.
+    const quitHint =
+      app === "claude" ? `\n\n${t("providers.accountSwitchQuitClaudeHint")}` : "";
     const ok = await ask(
-      `${t("providers.accountSwitchConfirm", { name: account.name })}${warn}`,
+      `${t("providers.accountSwitchConfirm", { name: account.name, cli: CLI_APP_LABEL[app] })}${warn}${quitHint}`,
       { title: t("providers.accountSwitchTitle"), kind: "warning" }
     );
     if (!ok) return;
@@ -494,8 +507,17 @@ export function OfficialAccountsSection({
       await reload();
       onSwitched?.();
     } catch (err) {
-      await invoke("mark_account_relogin", { id: account.id, needed: true }).catch(() => {});
-      toast.warning(t("toast.accountTokenExpired"));
+      if (app === "codex") {
+        // Codex validates the tokens over the network before writing, so a
+        // failure means the snapshot's refresh token is dead → flag it.
+        await invoke("mark_account_relogin", { id: account.id, needed: true }).catch(() => {});
+        toast.warning(t("toast.accountTokenExpired"));
+      } else {
+        // Claude doesn't validate at switch time — a failure here is a WRITE
+        // error (locked Keychain, fs), not a token problem; flagging the
+        // account as needs-relogin would misdiagnose it.
+        toast.error(String(err));
+      }
       await reload();
     } finally {
       setBusy(null);
@@ -538,7 +560,7 @@ export function OfficialAccountsSection({
     if (current && !current.saved) {
       rows.push({
         key: "__current__",
-        name: current.name ?? current.email ?? "Codex",
+        name: current.name ?? current.email ?? CLI_APP_LABEL[app],
         email: current.email,
         plan: current.plan,
         active: true,

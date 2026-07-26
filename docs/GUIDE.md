@@ -10,7 +10,7 @@ Termory has six destinations on the left activity rail (`⌘1`–`⌘6`), plus a
 
 | # | Destination | What it does |
 |---|-------------|--------------|
-| 1 | **[Providers](#1-providers)** | Manage each CLI's API providers and switch the active one; manage AI Gateways; view official quota; save and switch Codex accounts. |
+| 1 | **[Providers](#1-providers)** | Manage each CLI's API providers and switch the active one; manage AI Gateways; view official quota; save and switch Codex / Claude Code accounts. |
 | 2 | **[Records](#2-records)** | Browse every session, memory file, and skill; resume, migrate, or delete them. |
 | 3 | **[Favorites](#3-favorites)** | Messages you've starred, saved as snapshots. |
 | 4 | **[Search](#4-search)** | Full-text search across all history, plus a `⌘K` quick-search palette. |
@@ -178,13 +178,15 @@ For a CLI logged in with an official subscription, the card shows your usage as 
 
 When pay-as-you-go **Usage credits** are enabled on the account (Claude's overflow after you hit a plan limit, or grok on-demand credits), the card adds a **Usage credits** ring showing how much of the spending limit you've used (e.g. `$19.44 / $50.00`). Only the fields the official usage endpoint exposes are shown — the account's promotional-credit balance and auto-reload setting live behind the web billing login and aren't available to the CLI token.
 
-### Official accounts (Codex multi-account)
+### Official accounts (Codex & Claude Code multi-account)
 
-On the **Codex** tab, the Official card also manages multiple ChatGPT logins. **Save current** snapshots the live login; **Add account** starts a fresh `codex login` in your browser (cancellable — if you cancel or it fails, your previous login is restored). This works with just the desktop app installed too — Termory runs the CLI bundled inside the app for the login. Each saved row shows the account's email, plan, and when its tokens were last refreshed. **Switch** restores a snapshot — Termory refreshes its tokens first, and an account whose login has expired is flagged **Re-login** instead of being written broken. Snapshots live in `~/.termory/accounts.json` (owner-only file permissions); Codex's own `auth.json` is only touched when you switch or add.
+On the **Codex** and **Claude Code** tabs, the Official card also manages multiple logins. **Save current** snapshots the live login; **Add account** starts a fresh login in your browser (`codex login` / `claude auth login` — cancellable, and if you cancel or it fails, your previous login is restored). For Codex this works with just the desktop app installed too — Termory runs the CLI bundled inside the app for the login. Each saved row shows the account's email, plan, and when its tokens were last refreshed. **Switch** restores a snapshot — Termory refreshes its tokens first, and an account whose login has expired is flagged **Re-login** instead of being written broken. Snapshots live in `~/.termory/accounts.json` (owner-only file permissions); the CLI's own credential store is only touched when you switch or add.
 
-Accounts and providers are independent, even though Codex keeps both in the same file: switching accounts changes only which ChatGPT login is active, and never the provider you have selected or its API key. Saving an account records the login alone — a third-party key is never copied into a snapshot, so restoring one later can't bring someone else's key back. This holds the same way whether you switch from the app or the menu bar.
+Claude Code keeps its credential in the macOS Keychain (with `.credentials.json` as the fallback, and the only store on Linux / Windows). Termory reads and writes it through the same `security` command Claude itself uses, so no authorization prompt appears. One practical note: quit any running `claude` sessions before switching — a running instance keeps its config in memory and can write the old identity back over the switch.
 
-For **Claude Code** and **Gemini** the card just shows which official account is currently logged in — saving and switching is Codex-only.
+Accounts and providers are independent, even for Codex, which keeps both in the same file: switching accounts changes only which official login is active, and never the provider you have selected or its API key. Saving an account records the login alone — a third-party key is never copied into a snapshot, so restoring one later can't bring someone else's key back. This holds the same way whether you switch from the app or the menu bar.
+
+For **Gemini** and **Grok Build** the card just shows which official account is currently logged in — saving and switching covers Codex and Claude Code.
 
 ---
 
@@ -308,7 +310,7 @@ The tray lets you act without opening the window:
 - **Recent sessions** — up to 5 most recent; click to resume in your terminal. A Claude session that's currently running shows its live status next to the title (**· Working** / **· Needs input**).
 - **New Session** — open a CLI fresh in a recent project folder, or pick a new folder (**Choose Folder…**).
 - **Per-CLI submenus** — switch each CLI's active provider; the official quota shows inline (🟢/🟡/🔴 by pressure) while Official is the active choice.
-- **Codex accounts** — your saved ChatGPT logins sit right under **Official** in the Codex submenu; click one to switch. The live one is checkmarked, and a login whose tokens expired shows **⚠** and can't be picked — re-authenticate on the Providers page first. Switching from here snapshots the current login first, so nothing is lost even if you never pressed **Save current**.
+- **Codex / Claude Code accounts** — your saved logins sit right under **Official** in that CLI's submenu; click one to switch. The live one is checkmarked, and a login whose tokens expired shows **⚠** and can't be picked — re-authenticate on the Providers page first. Switching from here snapshots the current login first, so nothing is lost even if you never pressed **Save current**.
 - Switching **Codex** between Official and a third-party provider needs the "which projects should follow?" question, which a menu can't ask — so Termory opens the window for it. Turn on **Settings → Provider switching → Keep all sessions on a Codex switch** and it finishes in the menu bar instead.
 
 Closing the window doesn't quit Termory — it keeps running in the tray. Use **Open** to bring the window back, **Exit** to quit fully.

@@ -234,63 +234,19 @@ type Credential = (
     Option<String>,
 );
 
-/// Claude Code's config dir — `sessions::claude_config_root` (the
-/// scanners' single source: `CLAUDE_CONFIG_DIR`, else `~/.claude`).
-fn claude_config_dir() -> Option<PathBuf> {
-    crate::home_dir().map(|h| crate::sessions::claude_config_root(&h))
-}
-
-/// Read the Claude Code OAuth credential. Source priority mirrors
-/// Claude Code itself (auth.ts:1323 — Keychain on macOS, else file):
-///  1. macOS Keychain, service "Claude Code-credentials"
-///  2. `CLAUDE_CONFIG_DIR`/.credentials.json (default ~/.claude/)
+/// Read the Claude Code OAuth credential through the shared storage layer
+/// (`claude_auth::read_credentials` — Keychain-first on macOS with the
+/// official service-name derivation incl. the `CLAUDE_CONFIG_DIR` hash
+/// suffix, `-a` account arg, and a timeout so a locked Keychain can't hang
+/// the caller; then `.credentials.json`). Replaces an earlier local pair
+/// that hardcoded the service name and spawned `security` untimed.
+///
+/// `None` from the store (no entry / unreadable / corrupt) maps to
+/// `NotFound` — the card hides, matching a logged-out state.
 fn read_claude_credentials() -> Credential {
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(found) = read_claude_credentials_from_keychain() {
-            return found;
-        }
-    }
-    read_claude_credentials_from_file()
-}
-
-#[cfg(target_os = "macos")]
-fn read_claude_credentials_from_keychain() -> Option<Credential> {
-    let output = std::process::Command::new("security")
-        .args([
-            "find-generic-password",
-            "-s",
-            "Claude Code-credentials",
-            "-w",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None; // no Keychain entry — fall back to the file
-    }
-    let json = String::from_utf8(output.stdout).ok()?;
-    let json = json.trim();
-    if json.is_empty() {
-        return None;
-    }
-    Some(parse_claude_credentials(json))
-}
-
-fn read_claude_credentials_from_file() -> Credential {
-    let Some(path) = claude_config_dir().map(|d| d.join(".credentials.json")) else {
-        return (None, None, CredentialStatus::NotFound, None);
-    };
-    if !path.exists() {
-        return (None, None, CredentialStatus::NotFound, None);
-    }
-    match std::fs::read_to_string(&path) {
-        Ok(content) => parse_claude_credentials(&content),
-        Err(err) => (
-            None,
-            None,
-            CredentialStatus::ParseError,
-            Some(format!("Failed to read credentials file: {err}")),
-        ),
+    match crate::claude_auth::read_credentials() {
+        Some(doc) => parse_claude_credentials(&doc.to_string()),
+        None => (None, None, CredentialStatus::NotFound, None),
     }
 }
 

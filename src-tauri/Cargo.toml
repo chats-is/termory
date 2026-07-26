@@ -40,6 +40,11 @@ walkdir = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process"] }
 base64 = "0.22"
+# Claude Code derives its Keychain service name from a sha256 of a
+# non-default CLAUDE_CONFIG_DIR (macOsKeychainHelpers.ts:29); we must
+# reproduce it byte-for-byte to find the same entry. Already in the
+# lockfile as a transitive dep, so this adds no new build unit.
+sha2 = "0.10"
 log = "0.4"
 os_info = "3"
 tauri-plugin-autostart = "2"
