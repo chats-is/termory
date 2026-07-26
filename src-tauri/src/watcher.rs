@@ -334,17 +334,43 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
             // Drain self-induced events so they don't immediately
             // trigger another rescan. The SQLite reads we just did
             // touch `-wal` / `-shm`; FSEvents reports those back to us.
+            //
+            // But NOT everything arriving here is ours. A package
+            // manager installs by deleting the old binary and writing
+            // the new one, and the write often lands in exactly this
+            // window — right after a probe that saw the file already
+            // gone. Dropping it left that "not installed" reading cached
+            // with nothing to correct it (measured: one burst, 31 codex
+            // path events, `find_cli_binary=None`, and no second burst
+            // ever came). So bin-dir events are noted, not discarded.
             let settle_until = Instant::now() + SETTLE_WINDOW;
+            let mut install_settled_late = false;
             loop {
                 let now = Instant::now();
                 if now >= settle_until {
                     break;
                 }
                 match rx.recv_timeout(settle_until - now) {
+                    Ok(Ok(event)) if event_touches_install(&event, &install_targets) => {
+                        install_settled_late = true;
+                    }
                     Ok(_) => continue,
                     Err(mpsc::RecvTimeoutError::Timeout) => break,
                     Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 }
+            }
+
+            // A bin dir changed while we were settling: re-probe now
+            // that the write has landed. We're at least SETTLE_WINDOW
+            // past the reading that caught the install mid-flight, and
+            // this costs one probe on an operation the user is already
+            // waiting on. Reads only, so it can't feed itself new events.
+            if install_settled_late {
+                crate::providers::clear_shell_probe_cache();
+                if let Err(err) = app_handle.emit(CLI_INSTALL_CHANGED_EVENT, ()) {
+                    log::warn!("watcher post-settle install emit failed: {err}");
+                }
+                crate::tray::refresh_installed(&app_handle);
             }
         }
     });
@@ -652,6 +678,65 @@ mod tests {
     /// (Claude Code's native installer lands there on Windows too) and
     /// `.grok/bin` (grok's default, which the watcher lacked entirely
     /// while the search list had it).
+    fn ev(paths: &[&str]) -> notify::Event {
+        notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: paths.iter().map(PathBuf::from).collect(),
+            attrs: Default::default(),
+        }
+    }
+
+    /// The settle drain exists to swallow events WE caused (reading the
+    /// session SQLite files touches their `-wal` / `-shm` sidecars). It
+    /// must not swallow a package manager finishing its write — that
+    /// event is the only thing that corrects a probe which caught the
+    /// install mid-flight, and losing it left the CLI reading as "not
+    /// installed" until the app restarted.
+    ///
+    /// Paths here are verbatim from a real `npm install -g @openai/codex`
+    /// burst captured on the dev machine.
+    #[test]
+    fn install_events_are_distinguishable_from_our_own_sqlite_noise() {
+        let _lock = crate::testutils::lock_home();
+        let home = crate::home_dir().unwrap_or_default();
+        let targets = vec![
+            (home.join(".nvm/versions/node"), RecursiveMode::Recursive),
+            (home.join(".local/bin"), RecursiveMode::NonRecursive),
+        ];
+        let nvm_bin = home.join(".nvm/versions/node/v22.21.1/bin");
+
+        // The write that must survive the drain.
+        assert!(event_touches_install(
+            &ev(&[nvm_bin.join("codex").to_string_lossy().as_ref()]),
+            &targets
+        ));
+        // npm's atomic-rename temp file, same dir — also a real install
+        // event, and it arrives in the same burst.
+        assert!(event_touches_install(
+            &ev(&[nvm_bin.join(".codex-AVeyZY8H").to_string_lossy().as_ref()]),
+            &targets
+        ));
+
+        // Our own noise: session DBs and their sidecars live outside every
+        // bin dir, so the drain still discards them and can't self-trigger.
+        for noise in [
+            ".codex/state_5.sqlite-wal",
+            ".codex/state_5.sqlite-shm",
+            ".local/share/opencode/opencode.db-wal",
+            // Codex's own scratch dir, seen mixed into an install burst —
+            // not a bin dir, so it alone must not count as an install.
+            ".codex/tmp/arg0/codex-arg0p1neTE/.lock",
+        ] {
+            assert!(
+                !event_touches_install(
+                    &ev(&[home.join(noise).to_string_lossy().as_ref()]),
+                    &targets
+                ),
+                "{noise} must not read as an install event"
+            );
+        }
+    }
+
     #[test]
     fn install_watch_targets_cover_cross_platform_bin_dirs() {
         let _lock = crate::testutils::lock_home();

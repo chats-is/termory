@@ -154,7 +154,7 @@ Bound gateways also appear in each CLI's provider list (view/activate only — e
 
 ### Updating a CLI
 
-When a newer version of a CLI is published, an amber **↑ New v0.145.0** badge appears after its version on the Official card. **Click the badge and Termory upgrades that CLI in place** — the badge reads **↑ Updating** while it runs, then the version line refreshes and the badge disappears.
+When a newer version of a CLI is published, an amber **↑ New v0.145.0** badge appears after its version on the Official card. **Click the badge and Termory upgrades that CLI in place** — the badge reads **↑ Upgrading** while it runs, then the version line refreshes and the badge disappears.
 
 Termory runs each CLI's own upgrade command, so it respects however you installed it (npm, Homebrew, the official install script, …):
 

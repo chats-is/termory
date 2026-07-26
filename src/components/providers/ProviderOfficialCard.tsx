@@ -12,8 +12,8 @@ import { BrandIcon } from "@/components/BrandIcon";
 import { CLI_APP_SOURCE_BADGE } from "@/constants";
 import { cn } from "@/lib/utils";
 import { useT } from "@/i18n";
-import { updateBadgeState } from "@/lib/provider-utils";
-import type { UpdateBadgeState, VersionSegment } from "@/lib/provider-utils";
+import { upgradeBadgeState } from "@/lib/provider-utils";
+import type { UpgradeBadgeState, VersionSegment } from "@/lib/provider-utils";
 import type { CliApp } from "@/types";
 
 const BADGE_TONE = {
@@ -28,7 +28,7 @@ const BADGE_HOVER = {
 
 /** The update badge — the ONLY thing on the card that reflects an
  *  upgrade, so the layout never shifts. Pure rendering: every decision
- *  comes from `updateBadgeState`, where the rules and their tests live.
+ *  comes from `upgradeBadgeState`, where the rules and their tests live.
  *
  *    amber `↑ New v1.2.3`  idle — click upgrades (tooltip: the command)
  *    amber `↑ Updating`    running — same badge, label swapped, disabled
@@ -39,7 +39,7 @@ const BADGE_HOVER = {
  *                          install-method prompt) belong in the user's
  *                          own terminal.
  */
-function UpdateBadge({
+function UpgradeBadge({
   latest,
   command,
   state,
@@ -48,7 +48,7 @@ function UpdateBadge({
 }: {
   latest: string;
   command?: string | null;
-  state: UpdateBadgeState;
+  state: UpgradeBadgeState;
   error?: string;
   onUpgrade?: () => void;
 }) {
@@ -63,47 +63,47 @@ function UpdateBadge({
     <>
       <ArrowUp className="size-3" />
       {state.label === "updating" ? (
-        <span>{t("providers.updateRunning")}</span>
+        <span>{t("providers.upgradeRunning")}</span>
       ) : (
         <span className="font-mono">
-          {t("providers.updateAvailable", { version: `v${latest}` })}
+          {t("providers.upgradeAvailable", { version: `v${latest}` })}
         </span>
       )}
     </>
   );
+  const badge = state.clickable ? (
+    <Badge asChild variant="outline" className={className}>
+      <button type="button" disabled={state.disabled} onClick={() => onUpgrade?.()}>
+        {content}
+      </button>
+    </Badge>
+  ) : (
+    <Badge variant="outline" className={className}>
+      {content}
+    </Badge>
+  );
+  // No tooltip element at all while upgrading — see `upgradeBadgeState`
+  // for why (a stale one left open would flash a re-probed command).
+  if (state.tooltip === "none") {
+    return badge;
+  }
   return (
     <Tooltip>
-      <TooltipTrigger asChild>
-        {state.clickable ? (
-          <Badge asChild variant="outline" className={className}>
-            <button
-              type="button"
-              disabled={state.disabled}
-              onClick={() => onUpgrade?.()}
-            >
-              {content}
-            </button>
-          </Badge>
-        ) : (
-          <Badge variant="outline" className={className}>
-            {content}
-          </Badge>
-        )}
-      </TooltipTrigger>
+      <TooltipTrigger asChild>{badge}</TooltipTrigger>
       <TooltipContent side="top">
         {state.tooltip === "failed" ? (
           <span className="flex flex-col gap-0.5">
             <span>{error}</span>
-            <span className="opacity-80">{t("providers.updateRunItYourself")}</span>
+            <span className="opacity-80">{t("providers.upgradeRunItYourself")}</span>
             <code className="font-mono opacity-80">{command}</code>
           </span>
         ) : state.tooltip === "command" ? (
           <span className="flex flex-col gap-0.5">
-            <span>{t("providers.updateClickToRun")}</span>
+            <span>{t("providers.upgradeClickToRun")}</span>
             <code className="font-mono opacity-80">{command}</code>
           </span>
         ) : (
-          t("providers.updateAvailableHint")
+          t("providers.upgradeAvailableHint")
         )}
       </TooltipContent>
     </Tooltip>
@@ -140,7 +140,7 @@ export function ProviderOfficialCard({
    *  informational. */
   onUpgrade?: () => void;
   /** An upgrade for THIS app is running. Only a segment that actually
-   *  has an upgrade command reacts (see `updateBadgeState`). */
+   *  has an upgrade command reacts (see `upgradeBadgeState`). */
   upgrading?: boolean;
   /** Why the last attempt failed — turns that segment's badge red and
    *  becomes its tooltip. Never renders as its own row: the card's
@@ -185,12 +185,12 @@ export function ProviderOfficialCard({
                   {/* Badge belongs to THIS segment, not the line — a
                       Codex CLI update must not read as an App update. */}
                   {seg.latest && (
-                    <UpdateBadge
+                    <UpgradeBadge
                       latest={seg.latest}
                       command={seg.upgradeCommand}
                       error={upgradeError}
                       onUpgrade={onUpgrade}
-                      state={updateBadgeState(seg, {
+                      state={upgradeBadgeState(seg, {
                         upgrading,
                         error: upgradeError,
                         canUpgrade: !!onUpgrade

@@ -122,7 +122,7 @@ describe("ProviderOfficialCard", () => {
   });
 
   // Upgrade STATE rules (which segment reacts, tone, disabled) live in
-  // `updateBadgeState` and are table-tested in provider-utils.test.ts.
+  // `upgradeBadgeState` and are table-tested in provider-utils.test.ts.
   // These cover only that the card renders that state correctly.
 
   it("renders an idle update badge as a button that upgrades on click", async () => {
@@ -154,7 +154,7 @@ describe("ProviderOfficialCard", () => {
     expect(screen.queryByRole("button", { name: /New v2\.1\.216/ })).toBeNull();
   });
 
-  it("reads 'Updating' and goes disabled while an upgrade runs", async () => {
+  it("reads 'Upgrading' and goes disabled while an upgrade runs", async () => {
     const user = userEvent.setup();
     const onUpgrade = vi.fn();
     render(
@@ -169,10 +169,28 @@ describe("ProviderOfficialCard", () => {
     );
     // The label swaps rather than showing a spinner.
     expect(screen.queryByText("New v2.1.216")).toBeNull();
-    const badge = screen.getByRole("button", { name: /Updating/ });
+    const badge = screen.getByRole("button", { name: /Upgrading/ });
     expect(badge).toBeDisabled();
     await user.click(badge);
     expect(onUpgrade).not.toHaveBeenCalled();
+  });
+
+  it("renders no tooltip while an upgrade runs", () => {
+    // A tooltip left open from before the click would keep rendering the
+    // command, which is re-probed mid-run — Codex briefly resolves to the
+    // desktop app's absolute path while npm replaces the binary.
+    const { container } = render(
+      <ProviderOfficialCard
+        {...baseProps}
+        versions={[
+          { text: "v2.0.0", latest: "2.1.216", upgradeCommand: "claude update" }
+        ]}
+        onUpgrade={vi.fn()}
+        upgrading
+      />
+    );
+    expect(container.querySelector("[data-slot=tooltip-trigger]")).toBeNull();
+    expect(screen.getByRole("button", { name: /Upgrading/ })).toBeInTheDocument();
   });
 
   it("renders a failed badge red and still clickable", async () => {
@@ -246,7 +264,7 @@ describe("ProviderOfficialCard", () => {
         upgrading
       />
     );
-    expect(screen.getAllByText("Updating")).toHaveLength(1);
+    expect(screen.getAllByText("Upgrading")).toHaveLength(1);
     expect(screen.getByText("New v26.721.30844")).toBeInTheDocument();
   });
 

@@ -577,13 +577,13 @@ export function ProvidersPage({
           // Re-probe so the version line updates and the badge drops
           // away once installed === latest.
           await refreshVersions();
-          toast.success(t("providers.updateDone", { app: CLI_APP_LABEL[target] }));
+          toast.success(t("providers.upgradeDone", { app: CLI_APP_LABEL[target] }));
         } catch (err) {
           // Shown twice on purpose: a toast for the moment it happens,
           // and the badge turning red — which outlives the toast, so the
           // card still says something went wrong.
           setUpgradeErrors((prev) => ({ ...prev, [target]: String(err) }));
-          toast.error(t("providers.updateFailed", { app: CLI_APP_LABEL[target] }), {
+          toast.error(t("providers.upgradeFailed", { app: CLI_APP_LABEL[target] }), {
             description: String(err)
           });
         } finally {

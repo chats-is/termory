@@ -687,16 +687,60 @@ fn query_version_at(binary: &std::path::Path) -> Option<String> {
 fn shell_version_fallback(tool: &str) -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let mut cmd = std::process::Command::new(&shell);
-    cmd.args(["-l", "-i", "-c", &format!("{tool} --version 2>&1")]);
+    // The marker is echoed BEFORE the probe so rc output can be split
+    // off — see `version_after_probe_marker`. Exit status still belongs
+    // to `{tool} --version`: in a `;` sequence the shell reports the
+    // last command's code.
+    let probe = marked_shell_command(&format!("{tool} --version"));
+    cmd.args(["-l", "-i", "-c", &probe]);
     let output = output_with_timeout(cmd)?;
     if !output.status.success() {
         return None;
     }
     let raw = String::from_utf8_lossy(&output.stdout);
-    if raw.trim().is_empty() {
+    parse_version(after_shell_marker(&raw)?)
+}
+
+/// Echoed immediately before ANY command we run through the user's
+/// interactive login shell, so that command's real output can be told
+/// apart from whatever the rc files printed.
+///
+/// An INTERACTIVE shell sources `.zshrc`, and plenty of setups print a
+/// banner there (fastfetch/neofetch, greetings, MOTDs). All of it lands
+/// on the same stdout we read, AHEAD of the real output. Two places are
+/// affected and both use this marker:
+///
+/// * [`shell_version_fallback`] — [`parse_version`] returns the FIRST
+///   version-shaped token it sees. Measured on a real machine: a
+///   fastfetch banner made `codex --version` report `16.00`, the host's
+///   RAM size, because `Memory  11.56 GiB / 16.00 GiB` precedes
+///   `codex-cli 0.144.6` by eleven lines.
+/// * `upgrade::run_upgrade` — a failed upgrade would otherwise be
+///   reported with a banner line as its reason.
+pub(crate) const SHELL_PROBE_MARKER: &str = "__termory_shell_probe__";
+
+/// The `-c` payload for running `cmd` in an interactive login shell:
+/// marker first, then the command with stderr folded into stdout.
+///
+/// Exit status still belongs to `cmd` — in a `;` sequence the shell
+/// reports the last command's code.
+pub(crate) fn marked_shell_command(cmd: &str) -> String {
+    format!("echo {SHELL_PROBE_MARKER}; {cmd} 2>&1")
+}
+
+/// Everything after the marker — the command's own output. `None` when
+/// the marker never appeared: a shell that didn't reach the `echo`
+/// produced nothing trustworthy, so callers must not fall back to
+/// parsing the whole text (that is exactly the bug this prevents).
+pub(crate) fn after_shell_marker(raw: &str) -> Option<&str> {
+    // `rsplit` so a banner that happens to contain the marker text
+    // can't shadow the real one — the last occurrence is ours.
+    let after = raw.rsplit(SHELL_PROBE_MARKER).next()?;
+    // No marker at all → rsplit yields the input unchanged.
+    if after.len() == raw.len() {
         return None;
     }
-    parse_version(&raw)
+    Some(after)
 }
 
 #[cfg(not(unix))]
@@ -765,8 +809,34 @@ pub fn clear_shell_probe_cache() {
 /// alone has TWO install forms — this CLI and the desktop app — and
 /// some features (account add via `codex login`, terminal resume /
 /// New Session) need the binary specifically.
+/// Can a `codex` CLI be RUN here — standalone binary on disk, or one
+/// the user's interactive shell resolves (custom dir, alias)?
+///
+/// The EXECUTION-side counterpart to
+/// [`codex_standalone_cli_installed`]. Use this to gate features that
+/// just need to run codex; use the standalone one for anything that
+/// describes codex as an installed product (version, upgrade).
 pub fn codex_cli_installed() -> bool {
-    find_cli_binary("codex").is_some() || shell_installed_cached("codex")
+    codex_standalone_cli_installed() || shell_installed_cached("codex")
+}
+
+/// Is a STANDALONE codex CLI installed — i.e. is there a real binary on
+/// disk that the user installed and can upgrade themselves?
+///
+/// This is the VERSION-side answer, and it is deliberately narrower than
+/// [`codex_cli_installed`]. Codex ships in two forms and only this one
+/// is a product the user manages: the desktop app carries its own copy
+/// at `<bundle>/Contents/Resources/codex` (an alpha-channel build that
+/// updates with the app via Sparkle, not on its own).
+///
+/// The interactive-shell probe is NOT consulted here. It answers "can a
+/// `codex` be run in your shell", which is an EXECUTION question — it
+/// cannot say WHICH codex answered, so it must not decide whether a
+/// standalone install exists, what version to display, or whether an
+/// upgrade can be offered. Mixing the two once made the CLI version
+/// segment describe a binary the user never installed.
+pub fn codex_standalone_cli_installed() -> bool {
+    find_cli_binary("codex").is_some()
 }
 
 /// The Codex DESKTOP app's bundle id. Since 2026-07-09 the Codex app
@@ -985,8 +1055,15 @@ pub fn codex_binary() -> Option<std::path::PathBuf> {
 }
 
 /// Codex's install forms, probed in ONE pass (a single bundle
-/// resolution feeds `app` / `app_version` / `bundled_cli`; `cli` is
-/// the standalone binary via path scan + interactive-shell fallback).
+/// resolution feeds `app` / `app_version` / `bundled_cli`).
+///
+/// `cli` is the VERSION-side answer — a standalone binary found on disk
+/// ([`codex_standalone_cli_installed`]), NOT "some codex is runnable".
+/// It drives the CLI version segment, its version number, and whether
+/// an upgrade is offered, all of which describe that one product. The
+/// execution side (login / resume / new session / tray gating) reads
+/// `codex_binary()` or `InstallSnapshot::codex_terminal` instead, and
+/// those DO fall back to the bundled copy.
 /// Serialized camelCase — this is the `detect_codex_installs` IPC's
 /// wire shape (frontend `CodexInstalls` in src/types.ts).
 #[derive(Clone, PartialEq, serde::Serialize)]
@@ -999,7 +1076,7 @@ pub struct CodexInstalls {
 }
 
 pub fn probe_codex_installs() -> CodexInstalls {
-    let cli = codex_cli_installed();
+    let cli = codex_standalone_cli_installed();
     #[cfg(target_os = "macos")]
     {
         let info = codex_app_info();
@@ -1094,7 +1171,12 @@ pub fn detect_install_snapshot() -> InstallSnapshot {
     let mut map = std::collections::HashMap::new();
     for app in CliApp::all() {
         let installed = match app {
-            CliApp::Codex => codex.cli || codex.app,
+            // EXECUTION side — "can codex be managed here at all". Uses
+            // the wide answer (incl. the shell probe) so a CLI installed
+            // somewhere the fixed-dir scan misses still gets its tab,
+            // not the InstallGuide. The narrow `codex.cli` is for the
+            // version segment only.
+            CliApp::Codex => codex_cli_installed() || codex.app,
             // Claude Desktop is a GUI app with no CLI binary — detect it
             // by its on-disk config dir (and platform support) instead.
             CliApp::ClaudeDesktop => crate::claude_desktop::is_installed(),
@@ -1106,7 +1188,10 @@ pub fn detect_install_snapshot() -> InstallSnapshot {
     }
     InstallSnapshot {
         map,
-        codex_terminal: codex.cli || codex.bundled_cli,
+        // EXECUTION side: `codex.cli` is standalone-only, so the shell
+        // probe is added back here — the user's terminal resolves what
+        // the fixed-dir scan misses, and any runnable codex will do.
+        codex_terminal: codex.cli || codex.bundled_cli || shell_installed_cached("codex"),
         disabled: crate::config::disabled_sources(),
     }
 }
@@ -4589,6 +4674,113 @@ mod tests {
         assert_eq!(registrable_domain("[::1]"), None);
         // Bare hostnames (intranet) — no `.` → can't be stripped.
         assert_eq!(registrable_domain("localhost"), None);
+    }
+
+    /// Captured VERBATIM from a real interactive zsh on this project's
+    /// dev machine (fastfetch banner in `.zshrc`), with the `\x1b[18G`
+    /// column escapes intact — those are what make the banner's own
+    /// numbers survive tokenization.
+    const REAL_BANNER_PROBE: &str = concat!(
+        "  \u{f08c7}  OS \u{1b}[18GmacOS\n",
+        "  \u{f033d}  Kernel \u{1b}[18G25.5.0\n",
+        "  \u{f035b}  Memory \u{1b}[18G11.56 GiB / 16.00 GiB 72%\n",
+        "  \u{f02ca}  Disk \u{1b}[18G331.18 GiB / 460.43 GiB 72%\n",
+        "__termory_shell_probe__\n",
+        "codex-cli 0.144.6\n"
+    );
+
+    /// The bug this marker exists for: `parse_version` returns the FIRST
+    /// version-shaped token, so an rc banner ahead of the real output
+    /// wins. On this machine that reported the host's RAM (`16.00`) as
+    /// the codex version.
+    #[test]
+    fn after_shell_marker_ignores_rc_banner_output() {
+        // Whole text: the banner wins — this is the broken behaviour.
+        assert_eq!(
+            parse_version(REAL_BANNER_PROBE),
+            Some("16.00".to_string()),
+            "precondition: the banner really does shadow the real version"
+        );
+        // Marker-scoped: only the tool's own output is considered.
+        assert_eq!(
+            after_shell_marker(REAL_BANNER_PROBE).and_then(parse_version),
+            Some("0.144.6".to_string())
+        );
+    }
+
+    /// The marker does POSITIONAL splitting, not content matching — it
+    /// drops everything before itself without knowing what a banner
+    /// looks like. These cover shapes far apart from the fastfetch one
+    /// above so a future "smarter" parse can't quietly narrow that.
+    #[test]
+    fn after_shell_marker_survives_any_banner_shape() {
+        let probe = "codex-cli 0.144.6";
+        for (name, banner) in [
+            (
+                "plain greeting",
+                "Welcome back! You have 3.14 unread items.",
+            ),
+            (
+                "motd with a version",
+                "Last login: 2026-07-26  System 15.2.1 build 24C101",
+            ),
+            (
+                "package-manager notice",
+                "npm notice New major version available! 10.9.2 -> 11.1.0",
+            ),
+            (
+                "column escapes (fastfetch)",
+                "  Memory \u{1b}[18G11.56 GiB / 16.00 GiB 72%",
+            ),
+            // No trailing newline: the marker lands mid-line.
+            ("unterminated line", "loading... 9.99"),
+            // A banner that happens to print the marker text itself —
+            // `rsplit` keeps the LAST occurrence, which is ours.
+            (
+                "banner containing the marker",
+                concat!("debug: ", "__termory_shell_probe__", " was here 7.77"),
+            ),
+        ] {
+            let sep = if banner.ends_with("9.99") { "" } else { "\n" };
+            let raw = format!("{banner}{sep}{SHELL_PROBE_MARKER}\n{probe}\n");
+            assert_eq!(
+                after_shell_marker(&raw).and_then(parse_version),
+                Some("0.144.6".to_string()),
+                "banner shape: {name}"
+            );
+        }
+    }
+
+    /// Many version-shaped tokens before the marker, none of which may
+    /// win — the failure mode is "first match wins", so volume matters.
+    #[test]
+    fn after_shell_marker_ignores_a_banner_full_of_versions() {
+        let noisy: String = (0..20).map(|i| format!("tool-{i} 1.{i}.0\n")).collect();
+        let raw = format!("{noisy}{SHELL_PROBE_MARKER}\ncodex-cli 0.144.6\n");
+        assert_eq!(
+            after_shell_marker(&raw).and_then(parse_version),
+            Some("0.144.6".to_string())
+        );
+    }
+
+    #[test]
+    fn after_shell_marker_rejects_output_without_a_marker() {
+        // A shell that never reached the `echo` produced nothing we can
+        // trust — don't fall back to parsing the banner.
+        assert_eq!(after_shell_marker("codex-cli 0.144.6"), None);
+        assert_eq!(after_shell_marker(""), None);
+        // Marker present but nothing after it → empty, not the banner.
+        let probe = format!("banner\n{SHELL_PROBE_MARKER}\n");
+        assert_eq!(after_shell_marker(&probe).map(str::trim), Some(""));
+    }
+
+    #[test]
+    fn marked_shell_command_puts_the_marker_first_and_folds_stderr() {
+        let built = marked_shell_command("codex --version");
+        assert_eq!(
+            built,
+            format!("echo {SHELL_PROBE_MARKER}; codex --version 2>&1")
+        );
     }
 
     #[test]

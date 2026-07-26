@@ -103,21 +103,25 @@ export type VersionSegment = {
  *  upgrade command are upgradable at all — Codex renders CLI + App and
  *  the desktop app self-updates via Sparkle. A segment with no command
  *  therefore ignores app state entirely and stays informational. */
-export type UpdateBadgeState = {
+export type UpgradeBadgeState = {
   label: "version" | "updating";
   tone: "amber" | "red";
   clickable: boolean;
   disabled: boolean;
-  /** Note there is no "updating" tooltip: a `disabled` button dispatches
-   *  no hover events, so Radix's tooltip cannot open while an upgrade
-   *  runs. The badge's own label carries that state instead. */
-  tooltip: "command" | "failed" | "info";
+  /** `"none"` renders no tooltip at all — used while an upgrade runs.
+   *  Two reasons: a `disabled` button dispatches no hover events so a
+   *  fresh one can't open anyway, and a tooltip left OPEN from before
+   *  the click would keep rendering stale text. The command shown there
+   *  is re-probed during the run, and mid-reinstall the binary is
+   *  briefly missing — Codex then resolves to the desktop app's bundled
+   *  path, so the tooltip would flash an absolute path at the user. */
+  tooltip: "command" | "failed" | "info" | "none";
 };
 
-export function updateBadgeState(
+export function upgradeBadgeState(
   segment: Pick<VersionSegment, "upgradeCommand">,
   opts: { upgrading?: boolean; error?: string; canUpgrade?: boolean } = {}
-): UpdateBadgeState {
+): UpgradeBadgeState {
   if (!segment.upgradeCommand || opts.canUpgrade === false) {
     return {
       label: "version",
@@ -129,14 +133,13 @@ export function updateBadgeState(
   }
   if (opts.upgrading) {
     // Stays a button so it can be visibly disabled rather than swapping
-    // element type mid-run. `tooltip` is unreachable while disabled (see
-    // the type) — "command" is simply the value it returns to on finish.
+    // element type mid-run.
     return {
       label: "updating",
       tone: "amber",
       clickable: true,
       disabled: true,
-      tooltip: "command"
+      tooltip: "none"
     };
   }
   if (opts.error) {

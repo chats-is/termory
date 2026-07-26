@@ -125,10 +125,19 @@ pub fn upgrade_command(app: CliApp) -> Option<String> {
         //   opencode — cli/cmd/upgrade.ts `UpgradeCommand`
         //   grok     — `grok update`, per the shipped `--help` (0.2.111)
         CliApp::Claude => "claude update".to_string(),
-        // Routed through the tray's launch helper so an app-only Codex
-        // install runs the bundled binary instead of a bare `codex`
-        // that isn't on PATH.
-        CliApp::Codex => format!("{} update", crate::terminal::codex_shell_invocation()),
+        // Bare `codex`, NOT `terminal::codex_shell_invocation()`. That
+        // helper falls back to the desktop app's bundled binary when no
+        // standalone CLI is found, which is right for LAUNCHING a
+        // session (any codex will do) and wrong here: upgrading is a
+        // version-side action and only a self-managed install can
+        // upgrade itself. The bundled copy ships with the app via
+        // Sparkle, and codex's own updater classifies it as
+        // `InstallMethod::Other` and bails with "Could not detect the
+        // Codex installation method" (cli/src/main.rs:809). Borrowing
+        // the helper once put `'/Applications/ChatGPT.app/Contents/
+        // Resources/codex' update` in the badge tooltip — a command
+        // that always fails.
+        CliApp::Codex => "codex update".to_string(),
         CliApp::Opencode => "opencode upgrade".to_string(),
         CliApp::Grok => "grok update".to_string(),
         CliApp::Gemini => gemini_command(),
@@ -155,16 +164,6 @@ const UPGRADE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600)
 /// How many trailing output lines to keep for the failure message.
 const TAIL_LINES: usize = 20;
 
-/// Echoed by the shell immediately before the upgrade command runs.
-///
-/// An INTERACTIVE shell sources the user's rc files, and many people's
-/// `.zshrc` prints something (a fastfetch banner, a greeting, version
-/// notices) onto the same stdout we read. Everything before this line
-/// is that rc noise and is dropped — otherwise a FAILURE gets reported
-/// as "Disk 330 GiB / 460 GiB" instead of the reason the command gave.
-/// Verified against a real `.zshrc` that prints a system banner.
-const START_MARKER: &str = "__termory_upgrade_start__";
-
 /// Build the child process. See the module doc for why this is an
 /// interactive login shell rather than a bare spawn.
 #[cfg(unix)]
@@ -174,14 +173,11 @@ fn upgrade_child(cmd: &str) -> tokio::process::Command {
     // TERM=dumb keeps spinner libraries from emitting cursor-control
     // escapes we'd only have to strip back out.
     c.env("TERM", "dumb");
-    // `2>&1` folds the COMMAND's stderr into the stream we read; the
-    // SHELL's own stderr is discarded in `run_upgrade`.
-    c.args([
-        "-l",
-        "-i",
-        "-c",
-        &format!("echo {START_MARKER}; {cmd} 2>&1"),
-    ]);
+    // Shared with `shell_version_fallback`: marker first so rc-file
+    // banners can be split off, then the command with its stderr folded
+    // in. The SHELL's own stderr is discarded in `run_upgrade`.
+    let script = crate::providers::marked_shell_command(cmd);
+    c.args(["-l", "-i", "-c", &script]);
     c
 }
 
@@ -191,7 +187,10 @@ fn upgrade_child(cmd: &str) -> tokio::process::Command {
     let mut c = tokio::process::Command::new("cmd");
     // cmd.exe has no rc file, so nothing precedes the marker — it's
     // echoed anyway so the reader's filter is identical on both paths.
-    c.args(["/C", &format!("echo {START_MARKER}& {cmd} 2>&1")]);
+    c.args([
+        "/C",
+        &format!("echo {}& {cmd} 2>&1", crate::providers::SHELL_PROBE_MARKER),
+    ]);
     // Silent helper — no console window (see providers::hide_console).
     c.creation_flags(crate::providers::CREATE_NO_WINDOW);
     c
@@ -247,7 +246,7 @@ pub async fn run_upgrade(app: CliApp) -> Result<(), String> {
             if !started {
                 // `contains`, not equality: a prompt or banner fragment
                 // can share the line the echo lands on.
-                started = line.contains(START_MARKER);
+                started = line.contains(crate::providers::SHELL_PROBE_MARKER);
                 continue;
             }
             if line.is_empty() {
@@ -294,10 +293,29 @@ mod tests {
             upgrade_command(CliApp::Grok).as_deref(),
             Some("grok update")
         );
-        // Codex's binary name resolves at call time (bare `codex`, or
-        // the bundled path for an app-only install), so assert shape.
-        let codex = upgrade_command(CliApp::Codex).expect("codex has an upgrade command");
-        assert!(codex.ends_with(" update"), "unexpected: {codex}");
+        // Never the bundled binary's path — see the Codex arm.
+        assert_eq!(
+            upgrade_command(CliApp::Codex).as_deref(),
+            Some("codex update")
+        );
+    }
+
+    /// Upgrade commands must never carry an absolute path. Codex is the
+    /// one at risk: a second, bundled binary exists inside the desktop
+    /// app, and the session-launch helper falls back to it by path.
+    /// That fallback belongs to execution, not to upgrading.
+    #[test]
+    fn upgrade_commands_never_reference_a_bundled_binary() {
+        for (app, cmd) in upgrade_commands() {
+            assert!(
+                !cmd.contains(".app/"),
+                "{app} upgrade command points inside an app bundle: {cmd}"
+            );
+            assert!(
+                !cmd.starts_with('/') && !cmd.starts_with('\''),
+                "{app} upgrade command is an absolute path: {cmd}"
+            );
+        }
     }
 
     #[test]

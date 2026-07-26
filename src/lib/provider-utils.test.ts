@@ -18,7 +18,7 @@ import {
   protocolForNpm,
   providerFromBinding,
   resolveActiveProviderId,
-  updateBadgeState,
+  upgradeBadgeState,
   gatewayBaseForProtocol
 } from "./provider-utils";
 import type {
@@ -663,14 +663,14 @@ describe("visibleSources / isGatewayBindableApp", () => {
   });
 });
 
-describe("updateBadgeState", () => {
+describe("upgradeBadgeState", () => {
   const upgradable = { upgradeCommand: "codex update" };
   // Codex's desktop-app segment: a newer version exists, but there is no
   // way to upgrade it from here (Sparkle self-updates it).
   const displayOnly = { upgradeCommand: undefined };
 
   it("is idle and clickable with nothing going on", () => {
-    expect(updateBadgeState(upgradable)).toEqual({
+    expect(upgradeBadgeState(upgradable)).toEqual({
       label: "version",
       tone: "amber",
       clickable: true,
@@ -680,18 +680,20 @@ describe("updateBadgeState", () => {
   });
 
   it("swaps the label and disables itself while upgrading", () => {
-    expect(updateBadgeState(upgradable, { upgrading: true })).toEqual({
+    expect(upgradeBadgeState(upgradable, { upgrading: true })).toEqual({
       label: "updating",
       tone: "amber",
       clickable: true,
       disabled: true,
-      // No "updating" tooltip exists — a disabled button can't open one.
-      tooltip: "command"
+      // No tooltip at all mid-run: a stale one left open from before the
+      // click would show a command that gets re-probed during the
+      // upgrade (mid-reinstall Codex resolves to an absolute path).
+      tooltip: "none"
     });
   });
 
   it("goes red and stays retryable after a failure", () => {
-    expect(updateBadgeState(upgradable, { error: "EACCES" })).toEqual({
+    expect(upgradeBadgeState(upgradable, { error: "EACCES" })).toEqual({
       label: "version",
       tone: "red",
       clickable: true,
@@ -702,7 +704,7 @@ describe("updateBadgeState", () => {
 
   it("prefers the running state over a previous failure", () => {
     // A retry is in flight — show it as running, not as still-failed.
-    const state = updateBadgeState(upgradable, {
+    const state = upgradeBadgeState(upgradable, {
       upgrading: true,
       error: "EACCES"
     });
@@ -718,7 +720,7 @@ describe("updateBadgeState", () => {
     ["failed", { error: "EACCES" }],
     ["upgrading after a failure", { upgrading: true, error: "EACCES" }]
   ])("stays informational when %s", (_name, opts) => {
-    expect(updateBadgeState(displayOnly, opts)).toEqual({
+    expect(upgradeBadgeState(displayOnly, opts)).toEqual({
       label: "version",
       tone: "amber",
       clickable: false,
@@ -729,7 +731,7 @@ describe("updateBadgeState", () => {
 
   it("is informational when the card wires up no upgrade handler", () => {
     expect(
-      updateBadgeState(upgradable, { upgrading: true, canUpgrade: false })
+      upgradeBadgeState(upgradable, { upgrading: true, canUpgrade: false })
     ).toEqual({
       label: "version",
       tone: "amber",
