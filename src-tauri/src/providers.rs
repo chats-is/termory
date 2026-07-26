@@ -5659,6 +5659,85 @@ command = "npx"
         assert_eq!(txt.matches("[model_providers.termory]").count(), 1);
     }
 
+    /// End-to-end guard for the interaction between the two features that
+    /// share `~/.codex/auth.json`: with a custom provider active, switching
+    /// the official ACCOUNT must leave the provider active.
+    ///
+    /// `read_active_codex` matches on config.toml's `model_provider` +
+    /// `base_url` AND auth.json's `OPENAI_API_KEY` — so a switch that dropped
+    /// the key (restoring a snapshot taken while Official was in use) left the
+    /// state `Unmanaged`, which reads in the UI as the provider having been
+    /// deactivated. Asserting the auth.json FIELDS alone (as accounts.rs does)
+    /// would not have caught that, since the damage shows up in the derived
+    /// state.
+    #[tokio::test]
+    async fn codex_account_switch_keeps_the_active_provider() {
+        let _g = lock_home();
+        let tmp = tempdir("codex-acct-switch");
+        let _home = override_home(&tmp);
+        fs::create_dir_all(tmp.join(".codex")).unwrap();
+
+        // A ChatGPT login is in place (account A), then account B. No
+        // `refresh_token`: `switch_codex` always attempts a refresh first, and
+        // one here would make this test hit the network (a real 401).
+        let write_login = |account: &str| {
+            fs::write(
+                tmp.join(".codex/auth.json"),
+                format!(
+                    r#"{{
+                      "auth_mode": "chatgpt",
+                      "tokens": {{
+                        "access_token": "at-{account}",
+                        "account_id": "{account}"
+                      }},
+                      "last_refresh": "2025-01-01T00:00:00Z"
+                    }}"#
+                ),
+            )
+            .unwrap();
+        };
+        write_login("acct-a");
+        crate::accounts::save_current_account(CliApp::Codex).unwrap();
+        write_login("acct-b");
+        crate::accounts::save_current_account(CliApp::Codex).unwrap();
+
+        // Now activate a custom provider on top of the live login.
+        let p = make_provider(CliApp::Codex, "gw", "https://gw.x.io/v1", "sk-gw");
+        activate(&p, &[p.clone()]).unwrap();
+        assert_eq!(
+            read_active_state(CliApp::Codex, &[p.clone()]).unwrap().kind,
+            ActiveKind::Custom,
+            "precondition: the provider is active"
+        );
+
+        // Switch the official account. Both snapshots were taken BEFORE the
+        // provider existed, so neither payload carries its key.
+        crate::accounts::switch_account("acct-a".to_string())
+            .await
+            .unwrap();
+
+        let state = read_active_state(CliApp::Codex, &[p.clone()]).unwrap();
+        assert_eq!(
+            state.kind,
+            ActiveKind::Custom,
+            "switching accounts must not deactivate the provider"
+        );
+        assert_eq!(state.matched_provider_id.as_deref(), Some("test-gw"));
+
+        let auth: JsonValue =
+            serde_json::from_str(&fs::read_to_string(tmp.join(".codex/auth.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            auth.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
+            Some("sk-gw"),
+        );
+        assert_eq!(
+            auth.pointer("/tokens/account_id").and_then(|v| v.as_str()),
+            Some("acct-a"),
+            "…while the login really did switch"
+        );
+    }
+
     #[test]
     fn codex_oauth_login_then_activate_api_then_deactivate_keeps_oauth() {
         // Three-stage round-trip: user logged into ChatGPT, swaps to
