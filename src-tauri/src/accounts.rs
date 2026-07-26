@@ -20,10 +20,11 @@
 //! `config.toml`; we detect that and surface a warning (Keychain writes
 //! are a later phase).
 //!
-//! A saved account stores the **full `auth.json` verbatim** (the OAuth
-//! `tokens` block — id/access/refresh — plus `last_refresh` / `account_id`
-//! must travel together for Codex's refresh to keep working), labelled by
-//! the email + plan decoded from the `tokens.id_token` JWT.
+//! A saved account stores `auth.json` (the OAuth `tokens` block —
+//! id/access/refresh — plus `last_refresh` / `account_id` must travel
+//! together for Codex's refresh to keep working), labelled by the email +
+//! plan decoded from the `tokens.id_token` JWT — **minus the fields
+//! provider management owns**, see `PROVIDER_OWNED_AUTH_FIELDS`.
 //!
 //! Claude (which on macOS keeps its credential in the Keychain, not a
 //! file) is a later phase; the `app` field on each stored account leaves
@@ -35,6 +36,56 @@ use serde_json::{json, Value as JsonValue};
 use std::error::Error;
 
 use crate::providers::{codex_auth_path, codex_root, CliApp};
+
+/// The `auth.json` fields owned by PROVIDER management, not by an account
+/// snapshot: `providers::activate_codex` writes them (`auth_mode = "apikey"`
+/// plus the third-party `OPENAI_API_KEY`) and `deactivate_codex` removes
+/// them. Both deliberately leave the OAuth `tokens` alongside, which is why
+/// a live login still reads as a valid account while a provider is active.
+///
+/// Account switching swaps the official login ONLY, so these must survive it
+/// untouched — and must never be captured into a snapshot, which would copy
+/// a third-party API key into `accounts.json` and re-apply it on some later
+/// switch to a completely different account.
+const PROVIDER_OWNED_AUTH_FIELDS: &[&str] = &["auth_mode", "OPENAI_API_KEY"];
+
+/// Drop the provider-owned fields from a credential document about to be
+/// stored, so a snapshot taken while a custom provider was active carries
+/// only the official login.
+fn strip_provider_fields(doc: &mut JsonValue) {
+    if let JsonValue::Object(o) = doc {
+        for key in PROVIDER_OWNED_AUTH_FIELDS {
+            o.remove(*key);
+        }
+    }
+}
+
+/// Overwrite `doc`'s provider-owned fields with whatever the LIVE `auth.json`
+/// currently holds (absent there ⇒ absent here), so writing `doc` leaves the
+/// active provider exactly as it was found.
+///
+/// Deliberately infallible: an unreadable or corrupt live file is treated as
+/// "no provider fields", which strips them from `doc`. Writing no key is
+/// always safe (Codex falls back to the OAuth `tokens`); writing a stale one
+/// from an unrelated snapshot is what this whole seam exists to prevent.
+fn carry_over_provider_fields(path: &std::path::Path, doc: &mut JsonValue) {
+    let live: Option<JsonValue> = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+    let JsonValue::Object(target) = doc else {
+        return;
+    };
+    for key in PROVIDER_OWNED_AUTH_FIELDS {
+        match live.as_ref().and_then(|l| l.get(*key)) {
+            Some(v) => {
+                target.insert((*key).to_string(), v.clone());
+            }
+            None => {
+                target.remove(*key);
+            }
+        }
+    }
+}
 
 // ===================================================================
 // Wire types (camelCase → frontend)
@@ -369,12 +420,12 @@ fn auto_save_unsaved_live_codex_account() -> Result<Option<String>, Box<dyn Erro
         return Ok(None);
     };
     let mut store = read_store()?;
-    let id = live.id.as_str();
+    let id = live.id.clone();
     if store
         .iter()
-        .any(|e| str_field(e, "app") == Some("codex") && str_field(e, "id") == Some(id))
+        .any(|e| str_field(e, "app") == Some("codex") && str_field(e, "id") == Some(id.as_str()))
     {
-        return Ok(Some(id.to_string()));
+        return Ok(Some(id));
     }
     let entry = serde_json::json!({
         "id": id, "app": "codex",
@@ -383,7 +434,7 @@ fn auto_save_unsaved_live_codex_account() -> Result<Option<String>, Box<dyn Erro
     });
     store.push(entry);
     write_store(store)?;
-    Ok(Some(id.to_string()))
+    Ok(Some(id))
 }
 
 /// Abort an in-flight `login_and_save_codex_account` call by signalling its
@@ -423,9 +474,9 @@ pub fn delete_account(id: String) -> Result<(), Box<dyn Error>> {
 // ===================================================================
 
 /// Schema version stamped into accounts.json. Bump when the on-disk shape
-/// changes in a backward-incompatible way and add a migration arm to
-/// `migrate_account_entries`. v1 is the current baseline.
-pub const ACCOUNTS_SCHEMA_VERSION: u64 = 2;
+/// changes, or when historical data needs a one-time cleanup, and add an arm
+/// to `migrate_account_entries`. v1 is the original baseline.
+pub const ACCOUNTS_SCHEMA_VERSION: u64 = 3;
 
 fn read_store() -> Result<Vec<JsonValue>, Box<dyn Error>> {
     let raw = crate::config::read_accounts()?;
@@ -458,12 +509,17 @@ fn read_store() -> Result<Vec<JsonValue>, Box<dyn Error>> {
 
 /// Upgrade account entries written by an older schema version to the
 /// current shape. Add an arm when bumping `ACCOUNTS_SCHEMA_VERSION`.
-fn migrate_account_entries(version: u64, entries: Vec<JsonValue>) -> Vec<JsonValue> {
+///
+/// Arms apply in sequence, each gated on the version that introduced it, so a
+/// v1 file walks through every later arm too. Don't `return` out of one — that
+/// would make the oldest data skip the newest cleanups (each arm is written to
+/// be idempotent, so falling through them all is safe).
+fn migrate_account_entries(version: u64, mut entries: Vec<JsonValue>) -> Vec<JsonValue> {
     if version < 2 {
         // v1 stored `payload` as a JSON-ENCODED STRING; v2 stores the parsed
         // object. Convert each historical entry in place (leaving already-object
         // payloads untouched so the pass is idempotent).
-        return entries
+        entries = entries
             .into_iter()
             .map(|mut e| {
                 let parsed = e
@@ -472,6 +528,22 @@ fn migrate_account_entries(version: u64, entries: Vec<JsonValue>) -> Vec<JsonVal
                     .and_then(|s| serde_json::from_str::<JsonValue>(s).ok());
                 if let Some(obj) = parsed {
                     e["payload"] = obj;
+                }
+                e
+            })
+            .collect();
+    }
+    if version < 3 {
+        // Snapshots taken before the provider/account split captured the whole
+        // auth.json, so one taken while a custom provider was active still
+        // holds that provider's `OPENAI_API_KEY`. `switch_codex` no longer
+        // writes it out (it carries the live file's fields over instead), but
+        // the key itself shouldn't keep sitting in accounts.json — drop it.
+        entries = entries
+            .into_iter()
+            .map(|mut e| {
+                if let Some(payload) = e.get_mut("payload") {
+                    strip_provider_fields(payload);
                 }
                 e
             })
@@ -507,8 +579,9 @@ struct CodexLive {
     name: Option<String>,
     email: Option<String>,
     plan: Option<String>,
-    /// Full parsed auth.json, stored as the snapshot payload (a JSON object,
-    /// NOT a JSON-encoded string).
+    /// The parsed auth.json, stored as the snapshot payload (a JSON object,
+    /// NOT a JSON-encoded string) — already MINUS `PROVIDER_OWNED_AUTH_FIELDS`,
+    /// stripped once in `read_codex_live` so no consumer has to remember to.
     doc: JsonValue,
 }
 
@@ -684,34 +757,49 @@ fn read_codex_live() -> Result<Option<CodexLive>, Box<dyn Error>> {
         return Ok(None);
     }
     let raw = std::fs::read_to_string(&path)?;
-    let doc: JsonValue = serde_json::from_str(&raw)
+    let mut doc: JsonValue = serde_json::from_str(&raw)
         .map_err(|e| format!("Failed to parse ~/.codex/auth.json: {e}"))?;
 
-    // No `tokens` block = no ChatGPT login (pure API-key login or logged
-    // out) — nothing to save. Mirrors quota.rs `parse_codex_credentials`.
-    let Some(tokens) = doc.get("tokens").filter(|t| !t.is_null()) else {
-        return Ok(None);
+    // Scoped so the borrow of `doc` ends before it is stripped below.
+    let (id_info, account_id) = {
+        // No `tokens` block = no ChatGPT login (pure API-key login or logged
+        // out) — nothing to save. Mirrors quota.rs `parse_codex_credentials`.
+        let Some(tokens) = doc.get("tokens").filter(|t| !t.is_null()) else {
+            return Ok(None);
+        };
+        let id_info = tokens
+            .get("id_token")
+            .and_then(|v| v.as_str())
+            .and_then(|jwt| parse_codex_id_token(jwt).ok());
+        // tokens.account_id is the top-level field in auth.json (set by the
+        // login server alongside the token bundle). Mirrors the official
+        // priority in local_chatgpt_auth.rs:37-40: tokens.account_id →
+        // chatgpt_account_id.
+        let account_id = tokens
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        (id_info, account_id)
     };
-
-    let id_info = tokens
-        .get("id_token")
-        .and_then(|v| v.as_str())
-        .and_then(|jwt| parse_codex_id_token(jwt).ok());
-    // tokens.account_id is the top-level field in auth.json (set by the
-    // login server alongside the token bundle). Mirrors the official priority
-    // in local_chatgpt_auth.rs:37-40: tokens.account_id → chatgpt_account_id.
-    let account_id = tokens.get("account_id").and_then(|v| v.as_str());
 
     let name = id_info.as_ref().and_then(|i| i.name.clone());
     let email = id_info.as_ref().and_then(|i| i.email.clone());
     let plan = id_info.as_ref().and_then(|i| i.plan.clone());
     let chatgpt_account_id = id_info.as_ref().and_then(|i| i.chatgpt_account_id.clone());
 
+    // Strip HERE, the single point every consumer of `doc` goes through, so no
+    // caller has to remember to — and so nothing derived from the document as
+    // a whole (the id fallback right below) can vary with the active provider.
+    strip_provider_fields(&mut doc);
+
     let id = account_id
-        .map(String::from)
         .or(chatgpt_account_id)
         .or_else(|| email.clone())
-        .unwrap_or_else(|| stable_hash(&raw).to_string());
+        // Last resort, only when the login carries no identifying claim at
+        // all. Hashes the STRIPPED document, never the file text: otherwise
+        // activating a provider would change the hash and split one login
+        // into two accounts.
+        .unwrap_or_else(|| stable_hash(&doc.to_string()).to_string());
 
     Ok(Some(CodexLive {
         id,
@@ -945,6 +1033,13 @@ async fn switch_codex(payload: &JsonValue) -> Result<(), Box<dyn Error>> {
     }
 
     let path = codex_auth_path()?;
+    // Switching the account must not move the provider. `auth_mode` /
+    // `OPENAI_API_KEY` share this file but belong to provider management, so
+    // they are taken from the CURRENT auth.json, never from the snapshot —
+    // otherwise switching accounts would re-apply whichever third-party key
+    // happened to be live when that snapshot was taken (or wipe an active
+    // provider, when it was taken while Official was in use).
+    carry_over_provider_fields(&path, &mut doc);
     let updated = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
     atomic_write_0600(&path, updated.as_bytes())?;
     save_codex_account()?;
@@ -1276,7 +1371,8 @@ mod tests {
         let store_path = store_dir.join("accounts.json");
         std::fs::write(&store_path, serde_json::to_string_pretty(&v1).unwrap()).unwrap();
 
-        // A plain read migrates in memory AND rewrites the file to v2 + object.
+        // A plain read migrates in memory AND rewrites the file to the current
+        // version + an object payload.
         let entries = read_store().unwrap();
         assert!(
             entries[0]["payload"].is_object(),
@@ -1287,8 +1383,8 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&store_path).unwrap()).unwrap();
         assert_eq!(
             on_disk.pointer("/version").and_then(|v| v.as_u64()),
-            Some(2),
-            "historical file stamped to v2"
+            Some(ACCOUNTS_SCHEMA_VERSION),
+            "historical file stamped to the current version"
         );
         assert!(
             on_disk.pointer("/accounts/0/payload").unwrap().is_object(),
@@ -1361,6 +1457,277 @@ mod tests {
             Some("a@example.com")
         );
         assert!(state.accounts.iter().find(|x| x.id == a_id).unwrap().active);
+    }
+
+    /// Simulate `providers::activate_codex`: it merges the custom provider's
+    /// credentials into the SAME auth.json and deliberately leaves the OAuth
+    /// tokens beside them, so the login still reads as a valid account.
+    fn activate_custom_provider(home: &Path, key: &str) {
+        let path = home.join(".codex/auth.json");
+        let mut doc: JsonValue = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        doc["auth_mode"] = json!("apikey");
+        doc["OPENAI_API_KEY"] = json!(key);
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn switching_accounts_leaves_the_active_provider_credentials_alone() {
+        let _g = lock_home();
+        let tmp = tempdir("provider-untouched");
+        let _h = override_home(&tmp);
+        let path = tmp.join(".codex/auth.json");
+
+        // A and B both saved while Official was in use (clean snapshots).
+        write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
+        save_current_account(CliApp::Codex).unwrap();
+        write_codex_auth(&tmp, "b@example.com", "plus", "acct-b");
+        save_current_account(CliApp::Codex).unwrap();
+
+        // The user then points Codex at a third-party provider.
+        activate_custom_provider(&tmp, "sk-third-party");
+
+        switch_account("acct-a".to_string()).await.unwrap();
+
+        let after: JsonValue = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            after.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
+            Some("sk-third-party"),
+            "an account switch must not move the active provider's key"
+        );
+        assert_eq!(
+            after.get("auth_mode").and_then(|v| v.as_str()),
+            Some("apikey"),
+            "nor its mode marker"
+        );
+        assert_eq!(
+            after.pointer("/tokens/account_id").and_then(|v| v.as_str()),
+            Some("acct-a"),
+            "while the official login really did switch"
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_to_a_snapshot_holding_a_key_does_not_write_it_back() {
+        let _g = lock_home();
+        let tmp = tempdir("dirty-snapshot");
+        let _h = override_home(&tmp);
+        let path = tmp.join(".codex/auth.json");
+
+        // A snapshot from before this fix: taken while a provider was active,
+        // so its payload still carries that key.
+        write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
+        activate_custom_provider(&tmp, "sk-stale");
+        let dirty: JsonValue = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        write_store(vec![json!({
+            "id": "acct-a", "app": "codex",
+            "name": JsonValue::Null, "email": "a@example.com", "plan": "Pro",
+            "payload": dirty,
+            "savedAt": "2026-06-27T00:00:00Z",
+        })])
+        .unwrap();
+
+        // Live is Official again (a plain login, no provider fields).
+        write_codex_auth(&tmp, "b@example.com", "plus", "acct-b");
+
+        switch_account("acct-a".to_string()).await.unwrap();
+
+        let after: JsonValue = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(
+            after.get("OPENAI_API_KEY").is_none(),
+            "a stale key inside an old snapshot must not be resurrected"
+        );
+        assert!(after.get("auth_mode").is_none());
+        assert_eq!(
+            after.pointer("/tokens/account_id").and_then(|v| v.as_str()),
+            Some("acct-a"),
+        );
+    }
+
+    /// One login must stay ONE account when a provider is activated on top of
+    /// it. Exercised on the LAST-RESORT id branch — a login carrying no
+    /// identifying claim, whose id is a hash of the document — because that is
+    /// the only branch the provider's fields can reach. (The normal branch
+    /// reads `tokens.account_id`, which they can't touch, so asserting this
+    /// there passes no matter how the id is derived.)
+    #[test]
+    fn a_hashed_login_id_does_not_change_when_a_provider_is_activated() {
+        let _g = lock_home();
+        let tmp = tempdir("identity-fallback");
+        let _h = override_home(&tmp);
+
+        // `tokens` present (so this reads as a login) but with no account_id
+        // and no id_token to decode.
+        let dir = tmp.join(".codex");
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = json!({
+            "tokens": { "access_token": "access-xyz" },
+            "last_refresh": "2026-06-27T00:00:00Z",
+        });
+        std::fs::write(
+            dir.join("auth.json"),
+            serde_json::to_string_pretty(&doc).unwrap(),
+        )
+        .unwrap();
+
+        save_current_account(CliApp::Codex).unwrap();
+        let before = list_accounts(CliApp::Codex).unwrap();
+        assert_eq!(before.accounts.len(), 1);
+        assert!(before.current.as_ref().unwrap().saved);
+
+        activate_custom_provider(&tmp, "sk-third-party");
+
+        let after = list_accounts(CliApp::Codex).unwrap();
+        assert_eq!(
+            after.accounts[0].id, before.accounts[0].id,
+            "the id must not depend on provider fields sharing the file"
+        );
+        assert_eq!(
+            after.accounts.len(),
+            1,
+            "activating a provider must not fork the account list"
+        );
+        assert!(
+            after.accounts[0].active && after.current.as_ref().unwrap().saved,
+            "the live login must still read as this saved account"
+        );
+
+        // The tray's unattended snapshot therefore has nothing to add.
+        assert_eq!(
+            auto_save_unsaved_live_account().unwrap().as_deref(),
+            Some(before.accounts[0].id.as_str()),
+        );
+        assert_eq!(list_accounts(CliApp::Codex).unwrap().accounts.len(), 1);
+    }
+
+    #[test]
+    fn reading_the_store_scrubs_provider_keys_from_historical_snapshots() {
+        let _g = lock_home();
+        let tmp = tempdir("scrub-store");
+        let _h = override_home(&tmp);
+        let store_dir = tmp.join(".termory");
+        std::fs::create_dir_all(&store_dir).unwrap();
+
+        // A v2 file written before the provider/account split: the snapshot
+        // captured the whole auth.json, third-party key included.
+        let store = json!({
+            "version": 2,
+            "accounts": [{
+                "id": "acct-a", "app": "codex",
+                "name": "Jane", "email": "a@example.com", "plan": "Pro",
+                "payload": {
+                    "tokens": { "access_token": "access-xyz", "account_id": "acct-a" },
+                    "last_refresh": "2026-06-27T00:00:00Z",
+                    "auth_mode": "apikey",
+                    "OPENAI_API_KEY": "sk-leaked",
+                },
+                "savedAt": "2026-06-27T00:00:00Z",
+            }],
+        });
+        let store_path = store_dir.join("accounts.json");
+        std::fs::write(&store_path, serde_json::to_string_pretty(&store).unwrap()).unwrap();
+
+        let entries = read_store().unwrap();
+        assert!(entries[0]["payload"].get("OPENAI_API_KEY").is_none());
+
+        // …and the cleanup is persisted, not re-done on every read.
+        let on_disk: JsonValue =
+            serde_json::from_slice(&std::fs::read(&store_path).unwrap()).unwrap();
+        let payload = on_disk.pointer("/accounts/0/payload").unwrap();
+        assert!(
+            payload.get("OPENAI_API_KEY").is_none(),
+            "the leaked key must be gone from disk"
+        );
+        assert!(payload.get("auth_mode").is_none());
+        assert_eq!(
+            payload
+                .pointer("/tokens/account_id")
+                .and_then(|v| v.as_str()),
+            Some("acct-a"),
+            "the login itself survives"
+        );
+        assert_eq!(
+            on_disk
+                .pointer("/accounts/0/email")
+                .and_then(|v| v.as_str()),
+            Some("a@example.com"),
+            "and so does the rest of the entry"
+        );
+        assert_eq!(
+            on_disk.pointer("/version").and_then(|v| v.as_u64()),
+            Some(ACCOUNTS_SCHEMA_VERSION),
+        );
+    }
+
+    #[test]
+    fn v1_data_reaches_every_later_migration_arm() {
+        let _g = lock_home();
+        let tmp = tempdir("migrate-chain");
+        let _h = override_home(&tmp);
+        let store_dir = tmp.join(".termory");
+        std::fs::create_dir_all(&store_dir).unwrap();
+
+        // The oldest shape: payload as a JSON-encoded STRING, and it carries a
+        // provider key. Both the v2 arm (parse) and the v3 arm (scrub) apply.
+        let payload_str = serde_json::to_string(&json!({
+            "tokens": { "account_id": "acct-a" },
+            "OPENAI_API_KEY": "sk-leaked",
+        }))
+        .unwrap();
+        let store = json!({
+            "version": 1,
+            "accounts": [{
+                "id": "acct-a", "app": "codex",
+                "payload": payload_str,
+                "savedAt": "2026-06-27T00:00:00Z",
+            }],
+        });
+        std::fs::write(
+            store_dir.join("accounts.json"),
+            serde_json::to_string_pretty(&store).unwrap(),
+        )
+        .unwrap();
+
+        let entries = read_store().unwrap();
+        let payload = &entries[0]["payload"];
+        assert!(payload.is_object(), "v2 arm ran (string → object)");
+        assert!(
+            payload.get("OPENAI_API_KEY").is_none(),
+            "v3 arm ran too — an early return here would skip it"
+        );
+    }
+
+    #[test]
+    fn snapshots_never_capture_the_active_provider_credentials() {
+        let _g = lock_home();
+        let tmp = tempdir("snapshot-clean");
+        let _h = override_home(&tmp);
+
+        write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
+        activate_custom_provider(&tmp, "sk-third-party");
+
+        // Both entry points: the page's explicit save…
+        save_current_account(CliApp::Codex).unwrap();
+        // …and the tray's unattended one (idempotent on an already-saved id,
+        // so clear the store to exercise it).
+        let payload_from_save = read_store().unwrap()[0]["payload"].clone();
+        write_store(Vec::new()).unwrap();
+        auto_save_unsaved_live_account().unwrap();
+        let payload_from_auto_save = read_store().unwrap()[0]["payload"].clone();
+
+        for (label, payload) in [
+            ("save_current_account", &payload_from_save),
+            ("auto_save_unsaved_live_account", &payload_from_auto_save),
+        ] {
+            assert!(
+                payload.get("OPENAI_API_KEY").is_none(),
+                "{label} must not copy a third-party key into accounts.json"
+            );
+            assert!(payload.get("auth_mode").is_none(), "{label}");
+            assert!(
+                payload.pointer("/tokens/account_id").is_some(),
+                "{label} still stores the login itself"
+            );
+        }
     }
 
     #[test]

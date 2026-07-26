@@ -596,11 +596,15 @@ fn refresh_accounts(app: &AppHandle) {
 /// Reflect a landed account switch in the menu, preferring the in-place update
 /// so a menu the user reopened to check the result isn't dismissed.
 ///
-/// The switch replaced auth.json, which the provider derivation also reads — so
-/// when that moved the row's title (a snapshot taken while a custom provider
-/// was active restores its api-key fields), only a rebuild can express it, and
-/// showing the truth beats keeping the menu open. Switching between two plain
-/// official logins leaves the title identical, which is the common case.
+/// An account switch no longer moves the row's title on its own: it rewrites
+/// auth.json, which the provider derivation also reads, but
+/// `accounts::switch_codex` carries the provider-owned fields over from the
+/// live file (see `accounts::PROVIDER_OWNED_AUTH_FIELDS`), so the derived
+/// provider — and hence the title — is unchanged. This check therefore almost
+/// always takes the in-place branch now. It is kept as the guard for the case
+/// it cannot rule out: something else moved the provider between the menu
+/// being built and the switch landing, where only a rebuild can express the
+/// change and showing the truth beats keeping the menu open.
 fn settle_account_change(app: &AppHandle, cli: CliApp) {
     if cli_row_title_is_stale(cli) {
         if let Err(err) = rebuild_menu(app) {

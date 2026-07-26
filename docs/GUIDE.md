@@ -180,7 +180,11 @@ When pay-as-you-go **Usage credits** are enabled on the account (Claude's overfl
 
 ### Official accounts (Codex multi-account)
 
-On the **Codex** tab, the Official card also manages multiple ChatGPT logins. **Save current** snapshots the live login; **Add account** starts a fresh `codex login` in your browser (cancellable — if you cancel or it fails, your previous login is restored). This works with just the desktop app installed too — Termory runs the CLI bundled inside the app for the login. Each saved row shows the account's email, plan, and when its tokens were last refreshed. **Switch** restores a snapshot — Termory refreshes its tokens first, and an account whose login has expired is flagged **Re-login** instead of being written broken. Snapshots live in `~/.termory/accounts.json` (owner-only file permissions); Codex's own `auth.json` is only touched when you switch or add. For **Claude Code** and **Gemini** the card just shows which official account is currently logged in — saving and switching is Codex-only.
+On the **Codex** tab, the Official card also manages multiple ChatGPT logins. **Save current** snapshots the live login; **Add account** starts a fresh `codex login` in your browser (cancellable — if you cancel or it fails, your previous login is restored). This works with just the desktop app installed too — Termory runs the CLI bundled inside the app for the login. Each saved row shows the account's email, plan, and when its tokens were last refreshed. **Switch** restores a snapshot — Termory refreshes its tokens first, and an account whose login has expired is flagged **Re-login** instead of being written broken. Snapshots live in `~/.termory/accounts.json` (owner-only file permissions); Codex's own `auth.json` is only touched when you switch or add.
+
+Accounts and providers are independent, even though Codex keeps both in the same file: switching accounts changes only which ChatGPT login is active, and never the provider you have selected or its API key. Saving an account records the login alone — a third-party key is never copied into a snapshot, so restoring one later can't bring someone else's key back. This holds the same way whether you switch from the app or the menu bar.
+
+For **Claude Code** and **Gemini** the card just shows which official account is currently logged in — saving and switching is Codex-only.
 
 ---
 
