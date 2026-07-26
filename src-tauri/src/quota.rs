@@ -107,7 +107,22 @@ pub struct QuotaTier {
     /// Window id as returned by the API: `five_hour`, `seven_day`,
     /// `seven_day_opus`, `seven_day_sonnet`, … Unknown ids pass
     /// through verbatim so new windows surface without a release.
+    /// For a MODEL-SCOPED window this is the model's display name
+    /// ("Fable") — see `group` for the period it belongs to.
     pub name: String,
+    /// The PERIOD a model-scoped window covers, taken VERBATIM from the
+    /// API's own grouping (`limits[].group`: `session` / `weekly` /
+    /// `monthly`). Present only for model-scoped windows, whose `name`
+    /// is a bare model name that says nothing about the period — the
+    /// label renders `Weekly · Fable` from the two. `None` for the flat
+    /// account-wide windows, whose `name` already IS the period, and
+    /// for sources with no such grouping (Codex / Gemini / grok).
+    ///
+    /// Read from the API instead of inferred because this data is
+    /// DYNAMIC: which models have their own window, and which periods
+    /// exist, differ per account and change without notice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// Used percentage 0–100.
     pub utilization: f64,
     /// ISO 8601 reset time.
@@ -391,6 +406,8 @@ fn parse_claude_usage(body: &serde_json::Value) -> (Vec<QuotaTier>, Option<Extra
         let utilization = value.get("utilization")?.as_f64()?;
         Some(QuotaTier {
             name: name.to_string(),
+            // Flat top-level windows ARE their own period.
+            group: None,
             utilization,
             resets_at: value
                 .get("resets_at")
@@ -452,6 +469,18 @@ fn parse_claude_usage(body: &serde_json::Value) -> (Vec<QuotaTier>, Option<Extra
         }
         tiers.push(QuotaTier {
             name: model.to_string(),
+            // The period this scoped window belongs to, verbatim from
+            // the API ("weekly" for `weekly_scoped`) so the label can
+            // read "Weekly · Fable" rather than a bare model name.
+            // Absent (or empty) stays None — the period is never
+            // inferred from `kind` or from the model, so a shape we
+            // don't recognize degrades to today's bare-name label
+            // instead of inventing a period.
+            group: entry
+                .get("group")
+                .and_then(|g| g.as_str())
+                .filter(|g| !g.is_empty())
+                .map(String::from),
             utilization: percent,
             resets_at: entry
                 .get("resets_at")
@@ -857,6 +886,9 @@ fn parse_codex_usage(body: &serde_json::Value) -> Vec<QuotaTier> {
                 .and_then(|v| v.as_i64())
                 .map(window_seconds_to_tier_name)
                 .unwrap_or_else(|| "unknown".to_string()),
+            // Codex windows are account-wide time windows — the name IS
+            // the period, so there is nothing to group under.
+            group: None,
             utilization: used,
             resets_at: window
                 .get("reset_at")
@@ -1222,6 +1254,10 @@ fn parse_gemini_quota(body: &serde_json::Value) -> Vec<QuotaTier> {
         .into_iter()
         .map(|(name, remaining, reset)| QuotaTier {
             name,
+            // Gemini's buckets are per-MODEL CLASSES, already named as
+            // such (`gemini_pro` → "Gemini Pro") and carrying no period
+            // from the API — nothing to compose, so no group.
+            group: None,
             utilization: (1.0 - remaining) * 100.0,
             resets_at: reset,
         })
@@ -1490,6 +1526,9 @@ fn parse_grok_billing(body: &serde_json::Value) -> (Vec<QuotaTier>, Option<Extra
         .map(String::from);
     let tiers = vec![QuotaTier {
         name: name.to_string(),
+        // Grok reports ONE account-wide credit window whose name is
+        // already the period.
+        group: None,
         utilization,
         resets_at,
     }];
@@ -1816,8 +1855,8 @@ mod tests {
             "seven_day_sonnet": null,
             "limits": [
                 { "kind": "session", "percent": 53, "resets_at": "2026-07-04T09:29:59Z", "scope": null },
-                { "kind": "weekly_all", "percent": 63, "resets_at": "2026-07-09T15:59:59Z", "scope": null },
-                { "kind": "weekly_scoped", "percent": 100, "resets_at": "2026-07-09T15:59:59Z",
+                { "kind": "weekly_all", "group": "weekly", "percent": 63, "resets_at": "2026-07-09T15:59:59Z", "scope": null },
+                { "kind": "weekly_scoped", "group": "weekly", "percent": 100, "resets_at": "2026-07-09T15:59:59Z",
                   "scope": { "model": { "id": null, "display_name": "Fable" } }, "is_active": true }
             ]
         });
@@ -1829,6 +1868,37 @@ mod tests {
         let fable = tiers.iter().find(|t| t.name == "Fable").unwrap();
         assert_eq!(fable.utilization, 100.0);
         assert_eq!(fable.resets_at.as_deref(), Some("2026-07-09T15:59:59Z"));
+        // The scoped window carries the API's own period grouping, so
+        // the UI can label it "Weekly · Fable" instead of a bare model
+        // name; the flat account-wide windows carry none (their name IS
+        // the period).
+        assert_eq!(fable.group.as_deref(), Some("weekly"));
+        assert!(tiers
+            .iter()
+            .filter(|t| t.name != "Fable")
+            .all(|t| t.group.is_none()));
+    }
+
+    #[test]
+    fn parse_claude_usage_scoped_limit_without_a_group_keeps_the_model_name() {
+        // `group` is what the live API sends, but it must not be
+        // REQUIRED: a body without it still surfaces the window, just
+        // with no period to compose a label from.
+        let body = json!({
+            "limits": [
+                { "kind": "weekly_scoped", "percent": 7,
+                  "scope": { "model": { "display_name": "Fable" } } },
+                { "kind": "weekly_scoped", "group": "", "percent": 8,
+                  "scope": { "model": { "display_name": "Opus" } } }
+            ]
+        });
+        let (tiers, _) = parse_claude_usage(&body);
+        assert_eq!(
+            tiers.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            vec!["Fable", "Opus"]
+        );
+        // Missing and empty both mean "no period", never an empty label.
+        assert!(tiers.iter().all(|t| t.group.is_none()));
     }
 
     #[test]
@@ -2100,11 +2170,20 @@ mod tests {
             app: "claude".into(),
             credential_status: CredentialStatus::Valid,
             success: true,
-            tiers: vec![QuotaTier {
-                name: "five_hour".into(),
-                utilization: 12.5,
-                resets_at: Some("2026-06-10T12:00:00Z".into()),
-            }],
+            tiers: vec![
+                QuotaTier {
+                    name: "five_hour".into(),
+                    group: None,
+                    utilization: 12.5,
+                    resets_at: Some("2026-06-10T12:00:00Z".into()),
+                },
+                QuotaTier {
+                    name: "Fable".into(),
+                    group: Some("weekly".into()),
+                    utilization: 4.0,
+                    resets_at: None,
+                },
+            ],
             plan: Some("Max".into()),
             extra_usage: None,
             error: None,
@@ -2113,6 +2192,10 @@ mod tests {
         let v = serde_json::to_value(&quota).unwrap();
         assert_eq!(v["credentialStatus"], "valid");
         assert_eq!(v["tiers"][0]["resetsAt"], "2026-06-10T12:00:00Z");
+        // An absent group is OMITTED, not null — the frontend's optional
+        // field stays undefined for account-wide windows.
+        assert!(v["tiers"][0].get("group").is_none());
+        assert_eq!(v["tiers"][1]["group"], "weekly");
         assert_eq!(v["plan"], "Max");
         assert_eq!(v["queriedAt"], 1);
     }

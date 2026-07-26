@@ -302,6 +302,65 @@ describe("OfficialAccountsSection — quota rings in active row", () => {
     expect(screen.getByText("41%")).toBeInTheDocument();
   });
 
+  it("labels a model-scoped window with its period, not a bare model name", async () => {
+    mockList(makeState());
+    render(
+      <OfficialAccountsSection
+        app="claude"
+        quota={makeQuota({
+          tiers: [
+            { name: "five_hour", utilization: 9 },
+            // What the live API sends for a per-model weekly: the name is
+            // the MODEL, the period comes from `group`.
+            { name: "Fable", group: "weekly", utilization: 4 }
+          ]
+        })}
+        onRefreshQuota={vi.fn()}
+      />
+    );
+    await screen.findByText("5h");
+    expect(screen.getByText("Weekly · Fable")).toBeInTheDocument();
+    // The bare model name must NOT be a row of its own.
+    expect(screen.queryByText("Fable")).not.toBeInTheDocument();
+  });
+
+  it("shows the countdown on exactly one window when two share a name", async () => {
+    mockList(makeState());
+    const soon = new Date(Date.now() + 3 * 3_600_000).toISOString();
+    render(
+      <OfficialAccountsSection
+        app="claude"
+        quota={makeQuota({
+          // A model whose display name happens to equal a window id: the
+          // countdown is resolved to ONE row, not matched by name per row.
+          tiers: [
+            { name: "seven_day", utilization: 40, resetsAt: soon },
+            { name: "seven_day", group: "weekly", utilization: 4, resetsAt: soon }
+          ]
+        })}
+        onRefreshQuota={vi.fn()}
+      />
+    );
+    await screen.findByText("Weekly · seven_day");
+    expect(screen.getAllByText(/in \d/)).toHaveLength(1);
+  });
+
+  it("renders an unrecognized period group verbatim", async () => {
+    mockList(makeState());
+    render(
+      <OfficialAccountsSection
+        app="claude"
+        quota={makeQuota({
+          tiers: [{ name: "Fable", group: "fortnightly", utilization: 4 }]
+        })}
+        onRefreshQuota={vi.fn()}
+      />
+    );
+    // A period this build doesn't know still surfaces — same rule as
+    // unknown window ids, so a new API grouping needs no release.
+    expect(await screen.findByText("fortnightly · Fable")).toBeInTheDocument();
+  });
+
   it("shows the Refresh button and calls onRefreshQuota when clicked", async () => {
     const user = userEvent.setup();
     const onRefresh = vi.fn();
@@ -499,6 +558,19 @@ describe("waitingOnTierName", () => {
         { name: "gemini_flash", utilization: 20, resetsAt: soon }
       ])
     ).toBe("gemini_flash");
+  });
+
+  it("treats a window carrying an API group as model-scoped", () => {
+    // The API says this window is scoped to one model, so a spent one
+    // blocks nothing — settled by the `group` field, not by whether the
+    // name happens to be missing from the account-wide id list. A model
+    // named like a window id ("seven_day") must not read as account-wide.
+    expect(
+      waitingOnTierName([
+        { name: "five_hour", utilization: 30, resetsAt: soon },
+        { name: "seven_day", group: "weekly", utilization: 100, resetsAt: later }
+      ])
+    ).toBe("five_hour");
   });
 
   it("blocks on model-scoped windows once EVERY one is spent", () => {

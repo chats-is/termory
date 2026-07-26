@@ -268,7 +268,14 @@ export type CredentialStatus =
  * `seven_day`, `seven_day_opus`, `seven_day_sonnet`, …) — unknown ids
  * pass through verbatim. `utilization` is the used percentage 0–100. */
 export type QuotaTier = {
+  /** Window id (`five_hour`, `seven_day`, …) or, for a MODEL-SCOPED
+   * window, the model's display name ("Fable"). */
   name: string;
+  /** Period a model-scoped window groups under, verbatim from the API
+   * (`session` / `weekly` / `monthly`) — set only when `name` is a bare
+   * model name, so the label can read "Weekly · Fable". Absent for the
+   * account-wide windows, whose `name` already IS the period. */
+  group?: string;
   utilization: number;
   resetsAt?: string;
 };

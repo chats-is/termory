@@ -116,7 +116,13 @@ const SPENT_PCT = 100;
 const ACCOUNT_WIDE_TIERS = new Set(["five_hour", "seven_day", "30_day"]);
 const GENERATED_WINDOW = /^\d+_(hour|day)$/;
 
-function isAccountWide(name: string): boolean {
+// A `group` means the API itself said this window is scoped to one model
+// (it's the period the model's window groups under), so it settles the
+// question with no list to maintain. The id list stays for the windows
+// that carry no group: the account-wide ones, the legacy flat
+// `seven_day_opus`/`seven_day_sonnet`, and Gemini's per-model buckets.
+function isAccountWide(name: string, group?: string): boolean {
+  if (group) return false;
   return ACCOUNT_WIDE_TIERS.has(name) || GENERATED_WINDOW.test(name);
 }
 
@@ -158,18 +164,25 @@ function isAccountWide(name: string): boolean {
 // tiers, since the usage may sit on a different tier than the chosen one.
 // Windows without a usable reset time can't carry a countdown and are skipped.
 export function waitingOnTierName(
-  tiers: { name: string; utilization: number; resetsAt?: string | null }[]
+  tiers: {
+    name: string;
+    group?: string;
+    utilization: number;
+    resetsAt?: string | null;
+  }[]
 ): string | null {
   if (!tiers.some((tier) => tier.utilization > 0)) return null;
   const usable = tiers.flatMap((tier) => {
     if (!tier.resetsAt) return [];
     const at = new Date(tier.resetsAt).getTime();
-    return Number.isNaN(at) ? [] : [{ name: tier.name, at, pct: tier.utilization }];
+    return Number.isNaN(at)
+      ? []
+      : [{ name: tier.name, group: tier.group, at, pct: tier.utilization }];
   });
   if (usable.length === 0) return null;
   const isSpent = (tier: { pct: number }) => tier.pct >= SPENT_PCT;
-  const accountWide = usable.filter((t) => isAccountWide(t.name));
-  const modelScoped = usable.filter((t) => !isAccountWide(t.name));
+  const accountWide = usable.filter((t) => isAccountWide(t.name, t.group));
+  const modelScoped = usable.filter((t) => !isAccountWide(t.name, t.group));
   const spentAccountWide = accountWide.filter(isSpent);
   const blocking =
     spentAccountWide.length > 0
@@ -190,7 +203,34 @@ const RING_CLASS: Record<QuotaLevel, string> = {
   crit: "stroke-destructive"
 };
 
-function tierLabels(name: string, t: Translate): { short: string; full: string } {
+// The API's period groups, mapped to the SAME labels their account-wide
+// counterparts use so "Weekly · Fable" reads consistently next to a plain
+// "Weekly". Unrecognized groups render verbatim — a new period surfaces
+// without a release, exactly like an unknown window id.
+// One label per period (no short/full split): the composed
+// "Weekly · Fable" is already the whole story, unlike an account-wide
+// window whose full form adds scope ("Weekly (all models)").
+const GROUP_LABELS: Record<string, MessageKey> = {
+  session: "providers.quotaFiveHourShort",
+  weekly: "providers.quotaSevenDayShort",
+  monthly: "providers.quotaMonthlyShort"
+};
+
+// `group` is set only for MODEL-SCOPED windows, whose `name` is a bare
+// model name ("Fable") that alone wouldn't say which window it is sitting
+// next to "5h". Compose `{period} · {model}` — both halves come from the
+// API, so any model/period pair works with no per-model code (which
+// models get their own window is dynamic and differs per account).
+function tierLabels(
+  name: string,
+  t: Translate,
+  group?: string
+): { short: string; full: string } {
+  if (group) {
+    const period = GROUP_LABELS[group];
+    const composed = `${period ? t(period) : group} · ${name}`;
+    return { short: composed, full: composed };
+  }
   const known = TIER_LABELS[name];
   if (known) return { short: t(known.short), full: t(known.full) };
   const hours = /^(\d+)_hour$/.exec(name);
@@ -234,12 +274,14 @@ function QuotaRing({ utilization }: { utilization: number }) {
 function QuotaTierItem({
   app,
   name,
+  group,
   utilization,
   resetsAt,
   showCountdown
 }: {
   app: CliApp;
   name: string;
+  group?: string;
   utilization: number;
   resetsAt?: string;
   // Only the window you're waiting on (see waitingOnTierName) gets the
@@ -247,7 +289,7 @@ function QuotaTierItem({
   showCountdown: boolean;
 }) {
   const t = useT();
-  let labels = tierLabels(name, t);
+  let labels = tierLabels(name, t, group);
   // Grok reuses the seven_day/30_day window ids (so the tray "W"/"M"
   // abbreviations and ring shorts apply), but the Claude-specific FULL
   // labels ("Weekly (all models)") misdescribe grok's CREDIT window —
@@ -635,14 +677,26 @@ export function OfficialAccountsSection({
                 {(quota?.tiers.length ?? 0) > 0 &&
                   (() => {
                     const waitingOn = waitingOnTierName(quota!.tiers);
-                    return quota!.tiers.map((tier) => (
+                    // Resolve the name to ONE row up front: a model-scoped
+                    // window's name is a model, so it could in principle
+                    // equal an account-wide window id, and comparing by
+                    // name per row would then light the countdown twice.
+                    // First match wins, so exactly one row carries it.
+                    const waitingIndex = quota!.tiers.findIndex(
+                      (tier) => tier.name === waitingOn
+                    );
+                    return quota!.tiers.map((tier, index) => (
+                      // Same reason for the composite key: name alone is
+                      // not guaranteed unique across the two kinds, and a
+                      // duplicate React key is an error in its own right.
                       <QuotaTierItem
-                        key={tier.name}
+                        key={`${tier.group ?? ""}:${tier.name}`}
                         app={app}
                         name={tier.name}
+                        group={tier.group}
                         utilization={tier.utilization}
                         resetsAt={tier.resetsAt}
-                        showCountdown={tier.name === waitingOn}
+                        showCountdown={index === waitingIndex}
                       />
                     ));
                   })()}

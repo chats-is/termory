@@ -112,14 +112,28 @@ const TRAY_HIDDEN_TIERS: &[&str] = &["seven_day_opus", "seven_day_sonnet"];
 /// Providers page updates the tray too.
 #[derive(Clone, PartialEq)]
 struct TrayQuota {
-    /// `(window id, used %)` — already filtered to displayable
-    /// windows (TRAY_HIDDEN_TIERS dropped), API order preserved.
-    tiers: Vec<(String, f64)>,
+    /// Displayable windows (TRAY_HIDDEN_TIERS dropped), API order
+    /// preserved.
+    tiers: Vec<TrayTier>,
     /// Subscription plan display name ("Max" / "Plus" / "Free" …).
     plan: Option<String>,
     /// Pay-as-you-go credits (Claude "extra usage" / grok on-demand),
     /// present only when enabled — appended as "🟢 $used / $limit Credits".
     credits: Option<TrayCredits>,
+}
+
+/// One window on the tray row. Keeps the API's own fields rather than
+/// a pre-rendered label: the label is composed at RENDER time, so a
+/// language switch relabels the cached quota instead of freezing the
+/// locale it was fetched under.
+#[derive(Clone, PartialEq)]
+struct TrayTier {
+    /// Window id, or the model display name for a model-scoped window.
+    name: String,
+    /// Period a model-scoped window groups under — see
+    /// [`crate::quota::QuotaTier::group`].
+    group: Option<String>,
+    used: f64,
 }
 
 /// The pieces of an enabled `ExtraUsage` the tray row renders: a
@@ -1309,7 +1323,11 @@ pub fn refresh_quota(app: &AppHandle, quota: &crate::quota::SubscriptionQuota) {
             .tiers
             .iter()
             .filter(|t| !TRAY_HIDDEN_TIERS.contains(&t.name.as_str()))
-            .map(|t| (t.name.clone(), t.utilization))
+            .map(|t| TrayTier {
+                name: t.name.clone(),
+                group: t.group.clone(),
+                used: t.utilization,
+            })
             .collect(),
         plan: quota.plan.clone(),
         credits: quota
@@ -1397,12 +1415,21 @@ fn quota_glyph(utilization: f64) -> &'static str {
     }
 }
 
-/// Short menu label for a window id: the localized labels for the
+/// Short menu label for a window: the localized labels for the
 /// standard windows, "{n}h" / "{n}d" for generated `{n}_hour` /
 /// `{n}_day` ids (Codex non-standard window lengths, e.g. the free
 /// plan's 30-day window — mirrors `tierLabels` in
 /// OfficialAccountsSection.tsx), raw id otherwise.
-fn tray_tier_label(name: &str, labels: &TrayLabels) -> String {
+///
+/// A MODEL-SCOPED window (`group` set — Claude's per-model weeklies)
+/// renders as `{period} · {model}`, e.g. "Weekly · Fable": its `name`
+/// is a bare model name, which alone wouldn't say WHICH window it is
+/// sitting next to "5h". The period label comes from the API's own
+/// grouping so a new period/model pair needs no code here.
+fn tray_tier_label(name: &str, group: Option<&str>, labels: &TrayLabels) -> String {
+    if let Some(group) = group {
+        return format!("{} · {}", tray_group_label(group, labels), name);
+    }
     match name {
         "five_hour" => labels.five_hour.clone(),
         "seven_day" => labels.weekly.clone(),
@@ -1425,6 +1452,20 @@ fn tray_tier_label(name: &str, labels: &TrayLabels) -> String {
             }
             other.to_string()
         }
+    }
+}
+
+/// The API's period group (`session` / `weekly` / `monthly`) as the
+/// same short label its account-wide counterpart uses, so "Weekly ·
+/// Fable" reads consistently with the plain "Weekly" window. An
+/// unrecognized group renders verbatim — new periods surface without
+/// a release, exactly like unknown window ids.
+fn tray_group_label(group: &str, labels: &TrayLabels) -> String {
+    match group {
+        "session" => labels.five_hour.clone(),
+        "weekly" => labels.weekly.clone(),
+        "monthly" => labels.monthly.clone(),
+        other => other.to_string(),
     }
 }
 
@@ -1477,12 +1518,12 @@ fn quota_label(q: &TrayQuota, labels: &TrayLabels) -> Option<String> {
     let mut parts: Vec<String> = q
         .tiers
         .iter()
-        .map(|(name, used)| {
+        .map(|t| {
             format!(
                 "{} {:.0}% {}",
-                quota_glyph(*used),
-                used,
-                tray_tier_label(name, labels)
+                quota_glyph(t.used),
+                t.used,
+                tray_tier_label(&t.name, t.group.as_deref(), labels)
             )
         })
         .collect();
@@ -2281,11 +2322,20 @@ mod tests {
         assert_eq!(account_row_label(&revoked), "a@example.com ⚠");
     }
 
+    /// Account-wide window (its name IS the period, so no group).
+    fn wide_tier(name: &str, used: f64) -> TrayTier {
+        TrayTier {
+            name: name.into(),
+            group: None,
+            used,
+        }
+    }
+
     #[test]
     fn quota_label_formats_known_generated_and_missing_windows() {
         let labels = TrayLabels::default();
         let both = TrayQuota {
-            tiers: vec![("five_hour".into(), 12.4), ("seven_day".into(), 78.0)],
+            tiers: vec![wide_tier("five_hour", 12.4), wide_tier("seven_day", 78.0)],
             plan: None,
             credits: None,
         };
@@ -2295,14 +2345,14 @@ mod tests {
         );
         // Codex free plan: a single 30-day window → the "M" default label.
         let monthly = TrayQuota {
-            tiers: vec![("30_day".into(), 9.0)],
+            tiers: vec![wide_tier("30_day", 9.0)],
             plan: None,
             credits: None,
         };
         assert_eq!(quota_label(&monthly, &labels).as_deref(), Some("🟢 9% M"));
         // Truly unknown ids pass through raw.
         let odd = TrayQuota {
-            tiers: vec![("mystery_window".into(), 99.6)],
+            tiers: vec![wide_tier("mystery_window", 99.6)],
             plan: None,
             credits: None,
         };
@@ -2324,7 +2374,7 @@ mod tests {
         // Claude sends cents + decimal_places=2 → "$19.44 / $50 Credits"
         // ($50.00 trims to $50; $19.44 keeps its cents).
         let q = TrayQuota {
-            tiers: vec![("five_hour".into(), 12.0)],
+            tiers: vec![wide_tier("five_hour", 12.0)],
             plan: None,
             credits: Some(TrayCredits {
                 utilization: 38.88,
@@ -2359,15 +2409,49 @@ mod tests {
     #[test]
     fn tray_tier_label_humanizes_generated_ids() {
         let labels = TrayLabels::default();
-        assert_eq!(tray_tier_label("five_hour", &labels), "5h");
-        assert_eq!(tray_tier_label("seven_day", &labels), "W");
-        assert_eq!(tray_tier_label("3_hour", &labels), "3h");
-        assert_eq!(tray_tier_label("30_day", &labels), "M");
-        assert_eq!(tray_tier_label("14_day", &labels), "14d");
-        assert_eq!(tray_tier_label("gemini_pro", &labels), "Pro");
-        assert_eq!(tray_tier_label("gemini_flash_lite", &labels), "Lite");
-        assert_eq!(tray_tier_label("_day", &labels), "_day"); // no digits → raw
-        assert_eq!(tray_tier_label("weekly_limit", &labels), "weekly_limit");
+        assert_eq!(tray_tier_label("five_hour", None, &labels), "5h");
+        assert_eq!(tray_tier_label("seven_day", None, &labels), "W");
+        assert_eq!(tray_tier_label("3_hour", None, &labels), "3h");
+        assert_eq!(tray_tier_label("30_day", None, &labels), "M");
+        assert_eq!(tray_tier_label("14_day", None, &labels), "14d");
+        assert_eq!(tray_tier_label("gemini_pro", None, &labels), "Pro");
+        assert_eq!(tray_tier_label("gemini_flash_lite", None, &labels), "Lite");
+        assert_eq!(tray_tier_label("_day", None, &labels), "_day"); // no digits → raw
+        assert_eq!(
+            tray_tier_label("weekly_limit", None, &labels),
+            "weekly_limit"
+        );
+    }
+
+    #[test]
+    fn tray_tier_label_composes_model_scoped_windows_with_their_period() {
+        let labels = TrayLabels::default();
+        // A model-scoped weekly reads as its period + the model, so it
+        // can't be mistaken for a window of its own next to "5h".
+        assert_eq!(
+            tray_tier_label("Fable", Some("weekly"), &labels),
+            "W · Fable"
+        );
+        assert_eq!(
+            tray_tier_label("Opus", Some("session"), &labels),
+            "5h · Opus"
+        );
+        assert_eq!(
+            tray_tier_label("Haiku", Some("monthly"), &labels),
+            "M · Haiku"
+        );
+        // An unrecognized period renders verbatim rather than vanishing —
+        // same "unknown surfaces without a release" rule as window ids.
+        assert_eq!(
+            tray_tier_label("Fable", Some("fortnightly"), &labels),
+            "fortnightly · Fable"
+        );
+        // The model name never falls through the id-humanizing arms: a
+        // model literally called "3_hour" stays itself.
+        assert_eq!(
+            tray_tier_label("3_hour", Some("weekly"), &labels),
+            "W · 3_hour"
+        );
     }
 
     #[test]
