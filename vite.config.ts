@@ -13,7 +13,13 @@ export default defineConfig({
   },
   server: {
     port: 1420,
-    strictPort: true
+    strictPort: true,
+    watch: {
+      // vite must not watch the Rust tree: on Windows, fs.watch on a
+      // cargo-locked target/ dll throws EBUSY and crashes the dev server
+      // whenever cargo rebuilds while vite is running.
+      ignored: ["**/src-tauri/**"]
+    }
   },
   clearScreen: false,
   test: {
