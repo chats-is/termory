@@ -56,7 +56,10 @@ function UpgradeBadge({
   const className = cn(
     "gap-0.5 px-1.5 py-0",
     BADGE_TONE[state.tone],
-    state.disabled && "opacity-60",
+    // Light dimming while upgrading: the label already reads
+    // "Upgrading", so this is a hint, not the signal. A heavier fade
+    // (0.6) made the one thing the user is watching hard to read.
+    state.disabled && "opacity-80",
     state.clickable && !state.disabled && ["cursor-pointer", BADGE_HOVER[state.tone]]
   );
   const content = (
