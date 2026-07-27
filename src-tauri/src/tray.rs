@@ -634,9 +634,10 @@ fn settle_account_change(app: &AppHandle, cli: CliApp) {
 /// tokens first) — a failure leaves the live credential untouched, and for
 /// Codex we then mirror the Providers page by flagging the entry as needing
 /// re-login (its refresh token was revoked), which renders as the ⚠ suffix on
-/// the next build. Claude switches don't validate tokens (the CLI refreshes
-/// natively on next launch), so a failure there is a WRITE error — flagging
-/// it as a token problem would misdiagnose, so only Codex flags.
+/// the next build. Claude ALSO validates (switch_claude refreshes first) but
+/// flags needsRelogin BACKEND-side on AuthFailure only — a string Err here
+/// can't tell a dead token from a locked-Keychain write error, and flagging
+/// a write error would misdiagnose, so only Codex flags from this side.
 ///
 /// On success the quota belongs to a DIFFERENT account, so force a refetch:
 /// that also emits `quota-changed`, which an open Providers page already

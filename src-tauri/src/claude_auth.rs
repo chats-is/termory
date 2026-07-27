@@ -222,10 +222,23 @@ fn keychain_read_uncached() -> Option<JsonValue> {
 /// that leaves the old entry shadowing everything.
 #[cfg(all(target_os = "macos", not(test)))]
 fn keychain_write(doc: &JsonValue) -> bool {
-    // Official `update()` clears the cache before writing
-    // (macOsKeychainStorage.ts:100); ours also re-primes implicitly on the
-    // next read.
-    invalidate_keychain_cache();
+    let ok = keychain_write_inner(doc);
+    // Cache maintenance AFTER the write settles — invalidating BEFORE left a
+    // sub-second window where a concurrent read (tray build on the main
+    // thread) re-cached the OLD entry mid-write and the switch tail then
+    // snapshotted stale credentials. On success the cache is primed with the
+    // exact document written, so the very next read needs no spawn at all.
+    let mut cache = KEYCHAIN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    *cache = if ok {
+        Some((std::time::Instant::now(), Some(doc.clone())))
+    } else {
+        None
+    };
+    ok
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn keychain_write_inner(doc: &JsonValue) -> bool {
     let json = doc.to_string();
     let hex: String = json.bytes().map(|b| format!("{b:02x}")).collect();
     let account = keychain_account();
@@ -260,7 +273,13 @@ fn keychain_write(doc: &JsonValue) -> bool {
 /// mirroring `plainTextStorage.delete()`'s ENOENT handling.
 #[cfg(all(target_os = "macos", not(test)))]
 fn keychain_delete() -> bool {
-    invalidate_keychain_cache();
+    let ok = keychain_delete_inner();
+    invalidate_keychain_cache(); // after the delete settles — see keychain_write
+    ok
+}
+
+#[cfg(all(target_os = "macos", not(test)))]
+fn keychain_delete_inner() -> bool {
     let mut cmd = std::process::Command::new("security");
     cmd.args([
         "delete-generic-password",
@@ -312,7 +331,9 @@ fn file_delete() -> bool {
 /// Read the live credential document, `{"claudeAiOauth": {...}}`.
 ///
 /// Keychain first on macOS, then the file — the order `createFallbackStorage`
-/// uses, so we see exactly what the CLI would.
+/// uses, so we see exactly what the CLI would. Served through the 30s cache;
+/// fine for DISPLAY paths (tray, account list, quota), but every
+/// snapshot-quality read must use [`read_credentials_uncached`] instead.
 pub(crate) fn read_credentials() -> Option<JsonValue> {
     #[cfg(all(target_os = "macos", not(test)))]
     {
@@ -321,6 +342,36 @@ pub(crate) fn read_credentials() -> Option<JsonValue> {
         }
     }
     file_read()
+}
+
+/// [`read_credentials`] bypassing the 30s cache. REQUIRED at every point
+/// whose result gets PERSISTED (account snapshots) or decides a write:
+/// external writers — the `claude auth login` child, a running claude
+/// rotating its refresh token — change the Keychain without any Termory
+/// invalidation, and a ≤30s-stale answer at a snapshot point stores a dead
+/// refresh token (or, on a first login, reads None and rolls the fresh
+/// login back). Display paths keep the cached form; correctness wins here.
+pub(crate) fn read_credentials_uncached() -> Option<JsonValue> {
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        let value = keychain_read_uncached();
+        // Re-prime so display readers benefit from the fresh answer too.
+        *KEYCHAIN_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((std::time::Instant::now(), value.clone()));
+        if let Some(found) = value {
+            return Some(found);
+        }
+    }
+    file_read()
+}
+
+/// Drop the Keychain read cache. Called when an EXTERNAL writer is known to
+/// have changed the credential (the `claude auth login` child exiting) so
+/// even display reads pick up the new state immediately. No-op off macOS /
+/// in tests (no cache exists there).
+pub(crate) fn invalidate_credentials_cache() {
+    #[cfg(all(target_os = "macos", not(test)))]
+    invalidate_keychain_cache();
 }
 
 /// Write the credential document back, mirroring `createFallbackStorage.update`

@@ -599,9 +599,10 @@ pub(crate) fn hide_console(cmd: &mut std::process::Command) {
 
 /// Spawn `cmd` and read its full output, killing the child if it
 /// hasn't exited within [`SUBPROCESS_TIMEOUT`]. Returns `None` on
-/// spawn failure, non-zero exit, or timeout. Polls `try_wait` every
-/// 50ms — accurate enough for a 5s budget and avoids a watchdog
-/// thread.
+/// spawn failure or timeout; a NON-ZERO exit still returns `Some`
+/// (callers check `status` — the Keychain paths rely on exit 44/36).
+/// Polls `try_wait` every 50ms — accurate enough for a 5s budget and
+/// avoids a watchdog thread.
 fn output_with_timeout(cmd: std::process::Command) -> Option<std::process::Output> {
     output_with_timeout_stdin(cmd, None)
 }

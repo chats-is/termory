@@ -513,9 +513,11 @@ export function OfficialAccountsSection({
         await invoke("mark_account_relogin", { id: account.id, needed: true }).catch(() => {});
         toast.warning(t("toast.accountTokenExpired"));
       } else {
-        // Claude doesn't validate at switch time — a failure here is a WRITE
-        // error (locked Keychain, fs), not a token problem; flagging the
-        // account as needs-relogin would misdiagnose it.
+        // Claude validates too, but flags needsRelogin BACKEND-side on
+        // AuthFailure only — a string Err here can't tell a dead token from
+        // a locked-Keychain write error, and flagging a write error would
+        // trap a healthy account. Just surface the message; reload picks up
+        // any backend-set flag.
         toast.error(String(err));
       }
       await reload();

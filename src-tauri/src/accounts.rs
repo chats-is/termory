@@ -727,8 +727,25 @@ fn claude_json_path() -> Result<std::path::PathBuf, Box<dyn Error>> {
     }
 }
 
+/// Display-quality read (30s Keychain cache) — the tray / account list /
+/// quota path. Anything that PERSISTS the result must use
+/// [`read_claude_live_uncached`]: an external writer (a running claude
+/// rotating tokens, the `claude auth login` child) can change the Keychain
+/// under the cache, and snapshotting a stale doc stores a dead refresh
+/// token.
 fn read_claude_live() -> Result<Option<ClaudeLive>, Box<dyn Error>> {
-    let Some(credentials) = crate::claude_auth::read_credentials() else {
+    claude_live_from(crate::claude_auth::read_credentials())
+}
+
+/// Snapshot-quality read — bypasses the Keychain cache. See
+/// `claude_auth::read_credentials_uncached` for why every persisted read
+/// must pay the spawn.
+fn read_claude_live_uncached() -> Result<Option<ClaudeLive>, Box<dyn Error>> {
+    claude_live_from(crate::claude_auth::read_credentials_uncached())
+}
+
+fn claude_live_from(credentials: Option<JsonValue>) -> Result<Option<ClaudeLive>, Box<dyn Error>> {
+    let Some(credentials) = credentials else {
         return Ok(None);
     };
     // A credential without an OAuth block is an API-key-era file — not a
@@ -823,7 +840,11 @@ fn list_claude_accounts() -> Result<AccountsState, Box<dyn Error>> {
 }
 
 fn save_claude_account() -> Result<(), Box<dyn Error>> {
-    let live = read_claude_live()?
+    // UNCACHED: this is the one function that persists the live credential
+    // into the store. Reading it through the 30s cache once snapshotted a
+    // pre-login doc after a fast (<30s) browser login — pairing the NEW
+    // account's identity with the OLD account's tokens.
+    let live = read_claude_live_uncached()?
         .ok_or("No Claude login with account info found to save (run `claude` and log in first)")?;
 
     let id = live.id.clone();
@@ -1112,8 +1133,10 @@ async fn switch_claude(payload: &JsonValue) -> Result<(), Box<dyn Error>> {
     // days ago likely holds a dead RT — the live credential is the only copy
     // that still works. Only refreshes an EXISTING entry (never adds one; an
     // unsaved live login stays the user's explicit choice, guarded by the
-    // page's confirm warning / the tray's auto-save).
-    if let Ok(Some(live)) = read_claude_live() {
+    // page's confirm warning / the tray's auto-save). UNCACHED read: the
+    // rotation this step defends against is exactly what makes a ≤30s-stale
+    // cached doc wrong here.
+    if let Ok(Some(live)) = read_claude_live_uncached() {
         let store = read_store()?;
         if store
             .iter()
@@ -1222,7 +1245,7 @@ pub async fn login_and_save_claude_account(
     // below would AuthFailure into needsRelogin. Same rule, same reason as
     // `switch_claude`'s re-snapshot-outgoing step — an only-if-missing
     // auto-save is NOT enough here.
-    let prev_active_id = match read_claude_live().map_err(|e| e.to_string())? {
+    let prev_active_id = match read_claude_live_uncached().map_err(|e| e.to_string())? {
         Some(live) => {
             save_claude_account().map_err(|e| e.to_string())?;
             Some(live.id)
@@ -1351,6 +1374,14 @@ pub async fn login_and_save_claude_account(
         ));
     }
 
+    // The child WROTE the Keychain from outside this process — no Termory
+    // write path ran, so no invalidation happened. Drop the cache before
+    // anything reads: with a fast (<30s) browser login the cache still
+    // holds the PRE-login doc, and the save below would snapshot it (on a
+    // first login it held None, and the "could not save" rollback then
+    // deleted the fresh login outright).
+    crate::claude_auth::invalidate_credentials_cache();
+
     // Save the new account (reads the fresh credential claude just wrote).
     if let Err(e) = save_claude_account() {
         restore_claude_auth(original_cred.as_ref(), original_oauth.as_ref());
@@ -1384,8 +1415,13 @@ pub async fn login_and_save_claude_account(
 
 /// Fire the cancel notify for an in-flight `login_and_save_claude_account`.
 pub async fn cancel_claude_login(cancel_state: &ClaudeLoginCancel) -> Result<(), String> {
-    let notify = cancel_state.0.lock().unwrap().take();
-    match notify {
+    // `as_ref`, NOT `take` (mirrors cancel_codex_login): the slot doubles as
+    // the re-entrancy guard, and it must stay occupied until the CANCELLED
+    // flow finishes its kill + rollback and its LoginSlot Drop clears it. A
+    // take() here opened a window where a new login could reserve the slot
+    // while the old flow was still rolling back — and the old flow's Drop
+    // then wiped the NEW login's notify, leaving it uncancellable.
+    match cancel_state.0.lock().unwrap().as_ref() {
         Some(n) => {
             n.notify_one();
             Ok(())
@@ -1783,6 +1819,23 @@ async fn switch_codex(payload: &JsonValue) -> Result<(), Box<dyn Error>> {
             .map_err(|e| format!("Saved Codex credential is corrupt: {e}"))?,
         obj => obj.clone(),
     };
+
+    // Re-snapshot the OUTGOING login first when it's already in the store —
+    // same protection as switch_claude's: OpenAI can rotate the refresh
+    // token on refresh, so an entry saved days ago may hold a dead RT while
+    // the live auth.json has the only working copy; overwriting it without
+    // recapturing turns the next switch-back into a needsRelogin. Only
+    // refreshes an EXISTING entry (never adds one — an unsaved live login
+    // stays guarded by the page's confirm warning / the tray's auto-save).
+    // No cache concern here: auth.json is read fresh every time.
+    if let Ok(Some(live)) = read_codex_live() {
+        let store = read_store()?;
+        if store.iter().any(|e| {
+            str_field(e, "app") == Some("codex") && str_field(e, "id") == Some(live.id.as_str())
+        }) {
+            save_codex_account()?;
+        }
+    }
 
     // Always attempt a token refresh to validate the credential is still valid
     // server-side. A 401 (token_revoked — user logged out of Codex since the
@@ -2869,6 +2922,64 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("at-b-fresh"),
             "B's snapshot must hold the live (freshest) tokens, not the save-time ones"
+        );
+    }
+
+    /// The codex switch recaptures the outgoing login's live tokens into
+    /// its existing store entry before overwriting auth.json — the stored
+    /// copy may hold a rotated-away (dead) refresh token while the live
+    /// file has the only working one.
+    #[tokio::test]
+    async fn codex_switch_resnapshots_the_outgoing_login_first() {
+        let _g = lock_home();
+        let tmp = tempdir("codex-resnap");
+        let _h = override_home(&tmp);
+
+        // A saved, then B saved while B is live.
+        write_codex_auth(&tmp, "a@example.com", "plus", "acct-a");
+        save_current_account(CliApp::Codex).unwrap();
+        write_codex_auth(&tmp, "b@example.com", "pro", "acct-b");
+        save_current_account(CliApp::Codex).unwrap();
+
+        // Codex itself refreshes B's tokens after our save — the live file
+        // moves ahead of the snapshot.
+        let auth_path = tmp.join(".codex/auth.json");
+        let mut doc: JsonValue =
+            serde_json::from_str(&std::fs::read_to_string(&auth_path).unwrap()).unwrap();
+        doc["tokens"]["access_token"] = JsonValue::String("access-fresh".into());
+        std::fs::write(&auth_path, doc.to_string()).unwrap();
+
+        switch_account("acct-a".into()).await.unwrap();
+
+        let store = read_store().unwrap();
+        let b = store
+            .iter()
+            .find(|e| str_field(e, "id") == Some("acct-b"))
+            .expect("B still in store");
+        assert_eq!(
+            b.pointer("/payload/tokens/access_token")
+                .and_then(|v| v.as_str()),
+            Some("access-fresh"),
+            "B's snapshot must hold the live (freshest) tokens, not the save-time ones"
+        );
+    }
+
+    /// Cancelling must NOT vacate the slot — it stays occupied until the
+    /// cancelled flow's own Drop, so no new login can start while the old
+    /// one is still rolling back (a `take()` here once opened exactly that
+    /// window, and the old flow's Drop then wiped the new login's notify).
+    #[tokio::test]
+    async fn cancel_claude_login_leaves_the_slot_reserved() {
+        let state = ClaudeLoginCancel(std::sync::Mutex::new(None));
+        let (_guard, _notify) = LoginSlot::reserve(&state.0).unwrap();
+        cancel_claude_login(&state).await.expect("cancel fires");
+        assert!(
+            state.0.lock().unwrap().is_some(),
+            "slot must stay reserved until the cancelled flow's Drop"
+        );
+        assert!(
+            LoginSlot::reserve(&state.0).is_err(),
+            "no new login may start during the rollback window"
         );
     }
 
