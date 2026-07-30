@@ -1210,6 +1210,20 @@ pub fn run() {
             } else {
                 tray::show_main_window(app.handle());
             }
+            // macOS: drop the title bar's bottom hairline (the line under
+            // the traffic-light row, most visible while dragging). Not
+            // exposed by tauri.conf's window options, so set on the
+            // NSWindow directly — macOS 11+ property, sticky for the
+            // window's lifetime, and setup() runs on the main thread the
+            // AppKit call requires.
+            #[cfg(target_os = "macos")]
+            if let Some(win) = app.get_webview_window("main") {
+                if let Ok(ns) = win.ns_window() {
+                    use objc2_app_kit::{NSTitlebarSeparatorStyle, NSWindow};
+                    let ns = ns.cast::<NSWindow>();
+                    unsafe { (*ns).setTitlebarSeparatorStyle(NSTitlebarSeparatorStyle::None) };
+                }
+            }
             // Background filesystem watcher: pushes a fresh
             // `Vec<AppSession>` to the frontend via
             // `termory:sources-changed` whenever a watched source

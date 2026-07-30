@@ -55,5 +55,13 @@ tauri-plugin-autostart = "2"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The native macOS title bar draws a hairline separator under the
+# traffic-light row (most visible while dragging the window). Tauri's
+# window config doesn't expose `titlebarSeparatorStyle`, so lib.rs sets
+# it to None on the NSWindow directly. Already in the tree via wry —
+# no new build units.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", features = ["NSWindow"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
