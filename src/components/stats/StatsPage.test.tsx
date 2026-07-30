@@ -24,6 +24,26 @@ function render(ui: React.ReactElement, options?: RenderOptions) {
   return rtlRender(<TooltipProvider>{ui}</TooltipProvider>, options);
 }
 
+// A literal calendar date ages out of the default 30d window as real time
+// passes — RECENT_DATE fell outside it once wall-clock time reached late
+// July 2026 in a UTC+8 test run, while the SAME moment in UTC (a CI
+// runner) was still inside it: a pure timezone-boundary flake, not a
+// regression. Anchor "recent" fixture activity RELATIVE to the test's own
+// run time instead — 5 days back sits comfortably inside the 30d window
+// regardless of which side of midnight-UTC the runner's clock is on.
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+function dateKey(d: Date): string {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+const RECENT = new Date();
+RECENT.setDate(RECENT.getDate() - 5);
+const RECENT_DATE = dateKey(RECENT);
+function recentTimestamp(hour: number): string {
+  return `${RECENT_DATE}T${pad2(hour)}:00:00`;
+}
+
 function mk(partial: Partial<AppSession>): AppSession {
   return {
     id: "x",
@@ -31,8 +51,8 @@ function mk(partial: Partial<AppSession>): AppSession {
     title: "t",
     project: "",
     path: "/p",
-    started_at: "2026-07-01T10:00:00",
-    updated_at: "2026-07-01T11:00:00",
+    started_at: recentTimestamp(10),
+    updated_at: recentTimestamp(11),
     message_count: 0,
     preview: "",
     snippet: "",
@@ -40,7 +60,7 @@ function mk(partial: Partial<AppSession>): AppSession {
     model: "claude-opus-4-8",
     daily_tokens: [
       {
-        date: "2026-07-01",
+        date: RECENT_DATE,
         tokens: { input: 100, output: 50, cached: 0, reasoning: 0, total: 150 },
         messages: 3
       }
@@ -91,7 +111,7 @@ describe("StatsPage", () => {
       model: "claude-opus-4-8",
       daily_tokens: [
         {
-          date: "2026-07-01",
+          date: RECENT_DATE,
           tokens: { input: 500, output: 500, cached: 0, reasoning: 0, total: 1000 },
           messages: 5
         }
@@ -158,7 +178,7 @@ describe("StatsPage", () => {
         model: c.model,
         daily_tokens: [
           {
-            date: "2026-07-01",
+            date: RECENT_DATE,
             tokens: {
               input: 10,
               output: 10,
@@ -193,7 +213,7 @@ describe("StatsPage", () => {
         model: m,
         daily_tokens: [
           {
-            date: "2026-07-01",
+            date: RECENT_DATE,
             tokens: {
               input: 10,
               output: 10,
@@ -211,7 +231,7 @@ describe("StatsPage", () => {
       model: "",
       daily_tokens: [
         {
-          date: "2026-07-01",
+          date: RECENT_DATE,
           tokens: { input: 5, output: 5, cached: 0, reasoning: 0, total: 50 },
           messages: 1
         }
