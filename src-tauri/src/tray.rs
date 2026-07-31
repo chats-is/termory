@@ -1659,6 +1659,15 @@ fn select_recent_state(sessions: &[AppSession]) -> RecentState {
 
     let recent_sessions: Vec<RecentSession> = picked
         .iter()
+        // A row with neither title nor snippet can only render as
+        // "(untitled)", which names nothing — several of them are
+        // indistinguishable, and this list exists to click the conversation
+        // you mean. Filtered HERE rather than on `picked` on purpose: that
+        // vector also feeds the "New Session" project list below, and a
+        // project whose sessions happen to be untitled is still somewhere you
+        // work. Filtering before `take` keeps the list at RECENT_LIMIT named
+        // rows instead of shrinking it.
+        .filter(|s| !label_text(&s.title, &s.snippet).is_empty())
         .take(RECENT_LIMIT)
         .map(|s| RecentSession {
             source: s.source.clone(),
@@ -2702,11 +2711,15 @@ mod tests {
         assert!(out.ends_with('…'));
     }
 
+    /// A titled session — the default for these fixtures, because an
+    /// untitled one is now filtered out of the recent list entirely and the
+    /// tests below are about ordering / dedup / caps, not about that filter.
     fn sess(source: &str, id: &str, updated: &str) -> AppSession {
         AppSession {
             source: source.into(),
             id: id.into(),
             project: "/p".into(),
+            title: format!("chat {id}"),
             updated_at: Some(updated.into()),
             ..Default::default()
         }
@@ -2793,6 +2806,56 @@ mod tests {
         let state = select_recent_state(&vec![cmd, chat]);
         let ids: Vec<&str> = state.sessions.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["chat1"]);
+    }
+
+    /// A record with neither title nor snippet would render as "(untitled)",
+    /// which identifies nothing — several of them are indistinguishable in a
+    /// list whose only job is picking the conversation you mean.
+    #[test]
+    fn select_recent_state_drops_untitled_sessions() {
+        let mut blank = sess("Claude", "blank1", "2026-12-01T00:00:00Z");
+        blank.title = String::new(); // newest, but nameless → dropped
+        let mut whitespace = sess("Codex", "blank2", "2026-11-01T00:00:00Z");
+        whitespace.title = "   ".into(); // trims to nothing → also dropped
+        let named = sess("Gemini", "chat1", "2026-06-01T00:00:00Z");
+
+        let state = select_recent_state(&vec![blank, whitespace, named]);
+        let ids: Vec<&str> = state.sessions.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["chat1"]);
+    }
+
+    /// A session with no title still counts when it carries a snippet — that
+    /// is a name, just not a stored one. Guards against "fix" the filter by
+    /// gating on `title` alone.
+    #[test]
+    fn select_recent_state_keeps_a_snippet_only_session() {
+        let mut s = sess("Claude", "snip1", "2026-12-01T00:00:00Z");
+        s.title = String::new();
+        s.snippet = "what does this regex do".into();
+        let state = select_recent_state(&vec![s]);
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].label, "what does this regex do");
+    }
+
+    /// The untitled filter must NOT reach the "New Session" project list:
+    /// `picked` feeds both, and a project whose sessions happen to be
+    /// untitled is still somewhere the user works.
+    #[test]
+    fn select_recent_state_untitled_sessions_still_offer_their_project() {
+        let mut blank = sess_in("Claude", "/work/quiet", "b1", "2026-12-01T00:00:00Z");
+        blank.title = String::new();
+        let state = select_recent_state(&vec![blank]);
+
+        assert!(state.sessions.is_empty(), "nameless row is not listed");
+        assert_eq!(
+            state
+                .targets
+                .iter()
+                .map(|t| t.project.as_str())
+                .collect::<Vec<_>>(),
+            ["/work/quiet"],
+            "but its cwd is still a New Session target"
+        );
     }
 
     #[test]
