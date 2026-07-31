@@ -178,6 +178,12 @@ For a CLI logged in with an official subscription, the card shows your usage as 
 
 When pay-as-you-go **Usage credits** are enabled on the account (Claude's overflow after you hit a plan limit, or grok on-demand credits), the card adds a **Usage credits** ring showing how much of the spending limit you've used (e.g. `$19.44 / $50.00`). Only the fields the official usage endpoint exposes are shown — the account's promotional-credit balance and auto-reload setting live behind the web billing login and aren't available to the CLI token.
 
+Grok's other billing model shows up as **Balance** — the prepaid credits you bought, drawn down only once your plan allowance is spent. It has no ring: a balance has no limit to divide by, so there's no percentage to draw. It rides along on the menu-bar row too, after the windows and credits.
+
+**When there's nothing to show, nothing is shown.** Some accounts get no usage figures from the endpoint at all — a grok free account is the common case, because its allowance is a rolling 24-hour token window that no API exposes; it's only reported when you hit it, as an error in the CLI itself. In that case the card shows no rings rather than an invented 0%.
+
+**If a refresh fails, the window names turn red** and the last known numbers stay on screen — hover for the reason. Switching accounts clears the figures immediately and re-fetches, so what you see always belongs to the account you're looking at.
+
 ### Official accounts (Codex & Claude Code multi-account)
 
 On the **Codex** and **Claude Code** tabs, the Official card also manages multiple logins. **Save current** snapshots the live login; **Add account** starts a fresh login in your browser (`codex login` / `claude auth login` — cancellable, and if you cancel or it fails, your previous login is restored). For Codex this works with just the desktop app installed too — Termory runs the CLI bundled inside the app for the login. Each saved row shows the account's email, plan, and when its tokens were last refreshed. **Switch** restores a snapshot — Termory refreshes its tokens first, and an account whose login has expired is flagged **Re-login** instead of being written broken. Snapshots live in `~/.termory/accounts.json` (owner-only file permissions); the CLI's own credential store is only touched when you switch or add.
