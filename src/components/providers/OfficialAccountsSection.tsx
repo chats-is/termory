@@ -826,20 +826,26 @@ export function OfficialAccountsSection({
                   />
                 )}
                 <Tooltip>
+                  {/* The trigger is the WRAPPER, not the button: a disabled
+                      element dispatches no hover events, and this button is
+                      disabled exactly when it has something to explain —
+                      "refreshed just now, try again in a moment" could never
+                      be read while the cooldown that produces it was on. */}
                   <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      className="shrink-0 -ml-2"
-                      onClick={onRefreshQuota}
-                      disabled={quotaLoading || quotaCooldown}
-                      aria-label={t("providers.quotaRefresh")}
-                    >
-                      <RefreshCw
-                        className={cn("size-4", quotaLoading && "animate-spin")}
-                      />
-                    </Button>
+                    <span className="shrink-0 -ml-2 inline-flex">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={onRefreshQuota}
+                        disabled={quotaLoading || quotaCooldown}
+                        aria-label={t("providers.quotaRefresh")}
+                      >
+                        <RefreshCw
+                          className={cn("size-4", quotaLoading && "animate-spin")}
+                        />
+                      </Button>
+                    </span>
                   </TooltipTrigger>
                   <TooltipContent side="top">
                     {quotaCooldown && !quotaLoading

@@ -135,4 +135,23 @@ describe("ProviderCard — test/connectivity", () => {
     await user.click(screen.getByRole("button", { name: "Test" }));
     expect(onTest).toHaveBeenCalledTimes(1);
   });
+
+  // Same rule as the quota Refresh button: "install it first" only applies
+  // while the button is disabled, so the trigger must be the wrapper.
+  it("keeps the install hint reachable while the toggle is disabled", () => {
+    render(
+      <ProviderCard
+        provider={makeProvider()}
+        {...baseProps}
+        activatable={false}
+        onToggleEnabled={vi.fn()}
+        onSetDefault={vi.fn()}
+        onTest={vi.fn()}
+      />
+    );
+    const toggle = screen.getByLabelText("Enable");
+    expect(toggle).toBeDisabled();
+    expect(toggle.getAttribute("data-slot")).not.toBe("tooltip-trigger");
+    expect(toggle.closest('[data-slot="tooltip-trigger"]')).not.toBeNull();
+  });
 });

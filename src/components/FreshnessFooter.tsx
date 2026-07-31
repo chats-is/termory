@@ -1,7 +1,12 @@
 import React from "react";
 import { AlertTriangle, Check, RefreshCw } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { formatTimeAgo, getFormatLocale } from "@/lib/format";
+import { formatTimeAgo } from "@/lib/format";
 import { useT } from "@/i18n";
 
 export function FreshnessFooter({
@@ -48,12 +53,16 @@ export function FreshnessFooter({
   let state: "idle" | "syncing" | "done" | "error" = "idle";
   let icon: React.ReactNode = null;
   let label = "";
-  let tooltip: string | undefined;
+  // ONLY a failure gets a tooltip. The label already answers the question
+  // the footer exists for ("how fresh is this?") in the form anyone
+  // actually wants — "2m ago" — and an exact timestamp on hover adds a
+  // precision nobody decides anything with. A failure is the opposite: the
+  // label is just "Sync failed", and the reason has nowhere else to go.
+  const tooltip = error ?? undefined;
   if (error) {
     state = "error";
     icon = <AlertTriangle size={12} strokeWidth={2.25} />;
     label = t("footer.syncFailed");
-    tooltip = error;
   } else if (syncing) {
     state = "syncing";
     icon = <RefreshCw size={12} strokeWidth={2.25} className="animate-spin" />;
@@ -66,7 +75,6 @@ export function FreshnessFooter({
     state = "idle";
     icon = <Check size={12} strokeWidth={2.25} />;
     label = t("footer.synced", { ago: formatTimeAgo(lastSyncedAt, t) });
-    tooltip = new Date(lastSyncedAt).toLocaleString(getFormatLocale());
   }
 
   const stateClass = {
@@ -76,7 +84,7 @@ export function FreshnessFooter({
     error: "text-destructive"
   }[state];
 
-  return (
+  const footer = (
     <footer
       aria-label={label || t("footer.status")}
       className={cn(
@@ -87,5 +95,17 @@ export function FreshnessFooter({
       <span className="shrink-0">{icon}</span>
       <span>{label}</span>
     </footer>
+  );
+
+  // The label is relative ("Synced 2m ago") or a one-line failure; the
+  // hover carries what it can't: the exact local timestamp, or the full
+  // error. Nothing to add in the syncing / never-synced states, which
+  // render the bare footer.
+  if (!tooltip) return footer;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{footer}</TooltipTrigger>
+      <TooltipContent side="top">{tooltip}</TooltipContent>
+    </Tooltip>
   );
 }

@@ -347,6 +347,29 @@ describe("OfficialAccountsSection — quota rings in active row", () => {
   // (Free / unified billing), so the backend emits no tier rather than a
   // fake 0%. Nothing is shown in its place — no rings, no placeholder copy
   // (user decision 2026-07-31): an empty result is simply absent.
+  // A disabled element fires no pointer events, so the tooltip trigger has
+  // to sit on a wrapper — otherwise the cooldown hint, which exists only
+  // for the state that disables the button, is unreadable by construction.
+  it("keeps the refresh tooltip reachable while the button is disabled", async () => {
+    mockList(makeState());
+    render(
+      <OfficialAccountsSection
+        app="codex"
+        quota={makeQuota()}
+        quotaCooldown
+        onRefreshQuota={vi.fn()}
+      />
+    );
+    await screen.findByText("Jane");
+    const button = screen.getByLabelText("Refresh usage");
+    expect(button).toBeDisabled();
+    // Walk UP from the button — the card has several tooltips (the rings),
+    // so the first trigger in the DOM is not this one. The trigger must be
+    // an ANCESTOR, never the disabled button itself.
+    expect(button.getAttribute("data-slot")).not.toBe("tooltip-trigger");
+    expect(button.closest('[data-slot="tooltip-trigger"]')).not.toBeNull();
+  });
+
   it("renders no quota content for an empty result", async () => {
     mockList(makeState());
     const { container } = render(

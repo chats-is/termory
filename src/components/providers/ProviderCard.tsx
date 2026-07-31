@@ -187,23 +187,29 @@ export function ProviderCard({
             <div className="inline-flex items-center gap-1.5">
             {onToggleEnabled && (
               <Tooltip>
+                {/* Trigger on the WRAPPER: a disabled element fires no hover
+                    events, and "install it first" is precisely the tip for
+                    the state that disables this button — on the button it
+                    could never be read. */}
                 <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    type="button"
-                    onClick={onToggleEnabled}
-                    disabled={toggling || !activatable}
-                    aria-label={isConfigured ? t("providers.disable") : t("providers.enable")}
-                  >
-                    {toggling ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : isConfigured ? (
-                      <CircleCheckBig className="size-4 text-green-600" />
-                    ) : (
-                      <CircleOff className="size-4 text-red-600" />
-                    )}
-                  </Button>
+                  <span className="inline-flex">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      type="button"
+                      onClick={onToggleEnabled}
+                      disabled={toggling || !activatable}
+                      aria-label={isConfigured ? t("providers.disable") : t("providers.enable")}
+                    >
+                      {toggling ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : isConfigured ? (
+                        <CircleCheckBig className="size-4 text-green-600" />
+                      ) : (
+                        <CircleOff className="size-4 text-red-600" />
+                      )}
+                    </Button>
+                  </span>
                 </TooltipTrigger>
                 <TooltipContent side="top">
                   {!activatable

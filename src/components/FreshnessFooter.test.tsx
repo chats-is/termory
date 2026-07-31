@@ -1,7 +1,21 @@
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen } from "@testing-library/react";
+import {
+  act,
+  render as rtlRender,
+  screen,
+  type RenderOptions
+} from "@testing-library/react";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { FreshnessFooter } from "./FreshnessFooter";
+
+// The footer carries a Tooltip (exact timestamp / full error), and Radix
+// requires the provider the real app mounts at its root. Passed as RTL's
+// `wrapper` rather than wrapped inline, so `rerender` keeps it too —
+// wrapping the JSX by hand loses the provider on every rerender.
+function render(ui: React.ReactElement, options?: RenderOptions) {
+  return rtlRender(ui, { wrapper: TooltipProvider, ...options });
+}
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -10,6 +24,44 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("FreshnessFooter — tooltip", () => {
+  // ONLY a failure gets one. The success label ("Synced 1m ago") already
+  // says everything the footer is for, so an exact timestamp on hover was
+  // dropped as noise (user decision 2026-07-31); a failure's label is just
+  // "Sync failed" and the reason has nowhere else to live. Radix's asChild
+  // trigger stamps data-slot onto the footer, so that attribute tells a
+  // wrapped footer from a bare one.
+  const trigger = (el: Element | null) => el?.getAttribute("data-slot");
+  const synced = Date.now() - 60_000;
+
+  it("wraps the footer when a sync failed, so the reason is reachable", () => {
+    const { container } = render(
+      <FreshnessFooter syncing={false} lastSyncedAt={synced} error={"scan failed: EACCES"} />
+    );
+    expect(trigger(container.querySelector("footer"))).toBe("tooltip-trigger");
+  });
+
+  it("wraps a failure that happened before any successful sync", () => {
+    const { container } = render(
+      <FreshnessFooter syncing={false} lastSyncedAt={null} error={"scan failed: EACCES"} />
+    );
+    expect(trigger(container.querySelector("footer"))).toBe("tooltip-trigger");
+  });
+
+  it("leaves every success state bare — the label is the whole story", () => {
+    for (const props of [
+      { syncing: false, lastSyncedAt: synced, error: null }, // idle
+      { syncing: true, lastSyncedAt: synced, error: null }, // rescanning
+      { syncing: true, lastSyncedAt: null, error: null }, // first scan
+      { syncing: false, lastSyncedAt: null, error: null } // never synced
+    ]) {
+      const { container, unmount } = render(<FreshnessFooter {...props} />);
+      expect(trigger(container.querySelector("footer"))).toBeNull();
+      unmount();
+    }
+  });
 });
 
 describe("FreshnessFooter", () => {
