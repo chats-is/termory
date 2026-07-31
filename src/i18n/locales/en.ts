@@ -118,6 +118,7 @@ export const en = {
   "records.nothingMatches": "Nothing matches your current view",
   "records.nothingToView": "Nothing to view yet",
   "records.nothingToViewDesc": "Once Termory finds local history, sessions, memories, and skills will show up here.",
+  "records.untitled": "Untitled",
   "records.selectRecord": "Select a record",
   "records.findPlaceholder": "Find in session",
   "records.findNoMatches": "No matches",

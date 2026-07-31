@@ -110,6 +110,7 @@ export const zhHant: Record<MessageKey, string> = {
   "records.nothingMatches": "沒有符合目前檢視的內容",
   "records.nothingToView": "暫無可檢視的內容",
   "records.nothingToViewDesc": "Termory 找到本機歷史後,會話、記憶和技能會顯示在這裡。",
+  "records.untitled": "未命名",
   "records.selectRecord": "選擇一筆記錄",
   "records.findPlaceholder": "在會話中尋找",
   "records.findNoMatches": "無相符結果",

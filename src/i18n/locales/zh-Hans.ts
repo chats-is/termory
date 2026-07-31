@@ -110,6 +110,7 @@ export const zhHans: Record<MessageKey, string> = {
   "records.nothingMatches": "没有符合当前视图的内容",
   "records.nothingToView": "暂无可查看的内容",
   "records.nothingToViewDesc": "Termory 找到本地历史后,会话、记忆和技能会显示在这里。",
+  "records.untitled": "未命名",
   "records.selectRecord": "选择一条记录",
   "records.findPlaceholder": "在会话中查找",
   "records.findNoMatches": "无匹配",

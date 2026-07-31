@@ -118,7 +118,7 @@ export function FavoritesPage({
               >
                 <div className="flex items-baseline justify-between gap-2">
                   <span className="text-sm font-medium truncate flex-1 min-w-0">
-                    {fav.source_session_title || "(untitled)"}
+                    {fav.source_session_title || t("records.untitled")}
                   </span>
                   <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
                     {formatRelativeDate(fav.favorited_at, t)}
@@ -158,7 +158,7 @@ export function FavoritesPage({
             icon lines up with the message copy icon at 20px. */}
         <header className="flex flex-col gap-2 p-3 pr-4">
           <h2 className="text-lg font-semibold leading-snug truncate">
-            {selected.source_session_title || "(untitled)"}
+            {selected.source_session_title || t("records.untitled")}
           </h2>
 
           <div className="flex items-center justify-between gap-2">

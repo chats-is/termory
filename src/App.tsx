@@ -1559,7 +1559,7 @@ export function App() {
                                   session.archived && !isActive && "text-muted-foreground"
                                 )}
                               >
-                                {session.title}
+                                {session.title || t("records.untitled")}
                               </h2>
                               <span className="text-xs text-muted-foreground shrink-0">
                                 {formatRelativeDate(session.updated_at ?? session.started_at, t)}
@@ -1713,7 +1713,7 @@ export function App() {
                         edges land at 20px and the inter-icon gap matches. */}
                     <header className="flex flex-col gap-2 p-3 pr-4">
                       <h2 className="text-lg font-semibold leading-snug line-clamp-2">
-                        {selected.title || "(untitled)"}
+                        {selected.title || t("records.untitled")}
                       </h2>
 
                       <div className="flex items-center gap-2 text-xs leading-none text-muted-foreground flex-wrap">

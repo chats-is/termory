@@ -39,7 +39,7 @@ export function SearchResultRow({
     <>
       <div className="flex items-baseline justify-between gap-2">
         <h2 className="text-base font-medium leading-snug line-clamp-2 flex-1 min-w-0">
-          {session.title || "(untitled)"}
+          {session.title || t("records.untitled")}
         </h2>
         <span className="text-xs text-muted-foreground shrink-0">
           {formatRelativeDate(session.updated_at ?? session.started_at, t)}
