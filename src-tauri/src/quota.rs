@@ -33,6 +33,15 @@ pub fn supports_quota(app: CliApp) -> bool {
 /// Frontend mirror: QUOTA_CHANGED_EVENT in src/constants.ts.
 pub const QUOTA_CHANGED_EVENT: &str = "termory:quota-changed";
 
+/// Emitted with a CLI key payload (`"codex"`, …) when that CLI's cached
+/// quota was dropped because the LOGIN behind it changed — not because a
+/// fetch reported something. Lets an open Providers page discard the
+/// previous account's numbers on a switch made from the menu-bar tray,
+/// where the page never learns of the switch otherwise (its own switch
+/// path clears the entry directly). Emitted from tray::invalidate_quota;
+/// frontend mirror: QUOTA_INVALIDATED_EVENT in src/constants.ts.
+pub const QUOTA_INVALIDATED_EVENT: &str = "termory:quota-invalidated";
+
 /// Which CLI a credential-file path belongs to — the single list the
 /// filesystem watcher matches to force a quota refresh on login /
 /// logout (the readers below own the same paths). Keychain-backed
@@ -167,6 +176,20 @@ pub struct SubscriptionQuota {
     pub plan: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_usage: Option<ExtraUsage>,
+    /// Remaining PREPAID ("bought") credit balance in major currency units
+    /// — grok only, from `config.prepaidBalance` (billing.rs:94).
+    ///
+    /// A BALANCE, not usage: unlike `extra_usage` there is no limit to
+    /// divide by, so it carries no utilization and renders as a bare
+    /// amount. grok's two billing models are mutually exclusive
+    /// (`credit_limit_upsell_mode`, dispatch/billing.rs:54) — unified users
+    /// buy prepaid credits, legacy users get an on-demand cap — so a
+    /// unified subscriber has `onDemandCap: 0` and would show NOTHING
+    /// without this field, which is exactly what the on-demand-only
+    /// `extra_usage` mapping did. Drawn down only once the included
+    /// allowance hits 100% (credit_bar.rs:219), i.e. a reserve tank.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepaid_balance: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Unix millis of the query (frontend staleness display).
@@ -183,6 +206,7 @@ impl SubscriptionQuota {
             tiers: vec![],
             plan: None,
             extra_usage: None,
+            prepaid_balance: None,
             error: None,
             queried_at: Some(now_millis()),
         }
@@ -201,9 +225,17 @@ impl SubscriptionQuota {
             tiers,
             plan,
             extra_usage,
+            prepaid_balance: None,
             error: None,
             queried_at: Some(now_millis()),
         }
+    }
+
+    /// grok-only rider on `success` — every other CLI leaves it `None`, so
+    /// it stays off the shared constructor's signature.
+    fn with_prepaid_balance(mut self, balance: Option<f64>) -> Self {
+        self.prepaid_balance = balance;
+        self
     }
 
     fn error(app: &str, status: CredentialStatus, message: String) -> Self {
@@ -214,6 +246,7 @@ impl SubscriptionQuota {
             tiers: vec![],
             plan: None,
             extra_usage: None,
+            prepaid_balance: None,
             error: Some(message),
             queried_at: Some(now_millis()),
         }
@@ -1451,19 +1484,59 @@ const GROK_CLIENT_IDENTIFIER: &str = "grok-shell";
 const GROK_CLIENT_MODE: &str = "interactive";
 
 /// Map the billing response to quota tiers + extra usage.
-/// `config.creditUsagePercent` is the included-credit utilization
-/// (0–100; proto3 JSON omits zero → missing means 0). The usage window
-/// is `config.currentPeriod` (`USAGE_PERIOD_TYPE_WEEKLY`/`_MONTHLY`,
-/// billing.rs:37) with the deprecated `billingPeriodEnd` as fallback —
-/// mapped onto the existing `seven_day`/`30_day` tier ids so the tray
-/// ("W"/"M") and card labels apply. On-demand credits surface as
-/// `ExtraUsage` when a cap is configured.
+///
+/// Utilization follows grok's OWN resolution order (pager
+/// `credit_balance_from_config`, effects/helpers.rs:1256-1266): the
+/// credits-config `creditUsagePercent` first, else derived from the
+/// DEPRECATED `used`/`monthlyLimit` pair, else **unknown** — and unknown
+/// yields NO tier at all.
+///
+/// **A missing percent is NOT 0% (LOCKED).** This code used to read
+/// `creditUsagePercent` alone and `unwrap_or(0.0)`, reasoning that proto3
+/// JSON omits zero-valued scalars so absence must mean zero. That is true
+/// of a `Cent` (`{"val": 0}` → `{}`), but NOT of this response: the
+/// endpoint serves NO usage percentage at all for some accounts — verified
+/// live against a Free / `isUnifiedBillingUser` login, whose raw body
+/// carries `currentPeriod`, the on-demand Cents and `prepaidBalance` but
+/// neither `creditUsagePercent` nor the deprecated `used`/`monthlyLimit`.
+/// Those users got a confident "0%" ring that never moved, including after
+/// their allowance was exhausted (grok itself reports exhaustion through a
+/// 429 on the CHAT request — `subscription:free-usage-exhausted`,
+/// sampling/error.rs:290 — never through this endpoint). Showing nothing
+/// is the honest rendering; inventing a zero is what made the card lie.
+/// (grok's own `/usage` prints `Weekly limit: 0%` for these accounts, so
+/// this is a divergence from the TUI on purpose — the UI here is a ring
+/// that reads as authoritative, not a line of text.)
+///
+/// The window is `config.currentPeriod`
+/// (`USAGE_PERIOD_TYPE_WEEKLY`/`_MONTHLY`, billing.rs:37) with the
+/// deprecated `billingPeriodEnd` as fallback — mapped onto the existing
+/// `seven_day`/`30_day` tier ids so the tray ("W"/"M") and card labels
+/// apply. On-demand credits surface as `ExtraUsage` when a cap is
+/// configured; that is independent of the percent, so a no-percent account
+/// with a cap still shows its credits.
 fn parse_grok_billing(body: &serde_json::Value) -> (Vec<QuotaTier>, Option<ExtraUsage>) {
     let config = body.get("config").cloned().unwrap_or(serde_json::json!({}));
+    // Cent values (USD cents) — proto3 omits `val` when 0, so absent ⇒ 0.
+    let cents = |k: &str| {
+        config
+            .get(k)
+            .and_then(|v| v.get("val"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+    };
     let utilization = config
         .get("creditUsagePercent")
         .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
+        .or_else(|| {
+            // Legacy `GetGrokBuildBillingConfig` shape, same fallback the
+            // pager applies (a zero limit is no denominator, not 0%).
+            let limit = cents("monthlyLimit");
+            (limit > 0).then(|| cents("used") as f64 / limit as f64 * 100.0)
+        })
+        // The pager clamps too — the backend has been seen reporting past
+        // 100 (its own test covers `credit_usage_percent: Some(150.0)`).
+        .map(|pct| pct.clamp(0.0, 100.0));
     let period_type = config
         .pointer("/currentPeriod/type")
         .and_then(|v| v.as_str())
@@ -1480,23 +1553,18 @@ fn parse_grok_billing(body: &serde_json::Value) -> (Vec<QuotaTier>, Option<Extra
         .or_else(|| config.get("billingPeriodEnd"))
         .and_then(|v| v.as_str())
         .map(String::from);
-    let tiers = vec![QuotaTier {
-        name: name.to_string(),
-        // Grok reports ONE account-wide credit window whose name is
-        // already the period.
-        group: None,
-        utilization,
-        resets_at,
-    }];
-    // On-demand (pay-per-use overflow) — Cent values (USD cents, `val`
-    // omitted when 0).
-    let cents = |k: &str| {
-        config
-            .get(k)
-            .and_then(|v| v.get("val"))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0)
-    };
+    let tiers = utilization
+        .map(|utilization| QuotaTier {
+            name: name.to_string(),
+            // Grok reports ONE account-wide credit window whose name is
+            // already the period.
+            group: None,
+            utilization,
+            resets_at,
+        })
+        .into_iter()
+        .collect();
+    // On-demand (pay-per-use overflow).
     let cap = cents("onDemandCap");
     let used = cents("onDemandUsed");
     let extra = (cap > 0).then(|| ExtraUsage {
@@ -1509,6 +1577,24 @@ fn parse_grok_billing(body: &serde_json::Value) -> (Vec<QuotaTier>, Option<Extra
         decimal_places: None,
     });
     (tiers, extra)
+}
+
+/// Remaining prepaid ("bought") credit balance in DOLLARS, or `None` when
+/// there is none to show.
+///
+/// `config.prepaidBalance` is a `Cent` (USD cents — billing.rs:23), and
+/// billing stores credit amounts as NEGATIVE cents by accounting
+/// convention: grok's own renderers take `i64::abs` before display
+/// (credit_bar.rs:121 and :188), so a `-1250` balance is $12.50 of credit
+/// REMAINING, not a debt. Zero (including the proto3-omitted `{}` form)
+/// means no credits bought → nothing to render.
+fn parse_grok_prepaid_balance(body: &serde_json::Value) -> Option<f64> {
+    let cents = body
+        .pointer("/config/prepaidBalance/val")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0)
+        .abs();
+    (cents > 0).then(|| cents as f64 / 100.0)
 }
 
 /// `subscription_tier_display` from a `/v1/settings` response body.
@@ -1595,12 +1681,13 @@ async fn query_grok_quota(
         Err(e) => return e,
     };
     let (tiers, extra) = parse_grok_billing(&body);
+    let prepaid = parse_grok_prepaid_balance(&body);
     // The tier name is NOT in the billing response (billing.rs enriches it
     // from RemoteSettings client-side) — official precedence per
     // mvp_agent/mod.rs `resolve_subscription_tier_for_telemetry`:
     // `/settings` display name first, JWT `tier` claim fallback.
     let plan = plan_from_settings.or_else(|| grok_jwt_tier_plan(access_token));
-    SubscriptionQuota::success("grok", tiers, plan, extra)
+    SubscriptionQuota::success("grok", tiers, plan, extra).with_prepaid_balance(prepaid)
 }
 
 // ===================================================================
@@ -2142,6 +2229,7 @@ mod tests {
             ],
             plan: Some("Max".into()),
             extra_usage: None,
+            prepaid_balance: None,
             error: None,
             queried_at: Some(1),
         };
@@ -2154,6 +2242,16 @@ mod tests {
         assert_eq!(v["tiers"][1]["group"], "weekly");
         assert_eq!(v["plan"], "Max");
         assert_eq!(v["queriedAt"], 1);
+        // Same omit-when-absent rule for the grok-only balance.
+        assert!(v.get("prepaidBalance").is_none());
+        let with_balance = SubscriptionQuota {
+            prepaid_balance: Some(12.5),
+            ..quota
+        };
+        assert_eq!(
+            serde_json::to_value(&with_balance).unwrap()["prepaidBalance"],
+            12.5
+        );
     }
 
     #[test]
@@ -2426,33 +2524,114 @@ mod tests {
     }
 
     #[test]
-    fn parse_grok_billing_maps_weekly_window_and_omitted_percent() {
-        // The REAL response shape captured live (2026-07-16): proto3 JSON
-        // omits zero-valued fields, so creditUsagePercent absent ⇒ 0%.
+    fn parse_grok_billing_reports_no_tier_when_the_endpoint_serves_no_percent() {
+        // The REAL response for a Free / unified-billing login, captured
+        // live from the raw endpoint (2026-07-31): a period and the Cent
+        // fields, but NO usage percentage in any form. This body used to
+        // produce a 0% ring that never moved even once the allowance was
+        // exhausted — the absence means "not served", not "nothing used",
+        // so it must produce no tier at all.
         let body = json!({
             "config": {
                 "currentPeriod": {
                     "type": "USAGE_PERIOD_TYPE_WEEKLY",
-                    "start": "2026-07-15T00:00:00+00:00",
-                    "end": "2026-07-22T00:00:00+00:00"
+                    "start": "2026-07-29T00:00:00+00:00",
+                    "end": "2026-08-05T00:00:00+00:00"
                 },
                 "onDemandCap": {"val": 0},
                 "onDemandUsed": {"val": 0},
                 "isUnifiedBillingUser": true,
                 "prepaidBalance": {"val": 0},
-                "billingPeriodStart": "2026-07-15T00:00:00+00:00",
-                "billingPeriodEnd": "2026-07-22T00:00:00+00:00"
+                "topUpMethod": "TOP_UP_METHOD_SAVED_PAYMENT_METHOD",
+                "billingPeriodStart": "2026-07-29T00:00:00+00:00",
+                "billingPeriodEnd": "2026-08-05T00:00:00+00:00"
             }
         });
         let (tiers, extra) = parse_grok_billing(&body);
+        assert!(tiers.is_empty(), "no usage data → no ring, not a 0% ring");
+        assert!(extra.is_none(), "no on-demand cap → no extra usage");
+    }
+
+    #[test]
+    fn parse_grok_prepaid_balance_reads_the_signed_cent_value() {
+        // Billing stores credits as NEGATIVE cents; grok's own renderers
+        // abs() them, so this is $12.50 REMAINING.
+        let body = json!({"config": {"prepaidBalance": {"val": -1250}}});
+        assert_eq!(parse_grok_prepaid_balance(&body), Some(12.5));
+        // A positive value means the same amount.
+        let body = json!({"config": {"prepaidBalance": {"val": 1250}}});
+        assert_eq!(parse_grok_prepaid_balance(&body), Some(12.5));
+    }
+
+    #[test]
+    fn parse_grok_prepaid_balance_is_absent_when_zero_or_missing() {
+        // proto3 omits a zero Cent's `val` (and the whole field), and a
+        // zero balance is nothing to show either way.
+        assert_eq!(
+            parse_grok_prepaid_balance(&json!({"config": {"prepaidBalance": {"val": 0}}})),
+            None
+        );
+        assert_eq!(
+            parse_grok_prepaid_balance(&json!({"config": {"prepaidBalance": {}}})),
+            None
+        );
+        assert_eq!(parse_grok_prepaid_balance(&json!({"config": {}})), None);
+    }
+
+    #[test]
+    fn parse_grok_billing_falls_back_to_the_deprecated_used_over_limit() {
+        // Legacy `GetGrokBuildBillingConfig` shape — the pager's own second
+        // resolution step (effects/helpers.rs:1264), which this code
+        // previously skipped entirely.
+        let body = json!({
+            "config": {
+                "monthlyLimit": {"val": 2000},
+                "used": {"val": 500},
+                "billingPeriodEnd": "2026-08-05T00:00:00+00:00"
+            }
+        });
+        let (tiers, _) = parse_grok_billing(&body);
         assert_eq!(tiers.len(), 1);
-        assert_eq!(tiers[0].name, "seven_day");
-        assert_eq!(tiers[0].utilization, 0.0);
+        assert_eq!(tiers[0].utilization, 25.0);
         assert_eq!(
             tiers[0].resets_at.as_deref(),
-            Some("2026-07-22T00:00:00+00:00")
+            Some("2026-08-05T00:00:00+00:00")
         );
-        assert!(extra.is_none(), "no on-demand cap → no extra usage");
+    }
+
+    #[test]
+    fn parse_grok_billing_zero_percent_is_still_a_tier() {
+        // An explicit zero IS data — the distinction the missing-field case
+        // above turns on. It must still render (a genuinely unused window).
+        let body = json!({"config": {"creditUsagePercent": 0.0}});
+        let (tiers, _) = parse_grok_billing(&body);
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].utilization, 0.0);
+    }
+
+    #[test]
+    fn parse_grok_billing_clamps_an_over_100_percent() {
+        // The pager clamps; its own tests cover a 150% response.
+        let body = json!({"config": {"creditUsagePercent": 150.0}});
+        let (tiers, _) = parse_grok_billing(&body);
+        assert_eq!(tiers[0].utilization, 100.0);
+    }
+
+    #[test]
+    fn parse_grok_billing_keeps_on_demand_credits_without_a_percent() {
+        // The credits ring is independent of the window percent, so an
+        // account with a cap still shows its spend even when the endpoint
+        // serves no utilization.
+        let body = json!({
+            "config": {
+                "onDemandCap": {"val": 5000},
+                "onDemandUsed": {"val": 1250}
+            }
+        });
+        let (tiers, extra) = parse_grok_billing(&body);
+        assert!(tiers.is_empty());
+        let extra = extra.expect("cap configured");
+        assert_eq!(extra.used_credits, Some(12.5));
     }
 
     #[test]

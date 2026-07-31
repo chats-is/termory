@@ -120,6 +120,11 @@ struct TrayQuota {
     /// Pay-as-you-go credits (Claude "extra usage" / grok on-demand),
     /// present only when enabled — appended as "🟢 $used / $limit Credits".
     credits: Option<TrayCredits>,
+    /// Prepaid ("bought") credit balance in major units — grok only,
+    /// appended as "$12.50 Balance". Carries NO pressure glyph: the
+    /// glyphs encode a used/limit ratio and a balance has no limit, so
+    /// there is no level to colour.
+    balance: Option<f64>,
 }
 
 /// One window on the tray row. Keeps the API's own fields rather than
@@ -302,6 +307,7 @@ pub struct TrayLabels {
     status_busy: String,
     status_waiting: String,
     credits: String,
+    balance: String,
     /// Stand-in for a provider saved without a name — mirrors the Providers
     /// page's `p.name || t("providers.unnamed")`, so a nameless row is a
     /// readable placeholder here instead of a blank, unclickable-looking line.
@@ -321,6 +327,7 @@ impl Default for TrayLabels {
             choose_folder: "Choose Folder…".to_string(),
             status_busy: "Working".to_string(),
             status_waiting: "Needs input".to_string(),
+            balance: "Balance".to_string(),
             credits: "Credits".to_string(),
             unnamed: "(unnamed)".to_string(),
         }
@@ -467,6 +474,35 @@ const QUOTA_TRAY_ERROR_RETRY: std::time::Duration = std::time::Duration::from_se
 /// can't double-fetch within each other's windows.
 static QUOTA_LAST_FETCH: Mutex<Vec<(CliApp, std::time::Instant, bool)>> = Mutex::new(Vec::new());
 
+/// Whether a fetch is allowed given this CLI's marker, as the pure
+/// decision behind both floor call sites. `marker` is the CLI's entry in
+/// `QUOTA_LAST_FETCH` (elapsed since the last COMPLETED fetch + whether it
+/// succeeded); `None` = no fetch on record, which always allows one — that
+/// is the state `clear_quota_marker` restores on an account switch, so the
+/// switch's own re-fetch can never be refused by a floor the PREVIOUS
+/// account earned.
+fn quota_fetch_allowed(
+    marker: Option<(std::time::Duration, bool)>,
+    floor_ok: std::time::Duration,
+    floor_err: std::time::Duration,
+) -> bool {
+    match marker {
+        None => true,
+        Some((elapsed, ok)) => elapsed >= if ok { floor_ok } else { floor_err },
+    }
+}
+
+/// This CLI's marker as `(elapsed, succeeded)`, or `None` when no fetch is
+/// on record (never fetched, or invalidated by an account switch).
+fn quota_marker(cli: CliApp) -> Option<(std::time::Duration, bool)> {
+    let guard = QUOTA_LAST_FETCH.lock().ok()?;
+    let now = std::time::Instant::now();
+    guard
+        .iter()
+        .find(|(c, _, _)| *c == cli)
+        .map(|(_, prev, ok)| (now.duration_since(*prev), *ok))
+}
+
 fn set_quota_marker(cli: CliApp, ok: bool) {
     if let Ok(mut guard) = QUOTA_LAST_FETCH.lock() {
         let now = std::time::Instant::now();
@@ -477,6 +513,16 @@ fn set_quota_marker(cli: CliApp, ok: bool) {
             }
             None => guard.push((cli, now, ok)),
         }
+    }
+}
+
+/// Forget when this CLI was last fetched, so the next refresh runs no
+/// matter which floor would otherwise apply. Paired with dropping the
+/// cached numbers: the marker records when the PREVIOUS ACCOUNT's usage
+/// was fetched, which says nothing about the one now logged in.
+fn clear_quota_marker(cli: CliApp) {
+    if let Ok(mut guard) = QUOTA_LAST_FETCH.lock() {
+        guard.retain(|(c, _, _)| *c != cli);
     }
 }
 
@@ -656,9 +702,14 @@ fn spawn_account_switch(app: &AppHandle, cli: CliApp, id: String) {
             log::warn!("tray account switch: snapshotting the live login failed: {err}");
         }
         match crate::accounts::switch_account(id.clone()).await {
-            Ok(()) => {
+            Ok(_) => {
                 let _ = crate::accounts::mark_account_relogin(&id, false);
                 settle_account_change(&handle, cli);
+                // Order matters: drop the previous account's numbers
+                // BEFORE re-fetching, so the row shows no quota until the
+                // new login's own result lands (and keeps showing none if
+                // that fetch fails) instead of the old account's.
+                invalidate_quota(&handle, cli);
                 force_quota_refresh(&handle, cli);
             }
             Err(err) => {
@@ -1009,21 +1060,12 @@ pub fn trigger_quota_refresh(app: &AppHandle) {
         if rows_built && !cli_row_shows_quota(cli) {
             continue;
         }
-        {
-            let Ok(guard) = QUOTA_LAST_FETCH.lock() else {
-                continue;
-            };
-            let now = std::time::Instant::now();
-            if let Some((_, prev, ok)) = guard.iter().find(|(c, _, _)| *c == cli) {
-                let floor = if *ok {
-                    QUOTA_TRAY_MIN_INTERVAL
-                } else {
-                    QUOTA_TRAY_ERROR_RETRY
-                };
-                if now.duration_since(*prev) < floor {
-                    continue;
-                }
-            }
+        if !quota_fetch_allowed(
+            quota_marker(cli),
+            QUOTA_TRAY_MIN_INTERVAL,
+            QUOTA_TRAY_ERROR_RETRY,
+        ) {
+            continue;
         }
         spawn_quota_fetch(app, cli);
     }
@@ -1047,16 +1089,10 @@ pub fn force_quota_refresh(app: &AppHandle, cli: CliApp) {
     if crate::config::disabled_sources().contains(cli.key()) {
         return;
     }
-    {
-        let Ok(guard) = QUOTA_LAST_FETCH.lock() else {
-            return;
-        };
-        let now = std::time::Instant::now();
-        if let Some((_, prev, _)) = guard.iter().find(|(c, _, _)| *c == cli) {
-            if now.duration_since(*prev) < QUOTA_FORCE_FLOOR {
-                return;
-            }
-        }
+    // One flat floor here regardless of the last outcome — this is burst
+    // dedup, not a cache window.
+    if !quota_fetch_allowed(quota_marker(cli), QUOTA_FORCE_FLOOR, QUOTA_FORCE_FLOOR) {
+        return;
     }
     spawn_quota_fetch(app, cli);
 }
@@ -1298,6 +1334,43 @@ fn clear_quota_entry(app: &AppHandle, cli: CliApp) {
     }
 }
 
+/// Drop a CLI's cached quota because the IDENTITY behind it changed
+/// (an account switch), not because a fetch said so.
+///
+/// `refresh_quota` keeps the last good numbers when a fetch FAILS, which
+/// is right for a transient error on the SAME login but wrong across a
+/// switch: the retained tiers describe the previous account and would sit
+/// in the menu — next to the new account's checkmark — until some later
+/// fetch happened to succeed. Callers pair this with a refresh; clearing
+/// first means the window between them (and a failed fetch) shows no
+/// quota rather than someone else's.
+pub fn invalidate_quota(app: &AppHandle, cli: CliApp) {
+    if !crate::quota::supports_quota(cli) {
+        return;
+    }
+    clear_quota_entry(app, cli);
+    // Also drop the rate-limit marker, or the caller's own re-fetch can be
+    // refused by a floor earned by the PREVIOUS account's fetch — leaving
+    // the row cleared with nothing on the way to replace it. The tray's
+    // switch path hits exactly that: opening the menu triggers a fetch, and
+    // clicking an account row seconds later lands inside
+    // `QUOTA_FORCE_FLOOR`'s 10s burst-dedup window.
+    clear_quota_marker(cli);
+    // Tell an open Providers page to drop its copy too. A switch made
+    // from the TRAY is invisible to the page, which would otherwise keep
+    // rendering the previous account's rings until some later fetch
+    // succeeded — and indefinitely if the next one failed (its merge
+    // rule preserves the last good tiers). The page's OWN switch path
+    // clears the entry directly and re-emitting here is harmless: it
+    // only re-stamps the invalidation instant, and a result is stamped
+    // when the fetch COMPLETES, so the in-flight re-fetch still counts
+    // as newer.
+    {
+        use tauri::Emitter;
+        let _ = app.emit(crate::quota::QUOTA_INVALIDATED_EVENT, cli.key());
+    }
+}
+
 pub fn refresh_quota(app: &AppHandle, quota: &crate::quota::SubscriptionQuota) {
     let Some(cli) = CliApp::parse(&quota.app) else {
         return;
@@ -1337,6 +1410,7 @@ pub fn refresh_quota(app: &AppHandle, quota: &crate::quota::SubscriptionQuota) {
             })
             .collect(),
         plan: quota.plan.clone(),
+        balance: quota.prepaid_balance,
         credits: quota
             .extra_usage
             .as_ref()
@@ -1357,7 +1431,7 @@ pub fn refresh_quota(app: &AppHandle, quota: &crate::quota::SubscriptionQuota) {
     // pay-as-you-go credits ARE enabled we keep the entry so the tray
     // shows them even with no windows — matching the in-app card, which
     // renders credits off `extraUsage.isEnabled` regardless of tiers.
-    if next.tiers.is_empty() && next.credits.is_none() {
+    if next.tiers.is_empty() && next.credits.is_none() && next.balance.is_none() {
         clear_quota_entry(app, cli);
         return;
     }
@@ -1517,6 +1591,17 @@ fn credits_label(c: &TrayCredits, labels: &TrayLabels) -> String {
     )
 }
 
+/// "$12.50 Balance" — the prepaid-credit suffix, appended last. No
+/// glyph, deliberately: every other segment's glyph reports how much of
+/// a limit is spent, and a balance has none to measure against.
+fn balance_label(balance: f64, labels: &TrayLabels) -> String {
+    format!(
+        "{} {}",
+        format_credit_amount(balance, None, None),
+        labels.balance
+    )
+}
+
 /// "🟢 12% 5h · 🟡 78% Weekly · 🟢 $3 / $10 Credits" (or "🟢 9% 30d"
 /// on a Codex free plan) — appended to the CLI's first-level row title
 /// (percent right after the pressure glyph). None when no window and no
@@ -1536,6 +1621,9 @@ fn quota_label(q: &TrayQuota, labels: &TrayLabels) -> Option<String> {
         .collect();
     if let Some(credits) = &q.credits {
         parts.push(credits_label(credits, labels));
+    }
+    if let Some(balance) = q.balance {
+        parts.push(balance_label(balance, labels));
     }
     if parts.is_empty() {
         return None;
@@ -2204,6 +2292,128 @@ mod tests {
     }
 
     #[test]
+    fn quota_label_appends_the_prepaid_balance_last_without_a_glyph() {
+        let labels = TrayLabels::default();
+        // grok's unified-billing shape: a spent weekly window, no
+        // on-demand cap, and bought credits held in reserve.
+        let q = TrayQuota {
+            tiers: vec![wide_tier("seven_day", 100.0)],
+            plan: None,
+            credits: None,
+            balance: Some(12.5),
+        };
+        // No glyph on the balance — the others report a used/limit ratio,
+        // which a balance has none of.
+        assert_eq!(
+            quota_label(&q, &labels).as_deref(),
+            Some("🔴 100% W · $12.50 Balance")
+        );
+    }
+
+    #[test]
+    fn quota_label_orders_credits_before_the_balance() {
+        let labels = TrayLabels::default();
+        let q = TrayQuota {
+            tiers: vec![wide_tier("five_hour", 12.0)],
+            plan: None,
+            credits: Some(TrayCredits {
+                utilization: 30.0,
+                used: 3.0,
+                limit: Some(10.0),
+                currency: Some("USD".into()),
+                decimal_places: None,
+            }),
+            balance: Some(20.0),
+        };
+        // Whole amounts trim their cents, same as the credits amounts.
+        assert_eq!(
+            quota_label(&q, &labels).as_deref(),
+            Some("🟢 12% 5h · 🟢 $3 / $10 Credits · $20 Balance")
+        );
+    }
+
+    #[test]
+    fn quota_label_shows_a_balance_with_no_windows_at_all() {
+        let labels = TrayLabels::default();
+        // Nothing else known — the row must still carry the balance
+        // rather than reading as "no quota" (the same reason the empty
+        // check in refresh_quota counts it).
+        let q = TrayQuota {
+            tiers: vec![],
+            plan: None,
+            credits: None,
+            balance: Some(5.0),
+        };
+        assert_eq!(quota_label(&q, &labels).as_deref(), Some("$5 Balance"));
+    }
+
+    // The floor decision behind both quota-refresh entry points. The
+    // marker itself lives in a `static`, so the rule is tested here as the
+    // pure function the two call sites share.
+    #[test]
+    fn quota_fetch_allowed_applies_the_outcome_specific_floor() {
+        let ok_floor = std::time::Duration::from_secs(120);
+        let err_floor = std::time::Duration::from_secs(60);
+        let secs = std::time::Duration::from_secs;
+
+        // A success holds for the long floor; a failure only the short one,
+        // so a transient error doesn't mute the row for two minutes.
+        assert!(!quota_fetch_allowed(
+            Some((secs(119), true)),
+            ok_floor,
+            err_floor
+        ));
+        assert!(quota_fetch_allowed(
+            Some((secs(120), true)),
+            ok_floor,
+            err_floor
+        ));
+        assert!(!quota_fetch_allowed(
+            Some((secs(59), false)),
+            ok_floor,
+            err_floor
+        ));
+        assert!(quota_fetch_allowed(
+            Some((secs(61), false)),
+            ok_floor,
+            err_floor
+        ));
+    }
+
+    #[test]
+    fn quota_fetch_allowed_without_a_marker_always_fetches() {
+        let floor = std::time::Duration::from_secs(3600);
+        // This is the state `clear_quota_marker` leaves behind, and it is
+        // what makes an account switch's own re-fetch land: the entry was
+        // just dropped, so a floor earned by the PREVIOUS account must not
+        // refuse the fetch that would repopulate it — otherwise the row is
+        // cleared with nothing coming to replace it.
+        assert!(quota_fetch_allowed(None, floor, floor));
+    }
+
+    #[test]
+    fn quota_marker_reads_back_what_was_set_and_clears() {
+        // Uses a CLI no other test in this module touches, since the marker
+        // list is a process-wide `static` shared by the parallel test run.
+        let cli = CliApp::Gemini;
+        clear_quota_marker(cli);
+        assert!(
+            quota_marker(cli).is_none(),
+            "cleared marker reads as absent"
+        );
+
+        set_quota_marker(cli, true);
+        let (elapsed, ok) = quota_marker(cli).expect("marker present after set");
+        assert!(ok, "success flag round-trips");
+        assert!(elapsed < std::time::Duration::from_secs(5), "just recorded");
+
+        // An account switch invalidates it: the recorded fetch describes the
+        // login that was just replaced.
+        clear_quota_marker(cli);
+        assert!(quota_marker(cli).is_none());
+    }
+
+    #[test]
     fn cli_providers_mirrors_the_page_lists() {
         let library = vec![
             provider("c1", "claude", "custom", "Anthropic Proxy"),
@@ -2345,6 +2555,7 @@ mod tests {
             tiers: vec![wide_tier("five_hour", 12.4), wide_tier("seven_day", 78.0)],
             plan: None,
             credits: None,
+            balance: None,
         };
         assert_eq!(
             quota_label(&both, &labels).as_deref(),
@@ -2355,6 +2566,7 @@ mod tests {
             tiers: vec![wide_tier("30_day", 9.0)],
             plan: None,
             credits: None,
+            balance: None,
         };
         assert_eq!(quota_label(&monthly, &labels).as_deref(), Some("🟢 9% M"));
         // Truly unknown ids pass through raw.
@@ -2362,6 +2574,7 @@ mod tests {
             tiers: vec![wide_tier("mystery_window", 99.6)],
             plan: None,
             credits: None,
+            balance: None,
         };
         assert_eq!(
             quota_label(&odd, &labels).as_deref(),
@@ -2371,6 +2584,7 @@ mod tests {
             tiers: vec![],
             plan: None,
             credits: None,
+            balance: None,
         };
         assert_eq!(quota_label(&none, &labels), None);
     }
@@ -2383,6 +2597,7 @@ mod tests {
         let q = TrayQuota {
             tiers: vec![wide_tier("five_hour", 12.0)],
             plan: None,
+            balance: None,
             credits: Some(TrayCredits {
                 utilization: 38.88,
                 used: 1944.0,
@@ -2399,6 +2614,7 @@ mod tests {
         let grok = TrayQuota {
             tiers: vec![],
             plan: None,
+            balance: None,
             credits: Some(TrayCredits {
                 utilization: 95.0,
                 used: 3.0,

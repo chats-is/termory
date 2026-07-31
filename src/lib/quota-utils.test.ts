@@ -4,7 +4,8 @@ import {
   QUOTA_CRIT_PCT,
   QUOTA_WARN_PCT,
   mergeQuotaResult,
-  quotaLevel
+  quotaLevel,
+  quotaResultIsStale
 } from "./quota-utils";
 
 describe("quotaLevel", () => {
@@ -66,5 +67,49 @@ describe("mergeQuotaResult", () => {
 
   it("a failure with nothing to preserve passes through", () => {
     expect(mergeQuotaResult(undefined, q({ success: false, tiers: [] })).tiers).toEqual([]);
+  });
+
+  // The retention rule above is scoped to ONE login. Across an account
+  // switch the caller clears the entry, so there is no `prev` to keep and
+  // a failed post-switch fetch can't display the previous account's usage.
+  it("a cleared entry gives a post-switch failure nothing to retain", () => {
+    const previousAccount = q({ tiers: goodTiers, plan: "Max" });
+    expect(previousAccount.tiers).toEqual(goodTiers);
+    const afterSwitchFailure = mergeQuotaResult(
+      undefined, // ProvidersPage.resetQuota dropped the entry
+      q({ success: false, error: "401", tiers: [], queriedAt: 2000 })
+    );
+    expect(afterSwitchFailure.tiers).toEqual([]);
+    expect(afterSwitchFailure.plan).toBeUndefined();
+  });
+});
+
+describe("quotaResultIsStale", () => {
+  const q = (queriedAt?: number): SubscriptionQuota =>
+    ({
+      app: "claude",
+      credentialStatus: "valid",
+      success: true,
+      tiers: [],
+      queriedAt
+    }) as SubscriptionQuota;
+
+  it("never stale while the entry has not been invalidated", () => {
+    expect(quotaResultIsStale(q(1000), undefined)).toBe(false);
+    expect(quotaResultIsStale(q(undefined), undefined)).toBe(false);
+  });
+
+  it("drops a result fetched for the account switched away from", () => {
+    // In flight when the switch landed at t=2000 → describes the old login.
+    expect(quotaResultIsStale(q(1999), 2000)).toBe(true);
+  });
+
+  it("keeps a result fetched after the switch", () => {
+    expect(quotaResultIsStale(q(2000), 2000)).toBe(false);
+    expect(quotaResultIsStale(q(2500), 2000)).toBe(false);
+  });
+
+  it("treats a result with no timestamp as stale once invalidated", () => {
+    expect(quotaResultIsStale(q(undefined), 2000)).toBe(true);
   });
 });

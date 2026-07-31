@@ -976,9 +976,15 @@ async fn save_account(handle: tauri::AppHandle, app: String) -> Result<(), Strin
 /// Validates/refreshes tokens in memory before writing auth.json.
 #[tauri::command]
 async fn switch_account(handle: tauri::AppHandle, id: String) -> Result<(), String> {
-    accounts::switch_account(id)
+    let cli = accounts::switch_account(id)
         .await
         .map_err(|e| e.to_string())?;
+    // The cached quota describes the account we just switched AWAY from;
+    // keeping it would leave the previous login's usage on the tray row
+    // (and, on a failed re-fetch, leave it there indefinitely). The page
+    // re-fetches right after this call and that result flows back to the
+    // tray via `fetch_subscription_quota` → `tray::refresh_quota`.
+    tray::invalidate_quota(&handle, cli);
     // Moves the tray's account checkmark (and can change which provider
     // state reverse-derives, since auth.json is part of it).
     let _ = tray::rebuild_menu(&handle);

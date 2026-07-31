@@ -234,7 +234,11 @@ pub fn save_current_account(app: CliApp) -> Result<(), Box<dyn Error>> {
 /// Restore a saved snapshot into the live CLI credential.
 /// Refreshes tokens in memory BEFORE writing to auth.json — if refresh fails
 /// the auth.json is left untouched and the caller should mark needsRelogin.
-pub async fn switch_account(id: String) -> Result<(), Box<dyn Error>> {
+///
+/// Returns the CLI whose live login changed, so a caller holding only the
+/// account id (the IPC command) can invalidate that CLI's cached quota —
+/// the numbers belong to the account being switched away from.
+pub async fn switch_account(id: String) -> Result<CliApp, Box<dyn Error>> {
     let store = read_store()?;
     let entry = store
         .iter()
@@ -246,8 +250,14 @@ pub async fn switch_account(id: String) -> Result<(), Box<dyn Error>> {
         .ok_or("Saved account has no credential payload")?;
     let app = str_field(entry, "app").map(String::from);
     match app.as_deref() {
-        Some("codex") => switch_codex(&payload).await,
-        Some("claude") => switch_claude(&payload).await,
+        Some("codex") => {
+            switch_codex(&payload).await?;
+            Ok(CliApp::Codex)
+        }
+        Some("claude") => {
+            switch_claude(&payload).await?;
+            Ok(CliApp::Claude)
+        }
         other => Err(format!("Unsupported account app: {}", other.unwrap_or("?")).into()),
     }
 }

@@ -305,6 +305,12 @@ export type SubscriptionQuota = {
    * brand-ish raw value, not translated. */
   plan?: string;
   extraUsage?: ExtraUsage;
+  /** Remaining prepaid ("bought") credit balance in major units — grok
+   * only. A BALANCE, not usage: there is no limit to divide by, so it has
+   * no utilization and renders as a bare amount. grok's two billing models
+   * are mutually exclusive, so a unified-billing subscriber shows this
+   * while `extraUsage` (the legacy on-demand cap) stays absent. */
+  prepaidBalance?: number;
   error?: string;
   queriedAt?: number;
 };

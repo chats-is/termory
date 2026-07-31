@@ -99,6 +99,13 @@ export const ACTIVE_STATE_REFRESH_EVENT = "termory:providers-refresh";
 // QUOTA_CHANGED_EVENT in src-tauri/src/quota.rs.
 export const QUOTA_CHANGED_EVENT = "termory:quota-changed";
 
+// Backend pushes a CLI key ("codex", …) when that CLI's cached quota was
+// dropped because the LOGIN changed (an account switch), so the page can
+// discard the previous account's numbers — it has no other way to learn
+// of a switch made from the menu-bar tray. Rust mirror:
+// QUOTA_INVALIDATED_EVENT in src-tauri/src/quota.rs.
+export const QUOTA_INVALIDATED_EVENT = "termory:quota-invalidated";
+
 // A provider switch the TRAY started but handed to the page because it needs
 // the "follow sessions?" prompt the tray can't show (Codex official↔custom).
 // The page fetches the request with the `take_pending_tray_switch` IPC.

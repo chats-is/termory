@@ -302,6 +302,107 @@ describe("OfficialAccountsSection — quota rings in active row", () => {
     expect(screen.getByText("41%")).toBeInTheDocument();
   });
 
+  // A failed fetch keeps the previous good numbers on screen
+  // (mergeQuotaResult) — the label turns red so they don't read as live.
+  it("marks the tier names when the last fetch failed", async () => {
+    mockList(makeState());
+    render(
+      <OfficialAccountsSection
+        app="codex"
+        quota={makeQuota({ success: false, error: "HTTP 500" })}
+        onRefreshQuota={vi.fn()}
+      />
+    );
+    expect(await screen.findByText("5h")).toHaveClass("text-destructive");
+    expect(screen.getByText("Weekly")).toHaveClass("text-destructive");
+    // The RING keeps the pressure scale — a red ring would read as
+    // "nearly spent", which is a different statement.
+    expect(screen.getByText("12%")).not.toHaveClass("text-destructive");
+  });
+
+  it("leaves the tier names alone on a successful fetch", async () => {
+    mockList(makeState());
+    render(
+      <OfficialAccountsSection app="codex" quota={makeQuota()} onRefreshQuota={vi.fn()} />
+    );
+    expect(await screen.findByText("5h")).not.toHaveClass("text-destructive");
+  });
+
+  // A fetch in flight is not a failure: the entry still carries the
+  // previous result's `success: false` shape only if THAT one failed.
+  it("does not mark names while a refresh is in flight", async () => {
+    mockList(makeState());
+    render(
+      <OfficialAccountsSection
+        app="codex"
+        quota={makeQuota({ success: false })}
+        quotaLoading
+        onRefreshQuota={vi.fn()}
+      />
+    );
+    expect(await screen.findByText("5h")).not.toHaveClass("text-destructive");
+  });
+
+  // grok's billing endpoint serves no usage percentage for some accounts
+  // (Free / unified billing), so the backend emits no tier rather than a
+  // fake 0%. Nothing is shown in its place — no rings, no placeholder copy
+  // (user decision 2026-07-31): an empty result is simply absent.
+  it("renders no quota content for an empty result", async () => {
+    mockList(makeState());
+    const { container } = render(
+      <OfficialAccountsSection
+        app="grok"
+        quota={makeQuota({ app: "grok", tiers: [] })}
+        onRefreshQuota={vi.fn()}
+      />
+    );
+    await screen.findByText("Jane");
+    // No ring — matched on QuotaRing's own viewBox, since the row's
+    // lucide status icon is an svg with a <circle> too.
+    expect(container.querySelector('svg[viewBox="0 0 36 36"]')).toBeNull();
+    expect(screen.queryByText(/%/)).not.toBeInTheDocument();
+    // The row is just the account; only the Refresh control remains.
+    expect(screen.getByLabelText("Refresh usage")).toBeInTheDocument();
+  });
+
+  // grok's unified-billing model: bought credits arrive as a BALANCE with
+  // no limit, and such an account has no on-demand cap — so without this
+  // it showed nothing at all.
+  it("shows a grok prepaid balance with no ring", async () => {
+    mockList(makeState());
+    render(
+      <OfficialAccountsSection
+        app="grok"
+        quota={makeQuota({
+          app: "grok",
+          tiers: [{ name: "seven_day", utilization: 30 }],
+          prepaidBalance: 12.5
+        })}
+        onRefreshQuota={vi.fn()}
+      />
+    );
+    expect(await screen.findByText("Balance")).toBeInTheDocument();
+    // Currency symbol varies by the runner's resolved locale (same reason
+    // as the Credits test below) — match the amount.
+    expect(screen.getByText(/12\.50/)).toBeInTheDocument();
+    // One ring only — the window's. A balance has no limit to divide by,
+    // so it must not render a percentage of its own.
+    expect(screen.getAllByText(/^\d+%$/)).toHaveLength(1);
+  });
+
+  it("omits the balance when the account has none", async () => {
+    mockList(makeState());
+    render(
+      <OfficialAccountsSection
+        app="grok"
+        quota={makeQuota({ app: "grok", tiers: [{ name: "seven_day", utilization: 30 }] })}
+        onRefreshQuota={vi.fn()}
+      />
+    );
+    await screen.findByText("Weekly");
+    expect(screen.queryByText("Balance")).not.toBeInTheDocument();
+  });
+
   it("labels a model-scoped window with its period, not a bare model name", async () => {
     mockList(makeState());
     render(

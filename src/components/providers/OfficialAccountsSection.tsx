@@ -277,7 +277,8 @@ function QuotaTierItem({
   group,
   utilization,
   resetsAt,
-  showCountdown
+  showCountdown,
+  stale
 }: {
   app: CliApp;
   name: string;
@@ -287,6 +288,9 @@ function QuotaTierItem({
   // Only the window you're waiting on (see waitingOnTierName) gets the
   // countdown; the rest show just the absolute reset time.
   showCountdown: boolean;
+  // The last fetch failed, so these numbers are the previous successful
+  // result (mergeQuotaResult keeps them rather than blanking the card).
+  stale?: boolean;
 }) {
   const t = useT();
   let labels = tierLabels(name, t, group);
@@ -320,7 +324,19 @@ function QuotaTierItem({
         <span className="inline-flex items-center gap-1.5 text-xs leading-none">
           <QuotaRing utilization={utilization} />
           <span className="flex flex-col gap-1 min-w-0">
-            <span className="max-w-32 truncate text-foreground">{labels.short}</span>
+            {/* Red NAME, not a red ring: the ring's colors are the
+                pressure scale (amber ≥75%, red ≥90%), so tinting it
+                would read as "this window is nearly spent". The label
+                is the one part of the item that carries no other
+                meaning, so it can say "these numbers are stale". */}
+            <span
+              className={cn(
+                "max-w-32 truncate",
+                stale ? "text-destructive" : "text-foreground"
+              )}
+            >
+              {labels.short}
+            </span>
             {subline && (
               <span className="whitespace-nowrap text-[10px] text-muted-foreground/70">
                 {subline}
@@ -329,7 +345,17 @@ function QuotaTierItem({
           </span>
         </span>
       </TooltipTrigger>
-      <TooltipContent>{detail}</TooltipContent>
+      <TooltipContent>
+        {detail}
+        {/* A bare red label says something is wrong but not what — the
+            hover carries the reason. */}
+        {stale && (
+          <>
+            <br />
+            {t("providers.quotaStale")}
+          </>
+        )}
+      </TooltipContent>
     </Tooltip>
   );
 }
@@ -337,7 +363,7 @@ function QuotaTierItem({
 /** "Usage credits" — Claude's pay-as-you-go overflow (and grok on-demand
  * credits). Rendered next to the quota rings when enabled: a pressure ring
  * on the used-credit utilization + the currency amounts as the subline. */
-function ExtraUsageItem({ extra }: { extra: ExtraUsage }) {
+function ExtraUsageItem({ extra, stale }: { extra: ExtraUsage; stale?: boolean }) {
   const t = useT();
   const used = formatCurrency(
     extra.usedCredits ?? 0,
@@ -358,7 +384,12 @@ function ExtraUsageItem({ extra }: { extra: ExtraUsage }) {
         <span className="inline-flex items-center gap-1.5 text-xs leading-none">
           <QuotaRing utilization={extra.utilization ?? 0} />
           <span className="flex flex-col gap-1 min-w-0">
-            <span className="max-w-32 truncate text-foreground">
+            <span
+              className={cn(
+                "max-w-32 truncate",
+                stale ? "text-destructive" : "text-foreground"
+              )}
+            >
               {t("providers.usageCredits")}
             </span>
             <span className="whitespace-nowrap text-[10px] text-muted-foreground/70">
@@ -367,7 +398,58 @@ function ExtraUsageItem({ extra }: { extra: ExtraUsage }) {
           </span>
         </span>
       </TooltipTrigger>
-      <TooltipContent>{detail}</TooltipContent>
+      <TooltipContent>
+        {detail}
+        {stale && (
+          <>
+            <br />
+            {t("providers.quotaStale")}
+          </>
+        )}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** Prepaid ("bought") credit balance — grok's unified-billing model.
+ *
+ * Deliberately has NO ring, unlike every sibling item: a ring encodes a
+ * used/limit ratio and a balance has no limit to divide by, so any arc
+ * would be invented. Also NO low-balance colouring: grok's own warning
+ * (credit_bar.rs:219) fires only once the included allowance is fully
+ * spent AND is gated on the auto-top-up rule — a separate endpoint we
+ * don't call — so a bare "$10 is low" tint would cry wolf at users whose
+ * balance tops itself up. Just the amount. */
+function PrepaidBalanceItem({ amount, stale }: { amount: number; stale?: boolean }) {
+  const t = useT();
+  // grok stores these as USD (billing.rs `Cent`), already in major units.
+  const value = formatCurrency(amount, "USD");
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex flex-col gap-1 min-w-0 text-xs leading-none">
+          <span
+            className={cn(
+              "max-w-32 truncate",
+              stale ? "text-destructive" : "text-foreground"
+            )}
+          >
+            {t("providers.creditBalance")}
+          </span>
+          <span className="whitespace-nowrap text-[10px] text-muted-foreground/70">
+            {value}
+          </span>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>
+        {t("providers.creditBalanceHint", { amount: value })}
+        {stale && (
+          <>
+            <br />
+            {t("providers.quotaStale")}
+          </>
+        )}
+      </TooltipContent>
     </Tooltip>
   );
 }
@@ -598,6 +680,15 @@ export function OfficialAccountsSection({
   const showQuota =
     !!onRefreshQuota && quota?.credentialStatus !== "not_found";
 
+  // The last fetch FAILED while there is still something to show, which
+  // only happens because mergeQuotaResult keeps the previous successful
+  // result rather than blanking the card (see quota-utils). That retention
+  // is deliberate — but silently, so the numbers looked live while they
+  // could be arbitrarily old. Mark the labels instead of hiding the data.
+  // `not_found` never reaches here (showQuota already hides the section)
+  // and a fetch in flight isn't a failure, so neither reads as stale.
+  const quotaStale = !!quota && !quota.success && !quotaLoading;
+
   return (
     <div className="-mt-2 flex flex-col rounded-b-xl bg-card pt-2 shadow-sm">
       {state.storageWarning && (
@@ -721,11 +812,18 @@ export function OfficialAccountsSection({
                         utilization={tier.utilization}
                         resetsAt={tier.resetsAt}
                         showCountdown={index === waitingIndex}
+                        stale={quotaStale}
                       />
                     ));
                   })()}
                 {quota?.extraUsage?.isEnabled && (
-                  <ExtraUsageItem extra={quota.extraUsage} />
+                  <ExtraUsageItem extra={quota.extraUsage} stale={quotaStale} />
+                )}
+                {quota?.prepaidBalance != null && (
+                  <PrepaidBalanceItem
+                    amount={quota.prepaidBalance}
+                    stale={quotaStale}
+                  />
                 )}
                 <Tooltip>
                   <TooltipTrigger asChild>

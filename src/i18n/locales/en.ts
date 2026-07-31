@@ -65,6 +65,7 @@ export const en = {
   "tray.quotaWeekly": "W",
   "tray.quotaMonthly": "M",
   "tray.credits": "Credits",
+  "tray.balance": "Balance",
 
   // Stats
   "stats.kpi.sessions": "Sessions",
@@ -227,8 +228,11 @@ export const en = {
   "providers.quotaResets": "Resets {time}",
   "providers.quotaResetsCountdown": "in {duration}",
   "providers.quotaNotUsedYet": "You haven't used {model} yet",
+  "providers.quotaStale": "Last refresh failed — these numbers may be out of date",
   "providers.usageCredits": "Credits",
   "providers.usageCreditsHint": "Credits cover you when you hit your plan limits — {used} of {limit} used",
+  "providers.creditBalance": "Balance",
+  "providers.creditBalanceHint": "{amount} of prepaid credits left — used once you reach your plan limit",
   "providers.addProvider": "Add provider",
   "providers.noCustomProviders": "No custom providers yet",
   "providers.aiGateways": "AI Gateways",
