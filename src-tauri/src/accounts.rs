@@ -3900,10 +3900,26 @@ mod tests {
             "a second acquire must not get the lock while the first is held"
         );
 
-        let info = std::fs::read_to_string(tmp.join("auth.json.lock")).unwrap();
-        let (pid, ts) = info.split_once(':').expect("holder info is PID:TS");
-        assert_eq!(pid.parse::<u32>().unwrap(), std::process::id());
-        assert!(ts.parse::<u64>().unwrap() > 0);
+        // Reading the stamp back is UNIX-ONLY, and not for want of trying on
+        // Windows: `File::try_lock` is flock there and `LockFileEx` here, and
+        // `LockFileEx` is MANDATORY — while the guard above holds the range,
+        // any other handle reading it fails with os error 33, including this
+        // one. (Caught by CI, which is the only place this runs on Windows.)
+        //
+        // The production path is unaffected: the stamp is written through the
+        // handle that owns the lock. What a grok waiter can read on Windows is
+        // grok's own question, not ours — its waiter reads the same way
+        // (`auth/manager/lock.rs:234`, no platform branch) and every one of
+        // its ~20 lock tests is `#[cfg(unix)]` too. Mirroring the protocol
+        // exactly, platform quirks included, beats inventing a Windows-only
+        // divergence with nothing to validate it against.
+        #[cfg(unix)]
+        {
+            let info = std::fs::read_to_string(tmp.join("auth.json.lock")).unwrap();
+            let (pid, ts) = info.split_once(':').expect("holder info is PID:TS");
+            assert_eq!(pid.parse::<u32>().unwrap(), std::process::id());
+            assert!(ts.parse::<u64>().unwrap() > 0);
+        }
 
         drop(held);
         assert!(
