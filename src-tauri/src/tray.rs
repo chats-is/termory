@@ -675,15 +675,17 @@ fn settle_account_change(app: &AppHandle, cli: CliApp) {
     }
 }
 
-/// Restore a saved official login (Codex / Claude) from the tray. Async
-/// because a switch can do network work before writing (Codex refreshes the
-/// tokens first) — a failure leaves the live credential untouched, and for
-/// Codex we then mirror the Providers page by flagging the entry as needing
-/// re-login (its refresh token was revoked), which renders as the ⚠ suffix on
-/// the next build. Claude ALSO validates (switch_claude refreshes first) but
-/// flags needsRelogin BACKEND-side on AuthFailure only — a string Err here
-/// can't tell a dead token from a locked-Keychain write error, and flagging
-/// a write error would misdiagnose, so only Codex flags from this side.
+/// Restore a saved official login (Codex / Claude / Grok) from the tray. Async
+/// because ALL THREE validate over the network before writing — a failure
+/// leaves the live credential untouched.
+///
+/// Only CODEX is flagged as needing re-login from this side, mirroring the
+/// Providers page. The other two flag themselves BACKEND-side, and only on a
+/// definitive AuthFailure, because a string Err here cannot tell a dead token
+/// from a write error — Claude's could be a locked Keychain, Grok's could be a
+/// lost race for grok's `auth.json.lock` — and flagging one of those would
+/// misdiagnose a healthy account. The ⚠ suffix appears on the next build
+/// either way.
 ///
 /// On success the quota belongs to a DIFFERENT account, so force a refetch:
 /// that also emits `quota-changed`, which an open Providers page already
