@@ -39,7 +39,6 @@ import type {
   Gateway,
   Route,
   ScanResult,
-  SearchHit,
   SessionDetail,
   SessionMessage
 } from "@/types";
@@ -116,7 +115,6 @@ import { MemoryCard } from "@/components/MemoryCard";
 import { MessageList } from "@/components/MessageList";
 import { DocDetailView } from "@/components/DocDetailView";
 import { TranscriptFindBar } from "@/components/TranscriptFindBar";
-import { SnippetLine } from "@/components/SnippetLine";
 import { useI18n, useT } from "@/i18n";
 
 // Route + modal code-splitting (M6). Each lazy chunk only ships when
@@ -193,6 +191,8 @@ export function App() {
         monthly: t("tray.quotaMonthly"),
         // Pay-as-you-go "Credits" label on the CLI rows (Claude / grok).
         credits: t("tray.credits"),
+        // grok's prepaid ("bought") credit balance, appended after Credits.
+        balance: t("tray.balance"),
         // "New Session" submenu title + its "Choose Folder…" tail.
         newSession: t("tray.newSession"),
         chooseFolder: t("tray.chooseFolder"),
@@ -211,7 +211,6 @@ export function App() {
   const [projects, setProjects] = React.useState<Project[]>([]);
   const [selected, setSelected] = React.useState<AppSession | null>(null);
   const [detail, setDetail] = React.useState<SessionDetail | null>(null);
-  const [query, setQuery] = React.useState("");
   const [source, setSource] = React.useState("All");
   const [project, setProject] = React.useState<string | null>(null);
   const [expandedSources, setExpandedSources] = React.useState<Set<string>>(() => new Set());
@@ -222,9 +221,6 @@ export function App() {
   const [loading, setLoading] = React.useState(true);
   const [detailLoading, setDetailLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const [contentHits, setContentHits] = React.useState<Map<string, SearchHit>>(() => new Map());
-  const [, setSearchingContent] = React.useState(false);
-  const [contentQuery, setContentQuery] = React.useState("");
   const [pane, setPane] = usePersistentState<"sessions" | "memory" | "skills">(
     "records_pane",
     "sessions",
@@ -923,40 +919,6 @@ export function App() {
     selected?.message_count
   ]);
 
-  React.useEffect(() => {
-    const trimmed = query.trim();
-    if (trimmed.length < 2) {
-      setContentHits(new Map());
-      setContentQuery("");
-      setSearchingContent(false);
-      return;
-    }
-    let cancelled = false;
-    const handle = window.setTimeout(() => {
-      setSearchingContent(true);
-      invoke<SearchHit[]>("search_all_sessions", { query: trimmed })
-        .then((hits) => {
-          if (cancelled) return;
-          const map = new Map<string, SearchHit>();
-          for (const hit of hits) map.set(sessionKey(hit.session), hit);
-          setContentHits(map);
-          setContentQuery(trimmed);
-        })
-        .catch((err) => {
-          if (!cancelled) {
-            console.error("search_all_sessions failed", err);
-            setError(String(err));
-          }
-        })
-        .finally(() => {
-          if (!cancelled) setSearchingContent(false);
-        });
-    }, 300);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(handle);
-    };
-  }, [query]);
 
   const sessionItems = React.useMemo(
     () => sessions.filter((item) => !isMemoryItem(item) && !isSkillItem(item)),
@@ -965,74 +927,43 @@ export function App() {
   const memoryItems = React.useMemo(() => sessions.filter(isMemoryItem), [sessions]);
   const skillItems = React.useMemo(() => sessions.filter(isSkillItem), [sessions]);
 
-  const filtered = React.useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return sessionItems.filter((session) => {
-      if (source !== "All" && session.source !== source) return false;
-      if (project && session.project !== project) return false;
-      if (!needle) return true;
-      const metaMatch = [
-        session.title,
-        session.project,
-        session.source,
-        session.id,
-        session.path
-      ]
-        .join("\n")
-        .toLowerCase()
-        .includes(needle);
-      if (metaMatch) return true;
-      if (needle === contentQuery.toLowerCase() && contentHits.has(sessionKey(session))) {
+  const filtered = React.useMemo(
+    () =>
+      sessionItems.filter((session) => {
+        if (source !== "All" && session.source !== source) return false;
+        if (project && session.project !== project) return false;
         return true;
-      }
-      return false;
-    });
-  }, [sessionItems, query, source, project, contentHits, contentQuery]);
+      }),
+    [sessionItems, source, project]
+  );
 
-  const filteredMemories = React.useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return memoryItems.filter((memory) => {
-      if (source !== "All") {
-        const tools = memoryToolsOf(memory);
-        if (!tools.includes(source as MemoryTool)) return false;
-      }
-      if (project && memory.project !== project) return false;
-      if (!needle) return true;
-      const metaMatch = [memory.title, memory.project, memory.id, memory.path]
-        .join("\n")
-        .toLowerCase()
-        .includes(needle);
-      if (metaMatch) return true;
-      if (needle === contentQuery.toLowerCase() && contentHits.has(sessionKey(memory))) {
+  const filteredMemories = React.useMemo(
+    () =>
+      memoryItems.filter((memory) => {
+        if (source !== "All") {
+          const tools = memoryToolsOf(memory);
+          if (!tools.includes(source as MemoryTool)) return false;
+        }
+        if (project && memory.project !== project) return false;
         return true;
-      }
-      return false;
-    });
-  }, [memoryItems, query, source, project, contentHits, contentQuery]);
+      }),
+    [memoryItems, source, project]
+  );
 
-  const filteredSkills = React.useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return skillItems.filter((skill) => {
-      if (source !== "All") {
-        const tools = memoryToolsOf(skill);
-        if (!tools.includes(source as MemoryTool)) return false;
-      }
-      if (project && skill.project !== project) return false;
-      if (!needle) return true;
-      const metaMatch = [skill.title, skill.project, skill.id, skill.path]
-        .join("\n")
-        .toLowerCase()
-        .includes(needle);
-      if (metaMatch) return true;
-      if (needle === contentQuery.toLowerCase() && contentHits.has(sessionKey(skill))) {
+  const filteredSkills = React.useMemo(
+    () =>
+      skillItems.filter((skill) => {
+        if (source !== "All") {
+          const tools = memoryToolsOf(skill);
+          if (!tools.includes(source as MemoryTool)) return false;
+        }
+        if (project && skill.project !== project) return false;
         return true;
-      }
-      return false;
-    });
-  }, [skillItems, query, source, project, contentHits, contentQuery]);
+      }),
+    [skillItems, source, project]
+  );
 
-  const hasActiveFilters =
-    source !== "All" || project !== null || query.trim().length > 0;
+  const hasActiveFilters = source !== "All" || project !== null;
 
   const sourceGroups = React.useMemo(() => {
     // Pill order follows the Settings → Tools drag order; Claude Desktop
@@ -1574,14 +1505,10 @@ export function App() {
                             ? t("records.tryFilters")
                             : t("records.nothingMatches")
                         }
-                        action={undefined}
                       />
                     )}
                     {(!loading || sessionItems.length > 0) &&
                       filtered.map((session) => {
-                        const hit = contentHits.get(sessionKey(session));
-                        const showSnippet =
-                          !!hit && query.trim().toLowerCase() === contentQuery.toLowerCase();
                         const isActive =
                           selected?.path === session.path && selected?.id === session.id;
                         return (
@@ -1666,15 +1593,6 @@ export function App() {
                                 )}
                               </span>
                             </div>
-                            {showSnippet && hit && (
-                              <SnippetLine
-                                snippet={hit.snippet}
-                                query={query.trim()}
-                                role={hit.role}
-                                matchCount={hit.match_count}
-                                truncated={hit.truncated}
-                              />
-                            )}
                           </button>
                           </ListItemMenu>
                         );
@@ -1703,7 +1621,6 @@ export function App() {
                             ? t("records.tryFilters")
                             : t("records.nothingMatches")
                         }
-                        action={undefined}
                       />
                     )}
                     {filteredMemories.map((item) => (
@@ -1723,9 +1640,6 @@ export function App() {
                           item={item}
                           selected={selected}
                           onClick={() => setSelected(item)}
-                          query={query.trim()}
-                          contentQuery={contentQuery}
-                          hit={contentHits.get(sessionKey(item))}
                           showSource={source === "All"}
                         />
                       </ListItemMenu>
@@ -1754,7 +1668,6 @@ export function App() {
                             ? t("records.tryFilters")
                             : t("records.nothingMatches")
                         }
-                        action={undefined}
                       />
                     )}
                     {filteredSkills.map((item) => (
@@ -1773,9 +1686,6 @@ export function App() {
                           item={item}
                           selected={selected}
                           onClick={() => setSelected(item)}
-                          query={query.trim()}
-                          contentQuery={contentQuery}
-                          hit={contentHits.get(sessionKey(item))}
                           showSource={source === "All"}
                         />
                       </ListItemMenu>

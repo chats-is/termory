@@ -5,7 +5,6 @@ import {
   Eye,
   EyeOff,
   Loader2,
-  Plus,
   RefreshCw,
   Trash2
 } from "lucide-react";

@@ -95,7 +95,6 @@ export function ProviderCard({
   onTest: () => void;
 }) {
   const t = useT();
-  const isOpencode = provider.app === "opencode";
   // OpenCode + Grok are multi-slot (shared helper): the primary action is
   // "Set default" (the slot is enabled separately), not single-slot "Activate".
   const multiSlot = isMultiSlot(provider.app);

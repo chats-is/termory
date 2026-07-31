@@ -8,9 +8,8 @@ import {
   projectDisplayName,
   sourceDisplayName
 } from "@/lib/session-utils";
-import type { AppSession, SearchHit } from "@/types";
+import type { AppSession } from "@/types";
 import { BrandIcon } from "./BrandIcon";
-import { SnippetLine } from "./SnippetLine";
 
 // forwardRef + ...rest so the call site can make it a context-menu
 // `asChild` trigger (Radix passes a ref + event handlers to the child).
@@ -20,9 +19,6 @@ export const MemoryCard = React.forwardRef<
     item: AppSession;
     selected: AppSession | null;
     onClick: () => void;
-    query: string;
-    contentQuery: string;
-    hit: SearchHit | undefined;
     showSource: boolean;
   } & Omit<React.ComponentPropsWithoutRef<"button">, "onClick">
 >(function MemoryCard(
@@ -30,9 +26,6 @@ export const MemoryCard = React.forwardRef<
     item,
     selected,
     onClick,
-    query,
-    contentQuery,
-    hit,
     showSource,
     className,
     ...rest
@@ -40,7 +33,6 @@ export const MemoryCard = React.forwardRef<
   ref
 ) {
   const t = useT();
-  const showSnippet = !!hit && query.toLowerCase() === contentQuery.toLowerCase();
   const isActive = selected?.path === item.path && selected?.id === item.id;
   const tools = memoryToolsOf(item);
   return (
@@ -82,15 +74,6 @@ export const MemoryCard = React.forwardRef<
           </span>
         )}
       </div>
-      {showSnippet && hit && (
-        <SnippetLine
-          snippet={hit.snippet}
-          query={query}
-          role={hit.role}
-          matchCount={hit.match_count}
-          truncated={hit.truncated}
-        />
-      )}
     </button>
   );
 });
