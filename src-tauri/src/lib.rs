@@ -1055,6 +1055,31 @@ async fn cancel_claude_login(
     Ok(())
 }
 
+/// Add a Grok account via the headless `grok login --device-auth` (device
+/// flow, verification URL emitted as `grok:login-url` and the user code as
+/// `grok:login-code`), then auto-save the resulting credential and restore the
+/// previous login — the same flow shape as the codex / claude commands.
+#[tauri::command]
+async fn login_and_save_grok_account(
+    app: tauri::AppHandle,
+    cancel_state: tauri::State<'_, accounts::GrokLoginCancel>,
+) -> Result<String, String> {
+    let id = accounts::login_and_save_grok_account(app.clone(), &cancel_state).await?;
+    let _ = tray::rebuild_menu(&app);
+    Ok(id)
+}
+
+#[tauri::command]
+async fn cancel_grok_login(
+    app: tauri::AppHandle,
+    cancel_state: tauri::State<'_, accounts::GrokLoginCancel>,
+) -> Result<(), String> {
+    accounts::cancel_grok_login(&cancel_state).await?;
+    // Cancelling restores the previous login, so the tray follows.
+    let _ = tray::rebuild_menu(&app);
+    Ok(())
+}
+
 #[tauri::command]
 fn mark_account_relogin(handle: tauri::AppHandle, id: String, needed: bool) -> Result<(), String> {
     accounts::mark_account_relogin(&id, needed).map_err(|e| e.to_string())?;
@@ -1186,6 +1211,8 @@ pub fn run() {
             cancel_codex_login,
             login_and_save_claude_account,
             cancel_claude_login,
+            login_and_save_grok_account,
+            cancel_grok_login,
             mark_account_relogin,
         ])
         .on_window_event(|window, event| {
@@ -1223,6 +1250,7 @@ pub fn run() {
             // works with only the launch-time scan.
             app.manage(accounts::CodexLoginCancel(std::sync::Mutex::new(None)));
             app.manage(accounts::ClaudeLoginCancel(std::sync::Mutex::new(None)));
+            app.manage(accounts::GrokLoginCancel(std::sync::Mutex::new(None)));
             let handle = app.handle().clone();
             match watcher::start(handle) {
                 Ok(watcher_handle) => {

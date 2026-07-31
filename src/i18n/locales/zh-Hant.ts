@@ -358,6 +358,8 @@ export const zhHant: Record<MessageKey, string> = {
   "providers.accountKeyringWarning": "Codex 被設定為將憑證儲存在系統鑰匙圈({mode});此處切換寫入的是檔案,可能不會生效。",
   "providers.codexLoginDialogTitle": "授權 Codex",
   "providers.claudeLoginDialogTitle": "授權 Claude Code",
+  "providers.grokLoginDialogTitle": "授權 Grok",
+  "providers.loginDialogCode": "請在瀏覽器中確認此驗證碼",
   "providers.codexLoginDialogDesc": "瀏覽器應已自動開啟。如果沒有，請複製下方連結並手動在瀏覽器中開啟。",
   "providers.codexLoginDialogWaiting": "等待瀏覽器登入完成…",
   "install.notInstalled": "{name} 未安裝",

@@ -538,12 +538,11 @@ export function OfficialAccountsSection({
   const current: CurrentAccount | null = state?.current ?? null;
   const accounts = state?.accounts ?? [];
 
-  // Full snapshot management (save / switch / delete). Codex + Claude; the
-  // "Add account" (spawn `codex login`) and re-login flows stay Codex-only —
-  // their props are only passed for codex, so the buttons simply don't render
-  // elsewhere. A second Claude account is added by logging in via the CLI and
-  // saving here (the unsaved-current row's save button).
-  const isManaged = app === "codex" || app === "claude";
+  // Full snapshot management (save / switch / delete). Codex + Claude + Grok;
+  // Gemini stays display-only. The "Add account" / re-login buttons are gated
+  // separately by the page (their props are only passed for CLIs whose login
+  // Termory can spawn), so this flag governs the rows, not those buttons.
+  const isManaged = app === "codex" || app === "claude" || app === "grok";
 
   // Nothing to show until state loads; for display-only apps also bail out
   // when there is no current account.

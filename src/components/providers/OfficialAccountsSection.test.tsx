@@ -209,6 +209,48 @@ describe("OfficialAccountsSection — Codex management", () => {
     );
   });
 
+  it("manages grok saved accounts like codex (switch + delete rows)", async () => {
+    mockList(makeState());
+    render(<OfficialAccountsSection app="grok" />);
+    await screen.findByText("Work");
+    expect(screen.getByRole("button", { name: "Switch" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Delete" }).length).toBeGreaterThan(0);
+  });
+
+  // Grok flags needsRelogin BACKEND-side (switch_grok knows a 4xx refresh from
+  // a lock/write error; a string Err here does not), so the frontend must not
+  // flag it — the reload picks up whatever the backend set. Same split as
+  // claude.
+  it("does not flag needs-relogin from the frontend when a grok switch fails", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "list_accounts") return Promise.resolve(makeState());
+      if (cmd === "switch_account")
+        return Promise.reject(new Error("Grok token refresh failed (400)"));
+      return Promise.resolve(null);
+    });
+    render(<OfficialAccountsSection app="grok" />);
+    await screen.findByText("Work");
+    await userEvent.click(screen.getByRole("button", { name: "Switch" }));
+    await waitFor(() => expect(askMock).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("switch_account", { id: "acct-b" })
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith("mark_account_relogin", {
+      id: "acct-b",
+      needed: true
+    });
+  });
+
+  // Gemini is the one account-capable CLI that stays display-only: reading a
+  // login is not the same as being able to restore one.
+  it("keeps gemini display-only (no switch or delete rows)", async () => {
+    mockList(makeState());
+    render(<OfficialAccountsSection app="gemini" />);
+    await screen.findByText("Jane");
+    expect(screen.queryByRole("button", { name: "Switch" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+  });
+
   it("does not switch when cancelled", async () => {
     mockList(makeState());
     askMock.mockResolvedValue(false);

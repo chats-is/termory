@@ -376,6 +376,8 @@ export const en = {
   "providers.accountKeyringWarning": "Codex is set to store credentials in the system keyring ({mode}); switching here writes the file and may not take effect.",
   "providers.codexLoginDialogTitle": "Authorize Codex",
   "providers.claudeLoginDialogTitle": "Authorize Claude Code",
+  "providers.grokLoginDialogTitle": "Authorize Grok",
+  "providers.loginDialogCode": "Confirm this code in your browser",
   "providers.codexLoginDialogDesc": "Your browser should have opened automatically. If not, copy the link below and open it manually.",
   "providers.codexLoginDialogWaiting": "Waiting for browser login to complete…",
   "install.notInstalled": "{name} is not installed",

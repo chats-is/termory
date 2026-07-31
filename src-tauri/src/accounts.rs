@@ -33,6 +33,13 @@
 //! IDENTITY lives separately in `~/.claude.json` `oauthAccount`. See the
 //! "Claude Code — full multi-account management" section below for the
 //! snapshot shape and the deliberate `~/.claude.json` write exception.
+//!
+//! ## Phase 3 — Grok Build (file-based, never refreshes)
+//!
+//! Grok's store is the plain `<grok-home>/auth.json` file (0600) — no
+//! Keychain on any OS — but its refresh token rotates under reuse detection,
+//! so this is the one CLI whose switch does NO network validation. See the
+//! "Grok Build — full multi-account management" section below.
 
 use base64::Engine;
 use serde::Serialize;
@@ -141,8 +148,8 @@ struct SavedAccountView {
 // ===================================================================
 
 /// List the live + saved official accounts for `app`.
-/// Codex — full multi-account management.
-/// Claude / Gemini — display-only: reads the CLI's live credential file for
+/// Codex / Claude / Grok — full multi-account management.
+/// Gemini — display-only: reads the CLI's live credential file for
 ///   current name / email (no saved accounts, no switching).
 /// Other apps — empty state.
 pub fn list_accounts(app: CliApp) -> Result<AccountsState, Box<dyn Error>> {
@@ -169,13 +176,17 @@ pub struct TrayAccount {
     pub needs_relogin: bool,
 }
 
-/// Saved logins for the tray's account submenu. Codex + Claude — the CLIs
-/// with snapshot management (`list_accounts` is display-only for the others),
-/// so every other app returns `[]` and the tray renders no account section.
-/// A read failure also yields `[]`: no accounts.json just means "nothing saved".
+/// Saved logins for the tray's account submenu. Codex + Claude + Grok — the
+/// CLIs with snapshot management (`list_accounts` is display-only for the
+/// others), so every other app returns `[]` and the tray renders no account
+/// section. A read failure also yields `[]`: no accounts.json just means
+/// "nothing saved".
 pub fn tray_accounts(app: CliApp) -> Vec<TrayAccount> {
     let state = match app {
         CliApp::Codex => list_codex_accounts(),
+        // No perf gate like Claude's below: grok's live login is a plain file
+        // read, the same cost as codex's, not a `security(1)` spawn.
+        CliApp::Grok => list_grok_accounts(),
         CliApp::Claude => {
             // Perf gate for the tray HOT PATH (`build_menu` runs on the main
             // thread): resolving the live Claude login spawns `security(1)`
@@ -227,6 +238,7 @@ pub fn save_current_account(app: CliApp) -> Result<(), Box<dyn Error>> {
     match app {
         CliApp::Codex => save_codex_account(),
         CliApp::Claude => save_claude_account(),
+        CliApp::Grok => save_grok_account(),
         _ => Err(unsupported(app)),
     }
 }
@@ -257,6 +269,10 @@ pub async fn switch_account(id: String) -> Result<CliApp, Box<dyn Error>> {
         Some("claude") => {
             switch_claude(&payload).await?;
             Ok(CliApp::Claude)
+        }
+        Some("grok") => {
+            switch_grok(&id, &payload).await?;
+            Ok(CliApp::Grok)
         }
         other => Err(format!("Unsupported account app: {}", other.unwrap_or("?")).into()),
     }
@@ -323,10 +339,10 @@ pub async fn login_and_save_codex_account(
     // every exit path via Drop.
     let (_login_slot, cancel_notify) = LoginSlot::reserve(&cancel_state.0)?;
 
-    // If there is a live Codex login that is not yet saved, auto-save it so
-    // we can restore it after the new login completes.
+    // Capture the outgoing login BEFORE auth.json is cleared below — see
+    // `resnapshot_live_before_login` for why this cannot be only-if-missing.
     let prev_active_id: Option<String> =
-        auto_save_unsaved_live_account(CliApp::Codex).map_err(|e| e.to_string())?;
+        resnapshot_live_before_login(CliApp::Codex).map_err(|e| e.to_string())?;
 
     // Snapshot original auth.json for rollback.
     let original_auth: Option<Vec<u8>> = std::fs::read(&auth_path).ok();
@@ -467,6 +483,51 @@ pub async fn login_and_save_codex_account(
 /// is about to overwrite the credential can't destroy it. Used by the
 /// `codex login` flow and by the tray's account switch (which, unlike the
 /// Providers page, has no dialog to warn in). Non-managed apps are a no-op.
+/// Snapshot the live login into the store immediately before a login flow
+/// destroys it, returning its id so the caller can restore it afterwards.
+///
+/// **UNCONDITIONAL — deliberately not `auto_save_unsaved_live_account`.** Every
+/// login flow destroys the outgoing credential (claude's `performLogout` wipes
+/// local storage; a grok login overwrites the one shared scope entry; the codex
+/// flow blanks auth.json itself so codex's `logout_with_revoke` finds nothing to
+/// revoke). All three CLIs rotate their refresh token, so the copy ON DISK is
+/// the only one that still works — an entry saved days ago holds a rotated-away
+/// token, and the restore at the end of the flow would turn into a
+/// `needsRelogin` on an account the user never touched.
+///
+/// The only-if-missing helper below answers a DIFFERENT question ("would this
+/// unattended switch lose a login the user never saved?"), which is why the tray
+/// keeps using it: there, freshness is already handled by `switch_*`'s own
+/// outgoing re-snapshot. Here there is no later step to fall back on.
+fn resnapshot_live_before_login(app: CliApp) -> Result<Option<String>, Box<dyn Error>> {
+    match app {
+        CliApp::Codex => match read_codex_live()? {
+            Some(live) => {
+                save_codex_account()?;
+                Ok(Some(live.id))
+            }
+            None => Ok(None),
+        },
+        // UNCACHED: the rotation this defends against is exactly what makes a
+        // ≤30s-stale cached doc wrong here (same rule as switch_claude's).
+        CliApp::Claude => match read_claude_live_uncached()? {
+            Some(live) => {
+                save_claude_account()?;
+                Ok(Some(live.id))
+            }
+            None => Ok(None),
+        },
+        CliApp::Grok => match read_grok_live()? {
+            Some(live) => {
+                save_grok_live(&live)?;
+                Ok(Some(live.id))
+            }
+            None => Ok(None),
+        },
+        _ => Ok(None),
+    }
+}
+
 pub(crate) fn auto_save_unsaved_live_account(
     app: CliApp,
 ) -> Result<Option<String>, Box<dyn Error>> {
@@ -482,6 +543,19 @@ pub(crate) fn auto_save_unsaved_live_account(
                 str_field(e, "app") == Some("claude") && str_field(e, "id") == Some(id.as_str())
             }) {
                 save_claude_account()?;
+            }
+            Ok(Some(id))
+        }
+        CliApp::Grok => {
+            let Some(live) = read_grok_live()? else {
+                return Ok(None);
+            };
+            let id = live.id.clone();
+            let store = read_store()?;
+            if !store.iter().any(|e| {
+                str_field(e, "app") == Some("grok") && str_field(e, "id") == Some(id.as_str())
+            }) {
+                save_grok_live(&live)?;
             }
             Ok(Some(id))
         }
@@ -1247,21 +1321,9 @@ pub async fn login_and_save_claude_account(
     // every exit path via Drop.
     let (_login_slot, cancel_notify) = LoginSlot::reserve(&cancel_state.0)?;
 
-    // Snapshot the live login UNCONDITIONALLY (its id is what gets restored
-    // afterwards) — `claude auth login` wipes local storage (`performLogout`)
-    // before installing the new one, and that wipe destroys the only FRESH
-    // copy of the outgoing tokens: Claude rotates the refresh token on every
-    // refresh, so an entry saved days ago holds a dead RT and the restore
-    // below would AuthFailure into needsRelogin. Same rule, same reason as
-    // `switch_claude`'s re-snapshot-outgoing step — an only-if-missing
-    // auto-save is NOT enough here.
-    let prev_active_id = match read_claude_live_uncached().map_err(|e| e.to_string())? {
-        Some(live) => {
-            save_claude_account().map_err(|e| e.to_string())?;
-            Some(live.id)
-        }
-        None => None,
-    };
+    // Capture the outgoing login before `claude auth login`'s own
+    // `performLogout` wipes local storage — see `resnapshot_live_before_login`.
+    let prev_active_id = resnapshot_live_before_login(CliApp::Claude).map_err(|e| e.to_string())?;
 
     // Originals for rollback (cancel / timeout / failure after the wipe).
     let original_cred = crate::claude_auth::read_credentials();
@@ -1445,66 +1507,894 @@ pub async fn cancel_claude_login(cancel_state: &ClaudeLoginCancel) -> Result<(),
 // ===================================================================
 
 // ===================================================================
-// Grok Build account (display-only — plain fields in ~/.grok/auth.json)
+// Grok Build — full multi-account management
 // ===================================================================
+//
+// Grok's credential store is the plain `<grok-home>/auth.json` file (0600),
+// a scope-keyed map `{ "<issuer>::<client_id>": GrokAuth }` (xai-grok-shell
+// `auth/model.rs:259` + `auth/config.rs:217`) holding PLAIN `email` /
+// `first_name` / `last_name` — no Keychain on any OS and no JWT decode. The
+// xAI client_id is a compile-time constant (`auth/config.rs:279`), so every
+// first-party login lands on the SAME scope key: one account at a time on
+// disk, which is exactly why this snapshot/switch feature exists (same shape
+// as Codex / Claude).
+//
+// ## The refresh token is the whole hazard, and it shapes everything here
+//
+// auth.x.ai rotates the refresh token and runs reuse detection: spending one
+// twice revokes the token family (`auth/manager.rs:1710` — "a straddled
+// exchange loses the rotated token, which is what revokes the family";
+// `:1823` — "the double-spend that trips IdP rotation reuse detection"). The
+// blast radius is one `grok login`, not a lost account — but it is silent and
+// arrives hours later, so the design is built to never hand the user that.
+//
+// Three rules, each load-bearing:
+//
+//  1. **Refresh the snapshot before committing it** (`switch_grok`). A stored
+//     credential goes stale as grok rotates the on-disk one, and restoring a
+//     spent token "succeeds" then logs the user out at grok's next refresh.
+//     Validating first turns that into an error at click time plus a
+//     `needsRelogin` flag — the same contract `switch_codex` /
+//     `switch_claude` provide. A 429/5xx/network failure says nothing about
+//     the token, so it degrades to writing the snapshot verbatim.
+//  2. **Re-snapshot the outgoing login before overwriting it.** A grok running
+//     in a terminal rotates the RT in place, so an entry saved days ago holds
+//     a spent one. Recapturing at switch-out keeps the entry we may come back
+//     to in step with disk.
+//  3. **Hold grok's own `auth.json.lock` across all of it** (`GrokAuthLock`),
+//     including the IdP call — exactly why grok holds it across its own.
+//     Without it a concurrent grok refresh lands between our read and our
+//     write and we clobber the RT it just rotated to, which is both a lost
+//     token and the double-spend rule 1 exists to avoid.
+//
+// The endpoint and grant were verified live, not inferred — see
+// `GROK_TOKEN_ENDPOINT`. The refresh itself replicates grok's own
+// (`auth/oidc/refresh.rs`) field-for-field, including its keep-the-old-token
+// rule when the IdP declines to rotate.
 
-/// Grok Build's auth.json stores the login as a scope-keyed object
-/// (`https://auth.x.ai::<uuid>`) with PLAIN `email` / `first_name` /
-/// `last_name` fields (verified on the real 0.2.93 install) — no JWT
-/// decode needed. Display-only, like Claude / Gemini.
-fn list_grok_accounts() -> Result<AccountsState, Box<dyn Error>> {
-    let empty = || AccountsState {
-        current: None,
-        accounts: Vec::new(),
-        storage_warning: None,
+/// auth.json scope prefix for a first-party xAI login. Matched by PREFIX, not
+/// in full: the client_id suffix is a constant in grok (`auth/config.rs:279`)
+/// but `GROK_OAUTH2_CLIENT_ID` can override it (`auth/config.rs:233`).
+const GROK_XAI_SCOPE_PREFIX: &str = "https://auth.x.ai::";
+
+fn grok_auth_path() -> Result<std::path::PathBuf, Box<dyn Error>> {
+    Ok(crate::providers::grok_home_dir()
+        .ok_or("Grok home directory not available")?
+        .join("auth.json"))
+}
+
+/// The live first-party login read out of `auth.json`.
+struct GrokLive {
+    /// `user_id` — the account identity, and the store key.
+    id: String,
+    /// `first_name last_name`, whichever parts exist.
+    name: Option<String>,
+    email: Option<String>,
+    /// The scope key this login is filed under.
+    scope: String,
+    /// That scope's `GrokAuth` value, verbatim.
+    auth: JsonValue,
+}
+
+fn read_grok_live() -> Result<Option<GrokLive>, Box<dyn Error>> {
+    read_grok_live_at(&grok_auth_path()?)
+}
+
+fn read_grok_live_at(path: &std::path::Path) -> Result<Option<GrokLive>, Box<dyn Error>> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Ok(None);
     };
-    let Some(path) = crate::providers::grok_home_dir().map(|d| d.join("auth.json")) else {
-        return Ok(empty());
-    };
-    if !path.exists() {
-        return Ok(empty());
-    }
-    let doc: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&path)?).unwrap_or(serde_json::Value::Null);
-    let Some(entries) = doc.as_object() else {
-        return Ok(empty());
-    };
-    // First auth.x.ai-scoped entry = the live login.
-    let Some(entry) = entries
-        .iter()
-        .find(|(k, _)| k.starts_with("https://auth.x.ai::"))
-        .map(|(_, v)| v)
-    else {
-        return Ok(empty());
-    };
-    let field = |k: &str| {
-        entry
-            .get(k)
-            .and_then(|v| v.as_str())
+    let doc: JsonValue = serde_json::from_str(&raw).unwrap_or(JsonValue::Null);
+    Ok(grok_live_from_doc(&doc))
+}
+
+/// Pick the first-party xAI login out of a parsed auth.json.
+///
+/// Gated on the scope prefix AND a non-empty `user_id`. The `user_id` check
+/// is what keeps a plain API-key entry out: `store_api_key` writes the
+/// `xai::api_key` scope from `GrokAuth::default()` (`auth/storage.rs:426`),
+/// whose `user_id` is the empty string — so requiring one excludes it without
+/// hardcoding its key, and excludes any future keyless scope for free.
+fn grok_live_from_doc(doc: &JsonValue) -> Option<GrokLive> {
+    let field = |v: &JsonValue, k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
             .map(str::trim)
-            .filter(|v| !v.is_empty())
+            .filter(|x| !x.is_empty())
             .map(str::to_string)
     };
-    let email = field("email");
-    let name = match (field("first_name"), field("last_name")) {
-        (Some(f), Some(l)) => Some(format!("{f} {l}")),
-        (Some(f), None) => Some(f),
-        (None, Some(l)) => Some(l),
-        (None, None) => None,
-    };
-    if email.is_none() && name.is_none() {
-        return Ok(empty());
+    let (scope, auth) = doc
+        .as_object()?
+        .iter()
+        .find(|(k, v)| k.starts_with(GROK_XAI_SCOPE_PREFIX) && field(v, "user_id").is_some())?;
+    Some(GrokLive {
+        id: field(auth, "user_id")?,
+        name: match (field(auth, "first_name"), field(auth, "last_name")) {
+            (Some(f), Some(l)) => Some(format!("{f} {l}")),
+            (Some(f), None) => Some(f),
+            (None, Some(l)) => Some(l),
+            (None, None) => None,
+        },
+        email: field(auth, "email"),
+        scope: scope.clone(),
+        auth: auth.clone(),
+    })
+}
+
+/// Exclusive hold on grok's own `auth.json.lock`, mirroring
+/// `xai-grok-shell/src/auth/manager/lock.rs`: a whole-file advisory lock plus
+/// `PID:TIMESTAMP` holder info.
+///
+/// Writing the holder info is NOT cosmetic. A grok waiter that finds holder
+/// info older than its 60s stale timeout breaks the lock by unlinking the
+/// file and retrying on a fresh inode, so leaving the PREVIOUS holder's stale
+/// `PID:TS` in place invites grok to break ours mid-write.
+///
+/// **The hold spans an IdP round-trip** (`switch_grok` refreshes inside it, on
+/// purpose — two processes spending a refresh token concurrently is the
+/// double-spend rotation reuse detection punishes). It is nonetheless bounded
+/// by the refresh client's 20s timeout, roughly a third of grok's 60s stale
+/// threshold, so a single `PID:TS` stamp at acquire stays fresh for the whole
+/// hold and no heartbeat thread is needed. grok's own holds DO need one
+/// because its refreshes fire from a background daemon at arbitrary times and
+/// can straddle a system sleep, where wall-clock staleness keeps counting;
+/// ours run only when the user just clicked Switch, i.e. with the machine
+/// awake.
+///
+/// The lock releases when the handle drops (the advisory lock lives on the
+/// open file description). The lock FILE is deliberately never deleted:
+/// unlinking it is grok's break-a-stuck-holder signal, not a release.
+struct GrokAuthLock {
+    _file: std::fs::File,
+}
+
+impl GrokAuthLock {
+    /// One non-blocking attempt. `Ok(None)` = currently held by someone else.
+    fn try_acquire(auth_path: &std::path::Path) -> Result<Option<Self>, Box<dyn Error>> {
+        let lock_path = auth_path.with_file_name("auth.json.lock");
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // `truncate(false)`: the holder info is rewritten below under the
+        // lock. Truncating before acquiring would blank a live holder's
+        // `PID:TS` and make grok's waiters read IT as stale.
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => return Err(Box::new(e)),
+        }
+        // Best-effort, exactly as grok treats its own heartbeat rewrite: we
+        // hold the real lock either way, and the window is milliseconds.
+        if let Err(e) = write_grok_lock_holder(&mut file) {
+            log::warn!("Failed to stamp grok auth lock holder info: {e}");
+        }
+        Ok(Some(Self { _file: file }))
     }
+}
+
+/// Write `PID:UNIX_TIMESTAMP` into the lock file — the exact payload grok's
+/// `write_holder_info` (`auth/manager/lock.rs`) writes and its waiters parse.
+fn write_grok_lock_holder(file: &mut std::fs::File) -> std::io::Result<()> {
+    use std::io::{Seek, Write};
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    file.set_len(0)?;
+    file.seek(std::io::SeekFrom::Start(0))?;
+    write!(file, "{}:{}", std::process::id(), ts)?;
+    file.sync_all()
+}
+
+/// Acquire the auth lock, retrying briefly before giving up.
+///
+/// A grok refresh holds the lock across an IdP round-trip, so failing on the
+/// first miss would make switching flaky for the exact reason the lock exists.
+/// The retry stays bounded so a genuinely busy grok fails fast with actionable
+/// copy instead of hanging the switch.
+async fn acquire_grok_lock(auth_path: &std::path::Path) -> Result<GrokAuthLock, Box<dyn Error>> {
+    const ATTEMPTS: u32 = 10;
+    for attempt in 0..ATTEMPTS {
+        if let Some(lock) = GrokAuthLock::try_acquire(auth_path)? {
+            return Ok(lock);
+        }
+        if attempt + 1 < ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    }
+    Err("Grok is using its credentials right now — quit any running grok and try again".into())
+}
+
+/// Read auth.json for a read-modify-write, mirroring grok's own
+/// `read_auth_json_or_empty_recovering_corrupt` (`auth/storage.rs:181`):
+/// missing or empty → a fresh map; valid → the parsed map; non-empty corrupt →
+/// renamed aside to `auth.json.corrupt.<millis>` (grok's own backup name) and
+/// then a fresh map.
+///
+/// The rename is what makes starting fresh safe: a switch must never silently
+/// destroy credential bytes it could not parse.
+fn grok_doc_for_write(path: &std::path::Path) -> Result<JsonValue, Box<dyn Error>> {
+    let fresh = || JsonValue::Object(serde_json::Map::new());
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Ok(fresh());
+    };
+    if raw.trim().is_empty() {
+        return Ok(fresh());
+    }
+    match serde_json::from_str::<JsonValue>(&raw) {
+        Ok(v) if v.is_object() => Ok(v),
+        _ => {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let backup = path.with_file_name(format!("auth.json.corrupt.{ts}"));
+            std::fs::rename(path, &backup)?;
+            log::warn!("Backed up corrupt grok auth.json to {}", backup.display());
+            Ok(fresh())
+        }
+    }
+}
+
+fn list_grok_accounts() -> Result<AccountsState, Box<dyn Error>> {
+    let live = read_grok_live()?;
+    let current_id = live.as_ref().map(|l| l.id.as_str());
+    let store = read_store()?;
+
+    let mut accounts = Vec::new();
+    let mut current_saved = false;
+    for e in &store {
+        if str_field(e, "app") != Some("grok") {
+            continue;
+        }
+        let active = current_id.is_some() && current_id == str_field(e, "id");
+        if active {
+            current_saved = true;
+        }
+        accounts.push(SavedAccountView {
+            id: str_field(e, "id").unwrap_or_default().to_string(),
+            name: str_field(e, "name").unwrap_or_default().to_string(),
+            email: str_field(e, "email").map(String::from),
+            plan: str_field(e, "plan").map(String::from),
+            saved_at: str_field(e, "savedAt").unwrap_or_default().to_string(),
+            active,
+            // Set by `switch_grok` when the refresh came back a definitive
+            // 4xx; cleared by a successful refresh or a re-save.
+            needs_relogin: e
+                .get("needsRelogin")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        });
+    }
+
+    let current = live.map(|l| CurrentAccount {
+        name: l.name,
+        email: l.email,
+        // The plan is only served over the network (`/v1/settings`, see
+        // quota.rs `fetch_grok_plan`); the quota card already renders it, so
+        // the account row does not fetch it a second time.
+        plan: None,
+        saved: current_saved,
+    });
+
     Ok(AccountsState {
-        current: Some(CurrentAccount {
-            name,
-            email,
-            plan: None,
-            saved: true,
-        }),
-        accounts: Vec::new(),
+        current,
+        accounts,
         storage_warning: None,
     })
+}
+
+fn save_grok_account() -> Result<(), Box<dyn Error>> {
+    let live = read_grok_live()?.ok_or("No Grok login found to save (run `grok login` first)")?;
+    save_grok_live(&live)
+}
+
+/// Upsert `live` into the store.
+///
+/// Split from `save_grok_account` so the switch path can snapshot the document
+/// it already read under the lock, rather than re-reading the file it is about
+/// to overwrite (a second read is a second chance to race).
+fn save_grok_live(live: &GrokLive) -> Result<(), Box<dyn Error>> {
+    let mut store = read_store()?;
+    let entry = json!({
+        "id": live.id,
+        "app": "grok",
+        "name": live.name.clone().unwrap_or_default(),
+        "email": live.email,
+        // Payload is SCOPE-SCOPED, not the whole document — see switch_grok.
+        "payload": { "scope": live.scope, "auth": live.auth },
+        "savedAt": now_rfc3339(),
+    });
+    match store
+        .iter_mut()
+        .find(|e| str_field(e, "id") == Some(live.id.as_str()))
+    {
+        Some(slot) => *slot = entry,
+        None => store.push(entry),
+    }
+    write_store(store)
+}
+
+/// xAI's OAuth2 token endpoint. Taken from the live discovery document
+/// (`https://auth.x.ai/.well-known/openid-configuration`) rather than
+/// rediscovered at runtime — grok resolves it per refresh, but the value is
+/// stable and one fewer request is one fewer failure mode.
+///
+/// Verified live: `grant_types_supported` includes `refresh_token`, and
+/// `token_endpoint_auth_methods_supported` includes `none` — a PUBLIC client,
+/// so no secret is involved and the `oidc_client_id` in auth.json is the whole
+/// credential. A probe with a junk token returned `invalid_grant` (not
+/// `invalid_client`), i.e. the endpoint accepts this request shape from a
+/// third-party caller.
+const GROK_TOKEN_ENDPOINT: &str = "https://auth.x.ai/oauth2/token";
+
+/// Test-only override for `refresh_grok_auth`, so switch tests exercise every
+/// branch without a network call. Guarded by `lock_home()` like the rest of
+/// the process-global test state.
+#[cfg(test)]
+static GROK_REFRESH_STUB: std::sync::Mutex<Option<GrokRefreshStub>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+enum GrokRefreshStub {
+    /// Apply this token-endpoint response body (the patching still runs).
+    Response(JsonValue),
+    AuthFailure,
+    Transient,
+}
+
+/// Refresh a saved grok credential IN PLACE, patching exactly the fields
+/// grok's own refresh replaces (`auth/oidc/refresh.rs:255-278` +
+/// `oidc/protocol.rs:225` `build_grok_auth`): `key`, `create_time`,
+/// `expires_at`, and `refresh_token`.
+///
+/// Two rules are copied from that code rather than invented:
+///
+///  1. **A response without a `refresh_token` keeps the OLD one**
+///     (`refresh.rs:276-278`). The IdP rotates only sometimes; treating a
+///     missing field as "no refresh token" would delete the user's only way
+///     back into the account.
+///  2. **The profile fields are carried over, not re-fetched.** grok rebuilds
+///     them from the previous credential (`refresh.rs:255-272`) instead of
+///     calling `/userinfo`, so a refresh costs exactly one request. Patching
+///     the stored object in place gives that for free — everything we do not
+///     touch is preserved by construction.
+///
+/// On any error the object is left EXACTLY as it was, so the caller can fall
+/// back to writing the snapshot verbatim.
+async fn refresh_grok_auth(auth: &mut JsonValue) -> Result<bool, RefreshError> {
+    #[cfg(test)]
+    return grok_refresh_stubbed(auth);
+    #[cfg(not(test))]
+    grok_refresh_over_http(auth).await
+}
+
+/// Test build of [`refresh_grok_auth`]: never opens a socket.
+///
+/// A missing stub PANICS rather than falling through to the network. Making it
+/// merely documented is not enough — two switch tests really did send made-up
+/// tokens to the live auth.x.ai before this seam existed, and the only signal
+/// was a confusing `invalid_grant` failure. Now the mistake names itself.
+#[cfg(test)]
+fn grok_refresh_stubbed(auth: &mut JsonValue) -> Result<bool, RefreshError> {
+    let guard = GROK_REFRESH_STUB.lock().unwrap();
+    let Some(stub) = guard.as_ref() else {
+        panic!(
+            "refresh_grok_auth would hit the network: install a GrokRefreshGuard \
+             in this test. A switch test covers the file/store choreography, not \
+             the HTTP."
+        );
+    };
+    match stub {
+        GrokRefreshStub::Response(v) => apply_grok_token_response(auth, v),
+        GrokRefreshStub::AuthFailure => {
+            Err(RefreshError::AuthFailure("stubbed auth failure".into()))
+        }
+        GrokRefreshStub::Transient => {
+            Err(RefreshError::Transient("stubbed transient failure".into()))
+        }
+    }
+}
+
+#[cfg(not(test))]
+async fn grok_refresh_over_http(auth: &mut JsonValue) -> Result<bool, RefreshError> {
+    let refresh_token = auth
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| RefreshError::Transient("No refresh_token in saved credential".into()))?
+        .to_string();
+    let client_id = auth
+        .get("oidc_client_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| RefreshError::Transient("No oidc_client_id in saved credential".into()))?
+        .to_string();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| RefreshError::Transient(e.to_string()))?;
+    let resp = client
+        .post(GROK_TOKEN_ENDPOINT)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token.as_str()),
+            ("client_id", client_id.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|e| RefreshError::Transient(format!("Grok token refresh failed: {e}")))?;
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        // Same split as the codex / claude refreshers: only a definitive 4xx
+        // means the credential itself is dead. 429 and 5xx are the server
+        // saying "not now", which must NOT be reported as a dead token — that
+        // would flag a healthy account as needing re-login.
+        let detail = serde_json::from_str::<JsonValue>(&body)
+            .ok()
+            .and_then(|v| {
+                v.get("error_description")
+                    .or_else(|| v.get("error"))
+                    .and_then(|e| e.as_str())
+                    .map(String::from)
+            })
+            .unwrap_or_else(|| body.trim().to_string());
+        let msg = format!("Grok token refresh failed ({status}): {detail}");
+        return Err(if status.is_client_error() && status.as_u16() != 429 {
+            RefreshError::AuthFailure(msg)
+        } else {
+            RefreshError::Transient(msg)
+        });
+    }
+
+    let parsed: JsonValue = serde_json::from_str(&body)
+        .map_err(|e| RefreshError::Transient(format!("Grok token response is not JSON: {e}")))?;
+    apply_grok_token_response(auth, &parsed)
+}
+
+/// Patch a stored grok credential with a token-endpoint response.
+///
+/// Split from the HTTP call so the part that can DESTROY a credential is unit
+/// tested: everything this function does not touch survives, and the one field
+/// that must never be blanked is `refresh_token`.
+///
+/// Mirrors `build_grok_auth` (`oidc/protocol.rs:225`) for the fields a refresh
+/// replaces, plus the keep-the-old-token rule at `oidc/refresh.rs:276-278`.
+///
+/// Returns whether the IdP ROTATED the refresh token (sent a new one). grok
+/// tracks the same bit (`oidc/refresh.rs:274` `idp_rotated`); for us it is the
+/// one thing about the IdP's behaviour a switch can report that is not
+/// otherwise observable from disk afterwards.
+fn apply_grok_token_response(
+    auth: &mut JsonValue,
+    parsed: &JsonValue,
+) -> Result<bool, RefreshError> {
+    let access_token = parsed
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        // A 200 with no access_token is not something to guess about; treat it
+        // as transient so the snapshot is written verbatim rather than blanked.
+        .ok_or_else(|| RefreshError::Transient("Grok token response has no access_token".into()))?
+        .to_string();
+
+    let JsonValue::Object(map) = auth else {
+        return Err(RefreshError::Transient(
+            "Saved Grok credential is corrupt".into(),
+        ));
+    };
+    let now = chrono::Utc::now();
+    map.insert("key".into(), JsonValue::String(access_token));
+    map.insert("create_time".into(), JsonValue::String(now.to_rfc3339()));
+    match parsed.get("expires_in").and_then(|v| v.as_i64()) {
+        Some(secs) => {
+            let at = now + chrono::Duration::seconds(secs);
+            map.insert("expires_at".into(), JsonValue::String(at.to_rfc3339()));
+        }
+        // `build_grok_auth` sets `expires_at: None` when the response omits
+        // `expires_in`, which makes grok fall back to its 30-day TOKEN_TTL.
+        // Leaving the PREVIOUS (already past) value would instead make every
+        // read treat the fresh token as expired.
+        None => {
+            map.remove("expires_at");
+        }
+    }
+    // Only overwrite when the IdP actually rotated — a missing field means
+    // "keep using the one you have", NOT "you no longer have one".
+    let rotated = parsed
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    if let Some(rt) = rotated {
+        map.insert("refresh_token".into(), JsonValue::String(rt.into()));
+    }
+    Ok(rotated.is_some())
+}
+
+/// Persist a just-refreshed grok credential into its store entry, BEFORE the
+/// live file is written.
+///
+/// Order is load-bearing (same rule as `persist_refreshed_claude_snapshot`):
+/// the refresh may have spent the old refresh token, so the rotated one is now
+/// the only way back into this account. Writing the store first means a crash
+/// between the two writes leaves the *durable record* holding the live token —
+/// recoverable by switching again — instead of leaving it only in a file we
+/// never got to write.
+fn persist_refreshed_grok_snapshot(
+    id: &str,
+    scope: &str,
+    auth: &JsonValue,
+) -> Result<(), Box<dyn Error>> {
+    let mut store = read_store()?;
+    // `id` is the entry `switch_account` already resolved, NOT one re-derived
+    // from the payload: by the time this runs the refresh has SPENT the stored
+    // token, so a lookup that misses would leave the rotated replacement only
+    // in auth.json and the spent one in the store — silently recreating the
+    // stale-snapshot failure this whole feature exists to prevent.
+    let Some(slot) = store
+        .iter_mut()
+        .find(|e| str_field(e, "app") == Some("grok") && str_field(e, "id") == Some(id))
+    else {
+        return Err(format!("Saved Grok account {id} vanished mid-switch").into());
+    };
+    slot["payload"] = json!({ "scope": scope, "auth": auth });
+    slot["savedAt"] = JsonValue::String(now_rfc3339());
+    // A successful refresh proves the credential is live, so any stale
+    // needs-relogin mark on it is wrong (same implicit clear as a re-save).
+    if let JsonValue::Object(o) = slot {
+        o.remove("needsRelogin");
+    }
+    write_store(store)
+}
+
+/// Restore a saved grok login.
+///
+/// Validates the snapshot by refreshing it BEFORE touching `auth.json`, the
+/// same shape as `switch_codex` / `switch_claude`: a definitive 4xx means the
+/// stored refresh token is dead, so the live login is left untouched and the
+/// entry is flagged `needsRelogin` — the user sees the failure at click time
+/// instead of being logged out hours later by grok's own refresh.
+async fn switch_grok(id: &str, payload: &JsonValue) -> Result<(), Box<dyn Error>> {
+    let scope = payload
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or("Saved Grok credential is missing its auth.json scope")?
+        .to_string();
+    let mut auth = payload
+        .get("auth")
+        .filter(|v| v.is_object())
+        .cloned()
+        .ok_or("Saved Grok credential is corrupt")?;
+
+    let path = grok_auth_path()?;
+    // ONE lock across read-outgoing → re-snapshot → refresh → write-incoming.
+    // The refresh is INSIDE it for the same reason grok holds this lock across
+    // its own IdP call: two processes spending a refresh token concurrently is
+    // the double-spend that trips rotation reuse detection.
+    let _lock = acquire_grok_lock(&path).await?;
+
+    // Re-snapshot the OUTGOING login before it is overwritten, so switching
+    // back later restores the RT grok most recently rotated to instead of a
+    // spent one. Only refreshes an EXISTING entry (never adds one — an unsaved
+    // live login stays guarded by the page's confirm warning and the tray's
+    // auto-save), mirroring switch_codex.
+    if let Some(live) = read_grok_live_at(&path)? {
+        let store = read_store()?;
+        if store.iter().any(|e| {
+            str_field(e, "app") == Some("grok") && str_field(e, "id") == Some(live.id.as_str())
+        }) {
+            save_grok_live(&live)?;
+        }
+    }
+
+    // Short, non-identifying handle for the log lines below. NEVER log the
+    // email or any token material — this file's whole subject is credentials.
+    let who: String = auth
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .map(|id| id.chars().take(8).collect())
+        .unwrap_or_else(|| "unknown".into());
+
+    match refresh_grok_auth(&mut auth).await {
+        Ok(idp_rotated) => {
+            // Durable record first — see persist_refreshed_grok_snapshot.
+            //
+            // BEST-EFFORT on purpose: the refresh already spent the stored
+            // token, so the rotated one in `auth` is the only working copy
+            // left. Aborting here would throw it away and leave the account
+            // needing a re-login; writing auth.json anyway puts it where grok
+            // can use it, and the next switch AWAY recaptures it into the
+            // store (the outgoing re-snapshot above). The store-before-live
+            // ORDER still stands — it is about a crash, not a known failure.
+            if let Err(e) = persist_refreshed_grok_snapshot(id, &scope, &auth) {
+                log::warn!("grok switch: could not persist the refreshed snapshot: {e}");
+            }
+            // A switch SPENDS a refresh token, so it must leave a trace saying
+            // so. `idp_rotated` is the only part of the exchange that cannot be
+            // reconstructed from disk afterwards (a kept token and a rotated
+            // one look identical once written).
+            log::info!("grok switch: refreshed {who}, idp_rotated={idp_rotated}");
+        }
+        Err(RefreshError::AuthFailure(msg)) => {
+            // Flagged BACKEND-side, like switch_claude: only this arm knows the
+            // failure was a dead token rather than a lock or write error, and
+            // the caller sees just a string.
+            let _ = mark_account_relogin(id, true);
+            log::warn!("grok switch: refresh rejected for {who}, flagged needsRelogin: {msg}");
+            return Err(msg.into());
+        }
+        // 429 / 5xx / network: the server said "not now", which says nothing
+        // about the token. Write the snapshot verbatim and let grok refresh it
+        // itself — the pre-refresh behaviour, kept as the degraded path.
+        Err(RefreshError::Transient(msg)) => {
+            log::warn!("grok switch: refresh unavailable for {who}, writing snapshot as-is: {msg}");
+        }
+    }
+
+    // Replace ONLY this scope key. auth.json is a scope-keyed map that can
+    // also hold a plain API key (`xai::api_key`, `auth/storage.rs:426`) or an
+    // enterprise OIDC login under a different issuer; restoring a whole
+    // document would wipe whichever of those the snapshot predates.
+    let mut doc = grok_doc_for_write(&path)?;
+    if let JsonValue::Object(map) = &mut doc {
+        map.insert(scope, auth);
+    }
+    let updated = serde_json::to_string_pretty(&doc)?;
+    atomic_write_0600(&path, updated.as_bytes())?;
+    Ok(())
+}
+
+/// Tauri-managed state allowing `cancel_grok_login` to abort an in-flight
+/// `login_and_save_grok_account` call.
+pub struct GrokLoginCancel(pub std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>);
+
+pub const GROK_LOGIN_URL_EVENT: &str = "grok:login-url";
+/// The device-flow user code, emitted alongside the URL. Grok's device login
+/// shows a code the user confirms (or types) in the browser, and when the IdP
+/// returns no `verification_uri_complete` the URL alone cannot complete the
+/// login — so the code is surfaced rather than left in captured output.
+pub const GROK_LOGIN_CODE_EVENT: &str = "grok:login-code";
+
+/// What one line of `grok login --device-auth`'s prompt tells the frontend.
+#[derive(Debug, PartialEq, Eq)]
+enum GrokLoginPrompt {
+    Url(String),
+    Code(String),
+}
+
+/// Line-by-line reader for that prompt (`auth/device_code.rs:363-391`).
+///
+/// Extracted from the spawn closure ONLY so it can be tested: this runs on a
+/// path that needs a real browser round-trip, so a mistake here is invisible
+/// until a user hits it — which is exactly what happened. The first version
+/// gated the code on `ends_with("code:")` and its own comment claimed "both
+/// headings end in code:", which is false: the common one ends in `browser:`
+/// ("Confirm this code in your browser:", printed whenever the IdP returns a
+/// `verification_uri_complete`), so the code was never emitted in the case
+/// that actually occurs.
+#[derive(Default)]
+struct GrokLoginPromptReader {
+    expect_code: bool,
+}
+
+impl GrokLoginPromptReader {
+    fn feed(&mut self, line: &str) -> Option<GrokLoginPrompt> {
+        let trimmed = line.trim();
+        let out = if trimmed.starts_with("https://") {
+            Some(GrokLoginPrompt::Url(trimmed.to_string()))
+        } else if self.expect_code && !trimmed.is_empty() {
+            // The code is the next non-empty line after its heading, so its
+            // own format is never assumed.
+            self.expect_code = false;
+            Some(GrokLoginPrompt::Code(trimmed.to_string()))
+        } else {
+            None
+        };
+        // THREE lines of this prompt end in a colon, so `ends_with(':')` alone
+        // would arm on "To sign in, open this URL in your browser:" and then
+        // report the browser-fallback notice as the code. Requiring "code"
+        // narrows it to the two headings that really precede it — and both
+        // spellings are covered, which is the bug above.
+        if trimmed.ends_with(':') && trimmed.contains("code") {
+            self.expect_code = true;
+        }
+        out
+    }
+}
+
+pub async fn login_and_save_grok_account(
+    app: tauri::AppHandle,
+    cancel_state: &GrokLoginCancel,
+) -> Result<String, String> {
+    let path = grok_auth_path().map_err(|e| e.to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    // Reserve the cancel slot (also the re-entrancy guard); self-clears on
+    // every exit path via Drop.
+    let (_login_slot, cancel_notify) = LoginSlot::reserve(&cancel_state.0)?;
+
+    // Capture the outgoing login before a successful login overwrites this
+    // scope entry — see `resnapshot_live_before_login`.
+    let prev_active_id = resnapshot_live_before_login(CliApp::Grok).map_err(|e| e.to_string())?;
+
+    // Original bytes for rollback (cancel / timeout / failure).
+    let original_auth: Option<Vec<u8>> = std::fs::read(&path).ok();
+
+    // NOTE: deliberately NO pre-clear. The codex flow blanks auth.json first
+    // so codex's own `logout_with_revoke` finds nothing to revoke server-side;
+    // grok's logout is purely LOCAL (`auth/flow.rs:992` `perform_logout` →
+    // `remove_scope` / `clear`, and the crate has no revocation endpoint at
+    // all), so saved snapshots' tokens are never at risk and there is nothing
+    // to blank.
+    //
+    // `--device-auth` is REQUIRED, not a preference. The loopback branch runs
+    // with `reauth=true`, which clears the credential UP FRONT, so abandoning
+    // that login logs the user out (`auth/flow.rs:1093`); the device branch
+    // passes `force_interactive`, which skips the clear, so a cancelled login
+    // leaves the current account intact. It is also what prints the
+    // verification URL, i.e. what makes the flow headless at all.
+    let resolved = crate::providers::find_cli_binary("grok");
+    let program: std::ffi::OsString = resolved
+        .as_deref()
+        .map(|p| p.as_os_str().to_os_string())
+        .unwrap_or_else(|| "grok".into());
+    let mut cmd = tokio::process::Command::new(&program);
+    if let Some(path) = resolved
+        .as_deref()
+        .and_then(crate::providers::augmented_path_for)
+    {
+        cmd.env("PATH", path);
+    }
+    cmd.args(["login", "--device-auth"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    cmd.creation_flags(crate::providers::CREATE_NO_WINDOW);
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                "grok is not installed or not in PATH".to_string()
+            } else {
+                format!("Failed to launch grok: {e}")
+            };
+            return Err(msg);
+        }
+    };
+
+    // The device prompt goes to STDERR (`auth/device_code.rs:365-391`), so
+    // that is the stream read line-by-line; stdout only carries the trailing
+    // blank line `run_cli_login` prints on success.
+    let stderr_pipe = child.stderr.take().expect("stderr piped");
+    let app_clone = app.clone();
+    let stderr_task: tokio::task::JoinHandle<String> = tokio::spawn(async move {
+        use tauri::Emitter as _;
+        use tokio::io::AsyncBufReadExt as _;
+        let reader = tokio::io::BufReader::new(stderr_pipe);
+        let mut lines = reader.lines();
+        let mut collected = String::new();
+        let mut prompt = GrokLoginPromptReader::default();
+        while let Ok(Some(line)) = lines.next_line().await {
+            match prompt.feed(&line) {
+                Some(GrokLoginPrompt::Url(url)) => {
+                    let _ = app_clone.emit(GROK_LOGIN_URL_EVENT, url);
+                }
+                Some(GrokLoginPrompt::Code(code)) => {
+                    let _ = app_clone.emit(GROK_LOGIN_CODE_EVENT, code);
+                }
+                None => {}
+            }
+            if !collected.is_empty() {
+                collected.push('\n');
+            }
+            collected.push_str(line.trim());
+        }
+        collected
+    });
+    let stdout_pipe = child.stdout.take().expect("stdout piped");
+    let stdout_task: tokio::task::JoinHandle<String> = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt as _;
+        let mut buf = String::new();
+        let mut reader = stdout_pipe;
+        let _ = reader.read_to_string(&mut buf).await;
+        buf
+    });
+
+    // Wait up to 5 minutes for the browser roundtrip (same budget as the
+    // codex / claude flows).
+    let status = tokio::select! {
+        r = child.wait() => match r {
+            Ok(s) => s,
+            Err(e) => {
+                stderr_task.abort();
+                stdout_task.abort();
+                restore_auth(&path, original_auth.as_deref());
+                return Err(format!("grok login error: {e}"));
+            }
+        },
+        _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
+            let _ = child.kill().await;
+            stderr_task.abort();
+            stdout_task.abort();
+            restore_auth(&path, original_auth.as_deref());
+            return Err("grok login timed out after 5 minutes".into());
+        },
+        _ = cancel_notify.notified() => {
+            let _ = child.kill().await;
+            stderr_task.abort();
+            stdout_task.abort();
+            restore_auth(&path, original_auth.as_deref());
+            return Err("Login cancelled".into());
+        },
+    };
+
+    let stderr_msg = stderr_task.await.unwrap_or_default();
+    let stdout_msg = stdout_task.await.unwrap_or_default();
+
+    if !status.success() {
+        restore_auth(&path, original_auth.as_deref());
+        let detail = if stderr_msg.trim().is_empty() {
+            stdout_msg
+        } else {
+            stderr_msg
+        };
+        return Err(format!(
+            "grok login failed (exit {}): {}",
+            status.code().unwrap_or(-1),
+            detail.trim()
+        ));
+    }
+
+    // Save the new account (reads the credential grok just wrote).
+    let Some(new_live) = read_grok_live_at(&path).map_err(|e| e.to_string())? else {
+        restore_auth(&path, original_auth.as_deref());
+        return Err("Login finished but no Grok credential was written".into());
+    };
+    let new_id = new_live.id.clone();
+    if let Err(e) = save_grok_live(&new_live) {
+        restore_auth(&path, original_auth.as_deref());
+        return Err(format!("Login succeeded but could not save account: {e}"));
+    }
+
+    // Restore the previously active account (the login process has exited, so
+    // nothing is running on the new login). Skipped when the user re-logged
+    // into the SAME account — the restore would be a no-op write.
+    if let Some(prev_id) = prev_active_id.filter(|id| *id != new_id) {
+        if let Err(e) = switch_account(prev_id.clone()).await {
+            // Don't fail the operation — the new account was saved. No
+            // needsRelogin either: grok's switch never validates over the
+            // network, so any failure here is a lock or write error, and
+            // flagging one would trap a healthy account.
+            log::warn!("Failed to restore previous grok account {prev_id}: {e}");
+        }
+    }
+
+    Ok(new_id)
+}
+
+/// Fire the cancel notify for an in-flight `login_and_save_grok_account`.
+pub async fn cancel_grok_login(cancel_state: &GrokLoginCancel) -> Result<(), String> {
+    // `as_ref`, NOT `take` — see `cancel_claude_login` for why the slot must
+    // stay occupied until the cancelled flow's own Drop clears it.
+    match cancel_state.0.lock().unwrap().as_ref() {
+        Some(n) => {
+            n.notify_one();
+            Ok(())
+        }
+        None => Err("No grok login in progress".into()),
+    }
 }
 
 fn list_gemini_accounts() -> Result<AccountsState, Box<dyn Error>> {
@@ -1712,6 +2602,7 @@ pub fn mark_account_relogin(id: &str, needed: bool) -> Result<(), Box<dyn Error>
 }
 
 #[allow(dead_code)]
+#[derive(Debug)]
 enum RefreshError {
     /// Token is permanently invalid (4xx from OAuth server, excluding 429).
     /// The user must re-authenticate.
@@ -2602,6 +3493,682 @@ mod tests {
         let tmp = tempdir("switch-unknown");
         let _h = override_home(&tmp);
         assert!(switch_account("no-such-id".into()).await.is_err());
+    }
+
+    // ── Grok Build ────────────────────────────────────────────────────────
+
+    const GROK_SCOPE: &str = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828";
+
+    /// One `GrokAuth` value shaped like the real thing (field names verified
+    /// against `auth/model.rs` and a live 0.2.99 install).
+    fn grok_auth_value(user_id: &str, email: &str, refresh: &str) -> JsonValue {
+        json!({
+            "key": format!("access-{user_id}"),
+            "auth_mode": "oidc",
+            "create_time": "2026-07-31T00:55:48.732571Z",
+            "user_id": user_id,
+            "email": email,
+            "first_name": "Jane",
+            "last_name": "Doe",
+            "refresh_token": refresh,
+            "expires_at": "2026-07-31T06:55:48.732571Z",
+            "oidc_issuer": "https://auth.x.ai",
+            "oidc_client_id": "b1a00492-073a-47ea-816f-4c329264a828",
+        })
+    }
+
+    /// Write a live grok auth.json holding one xAI login plus the plain
+    /// API-key sibling scope a `grok login --api-key` user would also have.
+    fn write_grok_auth(home: &Path, user_id: &str, email: &str, refresh: &str) {
+        let doc = json!({
+            GROK_SCOPE: grok_auth_value(user_id, email, refresh),
+            "xai::api_key": {
+                "key": "xai-user-own-key",
+                "auth_mode": "api_key",
+                "create_time": "2026-07-01T00:00:00Z",
+                "user_id": "",
+            },
+        });
+        let dir = home.join(".grok");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("auth.json"),
+            serde_json::to_string_pretty(&doc).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn grok_live_doc(home: &Path) -> JsonValue {
+        serde_json::from_slice(&std::fs::read(home.join(".grok/auth.json")).unwrap()).unwrap()
+    }
+
+    /// Installs a `refresh_grok_auth` stub for the test's lifetime. Held
+    /// alongside `lock_home()`, which serializes it with every other test.
+    struct GrokRefreshGuard;
+    impl GrokRefreshGuard {
+        fn set(stub: GrokRefreshStub) -> Self {
+            *GROK_REFRESH_STUB.lock().unwrap() = Some(stub);
+            GrokRefreshGuard
+        }
+        /// The IdP accepted the refresh and rotated the token.
+        fn rotating() -> Self {
+            Self::set(GrokRefreshStub::Response(
+                json!({ "access_token": "at-fresh", "refresh_token": "rt-rotated", "expires_in": 21600 }),
+            ))
+        }
+    }
+    impl Drop for GrokRefreshGuard {
+        fn drop(&mut self) {
+            *GROK_REFRESH_STUB.lock().unwrap() = None;
+        }
+    }
+
+    fn stored_grok_refresh(id: &str) -> Option<String> {
+        read_store()
+            .unwrap()
+            .iter()
+            .find(|e| str_field(e, "id") == Some(id))?
+            .pointer("/payload/auth/refresh_token")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    }
+
+    /// The API-key scope carries an empty `user_id`, which is what keeps it
+    /// from being mistaken for a login — assert that rather than a hardcoded
+    /// key name, since that is the rule the code actually applies.
+    #[test]
+    fn grok_live_ignores_the_api_key_scope_and_composes_a_name() {
+        let _g = lock_home();
+        let tmp = tempdir("grok-live");
+        let _h = override_home(&tmp);
+        write_grok_auth(&tmp, "user-a", "a@example.com", "rt-a1");
+
+        let live = read_grok_live().unwrap().expect("a live login");
+        assert_eq!(live.id, "user-a");
+        assert_eq!(live.email.as_deref(), Some("a@example.com"));
+        assert_eq!(live.name.as_deref(), Some("Jane Doe"));
+        assert_eq!(live.scope, GROK_SCOPE);
+    }
+
+    /// An auth.json holding ONLY an API key is not a login — the account
+    /// section must stay empty rather than show a nameless row.
+    #[test]
+    fn grok_api_key_only_auth_json_is_not_a_login() {
+        let _g = lock_home();
+        let tmp = tempdir("grok-apikey-only");
+        let _h = override_home(&tmp);
+        let dir = tmp.join(".grok");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("auth.json"),
+            r#"{"xai::api_key":{"key":"xai-k","auth_mode":"api_key","user_id":""}}"#,
+        )
+        .unwrap();
+
+        assert!(read_grok_live().unwrap().is_none());
+        assert!(list_accounts(CliApp::Grok).unwrap().current.is_none());
+    }
+
+    /// The pre-login snapshot must be UNCONDITIONAL, for every CLI. A login
+    /// destroys the outgoing credential, and all three rotate their refresh
+    /// token — so an "already saved, nothing to do" shortcut leaves the restore
+    /// at the end of the flow reaching for a rotated-away token and flags an
+    /// account the user never touched. (`login_and_save_codex_account` really
+    /// did take that shortcut until 2026-07-31: the rotation hazard was fixed
+    /// in `switch_codex` but never carried back to the login path.)
+    #[test]
+    fn resnapshot_before_login_refreshes_an_already_saved_codex_entry() {
+        let _g = lock_home();
+        let tmp = tempdir("codex-prelogin");
+        let _h = override_home(&tmp);
+
+        // Saved while the live login held its first token…
+        write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
+        save_current_account(CliApp::Codex).unwrap();
+        let saved_first = read_store().unwrap()[0]
+            .pointer("/payload/tokens/access_token")
+            .cloned();
+
+        // …then codex ran and rotated it on disk.
+        let path = tmp.join(".codex/auth.json");
+        let mut doc: JsonValue = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        doc["tokens"]["access_token"] = json!("access-rotated");
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+        let id = resnapshot_live_before_login(CliApp::Codex).unwrap();
+        assert_eq!(id.as_deref(), Some("acct-a"), "returns the id to restore");
+        assert_eq!(
+            read_store().unwrap()[0].pointer("/payload/tokens/access_token"),
+            Some(&json!("access-rotated")),
+            "an already-saved entry must still be refreshed from disk"
+        );
+        assert_ne!(
+            saved_first.as_ref(),
+            Some(&json!("access-rotated")),
+            "guard: the fixture must actually have changed"
+        );
+    }
+
+    /// The tray's helper answers a different question and must KEEP its
+    /// only-if-missing shortcut — there, freshness is already handled by
+    /// `switch_*`'s own outgoing re-snapshot, and an extra write on every
+    /// menu-driven switch buys nothing.
+    #[test]
+    fn auto_save_stays_only_if_missing() {
+        let _g = lock_home();
+        let tmp = tempdir("codex-autosave");
+        let _h = override_home(&tmp);
+
+        write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
+        save_current_account(CliApp::Codex).unwrap();
+        let saved_at = str_field(&read_store().unwrap()[0], "savedAt")
+            .unwrap()
+            .to_string();
+
+        let path = tmp.join(".codex/auth.json");
+        let mut doc: JsonValue = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        doc["tokens"]["access_token"] = json!("access-rotated");
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+        auto_save_unsaved_live_account(CliApp::Codex).unwrap();
+        assert_eq!(
+            str_field(&read_store().unwrap()[0], "savedAt"),
+            Some(saved_at.as_str()),
+            "an already-saved entry must be left untouched by the tray helper"
+        );
+    }
+
+    /// THE load-bearing rule. grok rotates its refresh token under IdP reuse
+    /// detection, so switching away must recapture the LIVE token first:
+    /// restoring a stale one later is not a soft failure, it revokes the whole
+    /// token family. Here the store's copy of A is deliberately older than
+    /// what a running grok left on disk.
+    #[tokio::test]
+    async fn grok_switch_resnapshots_the_outgoing_login_first() {
+        let _g = lock_home();
+        let tmp = tempdir("grok-resnapshot");
+        let _h = override_home(&tmp);
+        let _r = GrokRefreshGuard::rotating();
+
+        // A is live and saved (store and disk agree at rt-a1).
+        write_grok_auth(&tmp, "user-a", "a@example.com", "rt-a1");
+        save_current_account(CliApp::Grok).unwrap();
+        // B is saved too.
+        write_grok_auth(&tmp, "user-b", "b@example.com", "rt-b1");
+        save_current_account(CliApp::Grok).unwrap();
+        // Back on A, and a grok run rotates A's refresh token on disk. The
+        // store still holds rt-a1 — the stale copy.
+        write_grok_auth(&tmp, "user-a", "a@example.com", "rt-a2");
+        assert_eq!(stored_grok_refresh("user-a").as_deref(), Some("rt-a1"));
+
+        switch_account("user-b".to_string()).await.unwrap();
+
+        assert_eq!(
+            stored_grok_refresh("user-a").as_deref(),
+            Some("rt-a2"),
+            "switching away must recapture the live refresh token, or the \
+             switch back would spend a rotated-away one"
+        );
+        assert_eq!(
+            grok_live_doc(&tmp).pointer(&format!("/{}/user_id", GROK_SCOPE.replace('/', "~1"))),
+            Some(&json!("user-b")),
+            "and the incoming account must actually be live"
+        );
+    }
+
+    /// The switch replaces one scope key, not the document: a plain API key
+    /// (or an enterprise OIDC login under another issuer) must survive it.
+    #[tokio::test]
+    async fn grok_switch_preserves_sibling_scopes_and_writes_verbatim() {
+        let _g = lock_home();
+        let tmp = tempdir("grok-siblings");
+        let _h = override_home(&tmp);
+        // Verbatim write is the TRANSIENT path — a successful refresh would
+        // (correctly) change the token, which is covered by its own test.
+        let _r = GrokRefreshGuard::set(GrokRefreshStub::Transient);
+
+        write_grok_auth(&tmp, "user-a", "a@example.com", "rt-a1");
+        save_current_account(CliApp::Grok).unwrap();
+        write_grok_auth(&tmp, "user-b", "b@example.com", "rt-b1");
+        save_current_account(CliApp::Grok).unwrap();
+
+        switch_account("user-a".to_string()).await.unwrap();
+
+        let live = grok_live_doc(&tmp);
+        assert_eq!(
+            live.get("xai::api_key").and_then(|v| v.get("key")),
+            Some(&json!("xai-user-own-key")),
+            "a whole-document restore would have wiped the user's API key"
+        );
+        assert_eq!(
+            live.get(GROK_SCOPE),
+            Some(&grok_auth_value("user-a", "a@example.com", "rt-a1")),
+            "the snapshot must be written back verbatim — no refresh, no rewrite"
+        );
+    }
+
+    /// The whole point of refreshing at switch time: a dead stored token must
+    /// be caught BEFORE auth.json is touched, so the user gets an error at
+    /// click time instead of being logged out hours later by grok's own
+    /// refresh. The live login must be left exactly as it was.
+    #[tokio::test]
+    async fn grok_switch_on_a_dead_token_writes_nothing_and_flags_relogin() {
+        let _g = lock_home();
+        let tmp = tempdir("grok-dead-token");
+        let _h = override_home(&tmp);
+        let _r = GrokRefreshGuard::set(GrokRefreshStub::AuthFailure);
+
+        write_grok_auth(&tmp, "user-a", "a@example.com", "rt-a1");
+        save_current_account(CliApp::Grok).unwrap();
+        write_grok_auth(&tmp, "user-b", "b@example.com", "rt-b1");
+        save_current_account(CliApp::Grok).unwrap();
+        let live_before = std::fs::read(tmp.join(".grok/auth.json")).unwrap();
+
+        let err = switch_account("user-a".to_string()).await.unwrap_err();
+        assert!(err.to_string().contains("stubbed auth failure"));
+        assert_eq!(
+            std::fs::read(tmp.join(".grok/auth.json")).unwrap(),
+            live_before,
+            "a failed validation must not touch the live credential"
+        );
+        let view = list_accounts(CliApp::Grok).unwrap();
+        let a = view.accounts.iter().find(|x| x.id == "user-a").unwrap();
+        assert!(
+            a.needs_relogin,
+            "the dead entry must be flagged for re-login"
+        );
+    }
+
+    /// A successful refresh must land the rotated token in the STORE as well
+    /// as the live file — the refresh may have spent the old one, so an entry
+    /// left holding it would be dead on the next switch back.
+    #[tokio::test]
+    async fn grok_switch_persists_the_rotated_token_to_both_places() {
+        let _g = lock_home();
+        let tmp = tempdir("grok-rotated");
+        let _h = override_home(&tmp);
+        let _r = GrokRefreshGuard::rotating();
+
+        write_grok_auth(&tmp, "user-a", "a@example.com", "rt-a1");
+        save_current_account(CliApp::Grok).unwrap();
+        write_grok_auth(&tmp, "user-b", "b@example.com", "rt-b1");
+        save_current_account(CliApp::Grok).unwrap();
+
+        switch_account("user-a".to_string()).await.unwrap();
+
+        let scope_ptr = format!("/{}", GROK_SCOPE.replace('/', "~1"));
+        let live = grok_live_doc(&tmp);
+        assert_eq!(
+            live.pointer(&format!("{scope_ptr}/refresh_token")),
+            Some(&json!("rt-rotated")),
+            "the live file must carry the rotated token"
+        );
+        assert_eq!(
+            live.pointer(&format!("{scope_ptr}/key")),
+            Some(&json!("at-fresh"))
+        );
+        assert_eq!(
+            stored_grok_refresh("user-a").as_deref(),
+            Some("rt-rotated"),
+            "and so must the store, or switching back would spend a dead one"
+        );
+    }
+
+    /// A refresh SPENDS the stored token, so once it succeeds the rotated
+    /// replacement in memory is the only working copy. If the store write then
+    /// fails, auth.json must still be written — aborting would discard it and
+    /// leave the account needing a re-login, and the next switch away recaptures
+    /// it into the store anyway. Here the store entry is deleted mid-switch
+    /// (the switch already holds the payload), which is what makes the persist
+    /// step fail.
+    #[tokio::test]
+    async fn grok_switch_still_writes_the_live_file_when_the_store_write_fails() {
+        let _g = lock_home();
+        let tmp = tempdir("grok-persist-fails");
+        let _h = override_home(&tmp);
+        let _r = GrokRefreshGuard::rotating();
+
+        write_grok_auth(&tmp, "user-a", "a@example.com", "rt-a1");
+        save_current_account(CliApp::Grok).unwrap();
+        write_grok_auth(&tmp, "user-b", "b@example.com", "rt-b1");
+        save_current_account(CliApp::Grok).unwrap();
+
+        // Take the payload the way switch_account does, then drop the entry so
+        // `persist_refreshed_grok_snapshot` cannot find it.
+        let payload = read_store()
+            .unwrap()
+            .into_iter()
+            .find(|e| str_field(e, "id") == Some("user-a"))
+            .and_then(|e| e.get("payload").cloned())
+            .unwrap();
+        delete_account("user-a".to_string()).unwrap();
+
+        switch_grok("user-a", &payload).await.unwrap();
+
+        assert_eq!(
+            grok_live_doc(&tmp)
+                .pointer(&format!("/{}/refresh_token", GROK_SCOPE.replace('/', "~1"))),
+            Some(&json!("rt-rotated")),
+            "the rotated token must reach the live file even when the store write fails"
+        );
+    }
+
+    /// 429 / 5xx / offline says nothing about the token. Switching must still
+    /// work (verbatim snapshot, grok refreshes it itself later) and must NOT
+    /// flag the account — that would trap a healthy login behind a disabled
+    /// Switch button.
+    #[tokio::test]
+    async fn grok_switch_survives_a_transient_refresh_failure_without_flagging() {
+        let _g = lock_home();
+        let tmp = tempdir("grok-transient");
+        let _h = override_home(&tmp);
+        let _r = GrokRefreshGuard::set(GrokRefreshStub::Transient);
+
+        write_grok_auth(&tmp, "user-a", "a@example.com", "rt-a1");
+        save_current_account(CliApp::Grok).unwrap();
+        write_grok_auth(&tmp, "user-b", "b@example.com", "rt-b1");
+        save_current_account(CliApp::Grok).unwrap();
+
+        switch_account("user-a".to_string()).await.unwrap();
+
+        assert_eq!(
+            grok_live_doc(&tmp)
+                .pointer(&format!("/{}/refresh_token", GROK_SCOPE.replace('/', "~1"))),
+            Some(&json!("rt-a1")),
+            "the snapshot should be written as-is when the server said 'not now'"
+        );
+        let view = list_accounts(CliApp::Grok).unwrap();
+        let a = view.accounts.iter().find(|x| x.id == "user-a").unwrap();
+        assert!(
+            !a.needs_relogin,
+            "a transient failure must not flag the account"
+        );
+    }
+
+    /// A second acquire must fail while the first guard is alive, and the
+    /// holder info must be the `PID:TS` payload grok's waiters parse — stale
+    /// holder info is what makes grok break a lock it should have waited on.
+    #[test]
+    fn grok_auth_lock_is_exclusive_and_stamps_holder_info() {
+        let tmp = tempdir("grok-lock");
+        let auth_path = tmp.join("auth.json");
+
+        let held = GrokAuthLock::try_acquire(&auth_path).unwrap();
+        assert!(held.is_some(), "first acquire should succeed");
+        assert!(
+            GrokAuthLock::try_acquire(&auth_path).unwrap().is_none(),
+            "a second acquire must not get the lock while the first is held"
+        );
+
+        let info = std::fs::read_to_string(tmp.join("auth.json.lock")).unwrap();
+        let (pid, ts) = info.split_once(':').expect("holder info is PID:TS");
+        assert_eq!(pid.parse::<u32>().unwrap(), std::process::id());
+        assert!(ts.parse::<u64>().unwrap() > 0);
+
+        drop(held);
+        assert!(
+            GrokAuthLock::try_acquire(&auth_path).unwrap().is_some(),
+            "dropping the guard must release the lock"
+        );
+        assert!(
+            tmp.join("auth.json.lock").exists(),
+            "the lock FILE must survive a release — unlinking it is grok's \
+             break-a-stuck-holder signal, not a release"
+        );
+    }
+
+    /// THE destructive case. The IdP rotates only sometimes; a response with
+    /// no `refresh_token` means "keep the one you have". Treating the missing
+    /// field as a value would blank the only way back into the account —
+    /// grok's own refresher guards this at `oidc/refresh.rs:276-278`.
+    #[test]
+    fn grok_refresh_without_rotation_keeps_the_existing_refresh_token() {
+        let mut auth = grok_auth_value("user-a", "a@example.com", "rt-old");
+        let rotated = apply_grok_token_response(
+            &mut auth,
+            &json!({ "access_token": "at-new", "expires_in": 21600 }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            auth["refresh_token"],
+            json!("rt-old"),
+            "must not be blanked"
+        );
+        assert_eq!(auth["key"], json!("at-new"));
+        assert!(!rotated, "no new token in the response means no rotation");
+    }
+
+    #[test]
+    fn grok_refresh_stores_a_rotated_refresh_token() {
+        let mut auth = grok_auth_value("user-a", "a@example.com", "rt-old");
+        let rotated = apply_grok_token_response(
+            &mut auth,
+            &json!({ "access_token": "at-new", "refresh_token": "rt-new" }),
+        )
+        .unwrap();
+        assert_eq!(auth["refresh_token"], json!("rt-new"));
+        assert!(rotated, "a new token in the response IS a rotation");
+    }
+
+    /// A refresh replaces four fields and must leave the rest of the
+    /// credential alone — grok carries the profile over rather than
+    /// re-fetching it (`oidc/refresh.rs:255-272`), and patching in place is
+    /// what gives us that for free.
+    #[test]
+    fn grok_refresh_preserves_every_other_credential_field() {
+        let mut auth = grok_auth_value("user-a", "a@example.com", "rt-old");
+        let before = auth.clone();
+        apply_grok_token_response(
+            &mut auth,
+            &json!({ "access_token": "at-new", "expires_in": 21600 }),
+        )
+        .unwrap();
+
+        for key in [
+            "user_id",
+            "email",
+            "first_name",
+            "last_name",
+            "auth_mode",
+            "oidc_issuer",
+            "oidc_client_id",
+        ] {
+            assert_eq!(auth[key], before[key], "{key} must survive a refresh");
+        }
+        // And the ones that SHOULD move actually moved.
+        assert_ne!(auth["key"], before["key"]);
+        assert_ne!(auth["expires_at"], before["expires_at"]);
+    }
+
+    /// No `expires_in` → the stale `expires_at` must be REMOVED, not left in
+    /// place. `build_grok_auth` sets it to None (grok then falls back to its
+    /// 30-day TTL); keeping the old, already-past value would make every read
+    /// treat the freshly minted token as expired.
+    #[test]
+    fn grok_refresh_without_expires_in_drops_the_stale_expiry() {
+        let mut auth = grok_auth_value("user-a", "a@example.com", "rt-old");
+        apply_grok_token_response(&mut auth, &json!({ "access_token": "at-new" })).unwrap();
+        assert!(auth.get("expires_at").is_none());
+    }
+
+    /// A 200 with no access token is not something to guess about: transient,
+    /// so the caller writes the snapshot verbatim instead of blanking it.
+    #[test]
+    fn grok_refresh_without_an_access_token_is_transient_and_changes_nothing() {
+        let mut auth = grok_auth_value("user-a", "a@example.com", "rt-old");
+        let before = auth.clone();
+        let err =
+            apply_grok_token_response(&mut auth, &json!({ "token_type": "Bearer" })).unwrap_err();
+        assert!(matches!(err, RefreshError::Transient(_)));
+        assert_eq!(
+            auth, before,
+            "a failed refresh must not mutate the credential"
+        );
+    }
+
+    /// The endpoint is pinned rather than discovered at runtime, so pin it in
+    /// a test too: the value came from auth.x.ai's live discovery document,
+    /// and this is where refresh tokens get POSTed — a typo would send live
+    /// credentials to whatever host the typo names.
+    #[test]
+    fn grok_token_endpoint_is_the_discovered_one() {
+        assert_eq!(GROK_TOKEN_ENDPOINT, "https://auth.x.ai/oauth2/token");
+    }
+
+    /// Replays `grok login --device-auth`'s prompt VERBATIM
+    /// (`auth/device_code.rs:363-391`), in the shape it takes when the IdP
+    /// returns a `verification_uri_complete` — the common case, and the one
+    /// the first version of this parser got wrong: its heading ends in
+    /// `browser:`, not `code:`, so the code was never emitted.
+    #[test]
+    fn grok_login_prompt_reads_the_url_and_the_confirm_variant_code() {
+        let mut r = GrokLoginPromptReader::default();
+        let mut seen = Vec::new();
+        for line in [
+            "",
+            "To sign in, open this URL in your browser:",
+            "",
+            "  https://accounts.x.ai/device?code=ABCD-EFGH",
+            "",
+            "Confirm this code in your browser:",
+            "",
+            "  ABCD-EFGH",
+            "",
+            "\u{1b}[90mOnly continue with a code you requested. Don't share it with anyone.\u{1b}[0m",
+            "",
+            "Waiting for authorization...",
+        ] {
+            if let Some(ev) = r.feed(line) {
+                seen.push(ev);
+            }
+        }
+        assert_eq!(
+            seen,
+            vec![
+                GrokLoginPrompt::Url("https://accounts.x.ai/device?code=ABCD-EFGH".into()),
+                GrokLoginPrompt::Code("ABCD-EFGH".into()),
+            ]
+        );
+    }
+
+    /// The other branch — no `verification_uri_complete`, so grok prints
+    /// "Then enter this code:" and the user must type it. Also carries the
+    /// browser-fallback notice, which sits between the URL and the heading.
+    #[test]
+    fn grok_login_prompt_reads_the_enter_variant_and_ignores_the_fallback_notice() {
+        let mut r = GrokLoginPromptReader::default();
+        let mut seen = Vec::new();
+        for line in [
+            "",
+            "To sign in, open this URL in your browser:",
+            "",
+            "  https://accounts.x.ai/device",
+            "",
+            "  (Could not open browser automatically — open the URL above manually.)",
+            "",
+            "Then enter this code:",
+            "",
+            "  WXYZ-1234",
+            "",
+            "Waiting for authorization...",
+        ] {
+            if let Some(ev) = r.feed(line) {
+                seen.push(ev);
+            }
+        }
+        assert_eq!(
+            seen,
+            vec![
+                GrokLoginPrompt::Url("https://accounts.x.ai/device".into()),
+                GrokLoginPrompt::Code("WXYZ-1234".into()),
+            ],
+            "the browser-fallback notice must not be mistaken for the code"
+        );
+    }
+
+    /// The URL heading also ends in a colon, so arming on the colon alone
+    /// would report the very next non-empty line — the fallback notice — as
+    /// the user's code. Pinning it separately because widening that condition
+    /// is the obvious "fix" for the bug the tests above cover.
+    #[test]
+    fn grok_login_prompt_url_heading_never_arms_the_code_reader() {
+        let mut r = GrokLoginPromptReader::default();
+        assert_eq!(r.feed("To sign in, open this URL in your browser:"), None);
+        assert!(
+            !r.expect_code,
+            "a heading without \"code\" must not arm the reader"
+        );
+        assert_eq!(r.feed("  (Could not open browser automatically.)"), None);
+    }
+
+    /// A corrupt auth.json is moved aside, never silently overwritten: those
+    /// bytes are the user's only copy of a credential we could not parse.
+    #[test]
+    fn grok_corrupt_auth_json_is_backed_up_before_a_write() {
+        let tmp = tempdir("grok-corrupt");
+        let path = tmp.join("auth.json");
+        std::fs::write(&path, b"{not json at all").unwrap();
+
+        let doc = grok_doc_for_write(&path).unwrap();
+        assert_eq!(doc, json!({}), "recovery starts from a fresh map");
+
+        let backup = std::fs::read_dir(&tmp)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("auth.json.corrupt.")
+            })
+            .expect("corrupt file must be renamed aside");
+        assert_eq!(std::fs::read(backup.path()).unwrap(), b"{not json at all");
+    }
+
+    /// A missing or empty file is normal (grok tolerates both), so it must
+    /// not be mistaken for corruption and generate a spurious backup.
+    #[test]
+    fn grok_missing_or_empty_auth_json_needs_no_backup() {
+        let tmp = tempdir("grok-empty");
+        let path = tmp.join("auth.json");
+        assert_eq!(grok_doc_for_write(&path).unwrap(), json!({}));
+
+        std::fs::write(&path, b"   \n").unwrap();
+        assert_eq!(grok_doc_for_write(&path).unwrap(), json!({}));
+        assert!(
+            !std::fs::read_dir(&tmp)
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|e| e.file_name().to_string_lossy().contains(".corrupt.")),
+            "an empty file is valid recovery state, not corruption"
+        );
+    }
+
+    /// `$GROK_HOME` moves the credential like it moves every other grok path.
+    #[test]
+    fn grok_home_env_redirects_credential_path() {
+        let _g = lock_home();
+        let tmp = tempdir("grok-home-env");
+        let _h = override_home(&tmp);
+        let custom = tmp.join("relocated-grok");
+        std::fs::create_dir_all(&custom).unwrap();
+        let _gh = EnvVarGuard::set("GROK_HOME", &custom);
+
+        std::fs::write(
+            custom.join("auth.json"),
+            serde_json::to_string_pretty(&json!({
+                GROK_SCOPE: grok_auth_value("user-moved", "moved@example.com", "rt-m"),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let live = read_grok_live().unwrap().expect("login under GROK_HOME");
+        assert_eq!(live.id, "user-moved");
+        assert!(
+            !tmp.join(".grok/auth.json").exists(),
+            "nothing should have been read from or written to the default path"
+        );
     }
 
     #[cfg(unix)]

@@ -48,7 +48,7 @@ import type {
 import { QUOTA_SUPPORTED, useQuotas } from "@/hooks/useQuotas";
 import { BrandIcon } from "@/components/BrandIcon";
 import { EmptyState } from "@/components/EmptyState";
-import { useT } from "@/i18n";
+import { useT, type MessageKey } from "@/i18n";
 import { ProviderCard } from "./ProviderCard";
 import { ProviderOfficialCard } from "./ProviderOfficialCard";
 import { OfficialAccountsSection } from "./OfficialAccountsSection";
@@ -168,10 +168,53 @@ let cachedCodexInstalls: CodexInstalls | null = null;
 // actually changed something).
 let versionsEverResolved = false;
 
-// CLIs whose Official card shows the logged-in account (grok's
-// auth.json also carries plain email/first_name/last_name —
-// display-only account info via backend `list_grok_accounts`).
+// CLIs whose Official card shows the logged-in account. Gemini is
+// display-only (current name/email, no snapshots); the three in LOGIN_APPS
+// below get full save / switch / add-account management.
 const ACCOUNT_SUPPORTED: ReadonlySet<CliApp> = new Set([...QUOTA_SUPPORTED]);
+
+type LoginSpec = {
+  /** IPC that runs the login and saves the resulting account. */
+  command: string;
+  cancel: string;
+  /** Backend event carrying the URL to open. */
+  urlEvent: string;
+  /** Backend event carrying a device-flow user code, where one exists. */
+  codeEvent?: string;
+  titleKey: MessageKey;
+};
+
+/** CLIs whose account login Termory can drive headlessly. */
+type LoginApp = "codex" | "claude" | "grok";
+
+// Per-CLI wiring for the headless "Add account" / re-login flow. Membership
+// here is what renders the button at all, so a CLI whose login Termory
+// cannot drive simply stays out.
+const LOGIN_APPS: Record<LoginApp, LoginSpec> = {
+  codex: {
+    command: "login_and_save_codex_account",
+    cancel: "cancel_codex_login",
+    urlEvent: "codex:login-url",
+    titleKey: "providers.codexLoginDialogTitle"
+  },
+  claude: {
+    command: "login_and_save_claude_account",
+    cancel: "cancel_claude_login",
+    urlEvent: "claude:login-url",
+    titleKey: "providers.claudeLoginDialogTitle"
+  },
+  grok: {
+    command: "login_and_save_grok_account",
+    cancel: "cancel_grok_login",
+    urlEvent: "grok:login-url",
+    // Grok uses the RFC 8628 device flow, which pairs the URL with a user
+    // code to confirm in the browser — the other two have no such code.
+    codeEvent: "grok:login-code",
+    titleKey: "providers.grokLoginDialogTitle"
+  }
+};
+
+const isLoginApp = (app: CliApp): app is LoginApp => app in LOGIN_APPS;
 
 // isMultiSlot lives in provider-utils (shared with GatewaysPage + the backend
 // set_default dispatch): OpenCode + Grok are multi-slot.
@@ -301,15 +344,20 @@ export function ProvidersPage({
   const [toggling, setToggling] = React.useState<string | null>(null);
   const [testing, setTesting] = React.useState<string | null>(null);
   const [settingDefault, setSettingDefault] = React.useState<string | null>(null);
-  // Codex "Add account" — state lives here so the button can live in the card.
-  const [codexLoggingIn, setCodexLoggingIn] = React.useState(false);
-  const [codexAccountTrigger, setCodexAccountTrigger] = React.useState(0);
-  const [claudeLoggingIn, setClaudeLoggingIn] = React.useState(false);
-  const [claudeAccountTrigger, setClaudeAccountTrigger] = React.useState(0);
+  // "Add account" / re-login — state lives here so the button can live in the
+  // card. ONE slot, not one per CLI: the login-URL dialog, the relogin marker
+  // and the backend's own LoginSlot are all single-slot, so the app currently
+  // logging in IS the "is a login running" guard.
+  const [loginApp, setLoginApp] = React.useState<LoginApp | null>(null);
+  const [accountTriggers, setAccountTriggers] = React.useState<
+    Partial<Record<CliApp, number>>
+  >({});
   const [activeReloginId, setActiveReloginId] = React.useState<string | null>(null);
-  const [codexLoginUrl, setCodexLoginUrl] = React.useState<string | null>(null);
-  const [claudeLoginUrl, setClaudeLoginUrl] = React.useState<string | null>(null);
-  const [codexLoginUrlCopied, setCodexLoginUrlCopied] = React.useState(false);
+  const [loginUrl, setLoginUrl] = React.useState<string | null>(null);
+  // Grok's device flow also shows a user code to confirm in the browser; the
+  // other two CLIs emit no code and leave this null.
+  const [loginCode, setLoginCode] = React.useState<string | null>(null);
+  const [loginUrlCopied, setLoginUrlCopied] = React.useState(false);
   // When set, the switch-time Codex "bring sessions along?" picker is open.
   // The prompt appears BEFORE activation; `activate` runs only after the user
   // decides (bring-along moves the selected projects first, then activates).
@@ -351,6 +399,13 @@ export function ProvidersPage({
   // handler re-checks and toasts.
   const codexCliMissing =
     codexInstalls != null && !codexInstalls.cli && !codexInstalls.bundledCli;
+
+  // Resolved once here rather than at each use site: `isLoginApp(app)` narrows
+  // `app`, but that narrowing does not survive into the JSX event handlers
+  // (closures over a non-const binding), so those would each need their own
+  // re-check. These consts do carry into them.
+  const loginTarget: LoginApp | null = isLoginApp(app) ? app : null;
+  const loginSpec: LoginSpec | null = loginTarget ? LOGIN_APPS[loginTarget] : null;
 
   const refreshInstalled = React.useCallback(async () => {
     try {
@@ -1164,29 +1219,39 @@ export function ProvidersPage({
   }, [traySwitch, app, customProviders, gatewayBoundForApp, setApp]);
 
   // Unified handler for both "Add Account" (reloginId=undefined) and
-  // "Re-login" (reloginId=the saved account's id). Mutual exclusion is
-  // enforced by the codexLoggingIn guard so both buttons share one lock.
-  const handleCodexLogin = async (reloginId?: string) => {
-    // Guard against BOTH flows: the shared login-URL dialog and the shared
-    // activeReloginId assume one login at a time across CLIs.
-    if (codexLoggingIn || claudeLoggingIn) return;
-    // Login spawns a codex binary (standalone CLI or the desktop app's
-    // bundled copy) — bail only when neither exists.
-    if (codexCliMissing) {
+  // "Re-login" (reloginId=the saved account's id), across every CLI whose
+  // login Termory can drive headlessly. Each backend flow has the same shape:
+  // snapshot the current login, spawn the CLI's own login subcommand, emit the
+  // URL to show, save the result, restore the previous account.
+  const handleLogin = async (target: LoginApp, reloginId?: string) => {
+    // One login at a time across ALL CLIs — the login-URL dialog and
+    // activeReloginId are single-slot (the backend guards independently too).
+    if (loginApp) return;
+    // Codex is the only CLI that can be "installed" without a spawnable
+    // binary (desktop app without the standalone CLI); the others show the
+    // InstallGuide instead of this button when they are missing.
+    if (target === "codex" && codexCliMissing) {
       toast.error(t("providers.accountAddNeedsCli"));
       return;
     }
-    setCodexLoggingIn(true);
+    const spec = LOGIN_APPS[target];
+    setLoginApp(target);
     setActiveReloginId(reloginId ?? null);
-    setCodexLoginUrl(null);
-    setCodexLoginUrlCopied(false);
-    const unlisten = await listen<string>("codex:login-url", (event) => {
-      setCodexLoginUrl(event.payload);
+    setLoginUrl(null);
+    setLoginCode(null);
+    setLoginUrlCopied(false);
+    const unlisten = await listen<string>(spec.urlEvent, (event) => {
+      setLoginUrl(event.payload);
     });
+    const unlistenCode = spec.codeEvent
+      ? await listen<string>(spec.codeEvent, (event) => {
+          setLoginCode(event.payload);
+        })
+      : null;
     try {
-      await invoke<string>("login_and_save_codex_account");
+      await invoke<string>(spec.command);
       toast.success(t("toast.accountAdded"));
-      void refreshQuota("codex", true);
+      void refreshQuota(target, true);
     } catch (err) {
       const msg = String(err);
       if (!msg.includes("Login cancelled")) {
@@ -1194,44 +1259,16 @@ export function ProvidersPage({
       }
     } finally {
       unlisten();
-      setCodexLoggingIn(false);
+      unlistenCode?.();
+      setLoginApp(null);
       setActiveReloginId(null);
-      setCodexLoginUrl(null);
-      setCodexLoginUrlCopied(false);
-      setCodexAccountTrigger((n) => n + 1);
-      void refreshActive();
-    }
-  };
-
-  // Claude's twin of handleCodexLogin — same headless flow: the backend
-  // spawns `claude auth login` (browser roundtrip), emits the fallback URL,
-  // saves the new login and restores the previous one. No missing-CLI case:
-  // the tab shows the InstallGuide instead when claude isn't installed.
-  const handleClaudeLogin = async (reloginId?: string) => {
-    if (claudeLoggingIn || codexLoggingIn) return;
-    setClaudeLoggingIn(true);
-    setActiveReloginId(reloginId ?? null);
-    setClaudeLoginUrl(null);
-    setCodexLoginUrlCopied(false);
-    const unlisten = await listen<string>("claude:login-url", (event) => {
-      setClaudeLoginUrl(event.payload);
-    });
-    try {
-      await invoke<string>("login_and_save_claude_account");
-      toast.success(t("toast.accountAdded"));
-      void refreshQuota("claude", true);
-    } catch (err) {
-      const msg = String(err);
-      if (!msg.includes("Login cancelled")) {
-        toast.error(msg);
-      }
-    } finally {
-      unlisten();
-      setClaudeLoggingIn(false);
-      setActiveReloginId(null);
-      setClaudeLoginUrl(null);
-      setCodexLoginUrlCopied(false);
-      setClaudeAccountTrigger((n) => n + 1);
+      setLoginUrl(null);
+      setLoginCode(null);
+      setLoginUrlCopied(false);
+      setAccountTriggers((prev) => ({
+        ...prev,
+        [target]: (prev[target] ?? 0) + 1
+      }));
       void refreshActive();
     }
   };
@@ -1373,8 +1410,8 @@ export function ProvidersPage({
                     onUpgrade={handleUpgrade}
                     upgrading={upgrades[app]}
                     upgradeError={upgradeErrors[app]}
-                    actions={app === "codex" ? (
-                      codexLoggingIn ? (
+                    actions={loginSpec === null ? undefined : (
+                      loginApp === app ? (
                         <div className="flex items-center gap-2 shrink-0">
                           <Loader2 className="size-4 animate-spin text-muted-foreground" />
                           <span className="text-sm text-muted-foreground">{t("providers.accountAdding")}</span>
@@ -1382,12 +1419,12 @@ export function ProvidersPage({
                             type="button"
                             variant="outline"
                             size="sm"
-                            onClick={() => void invoke("cancel_codex_login")}
+                            onClick={() => void invoke(loginSpec.cancel)}
                           >
                             {t("common.cancel")}
                           </Button>
                         </div>
-                      ) : codexCliMissing ? (
+                      ) : app === "codex" && codexCliMissing ? (
                         // App-only install — `codex login` can't spawn.
                         // Disabled buttons don't fire hover events, so
                         // the Tooltip anchors on a wrapping span.
@@ -1415,40 +1452,14 @@ export function ProvidersPage({
                           type="button"
                           variant="outline"
                           size="sm"
-                          onClick={() => void handleCodexLogin()}
+                          onClick={() => { if (loginTarget) void handleLogin(loginTarget); }}
                           className="shrink-0 gap-1.5"
                         >
                           <UserPlus className="size-4" />
                           {t("providers.accountAdd")}
                         </Button>
                       )
-                    ) : app === "claude" ? (
-                      claudeLoggingIn ? (
-                        <div className="flex items-center gap-2 shrink-0">
-                          <Loader2 className="size-4 animate-spin text-muted-foreground" />
-                          <span className="text-sm text-muted-foreground">{t("providers.accountAdding")}</span>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={() => void invoke("cancel_claude_login")}
-                          >
-                            {t("common.cancel")}
-                          </Button>
-                        </div>
-                      ) : (
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() => void handleClaudeLogin()}
-                          className="shrink-0 gap-1.5"
-                        >
-                          <UserPlus className="size-4" />
-                          {t("providers.accountAdd")}
-                        </Button>
-                      )
-                    ) : undefined}
+                    )}
                     onSetDefault={() => void setOfficialAsDefault()}
                   />
                 </div>
@@ -1473,29 +1484,11 @@ export function ProvidersPage({
                         ? () => void refreshQuota(app, true)
                         : undefined
                     }
-                    externalTrigger={
-                      app === "codex"
-                        ? codexAccountTrigger
-                        : app === "claude"
-                          ? claudeAccountTrigger
-                          : undefined
-                    }
-                    loginInProgress={
-                      app === "codex"
-                        ? codexLoggingIn
-                        : app === "claude"
-                          ? claudeLoggingIn
-                          : undefined
-                    }
-                    activeReloginId={
-                      app === "codex" || app === "claude" ? activeReloginId : undefined
-                    }
+                    externalTrigger={accountTriggers[app]}
+                    loginInProgress={loginApp === app}
+                    activeReloginId={loginTarget ? activeReloginId : undefined}
                     onRelogin={
-                      app === "codex"
-                        ? (id) => void handleCodexLogin(id)
-                        : app === "claude"
-                          ? (id) => void handleClaudeLogin(id)
-                          : undefined
+                      loginTarget ? (id) => void handleLogin(loginTarget, id) : undefined
                     }
                     reloginUnavailable={app === "codex" ? codexCliMissing : undefined}
                   />
@@ -1591,16 +1584,16 @@ export function ProvidersPage({
           sources: only one login can run at a time (each handler guards on
           its own loggingIn flag and the buttons live on different tabs). */}
       {(() => {
-        const loginUrl = codexLoginUrl ?? claudeLoginUrl;
-        const isCodexLogin = codexLoginUrl !== null;
-        const closeLoginUrl = () =>
-          isCodexLogin ? setCodexLoginUrl(null) : setClaudeLoginUrl(null);
+        const spec = loginApp ? LOGIN_APPS[loginApp] : null;
         return (
-          <Dialog open={loginUrl !== null} onOpenChange={(open) => { if (!open) closeLoginUrl(); }}>
+          <Dialog
+            open={loginUrl !== null && spec !== null}
+            onOpenChange={(open) => { if (!open) setLoginUrl(null); }}
+          >
             <DialogContent className="max-w-md">
               <DialogHeader>
                 <DialogTitle>
-                  {t(isCodexLogin ? "providers.codexLoginDialogTitle" : "providers.claudeLoginDialogTitle")}
+                  {t(spec?.titleKey ?? "providers.codexLoginDialogTitle")}
                 </DialogTitle>
                 <DialogDescription>{t("providers.codexLoginDialogDesc")}</DialogDescription>
               </DialogHeader>
@@ -1619,27 +1612,38 @@ export function ProvidersPage({
                       onClick={() => {
                         if (loginUrl) {
                           void navigator.clipboard.writeText(loginUrl).then(() => {
-                            setCodexLoginUrlCopied(true);
-                            setTimeout(() => setCodexLoginUrlCopied(false), 1500);
+                            setLoginUrlCopied(true);
+                            setTimeout(() => setLoginUrlCopied(false), 1500);
                           });
                         }
                       }}
                     >
-                      {codexLoginUrlCopied ? <Check className="size-4" /> : <Copy className="size-4" />}
+                      {loginUrlCopied ? <Check className="size-4" /> : <Copy className="size-4" />}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="top">{t("common.copy")}</TooltipContent>
                 </Tooltip>
               </div>
+              {/* Device-flow code (grok). Shown as its own row because the
+                  user reads it OFF this dialog to compare against — or type
+                  into — the browser, so it must not be buried in the URL. */}
+              {loginCode && (
+                <div className="rounded-md border bg-muted/50 px-3 py-2">
+                  <p className="text-xs text-muted-foreground">
+                    {t("providers.loginDialogCode")}
+                  </p>
+                  <span className="font-mono text-sm tracking-widest select-all">
+                    {loginCode}
+                  </span>
+                </div>
+              )}
               <DialogFooter className="flex-row items-center gap-3">
                 <p className="flex-1 text-xs text-muted-foreground">{t("providers.codexLoginDialogWaiting")}</p>
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
-                  onClick={() =>
-                    void invoke(isCodexLogin ? "cancel_codex_login" : "cancel_claude_login")
-                  }
+                  onClick={() => { if (spec) void invoke(spec.cancel); }}
                 >
                   {t("common.cancel")}
                 </Button>

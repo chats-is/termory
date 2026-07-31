@@ -358,6 +358,8 @@ export const zhHans: Record<MessageKey, string> = {
   "providers.accountKeyringWarning": "Codex 被设置为将凭据存储在系统钥匙串({mode});此处切换写入的是文件,可能不会生效。",
   "providers.codexLoginDialogTitle": "授权 Codex",
   "providers.claudeLoginDialogTitle": "授权 Claude Code",
+  "providers.grokLoginDialogTitle": "授权 Grok",
+  "providers.loginDialogCode": "请在浏览器中确认此验证码",
   "providers.codexLoginDialogDesc": "浏览器应已自动打开。如果没有，请复制下方链接并手动在浏览器中打开。",
   "providers.codexLoginDialogWaiting": "等待浏览器登录完成…",
   "install.notInstalled": "{name} 未安装",
