@@ -685,9 +685,13 @@ export function OfficialAccountsSection({
   // result rather than blanking the card (see quota-utils). That retention
   // is deliberate — but silently, so the numbers looked live while they
   // could be arbitrarily old. Mark the labels instead of hiding the data.
-  // `not_found` never reaches here (showQuota already hides the section)
-  // and a fetch in flight isn't a failure, so neither reads as stale.
-  const quotaStale = !!quota && !quota.success && !quotaLoading;
+  // `not_found` never reaches here (showQuota already hides the section).
+  //
+  // Deliberately NOT gated on `quotaLoading`: this marks the DATA, not the
+  // request. A refresh in flight hasn't replaced the numbers yet, so
+  // clearing the mark while it runs would flash red → normal → red and
+  // call stale data live for the duration.
+  const quotaStale = !!quota && !quota.success;
 
   return (
     <div className="-mt-2 flex flex-col rounded-b-xl bg-card pt-2 shadow-sm">

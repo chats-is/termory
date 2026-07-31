@@ -71,6 +71,11 @@ export function useQuotas(app: CliApp) {
   >(cachedQuotas);
   const [quotaLoading, setQuotaLoading] = React.useState<CliApp | null>(null);
   const quotaLoadingRef = React.useRef<CliApp | null>(null);
+  // Monotonic id per started fetch. `force` skips the in-flight guard, so
+  // two fetches for the same CLI can overlap (the previous account's and
+  // the switch's); without this the FIRST to return cleared the spinner
+  // and the one actually being waited on ran with no indicator.
+  const quotaRunRef = React.useRef(0);
   // When a CLI's displayed quota was last invalidated because the
   // IDENTITY behind it changed (account switch). Any result whose
   // `queriedAt` predates that moment was fetched for the PREVIOUS
@@ -134,6 +139,7 @@ export function useQuotas(app: CliApp) {
       ) {
         return;
       }
+      const run = ++quotaRunRef.current;
       quotaLoadingRef.current = target;
       setQuotaLoading(target);
       try {
@@ -156,8 +162,12 @@ export function useQuotas(app: CliApp) {
         // unknown-app guard only — leave the previous result on screen
         if (manual) toast.error(String(err));
       } finally {
-        if (quotaLoadingRef.current === target) quotaLoadingRef.current = null;
-        setQuotaLoading((cur) => (cur === target ? null : cur));
+        // Only the NEWEST run may clear the indicator — an older overlapping
+        // fetch returning first must leave it alone.
+        if (quotaRunRef.current === run) {
+          quotaLoadingRef.current = null;
+          setQuotaLoading((cur) => (cur === target ? null : cur));
+        }
       }
     },
     [quotaIsStale]

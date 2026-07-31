@@ -328,9 +328,10 @@ describe("OfficialAccountsSection — quota rings in active row", () => {
     expect(await screen.findByText("5h")).not.toHaveClass("text-destructive");
   });
 
-  // A fetch in flight is not a failure: the entry still carries the
-  // previous result's `success: false` shape only if THAT one failed.
-  it("does not mark names while a refresh is in flight", async () => {
+  // The mark describes the DATA, not the request. A refresh in flight
+  // hasn't replaced the failed numbers yet, so dropping the mark for its
+  // duration would flash red → normal → red and present stale data as live.
+  it("keeps the names marked while a retry is in flight", async () => {
     mockList(makeState());
     render(
       <OfficialAccountsSection
@@ -340,7 +341,7 @@ describe("OfficialAccountsSection — quota rings in active row", () => {
         onRefreshQuota={vi.fn()}
       />
     );
-    expect(await screen.findByText("5h")).not.toHaveClass("text-destructive");
+    expect(await screen.findByText("5h")).toHaveClass("text-destructive");
   });
 
   // grok's billing endpoint serves no usage percentage for some accounts

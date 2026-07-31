@@ -1536,6 +1536,12 @@ fn parse_grok_billing(body: &serde_json::Value) -> (Vec<QuotaTier>, Option<Extra
         })
         // The pager clamps too — the backend has been seen reporting past
         // 100 (its own test covers `credit_usage_percent: Some(150.0)`).
+        // DELIBERATELY stricter than the pager on the low end: it clamps
+        // only the served percent and leaves the derived one at `.min(100)`
+        // (effects/helpers.rs:1264), so a negative `used` would yield a
+        // negative percent there. Unreachable in practice — negative Cents
+        // are the accounting convention for a BALANCE, not for usage — but
+        // a ring cannot render one, so both branches get a floor.
         .map(|pct| pct.clamp(0.0, 100.0));
     let period_type = config
         .pointer("/currentPeriod/type")

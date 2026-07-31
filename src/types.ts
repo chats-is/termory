@@ -309,7 +309,13 @@ export type SubscriptionQuota = {
    * only. A BALANCE, not usage: there is no limit to divide by, so it has
    * no utilization and renders as a bare amount. grok's two billing models
    * are mutually exclusive, so a unified-billing subscriber shows this
-   * while `extraUsage` (the legacy on-demand cap) stays absent. */
+   * while `extraUsage` (the legacy on-demand cap) stays absent.
+   *
+   * CONTRACT: the backend sends this only when it is > 0
+   * (`parse_grok_prepaid_balance` in quota.rs returns `None` for a zero or
+   * missing balance), which is why the render site tests presence rather
+   * than magnitude. Anything that starts emitting a literal 0 would put a
+   * "$0.00 Balance" on the card and on the tray row. */
   prepaidBalance?: number;
   error?: string;
   queriedAt?: number;

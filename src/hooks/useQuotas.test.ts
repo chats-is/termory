@@ -200,6 +200,38 @@ describe("useQuotas — account switch", () => {
     expect(r.current.quotas.claude).toBeUndefined();
   });
 
+  // Overlapping fetches: the older one returning first must not clear the
+  // spinner while the switch's own fetch is still running.
+  it("keeps the spinner up until the newest fetch returns", async () => {
+    let releaseOld!: (q: SubscriptionQuota) => void;
+    let releaseNew!: (q: SubscriptionQuota) => void;
+    invokeMock
+      .mockReturnValueOnce(new Promise<SubscriptionQuota>((r) => (releaseOld = r)))
+      .mockReturnValueOnce(new Promise<SubscriptionQuota>((r) => (releaseNew = r)));
+    const { r } = await renderQuotas();
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = r.current.refreshQuota("claude");
+    });
+    act(() => {
+      second = r.current.refreshQuota("claude", false, true); // force: overlaps
+    });
+    expect(r.current.quotaLoading).toBe("claude");
+
+    await act(async () => {
+      releaseOld(quota({ queriedAt: Date.now() - 1_000 }));
+      await first;
+    });
+    expect(r.current.quotaLoading).toBe("claude"); // still waiting on the new one
+
+    await act(async () => {
+      releaseNew(quota());
+      await second;
+    });
+    expect(r.current.quotaLoading).toBeNull();
+  });
+
   it("keeps a result fetched after the switch", async () => {
     // Stamp `queriedAt` when the call is MADE, not when the mock is set
     // up — the backend stamps it as the fetch completes, and a value
