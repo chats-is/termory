@@ -1177,13 +1177,40 @@ fn grok_scanned_from_summary(session_dir: &Path) -> Option<GrokScanned> {
         .or_else(|| str_of("session_summary"))
         .unwrap_or_default();
     let updated_at = str_of("updated_at");
-    // Emptiness signal (`num_messages == 0`) — a blank never-chatted shell.
-    // The list scan drops these (see `scan_grok_sessions_in`).
-    let empty = summary
+    // Emptiness, decided in three tiers so the common cases never read a file.
+    //
+    // `num_messages == 0` alone is NOT sufficient, though it was the rule until
+    // 2026-08-01. It counts the turns grok INJECTS on entry, and how many of
+    // those exist depends on the directory: a bare cwd gets none (so a blank
+    // shell really does read 0), but one with project instructions and skills
+    // gets several. Observed on a real never-chatted session in this repo:
+    // `num_messages == 3`, all three being `<user_info>` plus two
+    // `<system-reminder>` injections, so the shell sailed through the filter
+    // exactly where the user was most likely to see it.
+    //
+    // A slash command does not rescue it either: `/status` and its reply live
+    // only in updates.jsonl, never in chat_history, so such a session still has
+    // no conversation to show — and `turn_completed` fires for it, which is why
+    // that is not the signal either.
+    //
+    // The signal that holds is the one the DISPLAY layer already uses: a turn
+    // counts as the user's when it carries no `synthetic_reason` and is not
+    // pure envelope (`grok_user_display_text`'s `injected`). Same rule, one
+    // definition — see `grok_chat_has_real_user_turn`.
+    let num_messages = summary
         .get("num_messages")
         .and_then(Value::as_u64)
-        .unwrap_or(0)
-        == 0;
+        .unwrap_or(0);
+    let empty = if num_messages == 0 {
+        true
+    } else if !title.is_empty() {
+        // grok titles a session off its first real exchange, so a title (or a
+        // summary — `title` already falls back to it) is proof of one. Skips
+        // the read for every established session.
+        false
+    } else {
+        !grok_chat_has_real_user_turn(&session_dir.join("chat_history.jsonl"))
+    };
     let session = AppSession {
         id,
         source: "Grok".to_string(),
@@ -1202,6 +1229,47 @@ fn grok_scanned_from_summary(session_dir: &Path) -> Option<GrokScanned> {
         ..Default::default()
     };
     Some(GrokScanned { session, empty })
+}
+
+/// Does `chat_history.jsonl` hold a turn the USER actually typed?
+///
+/// Applies the same test the transcript renderer applies (see the `role` choice
+/// in `parse_grok_chat_history`): a `user` line is the user's own unless it
+/// carries a `synthetic_reason` (runtime injection, conversation.rs:77) or
+/// unwraps to nothing but envelopes — `<user_info>`, `<system-reminder>`,
+/// `<skill_information>` — which `grok_user_display_text` reports via
+/// `injected`. Deliberately ONE definition: if the two ever disagreed, a
+/// session would be listed whose every message renders as "system".
+///
+/// Streams and stops at the first real turn, so an established session reads a
+/// few lines rather than the whole file (these run to hundreds of KB). A
+/// missing or unreadable file counts as no real turn — the caller only asks
+/// when nothing else has already proven the session real.
+fn grok_chat_has_real_user_turn(chat_history: &Path) -> bool {
+    let Ok(file) = fs::File::open(chat_history) else {
+        return false;
+    };
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if msg.get("type").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        if msg.get("synthetic_reason").is_some() {
+            continue;
+        }
+        let raw = grok_chat_content_text(msg.get("content"));
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let (text, injected) = grok_user_display_text(&raw);
+        if !injected && !text.trim().is_empty() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Read a grok session dir's cwd from its `summary.json` (`info.cwd`).
@@ -19118,7 +19186,15 @@ mod tests {
             format!(r#"{{"info":{{"id":"{uuid}","cwd":"{cwd}"}},"num_messages":1}}"#),
         )
         .unwrap();
-        fs::write(d.join("chat_history.jsonl"), b"{}").unwrap();
+        // A turn the user actually typed. Without one the scan reads the dir
+        // as a blank CLI-entry shell and drops it (see
+        // `grok_chat_has_real_user_turn`), and these tests are about migration
+        // and deletion, not about that filter.
+        fs::write(
+            d.join("chat_history.jsonl"),
+            br#"{"type":"user","content":"hello"}"#,
+        )
+        .unwrap();
         d
     }
 
@@ -19205,6 +19281,112 @@ mod tests {
         assert!(found.iter().any(|s| s.path.ends_with("MEMORY.md")));
         assert!(found.iter().any(|s| s.path.contains("termory-a3f7b2c9")
             && s.path.ends_with("2026-07-13-hello-abcd1234.md")));
+    }
+
+    /// Built from a REAL never-chatted session in this repo (2026-08-01).
+    /// `num_messages == 3` — not 0 — because grok injects `<user_info>` plus a
+    /// `<system-reminder>` per project-instruction and skill file on entry, so
+    /// how many it counts depends on the directory. The old `num_messages == 0`
+    /// rule therefore listed a blank shell in exactly the kind of repo the user
+    /// works in, while correctly dropping one opened in a bare directory.
+    #[test]
+    fn grok_scan_drops_a_shell_whose_only_turns_were_injected() {
+        let tmp = TestDir::new("grok-injected-shell");
+        let root = tmp.path().join("sessions");
+        let d = root.join("%2Fwork%2Fa").join("u-blank");
+        fs::create_dir_all(&d).unwrap();
+        // No generated_title, no session_summary — grok never titled it,
+        // because there was nothing to title.
+        fs::write(
+            d.join("summary.json"),
+            r#"{"info":{"id":"u-blank","cwd":"/work/a"},"num_messages":3,"session_summary":""}"#,
+        )
+        .unwrap();
+        fs::write(
+            d.join("chat_history.jsonl"),
+            [
+                r#"{"type":"system","content":"You are Grok…"}"#,
+                r#"{"type":"user","content":"<user_info>\nOS Version: macos\n</user_info>"}"#,
+                r#"{"type":"user","content":"<system-reminder>rules…</system-reminder>","synthetic_reason":"project_instructions"}"#,
+                r#"{"type":"user","content":"<system-reminder>skills…</system-reminder>","synthetic_reason":"system_reminder"}"#,
+                // Plain-text synthetic, i.e. NO envelope to give it away —
+                // grok emits these for auto_continue and friends. Only
+                // `synthetic_reason` distinguishes it from something typed,
+                // which is why that check is not redundant with the envelope
+                // one above.
+                r#"{"type":"user","content":"continue","synthetic_reason":"auto_continue"}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        // The `/status` this session ran lives ONLY here, never in
+        // chat_history — which is why a completed turn cannot be the signal.
+        fs::write(
+            d.join("updates.jsonl"),
+            r#"{"params":{"update":{"sessionUpdate":"turn_completed"}}}"#,
+        )
+        .unwrap();
+
+        let found = scan_grok_sessions_in(&root).unwrap();
+        assert!(
+            found.is_empty(),
+            "a shell whose every turn was injected must not be listed: {:?}",
+            found.iter().map(|s| &s.id).collect::<Vec<_>>()
+        );
+    }
+
+    /// The counterpart: one real typed turn is enough, even with no title yet
+    /// (grok titles off the first exchange, so a brand-new session has none).
+    #[test]
+    fn grok_scan_keeps_a_session_with_one_real_turn_and_no_title() {
+        let tmp = TestDir::new("grok-one-turn");
+        let root = tmp.path().join("sessions");
+        let d = root.join("%2Fwork%2Fa").join("u-real");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(
+            d.join("summary.json"),
+            r#"{"info":{"id":"u-real","cwd":"/work/a"},"num_messages":3}"#,
+        )
+        .unwrap();
+        fs::write(
+            d.join("chat_history.jsonl"),
+            [
+                r#"{"type":"user","content":"<user_info>OS</user_info>"}"#,
+                r#"{"type":"user","content":"<system-reminder>x</system-reminder>","synthetic_reason":"system_reminder"}"#,
+                r#"{"type":"user","content":[{"type":"text","text":"why is this test failing"}]}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let found = scan_grok_sessions_in(&root).unwrap();
+        assert_eq!(
+            found.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["u-real"]
+        );
+    }
+
+    /// A titled session is proven real by its title, so the scan must not read
+    /// chat_history at all — the file here is deliberately unparseable, which
+    /// would report "no real turn" if it were consulted.
+    #[test]
+    fn grok_scan_trusts_a_title_without_reading_the_transcript() {
+        let tmp = TestDir::new("grok-titled");
+        let root = tmp.path().join("sessions");
+        let d = root.join("%2Fwork%2Fa").join("u-titled");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(
+            d.join("summary.json"),
+            r#"{"info":{"id":"u-titled","cwd":"/work/a"},"num_messages":2,"generated_title":"Fix the flaky test"}"#,
+        )
+        .unwrap();
+        fs::write(d.join("chat_history.jsonl"), "not json at all").unwrap();
+
+        let found = scan_grok_sessions_in(&root).unwrap();
+        assert_eq!(
+            found.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(),
+            ["Fix the flaky test"]
+        );
     }
 
     #[test]
