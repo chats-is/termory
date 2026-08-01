@@ -356,11 +356,35 @@ const CODEX_LOGIN_PORT: u16 = 1455;
 /// passes [`CODEX_LOGIN_PORT`].
 fn send_codex_cancel(port: u16) -> bool {
     use std::io::{Read as _, Write as _};
+    /// Budget for the REPLY, once connected.
     const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    /// Budget for the CONNECT, deliberately much shorter — and the
+    /// difference is a Windows fix, not a micro-optimisation.
+    ///
+    /// Unix refuses a connection to a closed loopback port instantly
+    /// (ECONNREFUSED), so "nothing is listening" costs nothing there and a
+    /// single 2s constant was invisible. **Windows does not send that
+    /// RST** — measured on real hardware (Win11), a connect to ANY closed
+    /// loopback port, port 1455 included, gets no answer at all and sits
+    /// out the full timeout. So every cancel with no server on 1455 stalled
+    /// the user for 2s before the fallback kill even began — the exact cost
+    /// [`crate::process::CANCEL_GRACE`] was split out to avoid, reintroduced
+    /// one layer down.
+    ///
+    /// That case is reachable, not theoretical: codex falls back to a second
+    /// port when 1455 is taken, and this only ever addresses 1455 (see the
+    /// note on [`CODEX_LOGIN_PORT`]) — so cancelling a login that took the
+    /// fallback finds nothing listening every single time.
+    ///
+    /// 300ms is ~1000x the headroom a loopback connect needs (no DNS, no
+    /// network, a kernel operation), and overshooting degrades gracefully
+    /// rather than breaking: a missed `/cancel` falls through to
+    /// `terminate`, which kills the job anyway.
+    const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
     let Ok(addr) = format!("127.0.0.1:{port}").parse::<std::net::SocketAddr>() else {
         return false;
     };
-    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, TIMEOUT) else {
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) else {
         return false; // nothing listening — nothing to cancel
     };
     let _ = stream.set_read_timeout(Some(TIMEOUT));
@@ -3068,9 +3092,24 @@ mod tests {
 
     /// Nothing listening ⇒ `false`, which is what tells the caller to skip
     /// the grace period and kill straight away.
+    ///
+    /// It must also report that FAST. The verdict is worthless if arriving
+    /// at it costs more than the wait it exists to skip — and on Windows it
+    /// did: no RST comes back from a closed loopback port, so the connect
+    /// sat out its full budget and every serverless cancel stalled 2s (see
+    /// `CONNECT_TIMEOUT`). Asserted on both platforms because only one of
+    /// them can regress here, and it is not the one this suite usually runs
+    /// on.
     #[test]
     fn send_codex_cancel_reports_false_when_nothing_listens() {
+        let started = std::time::Instant::now();
         assert!(!send_codex_cancel(closed_port()));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "took {elapsed:?} to work out that nobody was listening — the \
+             caller skips its grace period only to wait here instead"
+        );
     }
 
     /// With a server answering, the child is given its grace period and is
@@ -3115,6 +3154,58 @@ mod tests {
         let port = closed_port();
         let mut cmd = tokio::process::Command::new("/bin/sh");
         cmd.arg("-c").arg("sleep 30");
+        let mut child = crate::process::spawn_managed(cmd).expect("spawn probe");
+
+        let started = std::time::Instant::now();
+        stop_codex_login(&mut child, port).await;
+        let elapsed = started.elapsed();
+
+        let status = child.wait().await.expect("wait");
+        assert!(
+            !status.success(),
+            "child should have been killed, not exited cleanly: {status:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(1500),
+            "waited out the grace period with no server to wait for: {elapsed:?}"
+        );
+    }
+
+    /// Windows mirrors of the two `stop_codex_login` cases above.
+    ///
+    /// Worth having on both platforms rather than trusting "it's just
+    /// HTTP": the orphan this whole path exists to prevent was measured on
+    /// Windows too (`codex.exe` 9712 still holding port 1455 after its npm
+    /// wrapper was killed — see `stop_codex_login`), and the fallback leg
+    /// is `Managed::terminate`, whose Windows implementation is a Job
+    /// Object rather than a process group. `ping` is the sleep because
+    /// `spawn_managed` passes `CREATE_NO_WINDOW` and `timeout` refuses to
+    /// run without a console.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn stop_codex_login_lets_the_child_exit_on_its_own_on_windows() {
+        let _hold = crate::process::hold_children();
+        let (port, _rx) = stub_cancel_server();
+        let mut cmd = tokio::process::Command::new("cmd.exe");
+        cmd.args(["/C", "ping -n 2 127.0.0.1 >nul"]);
+        let mut child = crate::process::spawn_managed(cmd).expect("spawn probe");
+
+        stop_codex_login(&mut child, port).await;
+
+        let status = child.wait().await.expect("wait");
+        assert!(
+            status.success(),
+            "child should have exited on its own, not been killed: {status:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn stop_codex_login_kills_at_once_when_nothing_answers_on_windows() {
+        let _hold = crate::process::hold_children();
+        let port = closed_port();
+        let mut cmd = tokio::process::Command::new("cmd.exe");
+        cmd.args(["/C", "ping -n 31 127.0.0.1 >nul"]);
         let mut child = crate::process::spawn_managed(cmd).expect("spawn probe");
 
         let started = std::time::Instant::now();
