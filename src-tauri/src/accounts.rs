@@ -326,6 +326,105 @@ impl Drop for LoginSlot<'_> {
 pub const CODEX_LOGIN_URL_EVENT: &str = "codex:login-url";
 pub const CLAUDE_LOGIN_URL_EVENT: &str = "claude:login-url";
 
+/// Where codex's login server listens — its `DEFAULT_PORT`
+/// (`login/src/server.rs:54`).
+///
+/// Only this one, never the `FALLBACK_PORT` beside it: codex's own
+/// `/cancel` caller is gated on `!using_fallback_port` (server.rs:585), so
+/// it addresses the default port and never sweeps the fallback. Sweeping
+/// both would fire `/cancel` at whatever else occupies a port we did not
+/// bind, while our own server (on the fallback) went untouched.
+const CODEX_LOGIN_PORT: u16 = 1455;
+
+/// `GET /cancel` against a running codex login server, which responds and
+/// then shuts ITSELF down (`login/src/server.rs:445`,
+/// `HandledRequest::ResponseAndExit`). Byte-for-byte the request codex
+/// sends to clear a stale server before rebinding (`send_cancel_request`,
+/// server.rs:545), std sockets included — tokio is built here without the
+/// `net` feature.
+///
+/// Returns whether the request was CONNECTED AND SENT, mirroring codex's
+/// `io::Result<()>`: `?` on connect and write, but only `let _ = read(...)`
+/// for the reply. **The response is deliberately not inspected** — whether
+/// the child exits is the real answer and the caller waits for that; a
+/// status line would only add a weaker second signal that can disagree with
+/// it. The caller does need the send result, though: nothing listening means
+/// nothing to wait for, so it should go straight to `kill` rather than sit
+/// out the grace period.
+/// `port` is a parameter purely so the unit tests can point this at a stub
+/// listener on an ephemeral port; production has exactly one caller and it
+/// passes [`CODEX_LOGIN_PORT`].
+fn send_codex_cancel(port: u16) -> bool {
+    use std::io::{Read as _, Write as _};
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    let Ok(addr) = format!("127.0.0.1:{port}").parse::<std::net::SocketAddr>() else {
+        return false;
+    };
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, TIMEOUT) else {
+        return false; // nothing listening — nothing to cancel
+    };
+    let _ = stream.set_read_timeout(Some(TIMEOUT));
+    let _ = stream.set_write_timeout(Some(TIMEOUT));
+    let req =
+        format!("GET /cancel HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 64];
+    let _ = stream.read(&mut buf);
+    true
+}
+
+/// Stop a running `codex login` as cleanly as possible.
+///
+/// **Do NOT simplify this back to `child.kill()` (LOCKED).** codex installs
+/// from npm as a node WRAPPER that spawns the real binary
+/// (`bin/codex.js:195`), and the wrapper is the only process we hold a
+/// handle to. `Child::kill` sends SIGKILL, which is uncatchable — the
+/// wrapper dies instantly, its `forwardSignal` (codex.js:223) never runs,
+/// and the real binary is re-parented and KEEPS SERVING. Measured on two
+/// machines, both npm installs: macOS left pid 91035 holding 1455, Windows
+/// left `codex.exe` 9712 doing the same.
+///
+/// That orphan is not inert — it still answered `/auth/callback` with
+/// `400 State mismatch` after its parent was gone, i.e. a live OAuth server
+/// whose state DOES match the browser tab still open on the user's screen.
+/// Completing that login writes credentials AFTER `restore_auth` restored
+/// the previous account, silently undoing the cancel the user asked for.
+///
+/// So ask the server to stop: it exits on its own, the wrapper follows it
+/// (codex.js awaits the child, then mirrors its exit), and the port is
+/// released properly rather than left behind by a hard kill. Being plain
+/// HTTP this behaves identically on Windows.
+///
+/// **codex-only.** The other CLIs were measured and none leak: claude and
+/// grok run their login as a SINGLE process that `child.kill()` takes down
+/// cleanly — grok checked under both its official installer and
+/// `npm install -g @xai-official/grok` — and gemini has no login command.
+///
+/// **Not a total fix.** Only the path where `/cancel` reaches a listening
+/// server and the child then exits is clean; both fallbacks below still
+/// signal the wrapper alone and can leave the grandchild behind, with
+/// `restore_auth` running afterwards regardless. Both are narrow — nothing
+/// listening means the login has not bound its server yet (so there is no
+/// OAuth server to outlive us), and a server that took the cancel is
+/// already on its way out — but don't read the happy path as covering
+/// everything.
+async fn stop_codex_login(child: &mut tokio::process::Child, port: u16) {
+    let sent = tokio::task::spawn_blocking(move || send_codex_cancel(port))
+        .await
+        .unwrap_or(false);
+
+    if sent
+        && tokio::time::timeout(std::time::Duration::from_secs(2), child.wait())
+            .await
+            .is_ok()
+    {
+        return; // exited on its own — nothing to kill
+    }
+    let _ = child.kill().await;
+}
+
 pub async fn login_and_save_codex_account(
     app: tauri::AppHandle,
     cancel_state: &CodexLoginCancel,
@@ -429,13 +528,13 @@ pub async fn login_and_save_codex_account(
             }
         },
         _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
-            let _ = child.kill().await;
+            stop_codex_login(&mut child, CODEX_LOGIN_PORT).await;
             stderr_task.abort();
             restore_auth(&auth_path, original_auth.as_deref());
             return Err("codex login timed out after 5 minutes".into());
         },
         _ = cancel_notify.notified() => {
-            let _ = child.kill().await;
+            stop_codex_login(&mut child, CODEX_LOGIN_PORT).await;
             stderr_task.abort();
             restore_auth(&auth_path, original_auth.as_deref());
             return Err("Login cancelled".into());
@@ -2926,6 +3025,105 @@ mod tests {
     use super::*;
     use crate::testutils::{lock_home, override_home, EnvVarGuard};
     use std::path::{Path, PathBuf};
+
+    /// A one-shot stand-in for codex's login server: accepts a single
+    /// connection, hands the raw request back over the channel, and answers
+    /// 200 the way `/cancel` does. Bound to port 0 so the OS picks a free
+    /// one — the tests must never touch the real `CODEX_LOGIN_PORT`, which
+    /// may have an actual login on it.
+    fn stub_cancel_server() -> (u16, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub");
+        let port = listener.local_addr().expect("addr").port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 256];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+        (port, rx)
+    }
+
+    /// A port nothing is listening on: bind then immediately release it.
+    fn closed_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.local_addr().expect("addr").port()
+    }
+
+    /// The request must be exactly what codex's own `send_cancel_request`
+    /// sends (server.rs:545) — a wrong path or verb would be answered with
+    /// a 404 by the real server and cancel nothing.
+    #[test]
+    fn send_codex_cancel_issues_the_cancel_request() {
+        let (port, rx) = stub_cancel_server();
+        assert!(send_codex_cancel(port), "should report the request as sent");
+        let req = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("stub received a request");
+        assert!(
+            req.starts_with("GET /cancel HTTP/1.1\r\n"),
+            "unexpected request line: {req:?}"
+        );
+    }
+
+    /// Nothing listening ⇒ `false`, which is what tells the caller to skip
+    /// the grace period and kill straight away.
+    #[test]
+    fn send_codex_cancel_reports_false_when_nothing_listens() {
+        assert!(!send_codex_cancel(closed_port()));
+    }
+
+    /// With a server answering, the child is given its grace period and is
+    /// allowed to exit on its OWN — a successful exit status proves it was
+    /// not killed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_codex_login_lets_the_child_exit_on_its_own() {
+        let (port, _rx) = stub_cancel_server();
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 0.3")
+            .spawn()
+            .expect("spawn probe");
+
+        stop_codex_login(&mut child, port).await;
+
+        let status = child.try_wait().expect("try_wait").expect("already reaped");
+        assert!(
+            status.success(),
+            "child should have exited on its own, not been killed: {status:?}"
+        );
+    }
+
+    /// With nothing listening there is no exit coming, so the grace period
+    /// must be SKIPPED rather than sat out — it is a user-facing cancel.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_codex_login_kills_at_once_when_nothing_answers() {
+        let port = closed_port();
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .spawn()
+            .expect("spawn probe");
+
+        let started = std::time::Instant::now();
+        stop_codex_login(&mut child, port).await;
+        let elapsed = started.elapsed();
+
+        let status = child.try_wait().expect("try_wait").expect("already reaped");
+        assert!(
+            !status.success(),
+            "child should have been killed, not exited cleanly: {status:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(1500),
+            "waited out the grace period with no server to wait for: {elapsed:?}"
+        );
+    }
 
     fn tempdir(tag: &str) -> PathBuf {
         let mut dir = std::env::temp_dir();
