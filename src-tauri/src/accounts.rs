@@ -371,10 +371,28 @@ fn send_codex_cancel(port: u16) -> bool {
     /// [`crate::process::CANCEL_GRACE`] was split out to avoid, reintroduced
     /// one layer down.
     ///
-    /// That case is reachable, not theoretical: codex falls back to a second
-    /// port when 1455 is taken, and this only ever addresses 1455 (see the
-    /// note on [`CODEX_LOGIN_PORT`]) — so cancelling a login that took the
-    /// fallback finds nothing listening every single time.
+    /// **There is no known everyday trigger, and two guesses at one have
+    /// already been wrong — do not invent a third.**
+    ///
+    /// Not the fallback port: `bind_server` (server.rs:562-610) answers an
+    /// occupied 1455 by sending it `/cancel` and then retrying 10× at
+    /// 200ms, dropping to 1457 only if something held the port through all
+    /// 2s without ever answering — and the usual occupant, a codex orphan,
+    /// is precisely what codex clears there and what `process.rs` now stops
+    /// leaking.
+    ///
+    /// Nor "cancelled before the server bound": `run_login_server` binds at
+    /// server.rs:149 and only opens the browser at :172, so by the time
+    /// focus leaves Termory the port is listening, and coming back to click
+    /// Cancel always connects. That leaves a few hundred ms between the
+    /// click and the browser, which needs the user to regret the action
+    /// they just took.
+    ///
+    /// So this is defence in depth rather than a fix for something users
+    /// hit: it costs nothing on the success path and saves 1.7s whenever a
+    /// connect does fail. The measured Windows behaviour, plus the fact
+    /// that connecting and waiting for a reply are different waits, is
+    /// reason enough on its own.
     ///
     /// 300ms is ~1000x the headroom a loopback connect needs (no DNS, no
     /// network, a kernel operation), and overshooting degrades gracefully
