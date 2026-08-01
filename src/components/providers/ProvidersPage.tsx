@@ -1590,7 +1590,10 @@ export function ProvidersPage({
             open={loginUrl !== null && spec !== null}
             onOpenChange={(open) => { if (!open) setLoginUrl(null); }}
           >
-            <DialogContent className="max-w-md">
+            {/* `sm:` prefix required: shadcn's own `sm:max-w-lg` is a
+                different modifier, so a bare `max-w-*` does not replace
+                it and is simply outranked above the sm breakpoint. */}
+            <DialogContent className="sm:max-w-xl">
               <DialogHeader>
                 <DialogTitle>
                   {t(spec?.titleKey ?? "providers.codexLoginDialogTitle")}
