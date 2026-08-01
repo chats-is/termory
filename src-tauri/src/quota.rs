@@ -715,12 +715,19 @@ fn read_codex_credentials() -> CodexCredential {
     read_codex_credentials_from_file()
 }
 
+/// Read the Codex Keychain entry.
+///
+/// Goes through [`crate::process::probe`] for the TIMEOUT: a locked login
+/// keychain makes `security` put up an unlock dialog and block until it is
+/// answered, and this runs on a Tokio worker (the quota fetch is async), so
+/// an untimed call parks that worker for as long as the dialog is ignored.
+/// `claude_auth` has always been timed for this reason; the Codex and
+/// Gemini readers were the two that were not.
 #[cfg(target_os = "macos")]
 fn read_codex_credentials_from_keychain() -> Option<CodexCredential> {
-    let output = std::process::Command::new("security")
-        .args(["find-generic-password", "-s", "Codex Auth", "-w"])
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new("security");
+    cmd.args(["find-generic-password", "-s", "Codex Auth", "-w"]);
+    let output = crate::process::probe(cmd, crate::process::PROBE_TIMEOUT)?;
     if !output.status.success() {
         return None; // no Keychain entry — fall back to the file
     }
@@ -961,19 +968,20 @@ fn read_gemini_credentials() -> GeminiCredential {
     read_gemini_credentials_from_file()
 }
 
+/// Read the Gemini Keychain entry. Timed for the same reason as
+/// [`read_codex_credentials_from_keychain`].
 #[cfg(target_os = "macos")]
 fn read_gemini_credentials_from_keychain() -> Option<GeminiCredential> {
-    let output = std::process::Command::new("security")
-        .args([
-            "find-generic-password",
-            "-s",
-            "gemini-cli-oauth",
-            "-a",
-            "main-account",
-            "-w",
-        ])
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new("security");
+    cmd.args([
+        "find-generic-password",
+        "-s",
+        "gemini-cli-oauth",
+        "-a",
+        "main-account",
+        "-w",
+    ]);
+    let output = crate::process::probe(cmd, crate::process::PROBE_TIMEOUT)?;
     if !output.status.success() {
         return None; // no Keychain entry — fall back to the file
     }
@@ -1700,25 +1708,55 @@ async fn query_grok_quota(
 // Entry point
 // ===================================================================
 
+/// Run a credential read on a blocking thread.
+///
+/// Every one of them touches the filesystem and, on macOS, spawns
+/// `security(1)` — up to [`crate::process::PROBE_TIMEOUT`] of blocking if
+/// the login keychain is locked and the unlock dialog goes unanswered.
+/// `fetch_quota` is called from an async context on both of its paths (the
+/// `fetch_subscription_quota` IPC and the tray's `spawn_quota_fetch`), so
+/// doing that inline parks a Tokio worker for the duration.
+///
+/// A `JoinError` means the read panicked; degrade to "no credential"
+/// rather than taking the whole quota fetch down with it.
+async fn read_credential<T: Send + 'static>(
+    read: impl FnOnce() -> T + Send + 'static,
+    on_panic: T,
+) -> T {
+    tokio::task::spawn_blocking(read).await.unwrap_or(on_panic)
+}
+
 /// Fetch the official-account quota for one CLI (see `SUPPORTED`).
 pub async fn fetch_quota(app: CliApp) -> SubscriptionQuota {
     match app {
         CliApp::Claude => {
-            let (token, plan, status, message) = read_claude_credentials();
+            let (token, plan, status, message) = read_credential(
+                read_claude_credentials,
+                (None, None, CredentialStatus::NotFound, None),
+            )
+            .await;
             quota_for_credential("claude", token, status, message, move |t| async move {
                 query_claude_quota(&t, plan).await
             })
             .await
         }
         CliApp::Codex => {
-            let (token, account_id, status, message) = read_codex_credentials();
+            let (token, account_id, status, message) = read_credential(
+                read_codex_credentials,
+                (None, None, CredentialStatus::NotFound, None),
+            )
+            .await;
             quota_for_credential("codex", token, status, message, move |t| async move {
                 query_codex_quota(&t, account_id.as_deref()).await
             })
             .await
         }
         CliApp::Gemini => {
-            let (mut token, refresh_token, mut status, message) = read_gemini_credentials();
+            let (mut token, refresh_token, mut status, message) = read_credential(
+                read_gemini_credentials,
+                (None, None, CredentialStatus::NotFound, None),
+            )
+            .await;
             // Google access tokens last ~1h — when stale, mint a fresh
             // one from the refresh token before the shared scaffold
             // runs (used in-memory only; Termory never writes
@@ -1740,7 +1778,11 @@ pub async fn fetch_quota(app: CliApp) -> SubscriptionQuota {
         // doubles as the frontend CliApp key.
         CliApp::Opencode => SubscriptionQuota::not_found(app.bin_name()),
         CliApp::Grok => {
-            let (entry, status, message) = read_grok_credentials();
+            let (entry, status, message) = read_credential(
+                read_grok_credentials,
+                (None, CredentialStatus::NotFound, None),
+            )
+            .await;
             let token = entry.as_ref().map(|e| e.key.clone());
             // NO refresh — deliberate (see the module note: auth.x.ai
             // rotates refresh tokens with reuse detection; refreshing

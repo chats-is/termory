@@ -3,6 +3,7 @@ mod claude_auth;
 mod claude_desktop;
 mod codex_follow;
 mod config;
+mod process;
 mod providers;
 mod quota;
 mod sessions;
@@ -1290,6 +1291,12 @@ pub fn run() {
     }
 
     app.run(|app_handle, event| {
+        // Quitting must not leave a login or an upgrade running behind
+        // us. Only MANAGED children are affected — a terminal the user
+        // opened is deliberately outside this (see process.rs).
+        if let tauri::RunEvent::Exit = event {
+            process::shutdown_all();
+        }
         // macOS: re-launching the app from Finder / the Dock when it's
         // already running (the window was closed → hidden in the menu
         // bar, Dock icon gone) fires a Reopen event instead of a fresh

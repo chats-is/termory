@@ -41,19 +41,33 @@ fn with_cd(project: Option<&str>, cmd: &str) -> String {
 /// Is `bin` resolvable on PATH?
 #[cfg(not(target_os = "windows"))]
 fn which(bin: &str) -> bool {
-    Command::new("which")
-        .arg(bin)
-        .output()
+    let mut c = Command::new("which");
+    c.arg(bin);
+    crate::process::probe(c, crate::process::PROBE_TIMEOUT)
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
-fn spawn(mut c: Command) -> Result<(), String> {
-    c.spawn().map(|_| ()).map_err(|err| {
-        let msg = format!("couldn't launch the terminal: {err}");
-        log::error!("terminal: {msg}");
-        msg
-    })
+/// Launch a terminal for the user.
+///
+/// Goes through [`crate::process::spawn_detached`], which reaps the child
+/// but never kills it. Both halves matter here:
+///
+/// - **Reaped** — this used to drop the `Child` on the spot, and
+///   `std::process::Child::drop` does not wait, so every "Resume in
+///   terminal" / "New session" click left a zombie for the lifetime of
+///   the app.
+/// - **Never killed** — the user is about to work in this terminal, so it
+///   must outlive Termory. It is deliberately absent from the shutdown
+///   registry; do not "fix" that by making it managed.
+fn spawn(c: Command) -> Result<(), String> {
+    crate::process::spawn_detached(c)
+        .map(|_| ())
+        .map_err(|err| {
+            let msg = format!("couldn't launch the terminal: {err}");
+            log::error!("terminal: {msg}");
+            msg
+        })
 }
 
 /// The CLI invocation that resumes session `id` for `source`. Mirrors the
@@ -354,7 +368,9 @@ pub fn open(id: &str, project: Option<&str>, cmd: &str) -> Result<(), String> {
     for launch in linux_fallback_commands(&shell_cmd) {
         let mut c = Command::new(launch.program);
         c.args(&launch.args);
-        if c.spawn().is_ok() {
+        // Through `spawn` like every other branch — spawning directly
+        // here is what left a zombie behind for each emulator tried.
+        if spawn(c).is_ok() {
             return Ok(());
         }
     }
@@ -388,10 +404,12 @@ pub fn detect() -> Vec<TerminalOption> {
     fn where_(bin: &str) -> bool {
         let mut c = Command::new("where");
         c.arg(bin);
-        // Silent probe — without this a console window flashes for
-        // every `where` invocation (GUI-subsystem parent).
-        crate::providers::hide_console(&mut c);
-        c.output().map(|o| o.status.success()).unwrap_or(false)
+        // Timed + silent: `process::probe` applies the no-console-window
+        // flag, without which one flashes for every `where` invocation
+        // (GUI-subsystem parent).
+        crate::process::probe(c, crate::process::PROBE_TIMEOUT)
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
     // "auto" IS cmd on Windows — don't list Command Prompt again separately.
     let mut v = vec![opt("auto", "Default (cmd)")];
@@ -484,7 +502,7 @@ pub fn open(id: &str, project: Option<&str>, cmd: &str) -> Result<(), String> {
         c.current_dir(dir);
     }
     if launch.hide_helper_console {
-        crate::providers::hide_console(&mut c);
+        crate::process::hide_console(&mut c);
     }
     spawn(c)
 }

@@ -183,7 +183,6 @@ fn upgrade_child(cmd: &str) -> tokio::process::Command {
 
 #[cfg(windows)]
 fn upgrade_child(cmd: &str) -> tokio::process::Command {
-    use std::os::windows::process::CommandExt;
     let mut c = tokio::process::Command::new("cmd");
     // cmd.exe has no rc file, so nothing precedes the marker — it's
     // echoed anyway so the reader's filter is identical on both paths.
@@ -191,8 +190,7 @@ fn upgrade_child(cmd: &str) -> tokio::process::Command {
         "/C",
         &format!("echo {}& {cmd} 2>&1", crate::providers::SHELL_PROBE_MARKER),
     ]);
-    // Silent helper — no console window (see providers::hide_console).
-    c.creation_flags(crate::providers::CREATE_NO_WINDOW);
+    // No console window: applied by `process::spawn_managed`.
     c
 }
 
@@ -214,7 +212,8 @@ pub async fn run_upgrade(app: CliApp) -> Result<(), String> {
         return Err("this app has no command-line upgrade".to_string());
     };
 
-    let mut child = upgrade_child(&cmd)
+    let mut spawn_cmd = upgrade_child(&cmd);
+    spawn_cmd
         .stdout(std::process::Stdio::piped())
         // DISCARD the shell's own stderr. The command's stderr is
         // already folded into stdout by `2>&1`; what remains on fd 2 is
@@ -223,14 +222,16 @@ pub async fn run_upgrade(app: CliApp) -> Result<(), String> {
         // child blocks forever. Reproduced directly: a child writing
         // 400 KB to an unread piped stderr never returns its stdout.
         .stderr(std::process::Stdio::null())
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
+        .stdin(std::process::Stdio::null());
+    // Managed, so a timeout kills the whole tree: the thing doing the
+    // work here is a GRANDCHILD (`$SHELL -l -i -c` → `codex update` →
+    // `npm install -g`), which a signal to the shell alone would leave
+    // running — mid-install, with the package half-written.
+    let mut child = crate::process::spawn_managed(spawn_cmd)
         .map_err(|err| format!("couldn't start the upgrade: {err}"))?;
 
     let stdout = child
-        .stdout
-        .take()
+        .stdout()
         .ok_or_else(|| "couldn't read the upgrade output".to_string())?;
 
     // The stream must be DRAINED regardless (an unread pipe blocks the
@@ -262,7 +263,14 @@ pub async fn run_upgrade(app: CliApp) -> Result<(), String> {
 
     let status = match tokio::time::timeout(UPGRADE_TIMEOUT, stream).await {
         Ok(status) => status.map_err(|err| format!("the upgrade failed to run: {err}"))?,
-        Err(_) => return Err("the upgrade timed out".to_string()),
+        Err(_) => {
+            // Stop the whole tree explicitly rather than leaving it to
+            // `Drop`, which can't wait: an installer given a moment to
+            // handle SIGTERM cleans up its partial download, where an
+            // immediate SIGKILL leaves it on disk.
+            child.terminate(crate::process::INSTALL_GRACE).await;
+            return Err("the upgrade timed out".to_string());
+        }
     };
 
     if status.success() {

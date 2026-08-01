@@ -569,108 +569,19 @@ pub fn find_cli_binary(tool: &str) -> Option<std::path::PathBuf> {
 /// shebang stuck in interpreter prompt, runaway `.zshrc` user code via
 /// `shell_version_fallback`, etc.). Kill + give up so we don't pin a
 /// Tokio blocking-pool slot indefinitely.
-const SUBPROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const SUBPROCESS_TIMEOUT: std::time::Duration = crate::process::PROBE_TIMEOUT;
 
-/// Windows `CREATE_NO_WINDOW` process-creation flag. A GUI-subsystem
-/// process (the release build — `windows_subsystem = "windows"`) that
-/// spawns a console program gets a console WINDOW flashed on screen
-/// for the child; `.cmd` shims (every npm-installed CLI on Windows)
-/// are additionally routed through `cmd.exe` by the Rust runtime
-/// (CVE-2024-24576 hardening), so even `codex --version` pops a cmd
-/// window. This flag gives the child a console with NO window.
-/// Apply it to every SILENT helper spawn (`hide_console`); never to
-/// terminal-LAUNCH spawns, whose whole purpose is a visible window.
-#[cfg(windows)]
-pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-/// Mark a silent helper process so Windows doesn't flash a console
-/// window for it. No-op on other platforms.
-pub(crate) fn hide_console(cmd: &mut std::process::Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = cmd;
-    }
-}
-
-/// Spawn `cmd` and read its full output, killing the child if it
-/// hasn't exited within [`SUBPROCESS_TIMEOUT`]. Returns `None` on
-/// spawn failure or timeout; a NON-ZERO exit still returns `Some`
-/// (callers check `status` — the Keychain paths rely on exit 44/36).
-/// Polls `try_wait` every 50ms — accurate enough for a 5s budget and
-/// avoids a watchdog thread.
+/// Run a silent probe to completion, killing it (and anything it
+/// spawned) after [`SUBPROCESS_TIMEOUT`].
+///
+/// A thin alias over [`crate::process::probe`] — the module doc there
+/// covers the timeout, the console-hiding flag and why the kill has to
+/// reach the whole process group rather than just the direct child.
+/// Returns `None` on spawn failure or timeout; a NON-ZERO exit still
+/// returns `Some` (callers check `status` — the Keychain paths rely on
+/// reading exit 44/36).
 fn output_with_timeout(cmd: std::process::Command) -> Option<std::process::Output> {
-    output_with_timeout_stdin(cmd, None)
-}
-
-/// [`output_with_timeout`] with an optional stdin payload.
-///
-/// Exists because `security -i` — the form Claude Code itself uses to write
-/// the Keychain (macOsKeychainStorage.ts:117) — reads its command from stdin
-/// so the credential never appears in `argv` where a process monitor could
-/// see it. The plain helper hard-wires `Stdio::null()`, which would make that
-/// command read EOF and write nothing.
-///
-/// The timeout matters more here than for a version probe: a LOCKED Keychain
-/// makes `security` put up an unlock dialog and block until it is answered,
-/// so an untimed call would hang the calling thread indefinitely.
-///
-/// `input` is written and the pipe closed before the wait loop. Safe against
-/// deadlock for our payload sizes — a pipe buffers 64 KB and the largest
-/// thing we send is a few KB of hex.
-pub(crate) fn output_with_timeout_stdin(
-    mut cmd: std::process::Command,
-    input: Option<&[u8]>,
-) -> Option<std::process::Output> {
-    use std::io::Write;
-    use std::process::Stdio;
-    // Every caller is a silent probe (`--version` queries, shell
-    // fallback, Keychain reads/writes) — never a window the user should see.
-    hide_console(&mut cmd);
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .spawn()
-        .ok()?;
-    if let Some(bytes) = input {
-        // Take the handle so it drops (closing the pipe) before we wait —
-        // `security -i` keeps reading until EOF.
-        if let Some(mut stdin) = child.stdin.take() {
-            if stdin.write_all(bytes).is_err() {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return child.wait_with_output().ok(),
-            Ok(None) => {
-                if start.elapsed() > SUBPROCESS_TIMEOUT {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
+    crate::process::probe(cmd, SUBPROCESS_TIMEOUT)
 }
 
 /// PATH with `binary`'s own directory prepended, so the CLI's runtime
@@ -4687,39 +4598,9 @@ mod tests {
         );
     }
 
-    /// Verify [`output_with_timeout`] kills hung children. We can't
-    /// wait the full 5s in a unit test, so this exercises the
-    /// happy-path return shape instead — `sleep 0` exits immediately
-    /// and the watchdog never trips. Pair with a slower integration
-    /// test if hanging behavior matters more.
-    #[cfg(unix)]
-    #[test]
-    fn output_with_timeout_returns_on_immediate_exit() {
-        let mut cmd = std::process::Command::new("/bin/sh");
-        cmd.args(["-c", "exit 0"]);
-        let out = output_with_timeout(cmd).expect("shell should exit");
-        assert!(out.status.success());
-    }
-
-    /// Slow integration test — only runs when explicitly opted in via
-    /// `--ignored`, since it sleeps for the full SUBPROCESS_TIMEOUT
-    /// window. Confirms a child that exceeds the budget gets killed
-    /// and the function returns `None`.
-    #[cfg(unix)]
-    #[test]
-    #[ignore]
-    fn output_with_timeout_kills_hung_child() {
-        let mut cmd = std::process::Command::new("/bin/sh");
-        cmd.args(["-c", "sleep 30"]);
-        let start = std::time::Instant::now();
-        let result = output_with_timeout(cmd);
-        let elapsed = start.elapsed();
-        assert!(result.is_none(), "should have given up");
-        assert!(
-            elapsed < SUBPROCESS_TIMEOUT + std::time::Duration::from_secs(2),
-            "should have killed near the timeout window, took {elapsed:?}"
-        );
-    }
+    // The timeout / kill / reap behaviour behind `output_with_timeout`
+    // is tested where it lives, in `process::tests` — including the
+    // grandchild case this file's own tests never covered.
 
     #[test]
     fn registrable_domain_strips_subdomains_and_skips_ips() {

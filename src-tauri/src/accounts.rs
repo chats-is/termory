@@ -402,15 +402,14 @@ fn send_codex_cancel(port: u16) -> bool {
 /// cleanly — grok checked under both its official installer and
 /// `npm install -g @xai-official/grok` — and gemini has no login command.
 ///
-/// **Not a total fix.** Only the path where `/cancel` reaches a listening
-/// server and the child then exits is clean; both fallbacks below still
-/// signal the wrapper alone and can leave the grandchild behind, with
-/// `restore_auth` running afterwards regardless. Both are narrow — nothing
-/// listening means the login has not bound its server yet (so there is no
-/// OAuth server to outlive us), and a server that took the cancel is
-/// already on its way out — but don't read the happy path as covering
-/// everything.
-async fn stop_codex_login(child: &mut tokio::process::Child, port: u16) {
+/// **The fallback is no longer wrapper-only.** It used to be a bare
+/// `child.kill()`, which is exactly the signal that leaves the grandchild
+/// running; it is now [`crate::process::Managed::terminate`], which takes
+/// the whole process group / job down. `/cancel` is still tried FIRST —
+/// a server that shuts itself down releases its port properly and lets the
+/// wrapper mirror its exit, which a signal cannot do — so this stays the
+/// preferred path rather than the only line of defence.
+async fn stop_codex_login(child: &mut crate::process::Managed, port: u16) {
     let sent = tokio::task::spawn_blocking(move || send_codex_cancel(port))
         .await
         .unwrap_or(false);
@@ -422,7 +421,7 @@ async fn stop_codex_login(child: &mut tokio::process::Child, port: u16) {
     {
         return; // exited on its own — nothing to kill
     }
-    let _ = child.kill().await;
+    child.terminate(crate::process::CANCEL_GRACE).await;
 }
 
 pub async fn login_and_save_codex_account(
@@ -475,11 +474,9 @@ pub async fn login_and_save_codex_account(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    // Silent helper (output is captured, the browser is the UI) — don't
-    // flash a console window on Windows (see providers::hide_console).
-    #[cfg(windows)]
-    cmd.creation_flags(crate::providers::CREATE_NO_WINDOW);
-    let mut child = match cmd.spawn() {
+    // Managed: silent (no console window on Windows), killable as a whole
+    // process group, and torn down if Termory quits mid-login.
+    let mut child = match crate::process::spawn_managed(cmd) {
         Ok(c) => c,
         Err(e) => {
             restore_auth(&auth_path, original_auth.as_deref());
@@ -496,7 +493,7 @@ pub async fn login_and_save_codex_account(
     // the frontend can show a dialog without waiting for login to finish.
     // The URL appears as a bare `https://…` line (per codex's
     // `print_login_server_start` in cli/src/login.rs:113).
-    let stderr_pipe = child.stderr.take().expect("stderr piped");
+    let stderr_pipe = child.stderr().expect("stderr piped");
     let app_clone = app.clone();
     let stderr_task: tokio::task::JoinHandle<String> = tokio::spawn(async move {
         use tauri::Emitter as _;
@@ -1451,9 +1448,9 @@ pub async fn login_and_save_claude_account(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    #[cfg(windows)]
-    cmd.creation_flags(crate::providers::CREATE_NO_WINDOW);
-    let mut child = match cmd.spawn() {
+    // Managed: silent (no console window on Windows), killable as a whole
+    // process group, and torn down if Termory quits mid-login.
+    let mut child = match crate::process::spawn_managed(cmd) {
         Ok(c) => c,
         Err(e) => {
             let msg = if e.kind() == std::io::ErrorKind::NotFound {
@@ -1468,7 +1465,7 @@ pub async fn login_and_save_claude_account(
     // stdout: the auth URL rides a "…visit: https://…" line
     // (cli/handlers/auth.ts:199) — emit it as soon as it appears so the
     // frontend can show the copyable-URL dialog without waiting.
-    let stdout_pipe = child.stdout.take().expect("stdout piped");
+    let stdout_pipe = child.stdout().expect("stdout piped");
     let app_clone = app.clone();
     let stdout_task: tokio::task::JoinHandle<String> = tokio::spawn(async move {
         use tauri::Emitter as _;
@@ -1492,7 +1489,7 @@ pub async fn login_and_save_claude_account(
         }
         collected
     });
-    let stderr_pipe = child.stderr.take().expect("stderr piped");
+    let stderr_pipe = child.stderr().expect("stderr piped");
     let stderr_task: tokio::task::JoinHandle<String> = tokio::spawn(async move {
         use tokio::io::AsyncReadExt as _;
         let mut buf = String::new();
@@ -1513,14 +1510,14 @@ pub async fn login_and_save_claude_account(
             }
         },
         _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
-            let _ = child.kill().await;
+            child.terminate(crate::process::CANCEL_GRACE).await;
             stdout_task.abort();
             stderr_task.abort();
             restore_claude_auth(original_cred.as_ref(), original_oauth.as_ref());
             return Err("claude login timed out after 5 minutes".into());
         },
         _ = cancel_notify.notified() => {
-            let _ = child.kill().await;
+            child.terminate(crate::process::CANCEL_GRACE).await;
             stdout_task.abort();
             stderr_task.abort();
             restore_claude_auth(original_cred.as_ref(), original_oauth.as_ref());
@@ -2359,9 +2356,9 @@ pub async fn login_and_save_grok_account(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    #[cfg(windows)]
-    cmd.creation_flags(crate::providers::CREATE_NO_WINDOW);
-    let mut child = match cmd.spawn() {
+    // Managed: silent (no console window on Windows), killable as a whole
+    // process group, and torn down if Termory quits mid-login.
+    let mut child = match crate::process::spawn_managed(cmd) {
         Ok(c) => c,
         Err(e) => {
             let msg = if e.kind() == std::io::ErrorKind::NotFound {
@@ -2376,7 +2373,7 @@ pub async fn login_and_save_grok_account(
     // The device prompt goes to STDERR (`auth/device_code.rs:365-391`), so
     // that is the stream read line-by-line; stdout only carries the trailing
     // blank line `run_cli_login` prints on success.
-    let stderr_pipe = child.stderr.take().expect("stderr piped");
+    let stderr_pipe = child.stderr().expect("stderr piped");
     let app_clone = app.clone();
     let stderr_task: tokio::task::JoinHandle<String> = tokio::spawn(async move {
         use tauri::Emitter as _;
@@ -2402,7 +2399,7 @@ pub async fn login_and_save_grok_account(
         }
         collected
     });
-    let stdout_pipe = child.stdout.take().expect("stdout piped");
+    let stdout_pipe = child.stdout().expect("stdout piped");
     let stdout_task: tokio::task::JoinHandle<String> = tokio::spawn(async move {
         use tokio::io::AsyncReadExt as _;
         let mut buf = String::new();
@@ -2424,14 +2421,14 @@ pub async fn login_and_save_grok_account(
             }
         },
         _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
-            let _ = child.kill().await;
+            child.terminate(crate::process::CANCEL_GRACE).await;
             stderr_task.abort();
             stdout_task.abort();
             restore_auth(&path, original_auth.as_deref());
             return Err("grok login timed out after 5 minutes".into());
         },
         _ = cancel_notify.notified() => {
-            let _ = child.kill().await;
+            child.terminate(crate::process::CANCEL_GRACE).await;
             stderr_task.abort();
             stdout_task.abort();
             restore_auth(&path, original_auth.as_deref());
@@ -3082,39 +3079,49 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn stop_codex_login_lets_the_child_exit_on_its_own() {
+        // Keep `process::shutdown_all` (exercised by a parallel test in
+        // process.rs) from draining the global registry and killing this
+        // child out from under us.
+        let _hold = crate::process::hold_children();
         let (port, _rx) = stub_cancel_server();
-        let mut child = tokio::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("sleep 0.3")
-            .spawn()
-            .expect("spawn probe");
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg("sleep 0.3");
+        let mut child = crate::process::spawn_managed(cmd).expect("spawn probe");
 
         stop_codex_login(&mut child, port).await;
 
-        let status = child.try_wait().expect("try_wait").expect("already reaped");
+        let status = child.wait().await.expect("wait");
         assert!(
             status.success(),
             "child should have exited on its own, not been killed: {status:?}"
         );
     }
 
-    /// With nothing listening there is no exit coming, so the grace period
-    /// must be SKIPPED rather than sat out — it is a user-facing cancel.
+    /// With nothing listening there is no exit coming, so the CANCEL's
+    /// grace period must be SKIPPED rather than sat out — it is a
+    /// user-facing cancel.
+    ///
+    /// The `terminate` that follows has a grace period of its own, but
+    /// that one is the SIGTERM→SIGKILL escalation and is near-instant for
+    /// a process with default handlers (covered by
+    /// `process::tests::terminate_escalates_to_kill_when_term_is_ignored`).
     #[cfg(unix)]
     #[tokio::test]
     async fn stop_codex_login_kills_at_once_when_nothing_answers() {
+        // Keep `process::shutdown_all` (exercised by a parallel test in
+        // process.rs) from draining the global registry and killing this
+        // child out from under us.
+        let _hold = crate::process::hold_children();
         let port = closed_port();
-        let mut child = tokio::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("sleep 30")
-            .spawn()
-            .expect("spawn probe");
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg("sleep 30");
+        let mut child = crate::process::spawn_managed(cmd).expect("spawn probe");
 
         let started = std::time::Instant::now();
         stop_codex_login(&mut child, port).await;
         let elapsed = started.elapsed();
 
-        let status = child.try_wait().expect("try_wait").expect("already reaped");
+        let status = child.wait().await.expect("wait");
         assert!(
             !status.success(),
             "child should have been killed, not exited cleanly: {status:?}"

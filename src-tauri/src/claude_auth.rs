@@ -38,7 +38,7 @@ use std::error::Error;
 use std::path::PathBuf;
 
 #[cfg(all(target_os = "macos", not(test)))]
-use crate::providers::output_with_timeout_stdin;
+use crate::process::{probe_with_stdin, PROBE_TIMEOUT};
 
 // The Keychain tier is gated `all(target_os = "macos", not(test))`
 // throughout: unit tests must never touch the developer's (or CI runner's)
@@ -143,7 +143,7 @@ pub(crate) fn keychain_account() -> String {
 pub(crate) fn keychain_locked() -> bool {
     let mut cmd = std::process::Command::new("security");
     cmd.arg("show-keychain-info");
-    match output_with_timeout_stdin(cmd, None) {
+    match probe_with_stdin(cmd, None, PROBE_TIMEOUT) {
         Some(out) => out.status.code() == Some(SEC_KEYCHAIN_LOCKED),
         // A timeout or spawn failure is not evidence of a lock.
         None => false,
@@ -200,7 +200,7 @@ fn keychain_read_uncached() -> Option<JsonValue> {
         "-s",
         &keychain_service_name(),
     ]);
-    let out = output_with_timeout_stdin(cmd, None)?;
+    let out = probe_with_stdin(cmd, None, PROBE_TIMEOUT)?;
     if !out.status.success() {
         return None; // exit 44 = no entry
     }
@@ -249,7 +249,7 @@ fn keychain_write_inner(doc: &JsonValue) -> bool {
     if command.len() <= SECURITY_STDIN_LINE_LIMIT {
         let mut cmd = std::process::Command::new("security");
         cmd.arg("-i");
-        return output_with_timeout_stdin(cmd, Some(command.as_bytes()))
+        return probe_with_stdin(cmd, Some(command.as_bytes()), PROBE_TIMEOUT)
             .map(|o| o.status.success())
             .unwrap_or(false);
     }
@@ -264,7 +264,7 @@ fn keychain_write_inner(doc: &JsonValue) -> bool {
         "-X",
         &hex,
     ]);
-    output_with_timeout_stdin(cmd, None)
+    probe_with_stdin(cmd, None, PROBE_TIMEOUT)
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
@@ -288,7 +288,7 @@ fn keychain_delete_inner() -> bool {
         "-s",
         &keychain_service_name(),
     ]);
-    match output_with_timeout_stdin(cmd, None) {
+    match probe_with_stdin(cmd, None, PROBE_TIMEOUT) {
         Some(out) => out.status.success() || out.status.code() == Some(SEC_ITEM_NOT_FOUND),
         None => false,
     }
