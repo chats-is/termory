@@ -194,6 +194,74 @@ fn upgrade_child(cmd: &str) -> tokio::process::Command {
     c
 }
 
+/// Drain the child's stdout to EOF, returning the last [`TAIL_LINES`]
+/// lines that followed the start marker.
+///
+/// The stream must be drained REGARDLESS of whether anyone wants the
+/// text — an unread pipe blocks the child once it fills (~64 KB) — so
+/// this never stops early on anything but EOF or a real pipe error.
+///
+/// **Bytes in, lossy `String` out — never `lines()`.** That helper hands
+/// back `io::Result<String>` and yields `Err` for a line that isn't valid
+/// UTF-8, which the `while let Ok(..)` reading it took for end-of-stream.
+/// Not an edge case on Windows: a console child writes in the system's
+/// OEM code page, so on any non-English install the CLI's own error text
+/// is not UTF-8. Measured on a zh-CN Win11 box — `'x' is not recognized`
+/// arrived as CP936 (`178 187 202 199 …` = 不是内部或外部命令) and
+/// decoding stopped dead on it.
+///
+/// It cost more than mangled characters. Everything after that line was
+/// dropped too, so a failing upgrade reported a bare exit code with an
+/// EMPTY tooltip despite having explained itself perfectly well — and the
+/// drain stopped while the child kept writing, which is exactly the pipe
+/// deadlock described above, turning a chatty failure into a hang until
+/// [`UPGRADE_TIMEOUT`] (10 minutes).
+///
+/// Lossy decoding cannot fail, so the drain always reaches EOF, and the
+/// ASCII skeleton that makes the tail actionable (command names, paths,
+/// versions, error codes) survives whatever the code page was.
+///
+/// Split out of `run_upgrade` so the tests drive the REAL reader. The
+/// Windows shell form is the one that produces non-UTF-8 output, and a
+/// test copy of this loop would have reproduced the bug rather than
+/// caught it.
+async fn drain_marked_output<R>(stdout: R) -> Vec<String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut tail: Vec<String> = Vec::new();
+    let mut reader = BufReader::new(stdout);
+    let mut started = false;
+    let mut raw: Vec<u8> = Vec::new();
+
+    loop {
+        raw.clear();
+        match reader.read_until(b'\n', &mut raw).await {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(_) => break, // a real pipe error — nothing left to read
+        }
+        let decoded = String::from_utf8_lossy(&raw);
+        let line = crate::sessions::strip_ansi(&decoded).trim_end().to_string();
+        if !started {
+            // `contains`, not equality: a prompt or banner fragment can
+            // share the line the echo lands on.
+            started = line.contains(crate::providers::SHELL_PROBE_MARKER);
+            continue;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        if tail.len() == TAIL_LINES {
+            tail.remove(0);
+        }
+        tail.push(line);
+    }
+    tail
+}
+
 /// Run `app`'s upgrade and resolve when it finishes. The card's badge
 /// reads "Updating" and is disabled meanwhile; on failure the error
 /// returned here becomes the badge's tooltip.
@@ -206,8 +274,6 @@ fn upgrade_child(cmd: &str) -> tokio::process::Command {
 /// hanging forever; the UI then names the command for the user to run
 /// in their own terminal.
 pub async fn run_upgrade(app: CliApp) -> Result<(), String> {
-    use tokio::io::{AsyncBufReadExt, BufReader};
-
     let Some(cmd) = upgrade_command(app) else {
         return Err("this app has no command-line upgrade".to_string());
     };
@@ -234,35 +300,16 @@ pub async fn run_upgrade(app: CliApp) -> Result<(), String> {
         .stdout()
         .ok_or_else(|| "couldn't read the upgrade output".to_string())?;
 
-    // The stream must be DRAINED regardless (an unread pipe blocks the
-    // child); we keep the tail so a failure reports the reason the
-    // command actually printed rather than a bare exit code.
-    let mut tail: Vec<String> = Vec::new();
-    let mut lines = BufReader::new(stdout).lines();
-    let mut started = false;
-
     let stream = async {
-        while let Ok(Some(raw)) = lines.next_line().await {
-            let line = crate::sessions::strip_ansi(&raw).trim_end().to_string();
-            if !started {
-                // `contains`, not equality: a prompt or banner fragment
-                // can share the line the echo lands on.
-                started = line.contains(crate::providers::SHELL_PROBE_MARKER);
-                continue;
-            }
-            if line.is_empty() {
-                continue;
-            }
-            if tail.len() == TAIL_LINES {
-                tail.remove(0);
-            }
-            tail.push(line);
-        }
-        child.wait().await
+        let tail = drain_marked_output(stdout).await;
+        (tail, child.wait().await)
     };
 
-    let status = match tokio::time::timeout(UPGRADE_TIMEOUT, stream).await {
-        Ok(status) => status.map_err(|err| format!("the upgrade failed to run: {err}"))?,
+    let (tail, status) = match tokio::time::timeout(UPGRADE_TIMEOUT, stream).await {
+        Ok((tail, status)) => (
+            tail,
+            status.map_err(|err| format!("the upgrade failed to run: {err}"))?,
+        ),
         Err(_) => {
             // Stop the whole tree explicitly rather than leaving it to
             // `Drop`, which can't wait: an installer given a moment to
@@ -286,6 +333,97 @@ pub async fn run_upgrade(app: CliApp) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// Drive a real [`upgrade_child`] through the REAL reader, and hand
+    /// back its exit success plus the tail `run_upgrade` would report.
+    ///
+    /// Windows-only because that branch is a DIFFERENT shell form
+    /// (`cmd /C "echo <marker>& …"` rather than `$SHELL -l -i -c`) whose
+    /// output contract nothing checked — the unix side's marker handling
+    /// is covered by `providers::tests::after_shell_marker_*`.
+    #[cfg(windows)]
+    async fn drive_upgrade_child(cmd: &str) -> (bool, Vec<String>) {
+        let mut spawn_cmd = upgrade_child(cmd);
+        spawn_cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .stdin(std::process::Stdio::null());
+        let mut child = crate::process::spawn_managed(spawn_cmd).expect("spawn");
+        let stdout = child.stdout().expect("stdout");
+        let tail = drain_marked_output(stdout).await;
+        let status = child.wait().await.expect("wait");
+        (status.success(), tail)
+    }
+
+    /// The marker must actually reach stdout, and the command's own output
+    /// must follow it — every line before the marker is discarded, so a
+    /// form that never printed one would swallow the whole upgrade log and
+    /// leave a bare exit code. A non-empty tail proves both halves.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_upgrade_child_emits_the_marker_before_the_output() {
+        let _hold = crate::process::hold_children();
+        let (ok, tail) = drive_upgrade_child("echo hello").await;
+
+        assert!(ok, "a plain echo should succeed: {tail:?}");
+        assert!(
+            tail.iter().any(|l| l.contains("hello")),
+            "the output never survived the marker filter: {tail:?}"
+        );
+    }
+
+    /// **A failure reason in the system code page must still come back.**
+    ///
+    /// Two things have to hold at once here, and each broke on real
+    /// Windows: `2>&1` folds the reason onto stdout (the shell's own fd 2
+    /// is wired to `null`, so anything left there is gone), and the reader
+    /// survives decoding it. On a zh-CN box this exact command answers in
+    /// CP936, which is not valid UTF-8 — the `lines()` reader this
+    /// replaced treated that as end-of-stream and returned an empty tail.
+    ///
+    /// Asserting on the ECHOED COMMAND NAME rather than the message: it is
+    /// ASCII, so it survives lossy decoding on every locale, which keeps
+    /// this test meaningful on an English install too.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_upgrade_child_reports_a_failure_in_any_code_page() {
+        let _hold = crate::process::hold_children();
+        // cmd.exe reports an unknown command on stderr and exits non-zero:
+        // the same shape as a real failing upgrade.
+        let (ok, tail) = drive_upgrade_child("termory_no_such_command_xyz").await;
+
+        assert!(!ok, "an unknown command must fail: {tail:?}");
+        assert!(
+            tail.iter()
+                .any(|l| l.contains("termory_no_such_command_xyz")),
+            "the reason never survived, so the failure tooltip is empty: {tail:?}"
+        );
+    }
+
+    /// The drain must not stop at a line that isn't valid UTF-8 — the
+    /// lines AFTER it are exactly the ones a tail keeps, and stopping
+    /// early also stops draining a pipe the child is still writing to.
+    ///
+    /// Fed straight into the real reader rather than through a shell, so
+    /// it pins the rule on every platform instead of only where a console
+    /// happens to emit non-UTF-8.
+    #[tokio::test]
+    async fn the_drain_survives_a_line_that_is_not_utf8() {
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend_from_slice(crate::providers::SHELL_PROBE_MARKER.as_bytes());
+        raw.extend_from_slice(b"\n");
+        // CP936 for the tail of "is not an internal or external command".
+        raw.extend_from_slice(&[178, 187, 202, 199, 196, 218, 178, 191]);
+        raw.extend_from_slice(b"\nlast-line\n");
+
+        let tail = drain_marked_output(std::io::Cursor::new(raw)).await;
+
+        assert_eq!(
+            tail.last().map(String::as_str),
+            Some("last-line"),
+            "decoding stopped at the non-UTF-8 line: {tail:?}"
+        );
+    }
 
     #[test]
     fn built_in_upgrade_commands_are_used_verbatim() {
