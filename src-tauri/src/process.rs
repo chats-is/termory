@@ -1296,6 +1296,469 @@ mod tests {
         );
     }
 
+    // ===============================================================
+    // Windows mirrors
+    // ===============================================================
+    //
+    // The container above is a Job Object, not a process group, and none
+    // of the unix tests compile here — so without these the whole
+    // Windows half of this module ships untested, on the platform where
+    // it is load-bearing for EVERY subprocess (probes, upgrades, logins).
+    //
+    // Two unix tests have no Windows counterpart on purpose:
+    //
+    // - the SIGTERM-escalation pair, because `terminate` IS `kill` here
+    //   (`TerminateJobObject` has no polite form). What replaces them is
+    //   `terminate_does_not_wait_out_the_grace_on_windows`, which pins
+    //   the `alive() == false` rule those two would otherwise hide.
+    // - `detached_children_are_reaped`, because Windows has no zombies:
+    //   dropping the handle releases the process object outright.
+
+    /// A child that backgrounds a grandchild, with the grandchild's fate
+    /// made observable by two marker files.
+    ///
+    /// Batch files rather than an interpolated `cmd /C "…"`: the quoting
+    /// rules for a nested `start "" /B cmd /C "…"` are a trap, and the
+    /// files also give the grandchild a stable `%~dp0` to write into.
+    ///
+    /// `ping` is the sleep, NOT `timeout` — [`spawn_managed`] and
+    /// [`probe`] both pass `CREATE_NO_WINDOW`, and `timeout` refuses to
+    /// run without a console ("Input redirection is not supported").
+    #[cfg(windows)]
+    struct GrandchildProbe {
+        dir: std::path::PathBuf,
+        started: std::path::PathBuf,
+        survived: std::path::PathBuf,
+    }
+
+    /// Seconds the grandchild waits before writing `survived`. Every kill
+    /// in these tests happens well inside the window, so a pass never
+    /// depends on winning a race with it. `ping -n N` sleeps N-1 seconds.
+    #[cfg(windows)]
+    const GRANDCHILD_PINGS: u32 = 3;
+
+    /// A fresh, uniquely-named temp dir. Unique per call because the
+    /// suite runs in parallel and several of these tests are spawned from
+    /// the same process.
+    #[cfg(windows)]
+    fn scratch_path(tag: &str) -> std::path::PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "termory-{tag}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        dir
+    }
+
+    /// A scratch dir that removes itself — for tests that just need a
+    /// file on disk, without the grandchild harness around it.
+    #[cfg(windows)]
+    struct ScratchDir(std::path::PathBuf);
+
+    #[cfg(windows)]
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(windows)]
+    impl GrandchildProbe {
+        fn new(tag: &str) -> Self {
+            let dir = scratch_path(tag);
+            let probe = Self {
+                started: dir.join("started"),
+                survived: dir.join("survived"),
+                dir,
+            };
+            std::fs::write(
+                probe.dir.join("grand.cmd"),
+                format!(
+                    "@echo off\r\n\
+                     echo started>\"%~dp0started\"\r\n\
+                     ping -n {GRANDCHILD_PINGS} 127.0.0.1 >nul\r\n\
+                     echo survived>\"%~dp0survived\"\r\n"
+                ),
+            )
+            .expect("grand.cmd");
+            // Backgrounds the grandchild, then blocks well past the end of
+            // the test — so it is always the KILL that ends the tree.
+            std::fs::write(
+                probe.dir.join("child.cmd"),
+                "@echo off\r\n\
+                 start \"\" /B cmd /C \"%~dp0grand.cmd\"\r\n\
+                 ping -n 31 127.0.0.1 >nul\r\n",
+            )
+            .expect("child.cmd");
+            // Backgrounds the grandchild and exits NORMALLY, straight
+            // away — nothing is killed, so only the sweep can end it.
+            std::fs::write(
+                probe.dir.join("exit.cmd"),
+                "@echo off\r\n\
+                 start \"\" /B cmd /C \"%~dp0grand.cmd\"\r\n",
+            )
+            .expect("exit.cmd");
+            probe
+        }
+
+        fn child_script(&self) -> std::path::PathBuf {
+            self.dir.join("child.cmd")
+        }
+
+        fn exit_script(&self) -> std::path::PathBuf {
+            self.dir.join("exit.cmd")
+        }
+
+        /// Block until the grandchild is definitely running. Without this
+        /// the kill outruns `cmd`'s own startup and the test measures a
+        /// race instead of the rule.
+        fn wait_started(&self) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if self.started.exists() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            panic!("grandchild never started — the test proves nothing");
+        }
+
+        /// Wait past the grandchild's own delay, then report whether it
+        /// was still alive to write its marker.
+        fn grandchild_survived(&self) -> bool {
+            std::thread::sleep(
+                Duration::from_secs(GRANDCHILD_PINGS as u64) + Duration::from_secs(1),
+            );
+            self.survived.exists()
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for GrandchildProbe {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Is this pid still running? The Windows answer to `kill(pid, 0)`:
+    /// a process that has exited reports a non-`STILL_ACTIVE` code, and
+    /// one that is gone entirely can't be opened.
+    #[cfg(windows)]
+    fn pid_alive(pid: u32) -> bool {
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // SAFETY: the handle is checked before use and closed exactly once.
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+            let mut code: u32 = 0;
+            let ok = GetExitCodeProcess(handle, &mut code) != 0;
+            CloseHandle(handle);
+            ok && code == STILL_ACTIVE as u32
+        }
+    }
+
+    #[cfg(windows)]
+    fn cmd_c(arg: &str) -> Command {
+        let mut cmd = Command::new("cmd.exe");
+        cmd.args(["/C", arg]);
+        cmd
+    }
+
+    /// The direct child is reaped and the output comes back intact.
+    #[cfg(windows)]
+    #[test]
+    fn probe_returns_output_and_reaps_on_windows() {
+        let out = probe(cmd_c("echo hello"), Duration::from_secs(5)).expect("probe output");
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello");
+    }
+
+    /// A non-zero exit is still `Some` — callers read the status code.
+    #[cfg(windows)]
+    #[test]
+    fn probe_keeps_a_failing_exit_status_on_windows() {
+        let out = probe(cmd_c("exit 44"), Duration::from_secs(5)).expect("probe output");
+        assert_eq!(out.status.code(), Some(44));
+    }
+
+    /// Output bigger than a pipe buffer must come back whole, and must
+    /// not stall the probe into its own timeout.
+    #[cfg(windows)]
+    #[test]
+    fn probe_reads_output_larger_than_the_pipe_buffer_on_windows() {
+        let scratch = ScratchDir(scratch_path("bigout"));
+        std::fs::write(scratch.0.join("big.txt"), "0123456789".repeat(20_000)).expect("big file");
+        // Bare filename + `current_dir`, NOT an interpolated absolute
+        // path: Rust escapes an embedded `"` as `\"`, which `cmd.exe`
+        // does not unquote — the argument reaches `type` verbatim and it
+        // reports a missing file.
+        let mut cmd = cmd_c("type big.txt");
+        cmd.current_dir(&scratch.0);
+
+        let started = Instant::now();
+        let out = probe(cmd, Duration::from_secs(20)).expect("probe should not time out");
+
+        assert!(out.status.success());
+        assert_eq!(out.stdout.len(), 200_000, "output was truncated");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "probe stalled on a full pipe ({:?})",
+            started.elapsed()
+        );
+    }
+
+    /// stderr is drained too — same deadlock, other pipe.
+    #[cfg(windows)]
+    #[test]
+    fn probe_reads_large_stderr_without_stalling_on_windows() {
+        let scratch = ScratchDir(scratch_path("bigerr"));
+        std::fs::write(scratch.0.join("big.txt"), "0123456789".repeat(20_000)).expect("big file");
+        // See the stdout twin for why the path is not interpolated.
+        let mut cmd = cmd_c("type big.txt 1>&2");
+        cmd.current_dir(&scratch.0);
+
+        let out = probe(cmd, Duration::from_secs(20)).expect("probe should not time out");
+
+        assert!(out.status.success());
+        assert_eq!(out.stderr.len(), 200_000, "stderr was truncated");
+    }
+
+    /// stdin is delivered. `sort` with no file argument reads it.
+    #[cfg(windows)]
+    #[test]
+    fn probe_writes_stdin_on_windows() {
+        let out = probe_with_stdin(cmd_c("sort"), Some(b"payload"), Duration::from_secs(5))
+            .expect("probe output");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "payload");
+    }
+
+    /// **The grandchild rule.** A `cmd` that backgrounds a command and
+    /// then blocks leaves that command running; killing the direct child
+    /// does not touch it. A timed-out probe must take the whole job down.
+    #[cfg(windows)]
+    #[test]
+    fn probe_timeout_kills_the_whole_job_on_windows() {
+        let probe_dir = GrandchildProbe::new("probe");
+        let script = probe_dir.child_script();
+
+        // Spawn on a helper thread so the grandchild can be confirmed
+        // running while the probe is still inside its wait loop.
+        let script_done = std::thread::spawn(move || {
+            let mut cmd = Command::new("cmd.exe");
+            cmd.arg("/C").arg(&script);
+            let started = Instant::now();
+            let out = probe(cmd, Duration::from_millis(900));
+            (out.is_none(), started.elapsed())
+        });
+        probe_dir.wait_started();
+
+        let (timed_out, elapsed) = script_done.join().expect("probe thread");
+        assert!(timed_out, "a timed-out probe returns None");
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the probe must not sit out the child's full sleep"
+        );
+        assert!(
+            !probe_dir.grandchild_survived(),
+            "grandchild survived the job kill"
+        );
+    }
+
+    /// `terminate` must reach a grandchild too — the codex-login case,
+    /// where the process holding the OAuth port is not the one we spawned.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn managed_terminate_kills_the_whole_job_on_windows() {
+        let _hold = hold_children();
+        let probe_dir = GrandchildProbe::new("managed");
+        let mut cmd = tokio::process::Command::new("cmd.exe");
+        cmd.arg("/C").arg(probe_dir.child_script());
+
+        let mut managed = spawn_managed(cmd).expect("spawn");
+        probe_dir.wait_started();
+        managed.terminate(INSTALL_GRACE).await;
+
+        assert!(
+            !probe_dir.grandchild_survived(),
+            "grandchild survived terminate()"
+        );
+    }
+
+    /// Drop is the path an early `return` in a login flow takes, and it
+    /// must reach the grandchild as well.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn dropping_a_managed_child_kills_the_whole_job_on_windows() {
+        let _hold = hold_children();
+        let probe_dir = GrandchildProbe::new("dropped");
+        let mut cmd = tokio::process::Command::new("cmd.exe");
+        cmd.arg("/C").arg(probe_dir.child_script());
+
+        let managed = spawn_managed(cmd).expect("spawn");
+        probe_dir.wait_started();
+        drop(managed);
+
+        assert!(
+            !probe_dir.grandchild_survived(),
+            "grandchild survived the drop"
+        );
+    }
+
+    /// **A NORMAL exit must sweep the job too.** Nothing is killed here:
+    /// the child exits on its own and `wait()` reports success, so a
+    /// passing assertion can only come from the sweep inside `wait`.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_normal_exit_still_sweeps_the_job_on_windows() {
+        let _hold = hold_children();
+        let probe_dir = GrandchildProbe::new("normalexit");
+        let mut cmd = tokio::process::Command::new("cmd.exe");
+        cmd.arg("/C").arg(probe_dir.exit_script());
+
+        let mut managed = spawn_managed(cmd).expect("spawn");
+        probe_dir.wait_started();
+
+        let status = managed.wait().await.expect("wait");
+        assert!(
+            status.success(),
+            "the child should have exited by itself, not been killed: {status:?}"
+        );
+        assert!(
+            !probe_dir.grandchild_survived(),
+            "grandchild outlived a cleanly-exiting parent"
+        );
+    }
+
+    /// **`alive()` returning false is a rule, not a stub.**
+    ///
+    /// `TerminateJobObject` is synchronous and uncatchable, so there is
+    /// nothing to wait out — and the obvious "return true" placeholder
+    /// would make `shut_down` poll a job it has already destroyed for the
+    /// full grace, adding 2s to every login cancel on Windows. The child
+    /// here is the SIGTERM-ignoring case from the unix suite, which is
+    /// precisely the one that pays the grace over there.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn terminate_does_not_wait_out_the_grace_on_windows() {
+        let _hold = hold_children();
+        let mut cmd = tokio::process::Command::new("cmd.exe");
+        cmd.args(["/C", "ping -n 31 127.0.0.1 >nul"]);
+        let mut managed = spawn_managed(cmd).expect("spawn");
+        let pid = managed.child.id().expect("pid");
+
+        let started = Instant::now();
+        managed.terminate(INSTALL_GRACE).await;
+        let elapsed = started.elapsed();
+
+        assert!(!pid_alive(pid), "child {pid} survived terminate()");
+        assert!(
+            elapsed < INSTALL_GRACE,
+            "terminate waited out the grace ({elapsed:?}) — a job has no \
+             polite form to wait for"
+        );
+    }
+
+    /// The app-exit sweep must take managed children down — including
+    /// their grandchildren — while leaving nothing registered behind.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn shutdown_all_kills_managed_children_on_windows() {
+        let _sweep = SWEEP_LOCK.write().unwrap_or_else(|e| e.into_inner());
+        let probe_dir = GrandchildProbe::new("shutdown");
+        let mut cmd = tokio::process::Command::new("cmd.exe");
+        cmd.arg("/C").arg(probe_dir.child_script());
+
+        // The handle is deliberately KEPT alive across the assertions: if
+        // it were dropped first, `Drop` would do the killing and a broken
+        // sweep would still look fine.
+        let managed = spawn_managed(cmd).expect("spawn");
+        let ticket = managed.ticket.expect("registered");
+        probe_dir.wait_started();
+
+        shutdown_all();
+
+        assert!(
+            !registry_holds(|t, _| t == ticket),
+            "shutdown_all must empty the registry"
+        );
+        assert!(
+            !probe_dir.grandchild_survived(),
+            "grandchild survived shutdown_all()"
+        );
+        drop(managed);
+    }
+
+    /// A managed child is registered while it runs and gone once dropped.
+    /// On Windows this also proves `AssignProcessToJobObject` SUCCEEDED —
+    /// a failed adopt registers nothing and silently drops the whole
+    /// grandchild guarantee to a `log::warn`.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn managed_registers_and_deregisters_on_windows() {
+        let _hold = hold_children();
+        let mut cmd = tokio::process::Command::new("cmd.exe");
+        cmd.args(["/C", "ping -n 31 127.0.0.1 >nul"]);
+        let mut managed = spawn_managed(cmd).expect("spawn");
+        let ticket = managed.ticket.expect("no job container — adopt failed");
+        assert!(
+            registry_holds(|t, _| t == ticket),
+            "a live managed child must be registered for shutdown"
+        );
+        managed.terminate(INSTALL_GRACE).await;
+        drop(managed);
+        assert!(
+            !registry_holds(|t, _| t == ticket),
+            "a finished managed child must not stay in the registry"
+        );
+    }
+
+    /// Dropping without terminating still stops the child.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn dropping_a_managed_child_stops_it_on_windows() {
+        let _hold = hold_children();
+        let mut cmd = tokio::process::Command::new("cmd.exe");
+        cmd.args(["/C", "ping -n 31 127.0.0.1 >nul"]);
+        let managed = spawn_managed(cmd).expect("spawn");
+        let pid = managed.child.id().expect("pid");
+        drop(managed);
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !pid_alive(pid),
+            "dropped managed child {pid} is still running"
+        );
+    }
+
+    /// A detached child is NOT registered — quitting Termory must never
+    /// close the terminal the user is working in.
+    ///
+    /// Asserted as "the registry is still empty" rather than by group id:
+    /// a Windows container is a job HANDLE, which says nothing about which
+    /// pid is inside it. The sweep runs first (under the write lock, so no
+    /// sibling test owns a child) to establish that empty baseline.
+    #[cfg(windows)]
+    #[test]
+    fn detached_children_are_not_registered_for_shutdown_on_windows() {
+        let _sweep = SWEEP_LOCK.write().unwrap_or_else(|e| e.into_inner());
+        shutdown_all();
+
+        let pid = spawn_detached(cmd_c("ping -n 2 127.0.0.1 >nul")).expect("spawn");
+
+        assert!(
+            !registry_holds(|_, _| true),
+            "detached child {pid} must stay out of the shutdown registry"
+        );
+    }
+
     /// The zombie fix: a detached child that has exited must be REAPED,
     /// not left in the process table.
     ///
