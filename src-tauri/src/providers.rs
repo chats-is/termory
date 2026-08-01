@@ -674,6 +674,11 @@ pub(crate) const SHELL_PROBE_MARKER: &str = "__termory_shell_probe__";
 ///
 /// Exit status still belongs to `cmd` — in a `;` sequence the shell
 /// reports the last command's code.
+///
+/// Both callers (`shell_version_fallback`, `upgrade::upgrade_child`) are
+/// unix-only, so off unix this is dead in a RELEASE build — the test build
+/// keeps it alive through its own callers, which is why only release warned.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn marked_shell_command(cmd: &str) -> String {
     format!("echo {SHELL_PROBE_MARKER}; {cmd} 2>&1")
 }
@@ -682,6 +687,10 @@ pub(crate) fn marked_shell_command(cmd: &str) -> String {
 /// the marker never appeared: a shell that didn't reach the `echo`
 /// produced nothing trustworthy, so callers must not fall back to
 /// parsing the whole text (that is exactly the bug this prevents).
+///
+/// Its only caller is the unix-gated `shell_version_fallback`; see
+/// [`marked_shell_command`] for why that means a release-only warning.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn after_shell_marker(raw: &str) -> Option<&str> {
     // `rsplit` so a banner that happens to contain the marker text
     // can't shadow the real one — the last occurrence is ours.

@@ -640,10 +640,12 @@ fn msix_package_roaming_parents(local_app_data: &Path) -> Vec<PathBuf> {
     out
 }
 
-#[cfg(windows)]
-fn config_parent_dir() -> Result<PathBuf, Box<dyn Error>> {
-    Ok(select_config_parent(&windows_config_parents()))
-}
+// NOTE: there is deliberately no Windows `config_parent_dir`. Windows has
+// no SINGLE parent to return: `current_paths` picks one with
+// `select_config_parent`, while `install_watch_parents` watches ALL the
+// candidates. A wrapper returning just the selected one existed here and
+// was called by neither — dead code, and the only warning in the Windows
+// build.
 
 /// First candidate that already CONTAINS a Claude Desktop config dir
 /// (a `Claude*` non-3p child); else the first candidate, so fresh

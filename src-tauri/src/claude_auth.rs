@@ -100,6 +100,11 @@ pub(crate) fn credentials_file() -> Option<PathBuf> {
 /// a non-NFC form derives a different name. That degrades safely — the lookup
 /// finds nothing and the file fallback takes over — and adding a Unicode
 /// normalization dependency for that three-way edge case isn't worth it.
+///
+/// Every non-test caller is inside the macOS Keychain tier, so off macOS this
+/// is dead in a RELEASE build (the test build keeps it alive through its own
+/// callers, which is why only release warned).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn keychain_service_name() -> String {
     use sha2::{Digest, Sha256};
     // `isDefaultDir = !process.env.CLAUDE_CONFIG_DIR` — keyed on the env var,
