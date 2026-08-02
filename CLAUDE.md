@@ -674,6 +674,7 @@ Audit reference is now OpenCode `1.17.11` (commit `77f2d22`) — up from the ori
 
 ## Implementation Rules
 
+- **NEVER commit automatically (LOCKED).** Do not run `git commit`, `git push`, `git tag`, or create a PR unless the user asks for it in that turn. Finishing a change, going green on tests, and reaching the end of a task are NOT commit triggers — leave the work in the working tree and report what changed. Approval to commit once does not carry into the next change. Branching (`git checkout -b`) is fine when the user asked for branch-based work; it is the commit that needs an explicit ask.
 - Keep data acquisition and message preview formatting aligned with the official tool behavior, but **never hide content** — Termory is a history browser, so anything recorded must be surfaced (usually as an italic `*[wrapper-name]*` notice when there's no nicer representation). See the "Unified tool-message format — LOCKED RULE" rule 7.
 - Do not add custom title/message fallbacks unless the official tool does the same.
 - Format command and tool output the way the official tool **actually renders it in its TUI** — not what its docs say, and not what feels right. Always grep `.audit-sources/<repo>/` for the real render function and put a `// path/to/file.tsx:LINE` citation next to the matching Termory branch. Earlier rounds of this codebase had ~600 lines of tool-formatting guesswork that diverged from every TUI; those have been replaced and the rule exists to prevent regressing.
