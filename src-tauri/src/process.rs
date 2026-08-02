@@ -195,6 +195,13 @@ impl Group {
     /// `KILL_ON_JOB_CLOSE` is what makes this survive a Termory that never
     /// gets to run its own cleanup: when our process dies the last handle
     /// closes and the OS tears the job down.
+    ///
+    /// Verified on real hardware by ending Termory from Task Manager — the
+    /// managed children went with it. That is `TerminateProcess`, so none
+    /// of our own cleanup runs, which is exactly the path `shutdown_all`
+    /// cannot cover. Note the failure mode here is SILENT: drop the flag
+    /// and every existing test still passes, because `TerminateJobObject`
+    /// does not depend on it.
     fn adopt(_pid: u32, handle: isize) -> Option<Self> {
         use windows_sys::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
