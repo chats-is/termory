@@ -250,6 +250,19 @@ pub fn save_current_account(app: CliApp) -> Result<(), Box<dyn Error>> {
 /// Returns the CLI whose live login changed, so a caller holding only the
 /// account id (the IPC command) can invalidate that CLI's cached quota —
 /// the numbers belong to the account being switched away from.
+/// Which CLI a saved account belongs to, or `None` if the id is unknown.
+///
+/// Exists so the IPC entry point can apply the login guard, which needs a
+/// `CliApp` before the switch runs. `switch_account` itself derives the
+/// same thing internally, but the guard cannot live in there: the login
+/// flow calls it to RESTORE the previous account while still holding its
+/// own slot, so a guard inside would block the flow's own cleanup.
+pub fn account_cli(id: &str) -> Option<CliApp> {
+    let store = read_store().ok()?;
+    let entry = store.iter().find(|e| str_field(e, "id") == Some(id))?;
+    CliApp::parse(str_field(entry, "app")?)
+}
+
 pub async fn switch_account(id: String) -> Result<CliApp, Box<dyn Error>> {
     let store = read_store()?;
     let entry = store
@@ -320,6 +333,45 @@ impl<'a> LoginSlot<'a> {
 impl Drop for LoginSlot<'_> {
     fn drop(&mut self) {
         *self.slot.lock().unwrap() = None;
+    }
+}
+
+/// Is an add-account / re-login flow running for `cli` right now?
+///
+/// Reads the same [`LoginSlot`] reservation that guards re-entrancy, so it
+/// is true for exactly as long as the flow owns the credential — the slot
+/// is RAII and clears on every exit path, cancel and panic included.
+///
+/// **Why anything outside the login flow cares:** while a login runs, the
+/// CLI's credential is deliberately NOT the user's account. The codex flow
+/// blanks `auth.json` to `{}` up front (so `codex login` has nothing to
+/// revoke); claude's own `performLogout` clears local storage; grok's login
+/// overwrites the one shared scope entry. Anything that reads those files
+/// meanwhile sees a LOGGED-OUT account — indistinguishable from the real
+/// thing, but temporary and about to be rolled back.
+///
+/// `false` for CLIs with no login flow of their own (gemini, opencode,
+/// claude-desktop), and `false` if the managed state is absent, which is
+/// the case in unit tests and before `setup()` has run.
+pub fn login_in_progress(app: &tauri::AppHandle, cli: CliApp) -> bool {
+    use tauri::Manager as _;
+    fn reserved(slot: &std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>) -> bool {
+        slot.lock().map(|s| s.is_some()).unwrap_or(false)
+    }
+    match cli {
+        CliApp::Codex => app
+            .try_state::<CodexLoginCancel>()
+            .map(|s| reserved(&s.0))
+            .unwrap_or(false),
+        CliApp::Claude => app
+            .try_state::<ClaudeLoginCancel>()
+            .map(|s| reserved(&s.0))
+            .unwrap_or(false),
+        CliApp::Grok => app
+            .try_state::<GrokLoginCancel>()
+            .map(|s| reserved(&s.0))
+            .unwrap_or(false),
+        _ => false,
     }
 }
 

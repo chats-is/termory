@@ -767,6 +767,16 @@ async fn fetch_subscription_quota(
     app: String,
 ) -> Result<quota::SubscriptionQuota, String> {
     let cli = CliApp::parse(&app).ok_or_else(|| format!("unknown app: {app}"))?;
+    // The page pulls on its own (tab entry, cache expiry, manual refresh),
+    // so it needs the same guard as the credential watcher: mid-login, the
+    // file on disk is not the user's account and reading it reports a
+    // logout that clears the card. Returning early — WITHOUT
+    // `refresh_quota` — is the point: that call would stamp the rate-limit
+    // marker, and the real refresh triggered when the flow restores the
+    // credential would then be refused by a floor this non-fetch earned.
+    if accounts::login_in_progress(&handle, cli) {
+        return Ok(quota::quota_during_login(cli));
+    }
     let result = quota::fetch_quota(cli).await;
     // Keep the tray's quota row in sync with what the Providers page
     // just fetched (no extra network hit).
@@ -977,6 +987,23 @@ async fn save_account(handle: tauri::AppHandle, app: String) -> Result<(), Strin
 /// Validates/refreshes tokens in memory before writing auth.json.
 #[tauri::command]
 async fn switch_account(handle: tauri::AppHandle, id: String) -> Result<(), String> {
+    // Refuse while an add-account flow owns this CLI's credential. The
+    // switch would WRITE auth.json, and the flow overwrites it again when
+    // it ends — `switch_account(prev_id)` on success, `restore_auth` on
+    // cancel — so the user's choice is silently undone after a success
+    // toast, having spent a token refresh on the way. The frontend greys
+    // the button out; this covers the tray, which has its own row and no
+    // idea a login is running.
+    //
+    // Note the guard belongs HERE and not in `accounts::switch_account`:
+    // the login flow calls that to restore the previous account while
+    // still holding its slot, so a guard inside would block its own
+    // cleanup.
+    if let Some(cli) = accounts::account_cli(&id) {
+        if accounts::login_in_progress(&handle, cli) {
+            return Err("finish or cancel the add-account flow first".into());
+        }
+    }
     let cli = accounts::switch_account(id)
         .await
         .map_err(|e| e.to_string())?;
@@ -1012,22 +1039,42 @@ async fn login_and_save_codex_account(
     app: tauri::AppHandle,
     cancel_state: tauri::State<'_, accounts::CodexLoginCancel>,
 ) -> Result<String, String> {
-    let id = accounts::login_and_save_codex_account(app.clone(), &cancel_state).await?;
-    // A new saved login → a new row in the tray's account list, and the live
-    // login moved to it.
+    let result = accounts::login_and_save_codex_account(app.clone(), &cancel_state).await;
+    // Rebuild on BOTH outcomes, before propagating the error. Success adds a
+    // row and moves the live login; a failure — cancel, the 5-minute
+    // timeout, a save error — has just rolled auth.json back, which the tray
+    // must follow too. This sat after a `?`, so the rollback never reached
+    // the menu: a cancelled login left the account checkmark missing until
+    // the app was restarted.
     let _ = tray::rebuild_menu(&app);
-    Ok(id)
+    // Every quota refresh during the flow was skipped by the login guard,
+    // and on SUCCESS the live credential may now be a different account:
+    // with no previous account to restore (`resnapshot_live_before_login`
+    // returns None), auth.json is left holding the NEW login. That write
+    // landed while the guard was still up, and nothing writes the file
+    // again afterwards — so without this the card would keep showing the
+    // pre-login state, and a first-ever account would show none at all
+    // with its section hidden, refresh button and all. Cheap when
+    // redundant: `force_quota_refresh` has its own burst floor.
+    if result.is_ok() {
+        tray::force_quota_refresh(&app, CliApp::Codex);
+    }
+    result
 }
 
 #[tauri::command]
 async fn cancel_codex_login(
-    app: tauri::AppHandle,
     cancel_state: tauri::State<'_, accounts::CodexLoginCancel>,
 ) -> Result<(), String> {
     accounts::cancel_codex_login(&cancel_state).await?;
-    // Cancelling rolls auth.json back to the previous login, so the tray's
-    // account checkmark has to follow.
-    let _ = tray::rebuild_menu(&app);
+    // Deliberately NO `rebuild_menu` here. This only FIRES the cancel; the
+    // rollback happens inside the login flow, after it has stopped the
+    // child (an HTTP `/cancel` plus up to 2s waiting for it to exit).
+    // Rebuilding now reads the auth.json the flow blanked at the start, so
+    // every saved account compares as inactive and the tray loses its
+    // checkmark — with nothing to correct it, because the login IPC's own
+    // rebuild sat behind a `?` and a cancel returns Err. That flow rebuilds
+    // when it finishes, the only point at which the file has settled.
     Ok(())
 }
 
@@ -1040,19 +1087,42 @@ async fn login_and_save_claude_account(
     app: tauri::AppHandle,
     cancel_state: tauri::State<'_, accounts::ClaudeLoginCancel>,
 ) -> Result<String, String> {
-    let id = accounts::login_and_save_claude_account(app.clone(), &cancel_state).await?;
+    let result = accounts::login_and_save_claude_account(app.clone(), &cancel_state).await;
+    // Rebuild on BOTH outcomes, before propagating the error. Success adds a
+    // row and moves the live login; a failure — cancel, the 5-minute
+    // timeout, a save error — has just rolled auth.json back, which the tray
+    // must follow too. This sat after a `?`, so the rollback never reached
+    // the menu: a cancelled login left the account checkmark missing until
+    // the app was restarted.
     let _ = tray::rebuild_menu(&app);
-    Ok(id)
+    // Every quota refresh during the flow was skipped by the login guard,
+    // and on SUCCESS the live credential may now be a different account:
+    // with no previous account to restore (`resnapshot_live_before_login`
+    // returns None), auth.json is left holding the NEW login. That write
+    // landed while the guard was still up, and nothing writes the file
+    // again afterwards — so without this the card would keep showing the
+    // pre-login state, and a first-ever account would show none at all
+    // with its section hidden, refresh button and all. Cheap when
+    // redundant: `force_quota_refresh` has its own burst floor.
+    if result.is_ok() {
+        tray::force_quota_refresh(&app, CliApp::Claude);
+    }
+    result
 }
 
 #[tauri::command]
 async fn cancel_claude_login(
-    app: tauri::AppHandle,
     cancel_state: tauri::State<'_, accounts::ClaudeLoginCancel>,
 ) -> Result<(), String> {
     accounts::cancel_claude_login(&cancel_state).await?;
-    // Cancelling restores the previous login, so the tray follows.
-    let _ = tray::rebuild_menu(&app);
+    // Deliberately NO `rebuild_menu` here. This only FIRES the cancel; the
+    // rollback happens inside the login flow, after it has stopped the
+    // child (an HTTP `/cancel` plus up to 2s waiting for it to exit).
+    // Rebuilding now reads the auth.json the flow blanked at the start, so
+    // every saved account compares as inactive and the tray loses its
+    // checkmark — with nothing to correct it, because the login IPC's own
+    // rebuild sat behind a `?` and a cancel returns Err. That flow rebuilds
+    // when it finishes, the only point at which the file has settled.
     Ok(())
 }
 
@@ -1065,19 +1135,42 @@ async fn login_and_save_grok_account(
     app: tauri::AppHandle,
     cancel_state: tauri::State<'_, accounts::GrokLoginCancel>,
 ) -> Result<String, String> {
-    let id = accounts::login_and_save_grok_account(app.clone(), &cancel_state).await?;
+    let result = accounts::login_and_save_grok_account(app.clone(), &cancel_state).await;
+    // Rebuild on BOTH outcomes, before propagating the error. Success adds a
+    // row and moves the live login; a failure — cancel, the 5-minute
+    // timeout, a save error — has just rolled auth.json back, which the tray
+    // must follow too. This sat after a `?`, so the rollback never reached
+    // the menu: a cancelled login left the account checkmark missing until
+    // the app was restarted.
     let _ = tray::rebuild_menu(&app);
-    Ok(id)
+    // Every quota refresh during the flow was skipped by the login guard,
+    // and on SUCCESS the live credential may now be a different account:
+    // with no previous account to restore (`resnapshot_live_before_login`
+    // returns None), auth.json is left holding the NEW login. That write
+    // landed while the guard was still up, and nothing writes the file
+    // again afterwards — so without this the card would keep showing the
+    // pre-login state, and a first-ever account would show none at all
+    // with its section hidden, refresh button and all. Cheap when
+    // redundant: `force_quota_refresh` has its own burst floor.
+    if result.is_ok() {
+        tray::force_quota_refresh(&app, CliApp::Grok);
+    }
+    result
 }
 
 #[tauri::command]
 async fn cancel_grok_login(
-    app: tauri::AppHandle,
     cancel_state: tauri::State<'_, accounts::GrokLoginCancel>,
 ) -> Result<(), String> {
     accounts::cancel_grok_login(&cancel_state).await?;
-    // Cancelling restores the previous login, so the tray follows.
-    let _ = tray::rebuild_menu(&app);
+    // Deliberately NO `rebuild_menu` here. This only FIRES the cancel; the
+    // rollback happens inside the login flow, after it has stopped the
+    // child (an HTTP `/cancel` plus up to 2s waiting for it to exit).
+    // Rebuilding now reads the auth.json the flow blanked at the start, so
+    // every saved account compares as inactive and the tray loses its
+    // checkmark — with nothing to correct it, because the login IPC's own
+    // rebuild sat behind a `?` and a cancel returns Err. That flow rebuilds
+    // when it finishes, the only point at which the file has settled.
     Ok(())
 }
 

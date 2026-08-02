@@ -253,6 +253,31 @@ impl SubscriptionQuota {
     }
 }
 
+/// The result to hand back for a CLI whose credential is mid-login.
+///
+/// **Deliberately a plain failure, NOT `not_found`.** While an add-account
+/// flow runs, the CLI's credential on disk is not the user's account (the
+/// codex flow blanks `auth.json`, claude logs out locally, grok overwrites
+/// its scope entry), so a real fetch reports "logged out" — and both the
+/// tray and `mergeQuotaResult` (quota-utils.ts:64) treat that as
+/// DEFINITIVE and clear the display, taking the whole quota section and
+/// its refresh button with it. A plain failure takes the other branch in
+/// both places: keep the last good numbers. That is the honest answer
+/// here, because the user is adding a SECOND account and the one those
+/// numbers describe is still logged in — and every flow ends by restoring
+/// it (a cancel rolls back; a success saves the new account to the store
+/// and switches the live login back).
+///
+/// `Valid` because the stored credential IS valid; what is momentarily
+/// unavailable is our ability to read it, which `error` conveys.
+pub fn quota_during_login(cli: CliApp) -> SubscriptionQuota {
+    SubscriptionQuota::error(
+        cli.bin_name(),
+        CredentialStatus::Valid,
+        "an add-account flow is using this CLI's credential".to_string(),
+    )
+}
+
 // ===================================================================
 // Claude credentials
 // ===================================================================
@@ -1823,6 +1848,32 @@ fn now_millis() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    /// The mid-login placeholder must NOT look like a logout.
+    ///
+    /// `not_found` is the definitive logged-out state: the tray clears its
+    /// row for it and `mergeQuotaResult` (quota-utils.ts:64) replaces the
+    /// entry outright, which hides the whole quota section — refresh button
+    /// included. That is the reported bug this placeholder exists to avoid,
+    /// so returning one here would silently restore it. A plain failure
+    /// takes the other branch in both places and keeps the last good
+    /// numbers, which stay correct because every login flow ends by
+    /// restoring the account they describe.
+    #[test]
+    fn quota_during_login_is_a_transient_failure_not_a_logout() {
+        let q = quota_during_login(CliApp::Codex);
+        assert_ne!(
+            q.credential_status,
+            CredentialStatus::NotFound,
+            "must not be not_found — that clears the card"
+        );
+        assert!(
+            !q.success,
+            "must be a failure so the retry floor stays short"
+        );
+        assert!(q.error.is_some(), "the manual-refresh toast needs a reason");
+        assert!(q.tiers.is_empty(), "it carries no numbers of its own");
+    }
+
     use super::*;
     use serde_json::json;
 

@@ -435,6 +435,13 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
                 // crashed session's stale status clears even without a
                 // filesystem event (it splices live into the open menu).
                 refresh_work_status(tray.app_handle());
+                // And re-apply the account rows, for the same reason: an
+                // add-account flow greys them out (`account_row_enabled`),
+                // but STARTING one rebuilds nothing — so without this the
+                // menu would still be the one built before the login, with
+                // rows that look clickable and silently do nothing. Also
+                // in place, so it can't dismiss the menu.
+                refresh_accounts(tray.app_handle());
                 // Windows/Linux: LEFT click (release) opens the app
                 // window — the menu is on right click, see
                 // show_menu_on_left_click(false) above. (Linux
@@ -527,6 +534,22 @@ fn clear_quota_marker(cli: CliApp) {
 }
 
 fn spawn_quota_fetch(app: &AppHandle, cli: CliApp) {
+    // THE one place the login guard belongs: all three triggers land here
+    // (tray click via `trigger_quota_refresh`, credential watcher via
+    // `force_quota_refresh`, startup warm-up), and the guard first went on
+    // two of them, leaving the tray-click path reading the blanked
+    // auth.json and clearing the row on every menu open during a login.
+    //
+    // While an add-account flow runs, the credential on disk is not the
+    // user's account (see `accounts::login_in_progress`), so a fetch
+    // returns `not_found` — which every layer treats as a definitive
+    // logout and clears the display. Returning BEFORE `set_quota_marker`
+    // is deliberate: stamping it here would make the genuine refresh that
+    // follows the flow's restoring write get refused by a floor this
+    // non-fetch had earned.
+    if crate::accounts::login_in_progress(app, cli) {
+        return;
+    }
     // Mark pre-flight as failed-shape so an in-flight / errored
     // attempt only blocks the short window; the completed fetch
     // overwrites this via refresh_quota's marker update.
@@ -600,7 +623,26 @@ fn account_row_label(a: &crate::accounts::TrayAccount) -> String {
 /// Push the current saved-login state onto the cached row handles. Returns
 /// false when the cache can't express it — no rows, or the SET of accounts
 /// changed (added / removed / reordered) — leaving the caller to rebuild.
-fn apply_account_rows(rows: &[AccountRow]) -> bool {
+/// Whether a tray account row should be clickable.
+///
+/// **ONE definition, used by BOTH the build path and the in-place
+/// refresh.** They set this flag from different places, and the menu is
+/// built once then updated in place — so a row enabled by one and
+/// disabled by the other is a state the user can actually reach and stay
+/// in. Keep them reading from here.
+///
+/// - `needs_relogin` — fixable only by re-authenticating on the Providers
+///   page, so the click would just fail.
+/// - a running add-account flow — the switch would WRITE auth.json and the
+///   flow overwrites it when it ends, silently undoing the click. Both the
+///   `switch_account` IPC and the page's own button refuse for exactly
+///   this reason; the row has to LOOK refused too, or it reads as a dead
+///   click with no explanation (a native menu has nowhere to show one).
+fn account_row_enabled(app: &AppHandle, cli: CliApp, a: &crate::accounts::TrayAccount) -> bool {
+    !a.needs_relogin && !crate::accounts::login_in_progress(app, cli)
+}
+
+fn apply_account_rows(app: &AppHandle, rows: &[AccountRow]) -> bool {
     if rows.is_empty() {
         return false;
     }
@@ -619,7 +661,10 @@ fn apply_account_rows(rows: &[AccountRow]) -> bool {
         for (a, row) in live.iter().zip(&cached) {
             if row.item.set_text(account_row_label(a)).is_err()
                 || row.item.set_checked(a.active).is_err()
-                || row.item.set_enabled(!a.needs_relogin).is_err()
+                || row
+                    .item
+                    .set_enabled(account_row_enabled(app, cli, a))
+                    .is_err()
             {
                 return false;
             }
@@ -640,7 +685,7 @@ fn refresh_accounts(app: &AppHandle) {
         let updated = ACCOUNT_ROWS
             .lock()
             .ok()
-            .map(|rows| apply_account_rows(&rows))
+            .map(|rows| apply_account_rows(&handle, &rows))
             .unwrap_or(false);
         if !updated {
             if let Err(err) = do_rebuild_menu(&handle) {
@@ -691,6 +736,19 @@ fn settle_account_change(app: &AppHandle, cli: CliApp) {
 /// that also emits `quota-changed`, which an open Providers page already
 /// listens to for reloading its account list — no extra event needed.
 fn spawn_account_switch(app: &AppHandle, cli: CliApp, id: String) {
+    // Same guard as the `switch_account` IPC, and the reason that one is
+    // not enough on its own: this row is reachable from the menu bar with
+    // the window closed, while an add-account flow started on the page is
+    // still running. Switching now writes auth.json, and the flow
+    // overwrites it when it ends, so the click would be undone silently.
+    // The menu has nowhere to report that, so refuse and log.
+    if crate::accounts::login_in_progress(app, cli) {
+        log::warn!(
+            "tray account switch ignored: an add-account flow is running for {}",
+            cli.key()
+        );
+        return;
+    }
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         // Switching OVERWRITES the live credential, so a live login that was
@@ -1091,6 +1149,8 @@ pub fn force_quota_refresh(app: &AppHandle, cli: CliApp) {
     if crate::config::disabled_sources().contains(cli.key()) {
         return;
     }
+    // (A running add-account flow is filtered in `spawn_quota_fetch`,
+    // the single point every trigger funnels through.)
     // One flat floor here regardless of the last outcome — this is burst
     // dedup, not a cache window.
     if !quota_fetch_allowed(quota_marker(cli), QUOTA_FORCE_FLOOR, QUOTA_FORCE_FLOOR) {
@@ -2029,7 +2089,7 @@ fn build_menu(app: &AppHandle, installed: &InstallSnapshot) -> tauri::Result<Men
                 // checkmark, and it's the one row that should look normal.
                 // Clicking it is a no-op, guarded in the handler the same way
                 // the page guards it (`if (account.active) return`).
-                .enabled(!a.needs_relogin)
+                .enabled(account_row_enabled(app, cli, a))
                 .build(app)?;
                 sub = sub.item(&item);
                 // Keep the handle so a switch can update this row without a

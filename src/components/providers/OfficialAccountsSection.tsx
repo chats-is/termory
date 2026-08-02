@@ -721,19 +721,22 @@ export function OfficialAccountsSection({
                 account and disabled rows render a plain button with no tip. */}
             {isManaged &&
               (() => {
+                // `loginInProgress`: an add-account flow owns the
+                // credential, and switching now would be overwritten when
+                // it ends (the backend refuses for the same reason).
                 const switchable =
-                  !row.active && !row.needsRelogin && !rowBusy && !!acc;
+                  !row.active && !row.needsRelogin && !rowBusy && !loginInProgress && !!acc;
                 const btn = (
                   <button
                     type="button"
-                    disabled={row.active || row.needsRelogin || rowBusy}
+                    disabled={row.active || row.needsRelogin || rowBusy || loginInProgress}
                     onClick={acc ? () => void switchTo(acc) : undefined}
                     aria-label={
                       row.active
                         ? t("providers.accountActive")
                         : t("providers.accountSwitch")
                     }
-                    className={`group/sw flex size-10 shrink-0 items-center justify-center text-primary${(row.needsRelogin || rowBusy) ? " opacity-30 cursor-not-allowed" : ""}`}
+                    className={`group/sw flex size-10 shrink-0 items-center justify-center text-primary${(row.needsRelogin || rowBusy || loginInProgress) ? " opacity-30 cursor-not-allowed" : ""}`}
                   >
                     {rowBusy ? (
                       <Loader2 className="size-6 animate-spin" />
