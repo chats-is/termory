@@ -107,15 +107,16 @@ describe("OfficialAccountsSection — Codex management", () => {
     expect(invokeMock).toHaveBeenCalledWith("list_accounts", { app: "codex" });
   });
 
-  it("renders without error when there is no current login (not logged in)", async () => {
+  it("renders nothing at all when there is no current login (not logged in)", async () => {
     mockList(makeState({ current: null, accounts: [] }));
     const { container } = render(<OfficialAccountsSection app="codex" />);
-    // State loaded but no rows and no current → empty section, no hint
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("list_accounts", { app: "codex" })
     );
     expect(screen.queryByText(/No saved accounts/i)).toBeNull();
-    expect(container.querySelector("[class]")).toBeTruthy(); // section wrapper is in DOM
+    // No rows and no current → the whole section is gone. An empty wrapper
+    // would still paint its own bg-card + shadow-sm under the Official card.
+    expect(container).toBeEmptyDOMElement();
   });
 
   it("shows the empty hint when logged in but nothing saved yet", async () => {

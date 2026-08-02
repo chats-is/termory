@@ -692,6 +692,13 @@ export function OfficialAccountsSection({
   // call stale data live for the duration.
   const quotaStale = !!quota && !quota.success;
 
+  // Nothing to put in the container — a managed CLI with no login and no
+  // saved snapshot. The wrapper is not weightless: it is a `bg-card` strip
+  // with its OWN `shadow-sm`, tucked under the card by `-mt-2`, so an empty
+  // one renders as a second shadow under the Official card and reads as
+  // "this card sits lower than its neighbours". Bail out instead.
+  if (!state.storageWarning && rows.length === 0 && !current) return null;
+
   return (
     <div className="-mt-2 flex flex-col rounded-b-xl bg-card pt-2 shadow-sm">
       {state.storageWarning && (
