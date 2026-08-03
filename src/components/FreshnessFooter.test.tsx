@@ -126,6 +126,89 @@ describe("FreshnessFooter", () => {
     expect(screen.getByText(/Synced 10s ago/)).toBeInTheDocument();
   });
 
+  // The account auto-sync reports only the two outcomes that mean
+  // something moved. It rides the footer's existing states rather than
+  // adding wording of its own.
+  it("flashes the success state when an account sync wrote, then falls back", () => {
+    const synced = Date.now() - 60_000;
+    const { rerender } = render(
+      <FreshnessFooter syncing={false} lastSyncedAt={synced} error={null} />
+    );
+    expect(screen.queryByText("Synced just now")).toBeNull();
+
+    act(() => {
+      rerender(
+        <FreshnessFooter
+          syncing={false}
+          lastSyncedAt={synced}
+          error={null}
+          accountSync={{ at: Date.now(), error: null }}
+        />
+      );
+    });
+    expect(screen.getByText("Synced just now")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(screen.queryByText("Synced just now")).toBeNull();
+    // Back to the session scan's own clock — an account sync never moved it.
+    expect(screen.getByText(/Synced 1m ago/)).toBeInTheDocument();
+  });
+
+  it("shows the failure state when an account sync failed", () => {
+    const synced = Date.now() - 60_000;
+    const { rerender } = render(
+      <FreshnessFooter syncing={false} lastSyncedAt={synced} error={null} />
+    );
+    act(() => {
+      rerender(
+        <FreshnessFooter
+          syncing={false}
+          lastSyncedAt={synced}
+          error={null}
+          accountSync={{ at: Date.now(), error: "keychain locked" }}
+        />
+      );
+    });
+    expect(screen.getByText("Sync failed")).toBeInTheDocument();
+
+    // Self-heals next pass, so it clears rather than parking over the
+    // session status.
+    act(() => {
+      vi.advanceTimersByTime(6000);
+    });
+    expect(screen.queryByText("Sync failed")).toBeNull();
+  });
+
+  it("stays quiet when no new account-sync outcome arrived", () => {
+    // The backend emits nothing when a pass changed nothing, so the prop
+    // simply never advances — a minute-by-minute pulse is exactly what
+    // this must not become.
+    const synced = Date.now() - 60_000;
+    const sync = { at: Date.now(), error: null };
+    const { rerender } = render(
+      <FreshnessFooter
+        syncing={false}
+        lastSyncedAt={synced}
+        error={null}
+        accountSync={sync}
+      />
+    );
+    act(() => {
+      rerender(
+        <FreshnessFooter
+          syncing={false}
+          lastSyncedAt={synced}
+          error={null}
+          accountSync={sync}
+        />
+      );
+    });
+    expect(screen.queryByText("Synced just now")).toBeNull();
+    expect(screen.getByText(/Synced 1m ago/)).toBeInTheDocument();
+  });
+
   it("ignores lastSyncedAt advance when error is present", () => {
     const { rerender } = render(
       <FreshnessFooter

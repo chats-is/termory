@@ -95,6 +95,42 @@ fn display_plan(raw: &str) -> Option<String> {
     Some(first.to_uppercase().collect::<String>() + chars.as_str())
 }
 
+/// Claude's plan label, with the Max multiplier folded in: `"Max 20x"`.
+///
+/// `subscriptionType` alone cannot tell Max 5x from Max 20x — both are
+/// `"max"` — and the difference is the whole shape of the account's limits.
+/// The multiplier lives beside it in the same credential block as
+/// `rateLimitTier` (auth.ts:1227), written by the same profile fetch.
+///
+/// **Only Max takes a multiplier.** Claude Code itself never reads the tier
+/// on its own: every use is `isMax && rateLimitTier == …` (upgrade.tsx:25,
+/// rate-limit-options.tsx:52, planModeV2.ts:18). The reason is visible in
+/// `isTeamPremiumSubscriber` (auth.ts:1687), where `default_claude_max_5x`
+/// appears under a **team** subscription — so the tier string does not name
+/// a Max level on its own, and appending it to any other plan would invent
+/// a "Team 5x" that means something else entirely.
+///
+/// Unrecognized or absent tiers fall back to the bare plan rather than
+/// surfacing a raw identifier: the value set is not closed (only these two
+/// appear anywhere in Claude's source), so a new one must degrade to
+/// today's correct-but-less-specific label, never to `Max default_claude_…`.
+pub(crate) fn claude_plan_label(
+    subscription_type: Option<&str>,
+    rate_limit_tier: Option<&str>,
+) -> Option<String> {
+    let raw = subscription_type?;
+    let plan = display_plan(raw)?;
+    if !raw.trim().eq_ignore_ascii_case("max") {
+        return Some(plan);
+    }
+    let multiplier = match rate_limit_tier.map(str::trim) {
+        Some("default_claude_max_20x") => "20x",
+        Some("default_claude_max_5x") => "5x",
+        _ => return Some(plan),
+    };
+    Some(format!("{plan} {multiplier}"))
+}
+
 // ===================================================================
 // Wire types (camelCase to the frontend)
 // ===================================================================
@@ -338,11 +374,10 @@ fn parse_claude_credentials(content: &str) -> Credential {
     };
 
     // Subscription plan, stored at login by Claude Code itself
-    // (auth.ts:1225 `subscriptionType` — "free" / "pro" / "max").
-    let plan = entry
-        .get("subscriptionType")
-        .and_then(|v| v.as_str())
-        .and_then(display_plan);
+    // (auth.ts:1225 `subscriptionType` — "free" / "pro" / "max"), plus the
+    // Max multiplier from its neighbour `rateLimitTier` (auth.ts:1227).
+    let field = |k: &str| entry.get(k).and_then(|v| v.as_str());
+    let plan = claude_plan_label(field("subscriptionType"), field("rateLimitTier"));
 
     let access_token = match entry.get("accessToken").and_then(|v| v.as_str()) {
         Some(t) if !t.is_empty() => t.to_string(),
@@ -2595,6 +2630,46 @@ mod tests {
         assert_eq!(display_plan("standard-tier").as_deref(), Some("Standard"));
         assert_eq!(display_plan("  enterprise ").as_deref(), Some("Enterprise"));
         assert_eq!(display_plan(""), None);
+    }
+
+    /// Only Max carries a multiplier, and only for the two tier strings
+    /// Claude's own source names. Everything else degrades to the bare
+    /// plan — never to a raw identifier.
+    #[test]
+    fn claude_plan_label_appends_the_multiplier_to_max_only() {
+        let label = |sub: Option<&str>, tier: Option<&str>| claude_plan_label(sub, tier);
+
+        assert_eq!(
+            label(Some("max"), Some("default_claude_max_20x")).as_deref(),
+            Some("Max 20x")
+        );
+        assert_eq!(
+            label(Some("max"), Some("default_claude_max_5x")).as_deref(),
+            Some("Max 5x")
+        );
+        // Max with no tier recorded, or one nobody has seen before: the
+        // plan is still correct, just less specific.
+        assert_eq!(label(Some("max"), None).as_deref(), Some("Max"));
+        assert_eq!(
+            label(Some("max"), Some("default_claude_max_50x")).as_deref(),
+            Some("Max"),
+            "an unknown tier must not leak a raw identifier into the badge"
+        );
+        // NOT Max: the tier string does not name a Max level on its own —
+        // `isTeamPremiumSubscriber` pairs the 5x tier with a TEAM
+        // subscription (auth.ts:1687), so appending it here would invent a
+        // plan that means something else.
+        assert_eq!(
+            label(Some("team"), Some("default_claude_max_5x")).as_deref(),
+            Some("Team")
+        );
+        assert_eq!(
+            label(Some("pro"), Some("default_claude_max_20x")).as_deref(),
+            Some("Pro")
+        );
+        // No subscription at all → no label, tier or not.
+        assert_eq!(label(None, Some("default_claude_max_20x")), None);
+        assert_eq!(label(Some(""), None), None);
     }
 
     #[test]

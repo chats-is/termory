@@ -243,6 +243,278 @@ pub fn save_current_account(app: CliApp) -> Result<(), Box<dyn Error>> {
     }
 }
 
+// ===================================================================
+// Automatic sync of the account each CLI is currently logged into
+// ===================================================================
+//
+// A saved account is a copy of the CLI's official credential, and the CLI
+// keeps rewriting that credential underneath us: a token refresh rotates
+// the tokens, a re-login replaces the whole thing, and a plan change
+// arrives as new claims inside the refreshed token. So the entry for the
+// account currently in use goes stale on its own, with nothing the user
+// did to cause it. This keeps it in step.
+//
+// It re-derives that one entry from the live credential IN FULL, through
+// the same `*_entry` builder the save button uses — so the payload and the
+// name/email/plan shown beside it always come from one parse of one
+// document and cannot drift apart.
+//
+// Boundaries, each chosen because the credential files have other writers:
+//
+// * A login flow OWNS the credential while it runs (codex blanks auth.json
+//   to `{}` before spawning; claude's `performLogout` clears local storage;
+//   grok overwrites its one scope entry), so every trigger is gated on
+//   `login_in_progress` — the same guard the quota path uses.
+// * Provider switching writes `auth_mode` / `OPENAI_API_KEY` into codex's
+//   auth.json. `read_codex_live` strips those at the single point every
+//   consumer goes through, so an activate/deactivate produces no diff here
+//   and no write.
+// * A switch writes the target credential atomically and has already
+//   stored the same bytes, so a pass right after compares equal.
+// * Grok's auth.json is read WITHOUT taking grok's `auth.json.lock`, like
+//   every other read path in this module. Taking it would be worse than
+//   useless: acquiring stamps `PID:TIMESTAMP` into the lock file, which
+//   lives in the recursively-watched grok home, so every pass would emit a
+//   filesystem event and trigger a full session rescan. A torn read is
+//   caught by the parse instead — invalid JSON, or no scope entry, both
+//   mean "no coherent credential" and the pass skips.
+//
+// And two rules that keep it from causing harm of its own:
+//
+// * It only ever REPLACES an entry that already exists, matched by the live
+//   account's id, and it looks that id up on the copy it is about to write.
+//   A DELETE is the one conflict that does not heal by itself — writing a
+//   pre-delete copy back would resurrect the account and every later pass
+//   would keep it alive — so the lookup happens against current data.
+// * It writes nothing when the entry already matches, so a quiet system
+//   produces no disk writes at all. `~/.termory/` is outside every watched
+//   directory, so its writes cannot feed back into the watcher either.
+
+/// Emitted when a pass reached an outcome worth reporting: it rewrote the
+/// entry, or it failed trying. A pass that found nothing to change emits
+/// NOTHING — that is nearly every pass, and announcing those would turn a
+/// status indicator into a metronome.
+///
+/// Frontend mirror: `ACCOUNTS_CHANGED_EVENT` in src/constants.ts.
+pub const ACCOUNTS_CHANGED_EVENT: &str = "termory:accounts-changed";
+
+/// Payload of [`ACCOUNTS_CHANGED_EVENT`].
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSyncEvent {
+    /// CLI key, so a listener bound to one CLI can ignore the rest.
+    pub app: String,
+    pub ok: bool,
+    /// Reason for a failure — the only place it surfaces.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// How often the background pass runs.
+///
+/// A timer is not redundant with the file watcher. On macOS Claude's
+/// credential lives in the **Keychain**, which emits no filesystem event at
+/// all, and `~/.claude.json` (the account identity) sits outside every
+/// watched directory. A plan change is the same story: it reaches disk only
+/// when the CLI next refreshes its token, and nothing announces that. So
+/// the watcher covers the file-backed cases instantly and this covers the
+/// rest.
+const AUTO_SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Carry `key` from the entry being replaced into its replacement.
+///
+/// The store holds two timestamps with DIFFERENT owners: `savedAt` is
+/// written by the user's own saves (the Save button, a switch's
+/// re-snapshot, the login flow), `syncedAt` only by the auto-sync. Both
+/// writers replace the whole entry, so without this each would erase the
+/// other's record — a manual save would wipe the evidence that the sync
+/// ever ran, and a sync would restamp a "saved" time the user never
+/// caused.
+fn carry_over(slot: &JsonValue, entry: &mut JsonValue, key: &str) {
+    if let Some(previous) = slot.get(key).cloned() {
+        entry[key] = previous;
+    }
+}
+
+/// Do two entries describe the same account state? Two keys are excluded,
+/// and neither is cosmetic:
+///
+/// * `savedAt` is a timestamp — comparing it would make every pass look
+///   like a change and rewrite the store every minute.
+/// * `needsRelogin` is not part of the credential; it records that a switch
+///   was REJECTED. Counting it as a difference would make an unchanged
+///   credential "change", and the rewrite would clear the flag while the
+///   very token that was rejected is still the live one — hiding a state
+///   the user has to act on. Excluded, it survives a no-op pass and is
+///   dropped only when the credential genuinely changed, which is exactly
+///   when a new one supersedes the rejected one.
+fn entry_content_matches(a: &JsonValue, b: &JsonValue) -> bool {
+    let account_state = |v: &JsonValue| {
+        let mut v = v.clone();
+        if let Some(o) = v.as_object_mut() {
+            o.remove("savedAt");
+            o.remove("syncedAt");
+            o.remove("needsRelogin");
+        }
+        v
+    };
+    account_state(a) == account_state(b)
+}
+
+/// Bring `cli`'s entry for the CURRENT login back in step with the live
+/// credential. Returns whether anything was written.
+fn sync_live_account(cli: CliApp) -> Result<bool, Box<dyn Error>> {
+    // Nothing saved for this CLI means there is no entry to refresh. Bail
+    // before touching any credential — this runs on a timer, and Claude's
+    // read spawns `security(1)`.
+    if !read_store()?
+        .iter()
+        .any(|e| str_field(e, "app") == Some(cli.key()))
+    {
+        return Ok(false);
+    }
+    let live = match cli {
+        CliApp::Codex => read_codex_live().map(|l| l.as_ref().map(codex_entry)),
+        // UNCACHED for the same reason `save_claude_account` is: this
+        // persists a credential, and the 30s cache can pair a new
+        // account's identity with the previous account's tokens.
+        CliApp::Claude => read_claude_live_uncached().map(|l| l.as_ref().map(claude_entry)),
+        CliApp::Grok => read_grok_live().map(|l| l.as_ref().map(grok_entry)),
+        _ => return Ok(false),
+    };
+    let mut fresh = match live {
+        Ok(Some(fresh)) => fresh,
+        // Logged out — leave the snapshot alone. It is the user's only way
+        // back into that account.
+        Ok(None) => return Ok(false),
+        // A credential we cannot READ is not a sync failure, and must not
+        // be reported as one. The watcher fires on the write itself, so a
+        // read landing mid-write parses as garbage — a red "sync failed"
+        // for a CLI that is working perfectly, cleared by the next pass. A
+        // genuinely corrupt file would be worse: the same false alarm
+        // every minute, forever. Either way nothing was going to be
+        // synced, which is what `false` says. The user is not left in the
+        // dark about a broken credential — the quota card reads the same
+        // file and surfaces `ParseError` in its own right.
+        Err(err) => {
+            log::warn!(
+                "account auto-sync ({}): credential unreadable, skipping: {err}",
+                cli.key()
+            );
+            return Ok(false);
+        }
+    };
+    let Some(id) = str_field(&fresh, "id").map(String::from) else {
+        return Ok(false);
+    };
+
+    // Read AGAIN here, deliberately: the credential read above can take a
+    // hundred milliseconds (that `security(1)` spawn), which is ample room
+    // for the user to have deleted this account. Deciding against the copy
+    // from the top and writing it back would bring it back from the dead.
+    let mut store = read_store()?;
+    // Scoped by `app` as well as `id`, like every other "refresh an
+    // existing entry" helper here. An id is not globally unique: both the
+    // codex and claude derivations fall back to the EMAIL when the account
+    // carries no primary id (`tokens.account_id` / `accountUuid`), so one
+    // person signed into both with the same address can hold two entries
+    // under one id. Matching on id alone would let a codex pass overwrite
+    // the claude entry outright — `app` field included, since this
+    // replaces the whole entry.
+    let Some(slot) = store.iter_mut().find(|e| {
+        str_field(e, "app") == Some(cli.key()) && str_field(e, "id") == Some(id.as_str())
+    }) else {
+        return Ok(false);
+    };
+    if entry_content_matches(slot, &fresh) {
+        return Ok(false);
+    }
+    // `savedAt` is not this flow's to stamp — it dates the user's own
+    // saves, and nobody saved anything here. Carry it over and record the
+    // update under `syncedAt`, this flow's own field: with the two apart,
+    // the store says which changes came from a person and which from the
+    // background, and an entry that has never carried `syncedAt` has
+    // demonstrably never been auto-updated.
+    carry_over(slot, &mut fresh, "savedAt");
+    fresh["syncedAt"] = JsonValue::String(now_rfc3339());
+    // Replacing the whole entry also drops `needsRelogin`, which is right:
+    // that flag described the credential just superseded, so re-logging in
+    // from the CLI clears the warning by itself.
+    *slot = fresh;
+    write_store(store)?;
+    Ok(true)
+}
+
+/// One pass for `cli`, skipped while a login owns the credential.
+///
+/// Never propagates: nothing awaits these triggers, and a failure must not
+/// take down the watcher burst or the timer loop that called it. Both
+/// reportable outcomes are announced instead, so the status indicator can
+/// show that the background did something and say why when it could not.
+pub fn sync_live_account_if_idle(app: &tauri::AppHandle, cli: CliApp) {
+    use tauri::Emitter as _;
+    // Settings → Tools: a disabled tool is absent from every surface that
+    // would show this, so keeping its snapshot warm is work nobody can see
+    // — and on macOS Claude that work is a `security(1)` spawn every
+    // minute. Same rule the quota path applies for the same reason.
+    if crate::config::disabled_sources().contains(cli.key()) {
+        return;
+    }
+    if login_in_progress(app, cli) {
+        return;
+    }
+    let (ok, error) = match sync_live_account(cli) {
+        // Nothing changed — not an outcome, and nearly every pass lands
+        // here. Only a real update counts as having synced.
+        Ok(false) => return,
+        Ok(true) => {
+            // The entry SET is unchanged (this only ever replaces), so the
+            // tray updates its rows in place and an open menu survives.
+            crate::tray::refresh_accounts(app);
+            (true, None)
+        }
+        Err(err) => {
+            // Logged as well as emitted: the event reaches a window that
+            // may not be open, and this is the only durable record.
+            log::warn!("account auto-sync ({}) failed: {err}", cli.key());
+            (false, Some(err.to_string()))
+        }
+    };
+    let _ = app.emit(
+        ACCOUNTS_CHANGED_EVENT,
+        AccountSyncEvent {
+            app: cli.key().to_string(),
+            ok,
+            error,
+        },
+    );
+}
+
+/// Start the background pass. See `AUTO_SYNC_INTERVAL` for why a timer is
+/// needed on top of the watcher.
+pub fn start_auto_sync(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            for cli in [CliApp::Codex, CliApp::Claude, CliApp::Grok] {
+                let app = app.clone();
+                // Credential reads hit the filesystem and can spawn
+                // `security(1)`, so they stay off the async worker. The
+                // JoinHandle is dropped rather than propagated: a panic
+                // must not take the loop down with it.
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    sync_live_account_if_idle(&app, cli)
+                })
+                .await;
+            }
+            // Sleep AFTER the pass, so the first one runs at launch —
+            // which is when the store is most likely stale, because the
+            // CLI was used while Termory was closed and no event from that
+            // window survived to be replayed.
+            tokio::time::sleep(AUTO_SYNC_INTERVAL).await;
+        }
+    });
+}
+
 /// Restore a saved snapshot into the live CLI credential.
 /// Refreshes tokens in memory BEFORE writing to auth.json — if refresh fails
 /// the auth.json is left untouched and the caller should mark needsRelogin.
@@ -1031,11 +1303,18 @@ fn claude_live_from(credentials: Option<JsonValue>) -> Result<Option<ClaudeLive>
     else {
         return Ok(None);
     };
-    let plan = oauth
-        .get("subscriptionType")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(title_case_plan);
+    // Both halves of the label come from this one block: the plan and,
+    // for Max, the multiplier that `subscriptionType` alone cannot express.
+    // Shared with the quota card's derivation so one account cannot show
+    // two different plans in two places.
+    let oauth_str = |k: &str| {
+        oauth
+            .get(k)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    };
+    let plan =
+        crate::quota::claude_plan_label(oauth_str("subscriptionType"), oauth_str("rateLimitTier"));
 
     let path = claude_json_path()?;
     let account = std::fs::read_to_string(&path)
@@ -1121,11 +1400,28 @@ fn save_claude_account() -> Result<(), Box<dyn Error>> {
     let live = read_claude_live_uncached()?
         .ok_or("No Claude login with account info found to save (run `claude` and log in first)")?;
 
-    let id = live.id.clone();
+    let mut entry = claude_entry(&live);
+    let id = live.id;
     let mut store = read_store()?;
+    match store
+        .iter_mut()
+        .find(|e| str_field(e, "id") == Some(id.as_str()))
+    {
+        Some(slot) => {
+            carry_over(slot, &mut entry, "syncedAt");
+            *slot = entry;
+        }
+        None => store.push(entry),
+    }
+    write_store(store)
+}
 
-    let entry = json!({
-        "id": id,
+/// One store entry built from a live Claude login. Shared by the save
+/// button and the auto-sync — see `codex_entry` for why the label must be
+/// derived here and nowhere else.
+fn claude_entry(live: &ClaudeLive) -> JsonValue {
+    json!({
+        "id": live.id,
         "app": "claude",
         // The list row needs a non-empty primary label; email is the
         // reliable one (displayName is optional on AccountInfo).
@@ -1137,16 +1433,7 @@ fn save_claude_account() -> Result<(), Box<dyn Error>> {
             "oauthAccount": live.oauth_account,
         },
         "savedAt": now_rfc3339(),
-    });
-
-    match store
-        .iter_mut()
-        .find(|e| str_field(e, "id") == Some(id.as_str()))
-    {
-        Some(slot) => *slot = entry,
-        None => store.push(entry),
-    }
-    write_store(store)
+    })
 }
 
 /// Set (`Some`) or remove (`None`) ONLY the `oauthAccount` key of
@@ -1990,9 +2277,10 @@ fn save_grok_account() -> Result<(), Box<dyn Error>> {
 /// Split from `save_grok_account` so the switch path can snapshot the document
 /// it already read under the lock, rather than re-reading the file it is about
 /// to overwrite (a second read is a second chance to race).
-fn save_grok_live(live: &GrokLive) -> Result<(), Box<dyn Error>> {
-    let mut store = read_store()?;
-    let entry = json!({
+/// One store entry built from a live Grok login. Shared by the save button
+/// and the auto-sync — see `codex_entry`.
+fn grok_entry(live: &GrokLive) -> JsonValue {
+    json!({
         "id": live.id,
         "app": "grok",
         "name": live.name.clone().unwrap_or_default(),
@@ -2000,12 +2288,20 @@ fn save_grok_live(live: &GrokLive) -> Result<(), Box<dyn Error>> {
         // Payload is SCOPE-SCOPED, not the whole document — see switch_grok.
         "payload": { "scope": live.scope, "auth": live.auth },
         "savedAt": now_rfc3339(),
-    });
+    })
+}
+
+fn save_grok_live(live: &GrokLive) -> Result<(), Box<dyn Error>> {
+    let mut store = read_store()?;
+    let mut entry = grok_entry(live);
     match store
         .iter_mut()
         .find(|e| str_field(e, "id") == Some(live.id.as_str()))
     {
-        Some(slot) => *slot = entry,
+        Some(slot) => {
+            carry_over(slot, &mut entry, "syncedAt");
+            *slot = entry;
+        }
         None => store.push(entry),
     }
     write_store(store)
@@ -2743,28 +3039,38 @@ fn list_codex_accounts() -> Result<AccountsState, Box<dyn Error>> {
     })
 }
 
-fn save_codex_account() -> Result<(), Box<dyn Error>> {
-    let live = read_codex_live()?
-        .ok_or("No Codex ChatGPT login found to save (run `codex login` first)")?;
-
-    let id = live.id.clone();
-    let mut store = read_store()?;
-
-    let entry = json!({
-        "id": id,
+/// One store entry built from a live Codex login.
+///
+/// Shared by the save button and the auto-sync, and that sharing is the
+/// point: `name` / `email` / `plan` are parsed OUT OF the same document
+/// that becomes the payload (they come from `tokens.id_token`), so deriving
+/// them anywhere else is how the label and the credential start disagreeing.
+fn codex_entry(live: &CodexLive) -> JsonValue {
+    json!({
+        "id": live.id,
         "app": "codex",
         "name": live.name,
         "email": live.email,
         "plan": live.plan,
         "payload": live.doc,
         "savedAt": now_rfc3339(),
-    });
+    })
+}
 
+fn save_codex_account() -> Result<(), Box<dyn Error>> {
+    let live = read_codex_live()?
+        .ok_or("No Codex ChatGPT login found to save (run `codex login` first)")?;
+    let mut entry = codex_entry(&live);
+    let id = live.id;
+    let mut store = read_store()?;
     match store
         .iter_mut()
         .find(|e| str_field(e, "id") == Some(id.as_str()))
     {
-        Some(slot) => *slot = entry,
+        Some(slot) => {
+            carry_over(slot, &mut entry, "syncedAt");
+            *slot = entry;
+        }
         None => store.push(entry),
     }
     write_store(store)
@@ -3381,6 +3687,472 @@ mod tests {
         let saved = &list_accounts(CliApp::Codex).unwrap().accounts[0];
         assert_eq!(saved.name, "Jane Doe");
         assert_eq!(saved.email.as_deref(), Some("jane@example.com"));
+    }
+
+    // ── auto-sync of the live account ────────────────────────────────
+
+    /// A token rotation rewrites the credential under us; the entry for
+    /// that account has to follow it, payload and derived fields alike.
+    /// Every other entry describes a DIFFERENT account and must not move.
+    #[test]
+    fn auto_sync_follows_the_live_credential_and_leaves_others_alone() {
+        let _g = lock_home();
+        let tmp = tempdir("sync-codex");
+        let _h = override_home(&tmp);
+
+        write_codex_auth(&tmp, "a@example.com", "plus", "acct-a");
+        save_current_account(CliApp::Codex).unwrap();
+        write_codex_auth(&tmp, "b@example.com", "plus", "acct-b");
+        save_current_account(CliApp::Codex).unwrap();
+        mark_account_relogin("acct-b", true).unwrap();
+
+        // A quiet system writes nothing — otherwise the 60s pass would
+        // rewrite the store forever, and every pass would report a sync.
+        assert!(
+            !sync_live_account(CliApp::Codex).unwrap(),
+            "an unchanged credential must not write"
+        );
+
+        // The CLI refreshes: rotated tokens, and the account has moved to
+        // a higher plan since the snapshot was taken.
+        let jwt = fake_jwt(json!({
+            "email": "b@example.com",
+            "https://api.openai.com/auth": { "chatgpt_plan_type": "pro" },
+        }));
+        let doc = json!({
+            "tokens": { "id_token": jwt, "access_token": "rotated", "account_id": "acct-b" },
+        });
+        std::fs::write(tmp.join(".codex/auth.json"), doc.to_string()).unwrap();
+
+        assert!(sync_live_account(CliApp::Codex).unwrap());
+
+        let store = read_store().unwrap();
+        let find = |id: &str| {
+            store
+                .iter()
+                .find(|e| str_field(e, "id") == Some(id))
+                .unwrap()
+        };
+        let b = find("acct-b");
+        assert_eq!(
+            b.pointer("/payload/tokens/access_token")
+                .and_then(|v| v.as_str()),
+            Some("rotated"),
+            "the payload must be the credential the CLI is actually using"
+        );
+        assert_eq!(
+            str_field(b, "plan"),
+            Some("Pro"),
+            "plan is parsed from the same document, so it follows it"
+        );
+        assert!(
+            b.get("needsRelogin").is_none(),
+            "the stored credential IS the working one now"
+        );
+
+        let a = find("acct-a");
+        assert_eq!(str_field(a, "plan"), Some("Plus"));
+        assert_eq!(
+            a.pointer("/payload/tokens/account_id")
+                .and_then(|v| v.as_str()),
+            Some("acct-a")
+        );
+    }
+
+    /// What "changed" means, pinned on both sides.
+    ///
+    /// The key-order half is load-bearing and not obvious: this crate
+    /// enables serde_json's `preserve_order`, so an object is an IndexMap
+    /// — but its `PartialEq` compares key/value PAIRS, not sequence. If it
+    /// did compare sequence, a CLI that rewrote its credential with the
+    /// keys in a different order would read as a change on every pass, and
+    /// the quiet system this depends on would become a per-minute write
+    /// and a per-minute "synced" report.
+    #[test]
+    fn entry_comparison_ignores_bookkeeping_and_key_order() {
+        let base = json!({
+            "id": "a", "app": "codex", "name": "A", "email": "a@x.io",
+            "plan": "Pro", "payload": { "tokens": { "access_token": "t1" } },
+            "savedAt": "2026-01-01T00:00:00Z",
+        });
+
+        // Same account state, different bookkeeping → not a change.
+        let mut later = base.clone();
+        later["savedAt"] = json!("2026-08-03T00:00:00Z");
+        later["needsRelogin"] = json!(true);
+        assert!(entry_content_matches(&base, &later));
+
+        // Same content, keys written in another order → not a change.
+        let reordered = json!({
+            "savedAt": "2026-01-01T00:00:00Z", "plan": "Pro",
+            "payload": { "tokens": { "access_token": "t1" } },
+            "email": "a@x.io", "name": "A", "app": "codex", "id": "a",
+        });
+        assert!(entry_content_matches(&base, &reordered));
+
+        // A rotated token IS a change — anywhere inside the payload.
+        let mut rotated = base.clone();
+        rotated["payload"]["tokens"]["access_token"] = json!("t2");
+        assert!(!entry_content_matches(&base, &rotated));
+
+        // So is a plan move, which is the whole point of the feature.
+        let mut upgraded = base.clone();
+        upgraded["plan"] = json!("Max");
+        assert!(!entry_content_matches(&base, &upgraded));
+    }
+
+    /// An id is not globally unique across CLIs: both the codex and claude
+    /// derivations fall back to the EMAIL when the account carries no
+    /// primary id, so one person signed into both with the same address
+    /// holds two entries under one id. A pass for one CLI must not touch
+    /// the other's entry — it replaces the whole entry, `app` included, so
+    /// the mismatch would not even be recoverable by looking at it.
+    #[test]
+    fn auto_sync_does_not_touch_another_cli_entry_sharing_the_id() {
+        let _g = lock_home();
+        let tmp = tempdir("sync-id-collision");
+        let _h = override_home(&tmp);
+
+        // A codex login whose id falls back to the email (no account_id).
+        let jwt = fake_jwt(json!({ "email": "same@example.com" }));
+        let doc = json!({ "tokens": { "id_token": jwt, "access_token": "ax" } });
+        std::fs::create_dir_all(tmp.join(".codex")).unwrap();
+        std::fs::write(tmp.join(".codex/auth.json"), doc.to_string()).unwrap();
+        save_current_account(CliApp::Codex).unwrap();
+        assert_eq!(
+            str_field(&read_store().unwrap()[0], "id"),
+            Some("same@example.com")
+        );
+
+        // A claude entry that landed on the SAME id, hand-written the way
+        // the email fallback would produce it. Inserted FIRST on purpose:
+        // the lookup takes the first match, so with the codex entry ahead
+        // of it an id-only search would still land correctly and this test
+        // would pass against the very bug it exists for.
+        let mut store = read_store().unwrap();
+        store.insert(
+            0,
+            json!({
+                "id": "same@example.com",
+                "app": "claude",
+                "name": "Claude side",
+                "payload": { "credentials": { "claudeAiOauth": { "accessToken": "keep-me" } } },
+                "savedAt": "2026-01-01T00:00:00Z",
+            }),
+        );
+        write_store(store).unwrap();
+
+        // The codex credential rotates, so the pass has a real change to
+        // write — and must write it to the CODEX entry.
+        let jwt = fake_jwt(json!({ "email": "same@example.com" }));
+        let doc = json!({ "tokens": { "id_token": jwt, "access_token": "rotated" } });
+        std::fs::write(tmp.join(".codex/auth.json"), doc.to_string()).unwrap();
+        assert!(sync_live_account(CliApp::Codex).unwrap());
+
+        let store = read_store().unwrap();
+        let claude = store
+            .iter()
+            .find(|e| str_field(e, "app") == Some("claude"))
+            .expect("the claude entry must still exist");
+        assert_eq!(str_field(claude, "name"), Some("Claude side"));
+        assert_eq!(
+            claude
+                .pointer("/payload/credentials/claudeAiOauth/accessToken")
+                .and_then(|v| v.as_str()),
+            Some("keep-me"),
+            "the other CLI's credential must be untouched"
+        );
+        let codex = store
+            .iter()
+            .find(|e| str_field(e, "app") == Some("codex"))
+            .unwrap();
+        assert_eq!(
+            codex
+                .pointer("/payload/tokens/access_token")
+                .and_then(|v| v.as_str()),
+            Some("rotated")
+        );
+    }
+
+    /// A credential we cannot read is not a failure to report. The
+    /// watcher fires ON the write, so a read landing mid-write parses as
+    /// garbage — reporting that would paint the footer red for a CLI that
+    /// is working fine, and a genuinely corrupt file would repaint it
+    /// every minute forever.
+    #[test]
+    fn auto_sync_stays_quiet_when_the_credential_cannot_be_parsed() {
+        let _g = lock_home();
+        let tmp = tempdir("sync-torn-read");
+        let _h = override_home(&tmp);
+
+        write_codex_auth(&tmp, "a@example.com", "plus", "acct-a");
+        save_current_account(CliApp::Codex).unwrap();
+        let saved = read_store().unwrap();
+
+        // Half-written JSON, exactly what a read during the CLI's own
+        // write can catch.
+        std::fs::write(tmp.join(".codex/auth.json"), "{\"tokens\": {\"id_to").unwrap();
+
+        let outcome = sync_live_account(CliApp::Codex);
+        assert!(
+            matches!(outcome, Ok(false)),
+            "an unreadable credential must be a quiet no-op, not a reported failure: {outcome:?}"
+        );
+        // And the snapshot is untouched — it is the only way back in.
+        assert_eq!(read_store().unwrap(), saved);
+    }
+
+    /// List position is FIRST-SAVED order, and an update never moves a
+    /// row — the auto-sync replaces in place, so a row cannot jump under
+    /// the user while they are looking at it.
+    ///
+    /// The consequence is worth stating because it reads as a bug on real
+    /// data: `savedAt` is the LAST-WRITTEN time, not the added time, so an
+    /// older row that was updated recently carries a LATER timestamp than
+    /// the newer row below it. Nothing sorts by it, so this is only ever
+    /// confusing to someone reading the file.
+    #[test]
+    fn list_position_is_first_saved_order_and_updates_do_not_move_rows() {
+        let _g = lock_home();
+        let tmp = tempdir("store-order");
+        let _h = override_home(&tmp);
+
+        write_codex_auth(&tmp, "a@example.com", "plus", "acct-a");
+        save_current_account(CliApp::Codex).unwrap();
+        write_codex_auth(&tmp, "b@example.com", "plus", "acct-b");
+        save_current_account(CliApp::Codex).unwrap();
+
+        // The OLDER account is now live again and gets rewritten — by a
+        // re-save here, exactly as the auto-sync would.
+        write_codex_auth(&tmp, "a@example.com", "pro", "acct-a");
+        save_current_account(CliApp::Codex).unwrap();
+
+        let store = read_store().unwrap();
+        let ids: Vec<&str> = store.iter().map(|e| str_field(e, "id").unwrap()).collect();
+        assert_eq!(ids, vec!["acct-a", "acct-b"], "a rewrite must not reorder");
+
+        let at = |i: usize| str_field(&store[i], "savedAt").unwrap().to_string();
+        assert!(
+            at(0) > at(1),
+            "the row ABOVE now carries the LATER timestamp — position is add \
+             order, savedAt is write time, and they diverge on purpose"
+        );
+    }
+
+    /// The two timestamps have different owners and must not overwrite
+    /// each other. Without this split the store cannot answer the
+    /// question the field exists for — "has the background actually
+    /// updated this account, or has it never run?" — because a pass that
+    /// found nothing looks exactly like a pass that never happened.
+    #[test]
+    fn synced_at_is_the_auto_syncs_own_field_and_saved_at_is_not() {
+        let _g = lock_home();
+        let tmp = tempdir("synced-at");
+        let _h = override_home(&tmp);
+
+        write_codex_auth(&tmp, "a@example.com", "plus", "acct-a");
+        save_current_account(CliApp::Codex).unwrap();
+        let saved_at = str_field(&read_store().unwrap()[0], "savedAt")
+            .unwrap()
+            .to_string();
+        assert!(
+            read_store().unwrap()[0].get("syncedAt").is_none(),
+            "a manual save is not a sync — the field must be absent until \
+             the background has actually updated this entry"
+        );
+
+        // A pass with nothing to do leaves no trace at all: `syncedAt`
+        // marks a real update, not a check.
+        assert!(!sync_live_account(CliApp::Codex).unwrap());
+        assert!(read_store().unwrap()[0].get("syncedAt").is_none());
+
+        // Now the credential really changes.
+        let jwt = fake_jwt(json!({
+            "email": "a@example.com",
+            "https://api.openai.com/auth": { "chatgpt_plan_type": "pro" },
+        }));
+        let doc = json!({
+            "tokens": { "id_token": jwt, "access_token": "rotated", "account_id": "acct-a" },
+        });
+        std::fs::write(tmp.join(".codex/auth.json"), doc.to_string()).unwrap();
+        assert!(sync_live_account(CliApp::Codex).unwrap());
+
+        let entry = read_store().unwrap().remove(0);
+        assert!(
+            str_field(&entry, "syncedAt").is_some(),
+            "the sync must record when it updated the entry"
+        );
+        assert_eq!(
+            str_field(&entry, "savedAt"),
+            Some(saved_at.as_str()),
+            "the sync must not restamp `savedAt` — nobody saved anything"
+        );
+
+        // The pass AFTER a sync must still be a no-op. `syncedAt` is on
+        // the stored entry by now but never on the freshly built one, so
+        // letting it into the comparison would make every later pass
+        // differ — writing the store and reporting a sync every single
+        // minute, forever.
+        assert!(
+            !sync_live_account(CliApp::Codex).unwrap(),
+            "a pass following a real sync must not write again"
+        );
+        assert_eq!(
+            str_field(&read_store().unwrap()[0], "syncedAt"),
+            str_field(&entry, "syncedAt"),
+            "and must not restamp the field either"
+        );
+
+        // And the other direction: a later manual save updates `savedAt`
+        // without erasing the sync's record.
+        let synced_at = str_field(&entry, "syncedAt").unwrap().to_string();
+        save_current_account(CliApp::Codex).unwrap();
+        let entry = read_store().unwrap().remove(0);
+        assert_eq!(str_field(&entry, "syncedAt"), Some(synced_at.as_str()));
+        assert_ne!(str_field(&entry, "savedAt"), Some(saved_at.as_str()));
+    }
+
+    /// It refreshes what the user saved; it does not save things for them.
+    #[test]
+    fn auto_sync_never_creates_an_entry_for_an_unsaved_login() {
+        let _g = lock_home();
+        let tmp = tempdir("sync-unsaved");
+        let _h = override_home(&tmp);
+
+        write_codex_auth(&tmp, "a@example.com", "plus", "acct-a");
+        save_current_account(CliApp::Codex).unwrap();
+
+        write_codex_auth(&tmp, "c@example.com", "pro", "acct-c");
+        assert!(!sync_live_account(CliApp::Codex).unwrap());
+
+        let store = read_store().unwrap();
+        assert_eq!(store.len(), 1);
+        assert_eq!(str_field(&store[0], "id"), Some("acct-a"));
+    }
+
+    /// Deleting an account while its credential is being read must stick.
+    /// The id is looked up on the copy about to be written, so a pre-delete
+    /// decision cannot resurrect it — the one conflict that never heals on
+    /// its own, since every later pass would keep the account alive.
+    #[test]
+    fn auto_sync_does_not_resurrect_an_account_deleted_mid_pass() {
+        let _g = lock_home();
+        let tmp = tempdir("sync-vs-delete");
+        let _h = override_home(&tmp);
+
+        // TWO saved accounts, so deleting the live one still leaves a
+        // codex entry behind. Without that the "nothing saved for this
+        // CLI" gate short-circuits the pass and the lookup this test
+        // exists for never runs — the first version of this test made
+        // exactly that mistake and passed against a resurrecting build.
+        write_codex_auth(&tmp, "a@example.com", "plus", "acct-a");
+        save_current_account(CliApp::Codex).unwrap();
+        write_codex_auth(&tmp, "b@example.com", "plus", "acct-b");
+        save_current_account(CliApp::Codex).unwrap();
+
+        // acct-b is the live login; the user deletes it.
+        delete_account("acct-b".into()).unwrap();
+        assert_eq!(read_store().unwrap().len(), 1);
+
+        assert!(!sync_live_account(CliApp::Codex).unwrap());
+        let store = read_store().unwrap();
+        assert_eq!(store.len(), 1, "a deleted account must stay deleted");
+        assert_eq!(str_field(&store[0], "id"), Some("acct-a"));
+    }
+
+    /// Claude keeps the subscription inside the credential, so an upgrade
+    /// reaches disk on the CLI's next refresh with nothing happening in
+    /// Termory to announce it.
+    #[test]
+    fn auto_sync_picks_up_a_claude_plan_upgrade() {
+        let _g = lock_home();
+        let tmp = tempdir("sync-claude-plan");
+        let _h = override_home(&tmp);
+        let _cfg = EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
+
+        let creds = |plan: &str| {
+            json!({
+                "claudeAiOauth": {
+                    "accessToken": "at-a",
+                    "expiresAt": 1_800_000_000_000_i64,
+                    "scopes": ["user:inference"],
+                    "subscriptionType": plan,
+                }
+            })
+            .to_string()
+        };
+        write_claude_login(&tmp, "at-a", "uuid-a", "a@example.com", "Alice");
+        let cred_path = tmp.join(".claude/.credentials.json");
+        std::fs::write(&cred_path, creds("pro")).unwrap();
+        save_current_account(CliApp::Claude).unwrap();
+        assert_eq!(str_field(&read_store().unwrap()[0], "plan"), Some("Pro"));
+
+        std::fs::write(&cred_path, creds("max")).unwrap();
+        assert!(sync_live_account(CliApp::Claude).unwrap());
+        assert_eq!(str_field(&read_store().unwrap()[0], "plan"), Some("Max"));
+    }
+
+    /// A Max upgrade from 5x to 20x changes only `rateLimitTier` — the
+    /// subscription stays "max" — so it is exactly the kind of move that
+    /// is invisible without parsing that field, and it must flow through
+    /// the auto-sync like any other credential change.
+    #[test]
+    fn auto_sync_picks_up_a_max_multiplier_change() {
+        let _g = lock_home();
+        let tmp = tempdir("sync-claude-tier");
+        let _h = override_home(&tmp);
+        let _cfg = EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
+
+        let creds = |tier: &str| {
+            json!({
+                "claudeAiOauth": {
+                    "accessToken": "at-a",
+                    "expiresAt": 1_800_000_000_000_i64,
+                    "scopes": ["user:inference"],
+                    "subscriptionType": "max",
+                    "rateLimitTier": tier,
+                }
+            })
+            .to_string()
+        };
+        write_claude_login(&tmp, "at-a", "uuid-a", "a@example.com", "Alice");
+        let cred_path = tmp.join(".claude/.credentials.json");
+        std::fs::write(&cred_path, creds("default_claude_max_5x")).unwrap();
+        save_current_account(CliApp::Claude).unwrap();
+        assert_eq!(str_field(&read_store().unwrap()[0], "plan"), Some("Max 5x"));
+
+        std::fs::write(&cred_path, creds("default_claude_max_20x")).unwrap();
+        assert!(sync_live_account(CliApp::Claude).unwrap());
+        assert_eq!(
+            str_field(&read_store().unwrap()[0], "plan"),
+            Some("Max 20x")
+        );
+    }
+
+    /// Re-logging in outside Termory replaces the credential. The entry
+    /// follows it, which also clears a `needsRelogin` left by an earlier
+    /// failed switch — that flag described the credential just replaced.
+    #[test]
+    fn auto_sync_picks_up_a_relogin_and_clears_needs_relogin() {
+        let _g = lock_home();
+        let tmp = tempdir("sync-grok-relogin");
+        let _h = override_home(&tmp);
+
+        write_grok_auth(&tmp, "user-a", "a@example.com", "rt-old");
+        save_current_account(CliApp::Grok).unwrap();
+        mark_account_relogin("user-a", true).unwrap();
+
+        write_grok_auth(&tmp, "user-a", "a@example.com", "rt-fresh");
+        assert!(sync_live_account(CliApp::Grok).unwrap());
+
+        let entry = read_store().unwrap().remove(0);
+        assert_eq!(
+            entry
+                .pointer("/payload/auth/refresh_token")
+                .and_then(|v| v.as_str()),
+            Some("rt-fresh")
+        );
+        assert!(entry.get("needsRelogin").is_none());
     }
 
     #[test]

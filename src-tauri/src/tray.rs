@@ -679,7 +679,7 @@ fn apply_account_rows(app: &AppHandle, rows: &[AccountRow]) -> bool {
 /// normal next action, so a rebuild there would dismiss it every time. Same
 /// technique the quota suffix uses (`update_cli_row_title`). Falls back to a
 /// full rebuild when the account SET changed, which the handles can't express.
-fn refresh_accounts(app: &AppHandle) {
+pub fn refresh_accounts(app: &AppHandle) {
     let handle = app.clone();
     let queued = app.run_on_main_thread(move || {
         let updated = ACCOUNT_ROWS

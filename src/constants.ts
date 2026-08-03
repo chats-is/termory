@@ -99,6 +99,16 @@ export const ACTIVE_STATE_REFRESH_EVENT = "termory:providers-refresh";
 // QUOTA_CHANGED_EVENT in src-tauri/src/quota.rs.
 export const QUOTA_CHANGED_EVENT = "termory:quota-changed";
 
+// Backend pushes `{ app, ok, error? }` when its account auto-sync reached an
+// outcome worth reporting for that CLI: it rewrote the saved entry for the
+// account currently logged in (a token rotation, a re-login run in the
+// terminal, a plan change), or it failed trying. A pass that found nothing
+// to change emits NOTHING — that is nearly every pass, and only a real
+// update counts as having synced. Nothing the user did in Termory starts
+// it, so this is the only way the UI learns of it. Rust mirror:
+// ACCOUNTS_CHANGED_EVENT / AccountSyncEvent in src-tauri/src/accounts.rs.
+export const ACCOUNTS_CHANGED_EVENT = "termory:accounts-changed";
+
 // Backend pushes a CLI key ("codex", …) when that CLI's cached quota was
 // dropped because the LOGIN changed (an account switch), so the page can
 // discard the previous account's numbers — it has no other way to learn

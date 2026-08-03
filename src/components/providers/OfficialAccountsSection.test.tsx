@@ -7,6 +7,9 @@ import {
   type RenderOptions
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { act } from "react";
+import { toast } from "sonner";
+import { ACCOUNTS_CHANGED_EVENT } from "@/constants";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { AccountsState, SubscriptionQuota } from "@/types";
 import {
@@ -29,9 +32,20 @@ HTMLElement.prototype.releasePointerCapture ??= () => {};
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn().mockResolvedValue(() => {})
-}));
+// Captures the registered handlers so a test can fire a backend event.
+// Resolves an unsubscribe like the real API; callbacks stay dormant unless
+// a test reaches into `eventHandlers`, so existing tests are unaffected.
+const { listenMock, eventHandlers } = vi.hoisted(() => {
+  const eventHandlers = new Map<string, (e: { payload: unknown }) => void>();
+  const listenMock = vi.fn(
+    (name: string, cb: (e: { payload: unknown }) => void) => {
+      eventHandlers.set(name, cb);
+      return Promise.resolve(() => {});
+    }
+  );
+  return { listenMock, eventHandlers };
+});
+vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ onFocusChanged: vi.fn().mockResolvedValue(() => {}) })
 }));
@@ -93,6 +107,68 @@ beforeEach(() => {
   invokeMock.mockReset();
   askMock.mockReset();
   askMock.mockResolvedValue(true);
+  eventHandlers.clear();
+  vi.mocked(toast.error).mockClear();
+});
+
+describe("OfficialAccountsSection — backend auto-sync", () => {
+  // The backend keeps the live account's entry in step with the CLI's
+  // credential on its own, on a timer and on filesystem events. The whole
+  // flow reports through the freshness footer, so a failed refresh here
+  // must not ALSO become a toast — that would announce a background
+  // failure the user never asked for and cannot act on.
+  it("shows no error toast when the auto-sync refresh fails", async () => {
+    mockList(makeState());
+    render(<OfficialAccountsSection app="codex" />);
+    expect(await screen.findByText("Jane")).toBeInTheDocument();
+
+    invokeMock.mockRejectedValue(new Error("store unreadable"));
+    vi.mocked(toast.error).mockClear();
+
+    const fire = eventHandlers.get(ACCOUNTS_CHANGED_EVENT);
+    expect(fire, "the section must subscribe to the auto-sync event").toBeTruthy();
+    await act(async () => {
+      fire!({ payload: { app: "codex", ok: true } });
+    });
+
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  // The contrast that gives the assertion above its meaning: the same
+  // failing IPC on a path the user DID trigger still reports.
+  it("still reports a failure the user asked for", async () => {
+    invokeMock.mockRejectedValue(new Error("store unreadable"));
+    render(<OfficialAccountsSection app="codex" />);
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+  });
+
+  it("does not re-read on a FAILED pass — it changed nothing", async () => {
+    mockList(makeState());
+    render(<OfficialAccountsSection app="codex" />);
+    expect(await screen.findByText("Jane")).toBeInTheDocument();
+    invokeMock.mockClear();
+
+    await act(async () => {
+      eventHandlers.get(ACCOUNTS_CHANGED_EVENT)!({
+        payload: { app: "codex", ok: false, error: "keychain locked" }
+      });
+    });
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("ignores an auto-sync event for a different CLI", async () => {
+    mockList(makeState());
+    render(<OfficialAccountsSection app="codex" />);
+    expect(await screen.findByText("Jane")).toBeInTheDocument();
+    invokeMock.mockClear();
+
+    await act(async () => {
+      eventHandlers.get(ACCOUNTS_CHANGED_EVENT)!({
+        payload: { app: "grok", ok: true }
+      });
+    });
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("OfficialAccountsSection — Codex management", () => {

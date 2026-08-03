@@ -69,6 +69,7 @@ import {
 import { isSourceEnabled, orderSources, visibleSources } from "@/lib/provider-utils";
 import { addSetValue, toggleSetValue } from "@/lib/set-utils";
 import {
+  ACCOUNTS_CHANGED_EVENT,
   CLI_APPS,
   RAIL_ROUTE_ORDER,
   CLI_APP_SOURCE_BADGE,
@@ -839,6 +840,29 @@ export function App() {
       void unlisten.then((fn) => fn()).catch(() => {});
     };
   }, [applyScanResult]);
+
+  // The backend re-derived a saved account from its CLI's own credential
+  // with nothing the user did to start it, and reached an outcome worth
+  // reporting. Nothing to re-scan — the Providers page reloads itself off
+  // the same event — this only feeds the footer.
+  const [accountSync, setAccountSync] = React.useState<{
+    at: number;
+    error: string | null;
+  } | null>(null);
+  React.useEffect(() => {
+    const unlisten = listen<{ ok?: boolean; error?: string | null }>(
+      ACCOUNTS_CHANGED_EVENT,
+      (event) => {
+        setAccountSync({
+          at: Date.now(),
+          error: event.payload?.ok ? null : (event.payload?.error ?? "")
+        });
+      }
+    );
+    return () => {
+      void unlisten.then((fn) => fn()).catch(() => {});
+    };
+  }, []);
 
   // While the window is hidden (close-to-tray) the backend skips the
   // sources-changed emit, so re-scan on focus to catch up on what changed
@@ -1910,6 +1934,7 @@ export function App() {
         syncing={loading}
         lastSyncedAt={lastRefreshedAt}
         error={error}
+        accountSync={accountSync}
       />
       <CommandPalette
         open={paletteOpen}

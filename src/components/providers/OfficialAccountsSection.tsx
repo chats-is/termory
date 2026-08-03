@@ -19,7 +19,11 @@ import {
   TooltipContent,
   TooltipTrigger
 } from "@/components/ui/tooltip";
-import { CLI_APP_LABEL, QUOTA_CHANGED_EVENT } from "@/constants";
+import {
+  ACCOUNTS_CHANGED_EVENT,
+  CLI_APP_LABEL,
+  QUOTA_CHANGED_EVENT
+} from "@/constants";
 import { formatCountdown, formatCurrency, formatResetTime } from "@/lib/format";
 import { quotaLevel, type QuotaLevel } from "@/lib/quota-utils";
 import { cn } from "@/lib/utils";
@@ -497,13 +501,20 @@ export function OfficialAccountsSection({
   const [state, setState] = React.useState<AccountsState | null>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
 
-  const reload = React.useCallback(async () => {
-    try {
-      setState(await invoke<AccountsState>("list_accounts", { app }));
-    } catch (err) {
-      toast.error(String(err));
-    }
-  }, [app]);
+  // `silent` suppresses the error toast, for the one caller the user did
+  // not trigger: the backend's account auto-sync. Its failures are already
+  // reported by the freshness footer, and a toast raised from a refresh
+  // nobody asked for announces something the user cannot act on.
+  const reload = React.useCallback(
+    async (silent = false) => {
+      try {
+        setState(await invoke<AccountsState>("list_accounts", { app }));
+      } catch (err) {
+        if (!silent) toast.error(String(err));
+      }
+    },
+    [app]
+  );
 
   React.useEffect(() => {
     void reload();
@@ -522,6 +533,15 @@ export function OfficialAccountsSection({
     track(
       listen<{ app?: string }>(QUOTA_CHANGED_EVENT, (e) => {
         if (e.payload?.app === app) void reload();
+      })
+    );
+    // The backend re-derived this CLI's live account from its credential
+    // on its own, so the rendered row is out of date. Only a SUCCESS
+    // carries new data to read; a failed pass changed nothing, and
+    // re-reading would risk replacing good rows with an error.
+    track(
+      listen<{ app?: string; ok?: boolean }>(ACCOUNTS_CHANGED_EVENT, (e) => {
+        if (e.payload?.app === app && e.payload.ok) void reload(true);
       })
     );
     track(

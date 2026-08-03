@@ -264,6 +264,19 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
                 credential_clis.dedup();
                 for cli in credential_clis {
                     crate::tray::force_quota_refresh(&app_handle, cli);
+                    // Same signal, second consumer: the saved snapshot of
+                    // the account now logged in is a copy of this file, so
+                    // it just went stale. This is the instant path for the
+                    // file-backed credentials; the timer in
+                    // `accounts::start_auto_sync` covers the ones that emit
+                    // no event at all (macOS Keychain).
+                    //
+                    // Off this thread — the read can spawn `security(1)`
+                    // and this loop still has the burst to drain.
+                    let handle = app_handle.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        crate::accounts::sync_live_account_if_idle(&handle, cli)
+                    });
                 }
             }
 
