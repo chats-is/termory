@@ -299,10 +299,10 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
                     crate::tray::force_quota_refresh(&app_handle, cli);
                     // Same signal, second consumer: the saved snapshot of
                     // the account now logged in is a copy of this file, so
-                    // it just went stale. This is the instant path for the
-                    // file-backed credentials; the timer in
-                    // `accounts::start_auto_sync` covers the ones that emit
-                    // no event at all (macOS Keychain).
+                    // it just went stale. This is the whole real-time path
+                    // — Claude's Keychain included, via the lock above —
+                    // and the only other trigger is one catch-up pass at
+                    // launch (`accounts::sync_accounts_at_launch`).
                     //
                     // Off this thread — the read can spawn `security(1)`
                     // and this loop still has the burst to drain.

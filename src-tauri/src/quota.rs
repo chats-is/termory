@@ -84,9 +84,14 @@ pub fn claude_identity_signal_path() -> Option<PathBuf> {
 
 /// Which CLI a credential-file path belongs to — the single list the
 /// filesystem watcher matches to force a quota refresh on login /
-/// logout (the readers below own the same paths). Keychain-backed
-/// credentials produce no file event; the 60s not_found retry is the
-/// fallback there.
+/// logout (the readers below own the same paths).
+///
+/// A Keychain-backed credential produces no file event of its own, but
+/// Claude's is reachable anyway through the lock it takes to refresh
+/// (`claude_credential_signal_path`). Its LOGIN signal is deliberately
+/// absent — see `claude_identity_signal_path` for why that one must not
+/// reach `force_quota_refresh`. Codex's Keychain variant has no such
+/// signal, and the 60s not_found retry remains the fallback there.
 pub fn credential_cli_for_path(path: &std::path::Path) -> Option<CliApp> {
     let parent_is = |dir: &str| {
         path.parent()
