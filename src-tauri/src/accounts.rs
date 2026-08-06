@@ -310,17 +310,6 @@ pub struct AccountSyncEvent {
     pub error: Option<String>,
 }
 
-/// How often the background pass runs.
-///
-/// A timer is not redundant with the file watcher. On macOS Claude's
-/// credential lives in the **Keychain**, which emits no filesystem event at
-/// all, and `~/.claude.json` (the account identity) sits outside every
-/// watched directory. A plan change is the same story: it reaches disk only
-/// when the CLI next refreshes its token, and nothing announces that. So
-/// the watcher covers the file-backed cases instantly and this covers the
-/// rest.
-const AUTO_SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
-
 /// Carry `key` from the entry being replaced into its replacement.
 ///
 /// The store holds two timestamps with DIFFERENT owners: `savedAt` is
@@ -490,27 +479,32 @@ pub fn sync_live_account_if_idle(app: &tauri::AppHandle, cli: CliApp) {
     );
 }
 
-/// Start the background pass. See `AUTO_SYNC_INTERVAL` for why a timer is
-/// needed on top of the watcher.
-pub fn start_auto_sync(app: tauri::AppHandle) {
+/// One pass per CLI at launch, and nothing after that.
+///
+/// The watcher covers every credential from here on — Claude's Keychain
+/// included, through the two files beside its config dir — so the only gap
+/// left is the one no event can fill: whatever changed while Termory was
+/// CLOSED, when there was nobody to receive the event. That is a single
+/// catch-up, not a schedule.
+///
+/// **There is deliberately no periodic pass.** This app does not poll: the
+/// quota has "THREE triggers (NO periodic polling)", the install detection
+/// exists to have replaced a 3s poll, and session scanning leans on the
+/// watcher plus the user showing up. A timer here would have been the only
+/// recurring task in the process, spawning `security(1)` forever to
+/// re-find what the watcher already found, and it would have held this one
+/// feature to a standard nothing else in the codebase is held to.
+pub fn sync_accounts_at_launch(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
-        loop {
-            for cli in [CliApp::Codex, CliApp::Claude, CliApp::Grok] {
-                let app = app.clone();
-                // Credential reads hit the filesystem and can spawn
-                // `security(1)`, so they stay off the async worker. The
-                // JoinHandle is dropped rather than propagated: a panic
-                // must not take the loop down with it.
-                let _ = tauri::async_runtime::spawn_blocking(move || {
-                    sync_live_account_if_idle(&app, cli)
-                })
-                .await;
-            }
-            // Sleep AFTER the pass, so the first one runs at launch —
-            // which is when the store is most likely stale, because the
-            // CLI was used while Termory was closed and no event from that
-            // window survived to be replayed.
-            tokio::time::sleep(AUTO_SYNC_INTERVAL).await;
+        for cli in [CliApp::Codex, CliApp::Claude, CliApp::Grok] {
+            let app = app.clone();
+            // Credential reads hit the filesystem and can spawn
+            // `security(1)`, so they stay off the async worker. The
+            // JoinHandle is dropped rather than propagated: a panic here
+            // must not take the rest of the catch-up with it.
+            let _ =
+                tauri::async_runtime::spawn_blocking(move || sync_live_account_if_idle(&app, cli))
+                    .await;
         }
     });
 }
@@ -1255,7 +1249,7 @@ struct ClaudeLive {
 /// profile's credentials with another profile's identity under a custom
 /// `CLAUDE_CONFIG_DIR` — and worse, the switch then WROTE the identity into
 /// a file that profile's claude never reads.
-fn claude_json_path() -> Result<std::path::PathBuf, Box<dyn Error>> {
+pub(crate) fn claude_json_path() -> Result<std::path::PathBuf, Box<dyn Error>> {
     let config_dir = crate::claude_auth::config_dir().ok_or("home directory not available")?;
     let legacy = config_dir.join(".config.json");
     if legacy.exists() {

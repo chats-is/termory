@@ -1366,12 +1366,12 @@ pub fn run() {
             // tray click (menu open, rate-limited in trigger_quota_refresh)
             // and whenever the Providers page fetches via IPC.
             tray::trigger_quota_refresh(app.handle());
-            // Keep each CLI's saved entry for the account it is currently
-            // logged into in step with that CLI's own credential — token
-            // rotation, a re-login run in the terminal, a plan change. The
-            // watcher handles the file-backed cases the moment they land;
-            // this covers what emits no filesystem event (macOS Keychain).
-            accounts::start_auto_sync(app.handle().clone());
+            // One catch-up pass over each CLI's saved account for the login
+            // it is currently on. The watcher keeps them in step from here
+            // — Claude's Keychain included, through the files beside its
+            // config dir — so this covers only what changed while Termory
+            // was closed and nobody was listening.
+            accounts::sync_accounts_at_launch(app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())

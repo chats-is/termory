@@ -42,6 +42,46 @@ pub const QUOTA_CHANGED_EVENT: &str = "termory:quota-changed";
 /// frontend mirror: QUOTA_INVALIDATED_EVENT in src/constants.ts.
 pub const QUOTA_INVALIDATED_EVENT: &str = "termory:quota-invalidated";
 
+/// Claude's credential is in the macOS **Keychain** and emits no
+/// filesystem event of its own — but `<config-dir>.lock` does, and it
+/// means exactly one thing: the OAuth token was refreshed.
+///
+/// `proper-lockfile` names a lock `` `${file}.lock` `` and creates it with
+/// `mkdir` (lib/lockfile.js:11,:29), and Claude locks the CONFIG DIR
+/// ITSELF only in `checkAndRefreshOAuthTokenIfNeededImpl` (auth.ts:1485-
+/// 1491). Every other `lockfile.lock` call in its source locks some other
+/// path — a mailbox, a marker, a task — so this name is an exclusive
+/// signal, and a plan change rides the same refresh.
+///
+/// A credential change is what the quota cares about too, which is why
+/// this one is routed through `credential_cli_for_path` while the login
+/// signal below is NOT.
+pub fn claude_credential_signal_path() -> Option<PathBuf> {
+    let dir = crate::claude_auth::config_dir()?;
+    // Sibling of the config dir, not a child — `~/.claude` → `~/.claude.lock`.
+    let mut lock = dir.into_os_string();
+    lock.push(".lock");
+    Some(PathBuf::from(lock))
+}
+
+/// `.claude.json` — the only file a LOGIN touches (`storeOAuthAccountInfo`,
+/// cli/handlers/auth.ts:58/72; the tokens themselves go to the Keychain),
+/// and the same file a logout clears.
+///
+/// **Deliberately NOT part of `credential_cli_for_path`.** This is Claude's
+/// whole global config, written from 159 places in its source — startup
+/// counters, changelog fetch times, skill-usage tracking. Routing it there
+/// would hand every one of those writes to `force_quota_refresh`, which
+/// bypasses the normal two-minute floor, and turn a feature documented as
+/// having "THREE triggers (NO periodic polling)" into an Anthropic API call
+/// every ten seconds while Claude is in use. The account sync consumes it
+/// alone: a pass that finds nothing costs one credential read and writes
+/// nothing, and the watcher's debounce collapses a flurry of config writes
+/// into a single one.
+pub fn claude_identity_signal_path() -> Option<PathBuf> {
+    crate::accounts::claude_json_path().ok()
+}
+
 /// Which CLI a credential-file path belongs to — the single list the
 /// filesystem watcher matches to force a quota refresh on login /
 /// logout (the readers below own the same paths). Keychain-backed
@@ -74,6 +114,9 @@ pub fn credential_cli_for_path(path: &std::path::Path) -> Option<CliApp> {
         "auth.json" if parent_is(".codex") || parent_is_codex_home() => Some(CliApp::Codex),
         "auth.json" if parent_is(".grok") || parent_is_grok_home() => Some(CliApp::Grok),
         "oauth_creds.json" if parent_is(".gemini") => Some(CliApp::Gemini),
+        // Matched by FULL path, not basename: `.claude.lock` is an
+        // ordinary-looking name and one anywhere else is not Claude's.
+        _ if claude_credential_signal_path().as_deref() == Some(path) => Some(CliApp::Claude),
         _ => None,
     }
 }
@@ -2525,6 +2568,50 @@ mod tests {
         );
         assert_eq!(
             credential_cli_for_path(Path::new("/u/x/.claude/projects/p/s.jsonl")),
+            None
+        );
+    }
+
+    /// Claude's credential is in the macOS Keychain and emits no event of
+    /// its own; these two files beside the config dir are what does move.
+    /// Matched by FULL path — `.claude.json` is an ordinary-looking name
+    /// and a file called that anywhere else is not Claude's config.
+    #[test]
+    fn credential_cli_for_path_matches_claudes_keychain_signal_files() {
+        use crate::testutils::{lock_home, override_home, EnvVarGuard};
+        use std::path::Path;
+        let _g = lock_home();
+        let tmp = std::env::temp_dir().join("termory-claude-signal");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _h = override_home(&tmp);
+        let _e = EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
+
+        // The token-refresh lock: `proper-lockfile` appends `.lock` to the
+        // locked path, and Claude locks the config DIR itself.
+        assert_eq!(
+            credential_cli_for_path(&tmp.join(".claude.lock")),
+            Some(CliApp::Claude)
+        );
+        // The LOGIN signal must NOT be here. `.claude.json` is Claude's
+        // whole global config, written from 159 places in its source, and
+        // this map feeds `force_quota_refresh` — which bypasses its own
+        // rate floor. Routing it here turned a feature documented as
+        // having no periodic polling into an API call every ten seconds
+        // while Claude was in use. The account sync consumes it directly.
+        assert_eq!(credential_cli_for_path(&tmp.join(".claude.json")), None);
+        assert_eq!(
+            claude_identity_signal_path().as_deref(),
+            Some(tmp.join(".claude.json").as_path())
+        );
+        // Same basename somewhere else is not Claude's lock.
+        assert_eq!(
+            credential_cli_for_path(Path::new("/somewhere/else/.claude.lock")),
+            None
+        );
+        // A lock on a DIFFERENT path — Claude locks mailboxes, markers and
+        // tasks too, and none of those mean the credential moved.
+        assert_eq!(
+            credential_cli_for_path(&tmp.join(".claude/tasks.lock")),
             None
         );
     }

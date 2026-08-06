@@ -189,6 +189,28 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
         }
     }
 
+    // Claude's credential lives in the macOS Keychain, which emits no
+    // filesystem event — but two files beside `~/.claude` do move when it
+    // changes: the token-refresh lock and the login's identity write (see
+    // `quota::claude_identity_signal_path`). They sit one level ABOVE
+    // the watched config tree, and the lock exists only while held, so a
+    // direct file watch is impossible — watch their parent instead, the
+    // same non-recursive + name-filter shape as the Claude Desktop
+    // targets above, and for the same reason: a busy shared dir whose
+    // events are wanted for ONE routing decision and nothing else.
+    let claude_signal_parents = credential_signal_parents();
+    for path in &claude_signal_parents {
+        if let Err(err) = watcher.watch(path, RecursiveMode::NonRecursive) {
+            log::warn!("watcher skip claude credential-signal target {path:?}: {err}");
+        }
+    }
+    // Direct children of those parents are install/credential signals
+    // only; letting them through the rescan gate would make every dotfile
+    // written in the user's home (`.zsh_history` on every shell command)
+    // trigger a full session scan.
+    let mut rescan_ignored = claude_desktop_parents.clone();
+    rescan_ignored.extend(claude_signal_parents.iter().cloned());
+
     let inner = Arc::new(Mutex::new(WatcherInner {
         watcher,
         dynamic_paths: HashSet::new(),
@@ -262,6 +284,17 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
                 let mut credential_clis: Vec<crate::providers::CliApp> =
                     events.iter().flat_map(event_credential_clis).collect();
                 credential_clis.dedup();
+                let identity_touched = events.iter().any(event_touches_claude_identity);
+                if identity_touched && !credential_clis.contains(&crate::providers::CliApp::Claude)
+                {
+                    let handle = app_handle.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        crate::accounts::sync_live_account_if_idle(
+                            &handle,
+                            crate::providers::CliApp::Claude,
+                        )
+                    });
+                }
                 for cli in credential_clis {
                     crate::tray::force_quota_refresh(&app_handle, cli);
                     // Same signal, second consumer: the saved snapshot of
@@ -291,7 +324,7 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
             // session rescan.
             if !events
                 .iter()
-                .any(|e| event_has_relevant_path(e, &claude_desktop_parents))
+                .any(|e| event_has_relevant_path(e, &rescan_ignored))
             {
                 continue;
             }
@@ -407,6 +440,51 @@ fn event_credential_clis(event: &notify::Event) -> Vec<crate::providers::CliApp>
         .iter()
         .filter_map(|p| crate::quota::credential_cli_for_path(p))
         .collect()
+}
+
+/// Both Claude signal files: the credential one (routed to the quota too)
+/// and the login one (the account sync alone — see
+/// `quota::claude_identity_signal_path` for why it must not reach the
+/// quota). The watch needs their parents either way.
+fn claude_signal_paths() -> Vec<PathBuf> {
+    [
+        crate::quota::claude_credential_signal_path(),
+        crate::quota::claude_identity_signal_path(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Existing, deduped parent dirs of the Claude signal files.
+/// Deduped because in the default layout both live in `$HOME`; a
+/// relocated `CLAUDE_CONFIG_DIR` splits them (the lock sits beside the
+/// dir, the identity file moves inside it — where the normal recursive
+/// watch already covers it).
+fn credential_signal_parents() -> Vec<PathBuf> {
+    let mut parents: Vec<PathBuf> = Vec::new();
+    for path in claude_signal_paths() {
+        let Some(parent) = path.parent().map(PathBuf::from) else {
+            continue;
+        };
+        if parent.exists() && !parents.contains(&parent) {
+            parents.push(parent);
+        }
+    }
+    parents
+}
+
+/// Did this event touch Claude's LOGIN signal, `.claude.json`?
+///
+/// Kept apart from `event_credential_clis` on purpose: that map also feeds
+/// `force_quota_refresh`, and this file is Claude's whole global config,
+/// written from 159 places in its source. Routing it there would turn a
+/// feature with no periodic polling into an API call every ten seconds
+/// while Claude is in use. The account sync consumes it alone — see
+/// `quota::claude_identity_signal_path`.
+fn event_touches_claude_identity(event: &notify::Event) -> bool {
+    crate::quota::claude_identity_signal_path()
+        .is_some_and(|signal| event.paths.iter().any(|p| p == &signal))
 }
 
 fn event_has_relevant_path(event: &notify::Event, ignore_children_of: &[PathBuf]) -> bool {
@@ -881,6 +959,99 @@ mod tests {
         // Unrelated roots never match.
         assert!(!event_touches_claude_desktop(
             &ev(&["/Users/x/Claude"]),
+            &parents
+        ));
+    }
+
+    /// The login signal routes to the account sync and NOWHERE else — in
+    /// particular not through `event_credential_clis`, which also drives
+    /// `force_quota_refresh`. The two must stay separable, so each is
+    /// asserted against the other's input.
+    #[test]
+    fn the_login_signal_is_recognized_and_kept_out_of_the_credential_route() {
+        let _lock = crate::testutils::lock_home();
+        let tmp = std::env::temp_dir().join("termory-identity-signal");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _h = crate::testutils::override_home(&tmp);
+        let _e = crate::testutils::EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
+
+        fn ev(paths: &[std::path::PathBuf]) -> notify::Event {
+            let mut e = notify::Event::default();
+            e.paths = paths.to_vec();
+            e
+        }
+        let identity = ev(&[tmp.join(".claude.json")]);
+        let lock = ev(&[tmp.join(".claude.lock")]);
+
+        // The login signal is seen here…
+        assert!(event_touches_claude_identity(&identity));
+        // …and NOT on the credential route, whose forced quota refresh
+        // bypasses its own rate floor.
+        assert!(event_credential_clis(&identity).is_empty());
+
+        // The credential signal is the mirror image: on the credential
+        // route, not mistaken for the login one.
+        assert!(!event_touches_claude_identity(&lock));
+        assert_eq!(
+            event_credential_clis(&lock),
+            vec![crate::providers::CliApp::Claude]
+        );
+    }
+
+    /// The parent list the watch and the rescan exclusion are both built
+    /// from. Deduped because in the default layout the lock and the
+    /// identity file share one parent — watching `$HOME` twice would be
+    /// harmless but excluding it twice hides a real bug in the dedup.
+    #[test]
+    fn credential_signal_parents_dedupes_to_the_existing_home() {
+        let _lock = crate::testutils::lock_home();
+        let tmp = std::env::temp_dir().join("termory-signal-parents");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _h = crate::testutils::override_home(&tmp);
+        let _e = crate::testutils::EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
+
+        let parents = credential_signal_parents();
+        assert_eq!(
+            parents,
+            vec![tmp.clone()],
+            "both signal files live in HOME, so exactly one parent is watched"
+        );
+        // And it is the dir the rescan gate must ignore direct children of.
+        assert!(!event_has_relevant_path(
+            &{
+                let mut e = notify::Event::default();
+                e.paths = vec![tmp.join(".claude.lock")];
+                e
+            },
+            &parents
+        ));
+    }
+
+    /// The Claude signal files live in the user's HOME, a dir that churns
+    /// constantly (`.zsh_history` on every shell command). Their parent is
+    /// watched for the credential routing only — letting its direct
+    /// children through the rescan gate would turn every one of those
+    /// writes into a full session scan.
+    #[test]
+    fn home_level_signal_events_do_not_trigger_a_session_rescan() {
+        fn ev(paths: &[&str]) -> notify::Event {
+            let mut e = notify::Event::default();
+            e.paths = paths.iter().map(PathBuf::from).collect();
+            e
+        }
+        let parents = vec![PathBuf::from("/Users/x")];
+        assert!(!event_has_relevant_path(
+            &ev(&["/Users/x/.zsh_history"]),
+            &parents
+        ));
+        assert!(!event_has_relevant_path(
+            &ev(&["/Users/x/.claude.lock"]),
+            &parents
+        ));
+        // Session data one level deeper is still relevant — the exclusion
+        // is direct children only, so the watched CLI trees are untouched.
+        assert!(event_has_relevant_path(
+            &ev(&["/Users/x/.claude/projects/p/s.jsonl"]),
             &parents
         ));
     }
