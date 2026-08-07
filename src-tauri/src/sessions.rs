@@ -552,22 +552,61 @@ pub fn search_sessions(query: &str) -> Result<Vec<SearchHit>, Box<dyn Error>> {
 /// a fresh write produces a new mtime → new key → cache miss → re-
 /// parse.
 ///
-/// Capacity is intentionally small (default 200 entries). Real LRU
-/// eviction via a `VecDeque<key>` companion to the `HashMap` — when
-/// inserting past capacity, drop the front of the deque. Hot entries
+/// Real LRU eviction via a `VecDeque<key>` companion to the `HashMap` —
+/// when inserting past a limit, drop the front of the deque. Hot entries
 /// stay because every `get` rotates them to the back.
+///
+/// Bounded on TWO axes, because an entry-count limit alone bounds
+/// nothing: entries are whole parsed transcripts and their sizes differ
+/// by four orders of magnitude. With 158 sessions and a 200-entry limit,
+/// one search cached every session permanently and added **421 MB** of
+/// resident memory on a real machine — 224 MB of it a SINGLE session
+/// holding a 141 MB tool-output message. `byte_budget` is what actually
+/// caps that; `capacity` is kept as the cheap bound on bookkeeping.
 struct SearchCache {
-    map: HashMap<(std::path::PathBuf, std::time::SystemTime), Arc<SessionDetail>>,
+    map: HashMap<(std::path::PathBuf, std::time::SystemTime), CachedSession>,
     order: std::collections::VecDeque<(std::path::PathBuf, std::time::SystemTime)>,
     capacity: usize,
+    byte_budget: usize,
+    used_bytes: usize,
+}
+
+/// A cached transcript plus what it costs, so eviction can subtract the
+/// exact figure `put` added rather than re-measuring a shared `Arc`.
+struct CachedSession {
+    detail: Arc<SessionDetail>,
+    cost: usize,
+}
+
+/// Total bytes of transcript text the search cache may hold. Sized to
+/// fit a typical user's whole history (the measurement above: ~200 MB
+/// once the one pathological session is excluded by
+/// `SEARCH_CACHE_MAX_ENTRY_BYTES`) so ordinary searching still hits the
+/// cache on every keystroke. A budget tight enough to thrash would just
+/// trade this memory for a re-parse of every session per keystroke.
+const SEARCH_CACHE_BYTE_BUDGET: usize = 256 * 1024 * 1024;
+
+/// An entry larger than this is never cached. One outsized transcript
+/// would otherwise evict the entire rest of the cache to make room for
+/// itself, so the session that costs the most to parse is also the one
+/// that would poison the cache for everything else.
+const SEARCH_CACHE_MAX_ENTRY_BYTES: usize = 32 * 1024 * 1024;
+
+/// What a cached transcript costs: the message text, which is all of it
+/// that scales. The surrounding `AppSession` metadata is a fixed handful
+/// of short strings.
+fn search_entry_cost(detail: &SessionDetail) -> usize {
+    detail.messages.iter().map(|m| m.text.len()).sum()
 }
 
 impl SearchCache {
-    fn new(capacity: usize) -> Self {
+    fn new(capacity: usize, byte_budget: usize) -> Self {
         Self {
             map: HashMap::new(),
             order: std::collections::VecDeque::new(),
             capacity,
+            byte_budget,
+            used_bytes: 0,
         }
     }
 
@@ -581,19 +620,44 @@ impl SearchCache {
         // Promote to MRU.
         self.order.retain(|k| k != key);
         self.order.push_back(key.clone());
-        self.map.get(key).map(Arc::clone)
+        self.map.get(key).map(|entry| Arc::clone(&entry.detail))
+    }
+
+    /// Drop the least-recently-used entry. Returns false when there is
+    /// nothing left to evict, so callers can't spin.
+    fn evict_oldest(&mut self) -> bool {
+        let Some(oldest) = self.order.pop_front() else {
+            return false;
+        };
+        if let Some(entry) = self.map.remove(&oldest) {
+            self.used_bytes = self.used_bytes.saturating_sub(entry.cost);
+        }
+        true
     }
 
     fn put(&mut self, key: (std::path::PathBuf, std::time::SystemTime), value: Arc<SessionDetail>) {
-        if self.map.contains_key(&key) {
+        let cost = search_entry_cost(&value);
+        if let Some(previous) = self.map.remove(&key) {
             self.order.retain(|k| k != &key);
-        } else if self.map.len() >= self.capacity {
-            if let Some(oldest) = self.order.pop_front() {
-                self.map.remove(&oldest);
-            }
+            self.used_bytes = self.used_bytes.saturating_sub(previous.cost);
         }
+        // Outsized transcripts are served but not retained — the caller
+        // already holds the `Arc`, so skipping the insert costs it
+        // nothing now and only a re-parse later.
+        if cost > SEARCH_CACHE_MAX_ENTRY_BYTES.min(self.byte_budget) {
+            return;
+        }
+        while self.map.len() >= self.capacity && self.evict_oldest() {}
+        while self.used_bytes + cost > self.byte_budget && self.evict_oldest() {}
         self.order.push_back(key.clone());
-        self.map.insert(key, value);
+        self.used_bytes += cost;
+        self.map.insert(
+            key,
+            CachedSession {
+                detail: value,
+                cost,
+            },
+        );
     }
 
     #[cfg(test)]
@@ -603,7 +667,9 @@ impl SearchCache {
 }
 
 static SEARCH_CACHE: std::sync::LazyLock<std::sync::Mutex<SearchCache>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(SearchCache::new(200)));
+    std::sync::LazyLock::new(|| {
+        std::sync::Mutex::new(SearchCache::new(200, SEARCH_CACHE_BYTE_BUDGET))
+    });
 
 /// Everything the LIST scan derives from reading a session file's full
 /// contents: token usage, model, per-day breakdown, AND the visible
@@ -636,6 +702,266 @@ static SCAN_EXTRACT_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf,
 /// run to 100+ MB; the BufReader default (8 KB) costs ~32x more read
 /// syscalls than this on the cache-miss path.
 const SCAN_READ_BUF_SIZE: usize = 256 * 1024;
+
+/// Largest a single JSON *string value* may grow before the LIST scan
+/// elides the rest of it.
+///
+/// A JSONL record has no size bound: Codex writes a tool's output
+/// verbatim into one record, and a runaway `exec_command` produced a
+/// **156 MB single line** on a real machine (a second record in the same
+/// file was 74 MB). Every stage of the scan multiplied it — the line
+/// buffer grew to 245 MB, `serde_json::Value` added ~450 MB on top, and
+/// building the formatted message text added ~240 MB more, for a
+/// measured 913 MB of resident memory that macOS's allocator then never
+/// returned to the OS. Claude's own scan, over 165 MB of transcripts
+/// whose lines are all small, peaked at 23 MB — so this is a
+/// single-RECORD problem, not a data-volume one.
+///
+/// The scan never keeps message text. It reads short scalar fields
+/// (`type`, `timestamp`, `payload.type`, `usage.*`, `model`) and the
+/// COUNT of visible messages, then drops everything else. Eliding the
+/// tail of an over-long string leaves the record's JSON *structure*
+/// untouched, so `codex_message_from_value` / `claude_message_from_value`
+/// still reach exactly the same visible/hidden decisions and still
+/// produce the same message COUNT: those decisions key off structure and
+/// off exact matches against short constants (`(no content)`,
+/// `[Request interrupted by user]`, …), never off length, and the one
+/// emptiness test in `claude_display_text` returns `Some` on both arms.
+/// Nothing the scan reads is anywhere near the cap.
+///
+/// Truncating an over-long object KEY (indistinguishable from a value
+/// without tracking container state) is harmless for the same reason:
+/// every key the scan or the message builders look up is short, so a
+/// 64 KB+ key can never be one of them.
+///
+/// Only the LIST scan elides. The DETAIL parsers pass `NO_STRING_LIMIT`,
+/// so what the user actually reads is byte-for-byte unchanged.
+///
+/// SCOPE: the cap is per string VALUE, not per record. A record built
+/// from thousands of individually-under-cap strings would still buffer
+/// in full — bounding that needs structural truncation (closing the open
+/// brackets), which is a different and much larger change. Not a problem
+/// on real data: the worst file measured here holds its bulk in single
+/// giant strings, and a scan of the whole corpus peaks at 32 MB.
+const SCAN_MAX_STRING_BYTES: usize = 64 * 1024;
+
+/// `max_string_bytes` value meaning "emit every byte" — used by the
+/// detail parsers, which render what they read.
+const NO_STRING_LIMIT: usize = usize::MAX;
+
+/// Longest prefix of `bytes` that ends on a UTF-8 character boundary.
+/// A sequence is at most four bytes, so only the last three can be a
+/// partial one and this stays O(1) however long the buffer is.
+///
+/// Distinguishing "complete character at the end" from "truncated one"
+/// is the whole job: naively trimming trailing continuation bytes would
+/// eat a perfectly good multi-byte character.
+fn utf8_safe_len(bytes: &[u8]) -> usize {
+    let len = bytes.len();
+    for back in 1..=3.min(len) {
+        let byte = bytes[len - back];
+        if byte & 0xC0 == 0x80 {
+            continue; // continuation byte — keep walking back
+        }
+        let needs = if byte < 0x80 {
+            1
+        } else if byte & 0xE0 == 0xC0 {
+            2
+        } else if byte & 0xF0 == 0xE0 {
+            3
+        } else if byte & 0xF8 == 0xF0 {
+            4
+        } else {
+            1 // not a lead byte at all; malformed either way
+        };
+        return if needs <= back { len } else { len - back };
+    }
+    len
+}
+
+/// Where `read_record` is within a JSONL record, carried across the
+/// `fill_buf` chunk boundaries so a record larger than the read buffer
+/// is handled identically to a small one.
+#[derive(Default)]
+struct RecordReader {
+    in_string: bool,
+    /// The previous byte was a `\` inside a string, so this byte is its
+    /// escape partner and can never be a delimiter.
+    escaped: bool,
+    /// Inside a string that already hit the cap: bytes are dropped until
+    /// its closing quote.
+    eliding: bool,
+    /// Bytes emitted so far for the string currently being read.
+    string_bytes: usize,
+    /// Remaining hex digits of a `\uXXXX` escape, which must never be
+    /// cut apart.
+    hex_left: u8,
+    /// The escape's value so far — read only to spot a high surrogate,
+    /// which cannot be the last thing a string keeps.
+    hex_value: u32,
+}
+
+impl RecordReader {
+    /// Copy `chunk` into `out`, dropping the tail of any string longer
+    /// than `max_string_bytes`. Returns how many bytes of `chunk` were
+    /// consumed and whether the record ended. A record ends at a newline
+    /// outside a string; that newline is consumed but not emitted.
+    fn feed(&mut self, chunk: &[u8], out: &mut Vec<u8>, max_string_bytes: usize) -> (usize, bool) {
+        let mut i = 0;
+        while i < chunk.len() {
+            let byte = chunk[i];
+            if self.escaped {
+                if !self.eliding {
+                    out.push(byte);
+                    self.string_bytes += 1;
+                }
+                self.escaped = false;
+                // `\uXXXX` — the four hex digits are ordinary bytes that
+                // the bulk-copy below would happily cut in half, leaving
+                // an invalid escape. Count them so it can't.
+                if byte == b'u' {
+                    self.hex_left = 4;
+                    self.hex_value = 0;
+                }
+                i += 1;
+                continue;
+            }
+            match byte {
+                b'\\' if self.in_string => {
+                    if !self.eliding {
+                        out.push(byte);
+                        self.string_bytes += 1;
+                    }
+                    self.escaped = true;
+                    i += 1;
+                }
+                b'"' => {
+                    // The closing quote is always emitted, so an elided
+                    // string still terminates and the record stays valid.
+                    out.push(byte);
+                    if self.in_string {
+                        self.in_string = false;
+                        self.eliding = false;
+                    } else {
+                        self.in_string = true;
+                        self.string_bytes = 0;
+                    }
+                    // Only reachable mid-escape on malformed input, but
+                    // a stale count would misread the NEXT string.
+                    self.hex_left = 0;
+                    self.hex_value = 0;
+                    i += 1;
+                }
+                b'\n' if !self.in_string => {
+                    *self = Self::default();
+                    return (i + 1, true);
+                }
+                _ => {
+                    // Inside a `\uXXXX`: emit byte-wise and never cut,
+                    // so the escape stays whole. Overshoots the cap by
+                    // at most four bytes.
+                    if self.hex_left > 0 {
+                        if !self.eliding {
+                            out.push(byte);
+                            self.string_bytes += 1;
+                        }
+                        self.hex_left -= 1;
+                        self.hex_value =
+                            self.hex_value * 16 + (byte as char).to_digit(16).unwrap_or(0);
+                        if self.hex_left == 0
+                            && !self.eliding
+                            && self.string_bytes >= max_string_bytes
+                            // A HIGH surrogate is only half a character:
+                            // `serde_json` rejects `"\uD83D"` on its own
+                            // ("lone leading surrogate"), so the cut has
+                            // to wait for its partner.
+                            && !(0xD800..0xDC00).contains(&self.hex_value)
+                        {
+                            // An escape just closed, so `out` is already
+                            // at a safe boundary — nothing to trim.
+                            self.eliding = true;
+                        }
+                        i += 1;
+                        continue;
+                    }
+                    // Bulk-copy up to the next byte that can change
+                    // state. Byte-at-a-time over hundreds of MB is the
+                    // difference between a fast scan and a slow one.
+                    let rest = &chunk[i..];
+                    let run_len = if self.in_string {
+                        rest.iter().position(|&c| c == b'"' || c == b'\\')
+                    } else {
+                        rest.iter().position(|&c| c == b'"' || c == b'\n')
+                    }
+                    .unwrap_or(rest.len());
+                    let run = &rest[..run_len];
+                    if !self.in_string {
+                        out.extend_from_slice(run);
+                    } else if !self.eliding {
+                        let budget = max_string_bytes.saturating_sub(self.string_bytes);
+                        if run.len() <= budget {
+                            out.extend_from_slice(run);
+                            self.string_bytes += run.len();
+                        } else {
+                            out.extend_from_slice(&run[..budget]);
+                            // Back off to a UTF-8 boundary — a split
+                            // multi-byte character is invalid UTF-8 and
+                            // fails the parse of the WHOLE record.
+                            // Measured against `out`, not the run: when
+                            // a run ENDED at a chunk boundary mid-
+                            // character and this chunk's budget is
+                            // already 0, the half-written character is
+                            // back in the previous chunk and a
+                            // run-local check cannot see it.
+                            let safe = utf8_safe_len(out);
+                            out.truncate(safe);
+                            self.eliding = true;
+                        }
+                    }
+                    i += run_len;
+                }
+            }
+        }
+        (chunk.len(), false)
+    }
+}
+
+/// Read the next newline-terminated JSON record into `out`, reusing the
+/// caller's buffer instead of allocating a `String` per record.
+///
+/// Returns `false` at end of input — and on a read error, which ends the
+/// record stream exactly as the `BufRead::lines()` loops these calls
+/// replaced did. `max_string_bytes` caps individual JSON strings; pass
+/// `NO_STRING_LIMIT` to read the record verbatim.
+fn read_record<R: BufRead>(reader: &mut R, out: &mut Vec<u8>, max_string_bytes: usize) -> bool {
+    out.clear();
+    let mut state = RecordReader::default();
+    let mut saw_input = false;
+    loop {
+        let (consumed, done) = {
+            let Ok(available) = reader.fill_buf() else {
+                return saw_input;
+            };
+            if available.is_empty() {
+                // EOF. A final record with no trailing newline is still
+                // a record; a clean end has nothing buffered.
+                return saw_input;
+            }
+            saw_input = true;
+            state.feed(available, out, max_string_bytes)
+        };
+        reader.consume(consumed);
+        if done {
+            return true;
+        }
+    }
+}
+
+/// True when a record holds nothing but whitespace — the byte-slice
+/// equivalent of the `line.trim().is_empty()` guard these loops used.
+fn record_is_blank(record: &[u8]) -> bool {
+    record.iter().all(u8::is_ascii_whitespace)
+}
 
 /// Drop cache entries whose file no longer exists. Without this,
 /// deleted sessions pin their parsed stats in memory for the lifetime
@@ -2633,7 +2959,8 @@ fn codex_scan_extract(path: &Path) -> ScanExtract {
     let Ok(file) = fs::File::open(path) else {
         return ScanExtract::default();
     };
-    let reader = std::io::BufReader::with_capacity(SCAN_READ_BUF_SIZE, file);
+    let mut reader = std::io::BufReader::with_capacity(SCAN_READ_BUF_SIZE, file);
+    let mut record = Vec::new();
     let mut tokens: Option<TokenStats> = None;
     let mut model: Option<String> = None;
     let mut message_count = 0usize;
@@ -2644,14 +2971,11 @@ fn codex_scan_extract(path: &Path) -> ScanExtract {
     // Previous cumulative usage we've seen (any null `info` event
     // resets, so a fresh delta starts from zero on the next one).
     let mut prev_cumulative: Option<[u64; 4]> = None;
-    for line in reader.lines() {
-        let Ok(line) = line else {
-            break;
-        };
-        if line.trim().is_empty() {
+    while read_record(&mut reader, &mut record, SCAN_MAX_STRING_BYTES) {
+        if record_is_blank(&record) {
             continue;
         }
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+        let Ok(value) = serde_json::from_slice::<Value>(&record) else {
             continue;
         };
         // Visible message count, in the same pass — this used to be a
@@ -2892,7 +3216,8 @@ fn claude_scan_extract(path: &Path) -> ScanExtract {
     let Ok(file) = fs::File::open(path) else {
         return ScanExtract::default();
     };
-    let reader = std::io::BufReader::with_capacity(SCAN_READ_BUF_SIZE, file);
+    let mut reader = std::io::BufReader::with_capacity(SCAN_READ_BUF_SIZE, file);
+    let mut record = Vec::new();
     let mut input = 0u64;
     let mut output = 0u64;
     let mut cache_read = 0u64;
@@ -2904,14 +3229,11 @@ fn claude_scan_extract(path: &Path) -> ScanExtract {
     let mut daily: BTreeMap<String, [u64; 5]> = BTreeMap::new();
     let mut daily_hours: BTreeMap<String, [u64; 24]> = BTreeMap::new();
     let mut daily_hour_tokens: BTreeMap<String, [u64; 24]> = BTreeMap::new();
-    for line in reader.lines() {
-        let Ok(line) = line else {
-            break;
-        };
-        if line.trim().is_empty() {
+    while read_record(&mut reader, &mut record, SCAN_MAX_STRING_BYTES) {
+        if record_is_blank(&record) {
             continue;
         }
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+        let Ok(value) = serde_json::from_slice::<Value>(&record) else {
             continue;
         };
         // Visible message count, in the same pass — this used to be a
@@ -5941,7 +6263,14 @@ fn parse_claude_session(path: &Path) -> Result<SessionDetail, Box<dyn Error>> {
     }
     let official_session = parse_claude_lite_session(path, None)?;
 
-    let content = fs::read_to_string(path)?;
+    // Stream record-by-record rather than `read_to_string` — these
+    // JSONLs run to tens of MB and holding the whole file alongside the
+    // parsed messages doubles the peak for no benefit. `NO_STRING_LIMIT`
+    // keeps every byte: this is the DETAIL path, so what it reads is
+    // what the user sees.
+    let file = fs::File::open(path)?;
+    let mut reader = std::io::BufReader::with_capacity(SCAN_READ_BUF_SIZE, file);
+    let mut record = Vec::new();
     let mut conversation = ClaudeConversation {
         session_id: path
             .file_stem()
@@ -5952,8 +6281,11 @@ fn parse_claude_session(path: &Path) -> Result<SessionDetail, Box<dyn Error>> {
         ..Default::default()
     };
 
-    for line in content.lines().filter(|line| !line.trim().is_empty()) {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
+    while read_record(&mut reader, &mut record, NO_STRING_LIMIT) {
+        if record_is_blank(&record) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(&record) else {
             continue;
         };
         collect_claude_metadata(&mut conversation, &value);
@@ -7500,7 +7832,14 @@ fn gemini_project_from_chat_path(path: &Path) -> Option<String> {
 
 fn parse_codex_session(path: &Path, id: &str) -> Result<SessionDetail, Box<dyn Error>> {
     let mut session_from_state = codex_thread_from_state(id).ok();
-    let content = fs::read_to_string(path)?;
+    // Stream record-by-record rather than `read_to_string` — rollouts
+    // run to hundreds of MB and holding the whole file alongside the
+    // parsed messages doubles the peak for no benefit. `NO_STRING_LIMIT`
+    // keeps every byte: this is the DETAIL path, so what it reads is
+    // what the user sees.
+    let file = fs::File::open(path)?;
+    let mut reader = std::io::BufReader::with_capacity(SCAN_READ_BUF_SIZE, file);
+    let mut record = Vec::new();
     let mut messages = Vec::new();
     let mut session_id = id.to_string();
     let mut project = session_from_state
@@ -7515,8 +7854,11 @@ fn parse_codex_session(path: &Path, id: &str) -> Result<SessionDetail, Box<dyn E
     let mut latest_token_usage: Option<TokenStats> = None;
     let mut model: Option<String> = None;
 
-    for line in content.lines().filter(|line| !line.trim().is_empty()) {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
+    while read_record(&mut reader, &mut record, NO_STRING_LIMIT) {
+        if record_is_blank(&record) {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(&record) else {
             continue;
         };
         if let Some(timestamp) = value.get("timestamp").and_then(value_to_string) {
@@ -12792,7 +13134,7 @@ mod tests {
 
     #[test]
     fn search_cache_evicts_oldest_when_full() {
-        let mut cache = SearchCache::new(3);
+        let mut cache = SearchCache::new(3, SEARCH_CACHE_BYTE_BUDGET);
         let mtime = SystemTime::now();
         let arc = || {
             Arc::new(SessionDetail {
@@ -12829,7 +13171,7 @@ mod tests {
 
     #[test]
     fn search_cache_get_promotes_to_mru() {
-        let mut cache = SearchCache::new(3);
+        let mut cache = SearchCache::new(3, SEARCH_CACHE_BYTE_BUDGET);
         let mtime = SystemTime::now();
         let arc = || {
             Arc::new(SessionDetail {
@@ -12866,7 +13208,7 @@ mod tests {
 
     #[test]
     fn search_cache_put_refreshes_existing_position() {
-        let mut cache = SearchCache::new(2);
+        let mut cache = SearchCache::new(2, SEARCH_CACHE_BYTE_BUDGET);
         let mtime = SystemTime::now();
         let arc = || {
             Arc::new(SessionDetail {
@@ -18893,6 +19235,376 @@ mod tests {
         assert_eq!(day3_input, 400);
         let cached_total: u64 = daily.iter().map(|d| d.tokens.cached).sum();
         assert_eq!(cached_total, 50);
+    }
+
+    /// Drive the real reader over a chunked source so the state machine
+    /// crosses `fill_buf` boundaries the way it does on a big file — a
+    /// single-chunk test would never exercise the carried state.
+    fn read_all_records(input: &[u8], chunk: usize, max_string_bytes: usize) -> Vec<String> {
+        struct Chunked<'a> {
+            data: &'a [u8],
+            pos: usize,
+            chunk: usize,
+        }
+        impl std::io::Read for Chunked<'_> {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                unreachable!("BufRead path only")
+            }
+        }
+        impl BufRead for Chunked<'_> {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                let end = (self.pos + self.chunk).min(self.data.len());
+                Ok(&self.data[self.pos..end])
+            }
+            fn consume(&mut self, amt: usize) {
+                self.pos += amt;
+            }
+        }
+        let mut reader = Chunked {
+            data: input,
+            pos: 0,
+            chunk,
+        };
+        let mut out = Vec::new();
+        let mut record = Vec::new();
+        while read_record(&mut reader, &mut record, max_string_bytes) {
+            out.push(String::from_utf8(record.clone()).expect("records stay valid UTF-8"));
+        }
+        out
+    }
+
+    #[test]
+    fn read_record_keeps_records_verbatim_under_no_limit() {
+        // The DETAIL parsers read with NO_STRING_LIMIT — what they get
+        // back must be byte-identical to the file, escapes and all.
+        let input = b"{\"a\":\"x\\\"y\\\\z\",\"b\":[1,2]}\n{\"c\":\"line\\nbreak\"}\n";
+        for chunk in [1, 3, 7, 4096] {
+            let records = read_all_records(input, chunk, NO_STRING_LIMIT);
+            assert_eq!(
+                records,
+                vec![
+                    r#"{"a":"x\"y\\z","b":[1,2]}"#.to_string(),
+                    r#"{"c":"line\nbreak"}"#.to_string(),
+                ],
+                "chunk size {chunk}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_record_handles_crlf_like_the_lines_iterator_it_replaced() {
+        // `str::lines()` strips a trailing `\r`; `read_record` splits on
+        // `\n` alone and leaves it. That stays equivalent only because a
+        // stray `\r` is JSON whitespace — so assert the records still
+        // PARSE, and that a CRLF blank line is still recognised as blank.
+        let input = b"{\"a\":1}\r\n\r\n{\"b\":2}\r\n";
+        let records = read_all_records(input, 3, NO_STRING_LIMIT);
+        let parsed: Vec<Option<Value>> = records
+            .iter()
+            .filter(|r| !record_is_blank(r.as_bytes()))
+            .map(|r| serde_json::from_str(r).ok())
+            .collect();
+        assert_eq!(
+            parsed,
+            vec![
+                Some(serde_json::json!({"a": 1})),
+                Some(serde_json::json!({"b": 2}))
+            ]
+        );
+    }
+
+    #[test]
+    fn read_record_elides_long_strings_but_keeps_the_json_parseable() {
+        // The whole premise of SCAN_MAX_STRING_BYTES: an over-long value
+        // loses its tail, every sibling field survives, and the record
+        // still parses — a truncated string that broke the parse would
+        // cost the scan the record's tokens and timestamp too.
+        let huge = "A".repeat(50_000);
+        let input = format!(
+            "{{\"timestamp\":\"2026-04-01T01:08:14.699Z\",\"type\":\"response_item\",\"payload\":{{\"output\":\"{huge}\",\"kind\":\"tail\"}}}}\n"
+        );
+        let records = read_all_records(input.as_bytes(), 512, 1024);
+        assert_eq!(records.len(), 1);
+        let value: Value = serde_json::from_str(&records[0]).expect("elided record still parses");
+        assert_eq!(
+            value.get("timestamp").and_then(Value::as_str),
+            Some("2026-04-01T01:08:14.699Z"),
+            "fields before the huge string survive"
+        );
+        assert_eq!(
+            value
+                .get("payload")
+                .and_then(|p| p.get("kind"))
+                .and_then(Value::as_str),
+            Some("tail"),
+            "fields AFTER the huge string survive — the structure is intact"
+        );
+        let output = value
+            .get("payload")
+            .and_then(|p| p.get("output"))
+            .and_then(Value::as_str)
+            .expect("the elided string is still a string");
+        assert_eq!(output.len(), 1024, "elided at the cap");
+        assert!(records[0].len() < 2000, "the tail never reached the buffer");
+    }
+
+    #[test]
+    fn read_record_elides_on_a_utf8_boundary() {
+        // Cutting a multi-byte character in half yields invalid UTF-8,
+        // which fails the parse of the WHOLE record — so the cap has to
+        // back off to a boundary rather than slice at the byte count.
+        // "→" is 3 bytes, so a 100-byte cap lands mid-character.
+        let input = format!("{{\"s\":\"{}\"}}\n", "→".repeat(200));
+        for cap in [100, 101, 102] {
+            let records = read_all_records(input.as_bytes(), 64, cap);
+            assert_eq!(records.len(), 1);
+            let value: Value =
+                serde_json::from_str(&records[0]).expect("record parses after a boundary cut");
+            let s = value.get("s").and_then(Value::as_str).unwrap();
+            assert!(s.len() <= cap, "never exceeds the cap");
+            assert!(s.len() > cap - 3, "backs off at most one character");
+            assert!(s.chars().all(|c| c == '→'), "no partial character survived");
+        }
+    }
+
+    #[test]
+    fn read_record_never_splits_a_unicode_escape_or_a_surrogate_pair() {
+        // NOTE these are LITERAL backslash-u sequences (raw strings), not
+        // Rust escapes — an earlier version of this test used real emoji
+        // characters, never reached the escape path at all, and passed
+        // with the guard deleted.
+        //
+        // Two ways a cut inside an escape produces invalid JSON, each
+        // costing the WHOLE record (its count and its tokens, not just a
+        // tail): splitting the four hex digits (`"…\u00"`), and stopping
+        // between the halves of a surrogate pair (`serde_json` rejects a
+        // lone `\uD83D`). The measured rollout carries all of these —
+        // \uD83D pairs, ‍ joiners,  from terminal output.
+        // Sweeping the cap walks the cut through every offset.
+        // Doubled backslashes in ORDINARY strings: each body must hold
+        // the six ASCII bytes \ u 0 0 1 b, not one control character.
+        let bodies = [
+            "\\uD83D\\uDE00".repeat(6),         // surrogate pairs
+            "\\u001b[0m plain text ".repeat(3), // escapes mixed with plain runs
+            "\\u200d".repeat(12),               // BMP escapes, no pairs
+        ];
+        for body in bodies {
+            for cap in 4..40 {
+                for chunk in [1, 3, 7, 64] {
+                    let input = format!("{{\"s\":\"{body}\"}}\n");
+                    let records = read_all_records(input.as_bytes(), chunk, cap);
+                    assert_eq!(records.len(), 1);
+                    serde_json::from_str::<Value>(&records[0]).unwrap_or_else(|e| {
+                        panic!(
+                            "cap {cap} chunk {chunk} produced invalid JSON: {e}\n{}",
+                            records[0]
+                        )
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn read_record_still_caps_a_string_made_only_of_escapes() {
+        // Escape bytes are emitted without consulting the budget (that
+        // is what keeps them whole), so a string with no plain runs at
+        // all would never reach the bulk path where eliding is decided —
+        // and would stream in full, defeating the cap this whole reader
+        // exists to enforce. The escape path closes it by eliding at the
+        // moment an escape completes.
+        let body = "\\u200d".repeat(20_000); // 120 KB, zero plain bytes
+        let input = format!("{{\"s\":\"{body}\"}}\n");
+        let records = read_all_records(input.as_bytes(), 4096, 1024);
+        assert_eq!(records.len(), 1);
+        serde_json::from_str::<Value>(&records[0]).expect("still valid JSON");
+        assert!(
+            records[0].len() < 2048,
+            "capped, not streamed in full (got {} bytes)",
+            records[0].len()
+        );
+    }
+
+    #[test]
+    fn read_record_elides_safely_when_a_character_straddles_a_chunk_edge() {
+        // The back-off has to be measured against the OUTPUT, not the
+        // current run: a run that FITS the budget can still end mid-
+        // character at a `fill_buf` boundary, and by the time the next
+        // chunk finds the budget exhausted the half-written character is
+        // already in `out` where a run-local check cannot see it.
+        // "→" is 3 bytes; sweeping both cap and chunk size walks the cut
+        // through every offset within a character.
+        for cap in 30..48 {
+            for chunk in 4..17 {
+                let input = format!("{{\"s\":\"{}\"}}\n", "→".repeat(60));
+                let records = read_all_records(input.as_bytes(), chunk, cap);
+                assert_eq!(records.len(), 1, "cap {cap} chunk {chunk}");
+                serde_json::from_str::<Value>(&records[0]).unwrap_or_else(|e| {
+                    panic!("cap {cap} chunk {chunk} produced invalid UTF-8/JSON: {e}")
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn utf8_safe_len_keeps_complete_characters_and_drops_partial_ones() {
+        assert_eq!(utf8_safe_len(b"abc"), 3, "ascii is always a boundary");
+        assert_eq!(
+            utf8_safe_len("→".as_bytes()),
+            3,
+            "a COMPLETE 3-byte char stays"
+        );
+        assert_eq!(
+            utf8_safe_len(&"→".as_bytes()[..2]),
+            0,
+            "a truncated one goes"
+        );
+        assert_eq!(
+            utf8_safe_len(&"→".as_bytes()[..1]),
+            0,
+            "a lone lead byte goes"
+        );
+        assert_eq!(utf8_safe_len("a→".as_bytes()), 4, "complete after ascii");
+        assert_eq!(
+            utf8_safe_len(&"a→".as_bytes()[..3]),
+            1,
+            "partial after ascii"
+        );
+        assert_eq!(
+            utf8_safe_len("😀".as_bytes()),
+            4,
+            "complete 4-byte char stays"
+        );
+        assert_eq!(
+            utf8_safe_len(&"😀".as_bytes()[..3]),
+            0,
+            "truncated 4-byte goes"
+        );
+        assert_eq!(utf8_safe_len(b""), 0);
+    }
+
+    #[test]
+    fn read_record_never_splits_a_record_on_a_string_newline() {
+        // A `\n` INSIDE a JSON string is the two bytes `\` `n`, but a
+        // reader that tracked no string state would still be fooled by a
+        // raw newline smuggled into the input — and splitting there
+        // turns one record into two unparseable halves.
+        let input = "{\"a\":\"has \\\" quote\"}\n{\"b\":2}\n";
+        let records = read_all_records(input.as_bytes(), 2, NO_STRING_LIMIT);
+        assert_eq!(
+            records,
+            vec![
+                r#"{"a":"has \" quote"}"#.to_string(),
+                r#"{"b":2}"#.to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_extract_counts_and_totals_survive_an_elided_record() {
+        // The count/token contract under elision, on both scanners: a
+        // record whose payload blows past the cap must still be counted
+        // and must still contribute its tokens, because only the string
+        // TAIL is dropped — never the record.
+        let dir = TestDir::new("scan-elide");
+        let huge = "B".repeat(300_000);
+
+        let codex = dir.path().join("rollout.jsonl");
+        fs::write(
+            &codex,
+            format!(
+                "{}\n{}\n",
+                format_args!(
+                    r#"{{"timestamp":"2026-05-29T10:00:00Z","type":"response_item","payload":{{"type":"function_call_output","call_id":"c1","output":"{huge}"}}}}"#
+                ),
+                r#"{"timestamp":"2026-05-29T10:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":5,"cached_input_tokens":0,"reasoning_output_tokens":0}}}}"#
+            ),
+        )
+        .unwrap();
+        let extract = codex_scan_extract(&codex);
+        assert_eq!(
+            extract.message_count, 1,
+            "the oversized record is still counted"
+        );
+        let tokens = extract.tokens.expect("token_count record still parsed");
+        assert_eq!((tokens.input, tokens.output), (10, 5));
+
+        let claude = dir.path().join("session.jsonl");
+        fs::write(
+            &claude,
+            format!(
+                "{}\n{}\n",
+                format_args!(
+                    r#"{{"type":"user","sessionId":"s","cwd":"/w","timestamp":"2026-05-29T10:00:00Z","message":{{"role":"user","content":"{huge}"}}}}"#
+                ),
+                r#"{"type":"assistant","timestamp":"2026-05-29T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":10,"output_tokens":5}}}"#
+            ),
+        )
+        .unwrap();
+        let extract = claude_scan_extract(&claude);
+        assert_eq!(
+            extract.message_count, 2,
+            "an elided user turn is still a visible message"
+        );
+        let tokens = extract.tokens.expect("usage still picked up");
+        assert_eq!((tokens.input, tokens.output), (10, 5));
+    }
+
+    #[test]
+    fn search_cache_refuses_an_outsized_entry_and_keeps_the_rest() {
+        // The 224 MB session that made one search cost 421 MB: caching it
+        // would evict everything else to hold a single transcript.
+        let mut cache = SearchCache::new(200, 4096);
+        let mtime = SystemTime::now();
+        let sized = |bytes: usize| {
+            Arc::new(SessionDetail {
+                session: AppSession::default(),
+                messages: vec![SessionMessage {
+                    text: "x".repeat(bytes),
+                    ..Default::default()
+                }],
+            })
+        };
+        cache.put((PathBuf::from("/small"), mtime), sized(1000));
+        cache.put((PathBuf::from("/huge"), mtime), sized(1_000_000));
+        assert!(
+            cache.get(&(PathBuf::from("/huge"), mtime)).is_none(),
+            "outsized entry is served but never retained"
+        );
+        assert!(
+            cache.get(&(PathBuf::from("/small"), mtime)).is_some(),
+            "and it evicted nothing on its way past"
+        );
+    }
+
+    #[test]
+    fn search_cache_evicts_by_bytes_not_just_entry_count() {
+        // Entry COUNT bounds nothing when entries differ by orders of
+        // magnitude — this is the axis that actually caps the cache.
+        let mut cache = SearchCache::new(200, 3000);
+        let mtime = SystemTime::now();
+        let sized = |bytes: usize| {
+            Arc::new(SessionDetail {
+                session: AppSession::default(),
+                messages: vec![SessionMessage {
+                    text: "x".repeat(bytes),
+                    ..Default::default()
+                }],
+            })
+        };
+        cache.put((PathBuf::from("/a"), mtime), sized(1000));
+        cache.put((PathBuf::from("/b"), mtime), sized(1000));
+        cache.put((PathBuf::from("/c"), mtime), sized(1000));
+        assert_eq!(cache.len(), 3, "exactly at budget, nothing evicted");
+        // Well under the 200-entry cap, so only the byte budget can
+        // force this eviction.
+        cache.put((PathBuf::from("/d"), mtime), sized(1000));
+        assert_eq!(cache.len(), 3);
+        assert!(
+            cache.get(&(PathBuf::from("/a"), mtime)).is_none(),
+            "LRU went"
+        );
+        assert!(cache.get(&(PathBuf::from("/d"), mtime)).is_some());
     }
 
     #[test]
