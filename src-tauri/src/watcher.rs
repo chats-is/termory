@@ -70,6 +70,43 @@ impl WatcherHandle {
     /// static target (e.g. someone has `~/.codex/foo` as a session
     /// project — vanishingly rare) are skipped to avoid double events.
     pub fn reconfigure_dynamic(&self, new_paths: HashSet<PathBuf>) {
+        // Drop any path `start()` already owns for a different purpose.
+        //
+        // notify keys its watch registry by PATH with no reference
+        // counting — `recursive_info` on macOS, `watches` on Linux and
+        // Windows alike — so two owners of one path fight and the loser
+        // is silent. Measured: a non-recursive registration re-added as
+        // recursive starts delivering the whole subtree, and after the
+        // other owner's `unwatch()` it delivers nothing at all.
+        //
+        // The credential-signal parents are permanent and non-recursive.
+        // In the default layout one of them is `$HOME` — a perfectly
+        // ordinary place to have run a CLI, so it can arrive here as a
+        // session cwd. That would upgrade it to recursive (every file
+        // under the home directory reaching the event loop) and then
+        // unwatch it the moment that session aged out of the recent set,
+        // taking Claude's credential detection with it until the next
+        // restart, with no error logged anywhere.
+        //
+        // Filtered at the ENTRY, not at the `watch()` call: `dynamic_paths`
+        // records what this layer INTENDED to watch, and `to_remove` is
+        // computed from it, so skipping only the add would still leave the
+        // path in that set and unwatch it on the next pass. Both callers
+        // pass a set derived from `result.projects` and neither reads the
+        // set back, so narrowing it here is invisible to them.
+        //
+        // The cost is small and precise: for a session whose cwd is
+        // literally `$HOME`, its root-level instruction files
+        // (`~/CLAUDE.md` and friends) lose instant refresh and fall back
+        // to the window-focus rescan. Its skills dirs are unaffected —
+        // `~/.claude`, `~/.agents` and `~/.grok` are static targets in
+        // their own right.
+        let signal_parents = credential_signal_parents();
+        let new_paths: HashSet<PathBuf> = new_paths
+            .into_iter()
+            .filter(|p| !signal_parents.contains(p))
+            .collect();
+
         let mut inner = match self.inner.lock() {
             Ok(g) => g,
             // Worker thread panicked while holding the lock; recover
@@ -963,6 +1000,57 @@ mod tests {
         ));
     }
 
+    /// A session cwd that collides with a credential-signal parent must
+    /// never reach the dynamic layer: `start()` owns that path already,
+    /// and notify's registry has no reference counting, so the dynamic
+    /// layer would first upgrade it to recursive and then unwatch it —
+    /// killing Claude's credential detection with no error anywhere.
+    ///
+    /// Asserted on the SET the layer keeps, not merely on what it
+    /// watches. `dynamic_paths` is what the next reconfigure diffs
+    /// against, so a path left in there is a path that gets unwatched
+    /// later; a guard placed only at the `watch()` call passes a
+    /// watch-only assertion and still fails here.
+    #[test]
+    fn a_session_cwd_that_is_a_signal_parent_never_enters_the_dynamic_layer() {
+        let _lock = crate::testutils::lock_home();
+        let tmp = std::env::temp_dir().join("termory-dyn-collision");
+        std::fs::create_dir_all(tmp.join("proj")).unwrap();
+        let _h = crate::testutils::override_home(&tmp);
+        let _e = crate::testutils::EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
+
+        assert!(
+            credential_signal_parents().contains(&tmp),
+            "fixture sanity: HOME is a signal parent in the default layout"
+        );
+
+        let (tx, _rx) = mpsc::channel();
+        let watcher = notify::recommended_watcher(move |res| {
+            let _ = tx.send(res);
+        })
+        .unwrap();
+        let handle = WatcherHandle {
+            inner: Arc::new(Mutex::new(WatcherInner {
+                watcher,
+                dynamic_paths: HashSet::new(),
+            })),
+        };
+
+        let cwds: HashSet<PathBuf> = [tmp.clone(), tmp.join("proj")].into_iter().collect();
+        handle.reconfigure_dynamic(cwds);
+
+        let kept = handle.inner.lock().unwrap().dynamic_paths.clone();
+        assert!(
+            !kept.contains(&tmp),
+            "the signal parent must not be recorded as dynamic — it would be \
+             unwatched on the next reconfigure"
+        );
+        assert!(
+            kept.contains(&tmp.join("proj")),
+            "an ordinary project cwd is unaffected"
+        );
+    }
+
     /// The login signal routes to the account sync and NOWHERE else — in
     /// particular not through `event_credential_clis`, which also drives
     /// `force_quota_refresh`. The two must stay separable, so each is
@@ -1094,3 +1182,4 @@ mod tests {
         );
     }
 }
+
