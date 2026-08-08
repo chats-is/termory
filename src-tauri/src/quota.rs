@@ -485,7 +485,21 @@ fn is_token_expired(expires_at: &serde_json::Value) -> bool {
 // Claude usage API
 // ===================================================================
 
-/// Known window ids, in display order. Unknown ids are appended after.
+/// Known window ids, in display order — an ALLOWLIST, not a passthrough
+/// (LOCKED). This used to append any unknown top-level key that carried a
+/// `utilization`, so a new window could surface without a release. That
+/// was wrong about the namespace: Anthropic also puts internal CODENAMES
+/// here, and a real response (2026-08-08) carried six of them
+/// (`tangelo`, `iguana_necktie`, `omelette_promotional`, `cinder_cove`,
+/// `amber_ladder`, `nimbus_quill`) beside the real windows. Five were
+/// `null` and skipped only by accident; `nimbus_quill` arrived as
+/// `{utilization: 0.0, resets_at: null}` and rendered a ring labelled
+/// `nimbus_quill` on the card AND a row in the tray. Claude Code
+/// recognizes none of them and shows none of them.
+///
+/// Adding an id here also needs its label in `tierLabels` and
+/// `tray_tier_label`, or it renders as the raw id — the very thing this
+/// list exists to prevent.
 const CLAUDE_KNOWN_TIERS: &[&str] = &[
     "five_hour",
     "seven_day",
@@ -519,20 +533,6 @@ fn parse_claude_usage(body: &serde_json::Value) -> (Vec<QuotaTier>, Option<Extra
             tiers.push(tier);
         }
     }
-    if let Some(obj) = body.as_object() {
-        for (key, value) in obj {
-            // `limits` is the new structured array (handled below); the
-            // reserved keys and the known tiers are already covered.
-            if key == "extra_usage" || key == "limits" || CLAUDE_KNOWN_TIERS.contains(&key.as_str())
-            {
-                continue;
-            }
-            if let Some(tier) = window_tier(key, value) {
-                tiers.push(tier);
-            }
-        }
-    }
-
     // Newer API shape: a `limits` array carries model-SCOPED weekly
     // windows (e.g. Fable) that the flat top-level fields don't — the
     // top-level `seven_day_opus`/`seven_day_sonnet` are now null. Each
@@ -2058,14 +2058,59 @@ mod tests {
     }
 
     #[test]
-    fn parse_claude_usage_passes_unknown_windows_through() {
+    fn parse_claude_usage_drops_windows_outside_the_official_allowlist() {
+        // Was `..._passes_unknown_windows_through`, which pinned exactly
+        // the behaviour that produced the bug: Anthropic uses this
+        // namespace for internal CODENAMES, and an unknown key is far
+        // likelier to be one of those than a real new window. Claude
+        // Code parses an allowlist and recognizes none of these.
         let body = json!({
             "five_hour": { "utilization": 1.0 },
             "thirty_day": { "utilization": 9.0, "resets_at": "2026-07-01T00:00:00Z" }
         });
         let (tiers, _) = parse_claude_usage(&body);
         let names: Vec<&str> = tiers.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["five_hour", "thirty_day"]);
+        assert_eq!(
+            names,
+            vec!["five_hour"],
+            "a window we cannot name is a window we do not show"
+        );
+    }
+
+    #[test]
+    fn parse_claude_usage_drops_the_codename_windows_from_a_real_response() {
+        // Verbatim shape of GET /api/oauth/usage on 2026-08-08. The five
+        // nulls were only ever skipped by accident (no `utilization` to
+        // read); `nimbus_quill` is just as empty but serialized as an
+        // object, so it came through and rendered a ring labelled
+        // `nimbus_quill` — the reported bug.
+        let body = json!({
+            "five_hour": { "utilization": 33.0, "resets_at": "2026-08-08T06:30:00.942930+00:00" },
+            "seven_day": { "utilization": 35.0, "resets_at": "2026-08-13T16:00:00.942949+00:00" },
+            "seven_day_oauth_apps": null,
+            "seven_day_opus": null,
+            "seven_day_sonnet": null,
+            "seven_day_cowork": null,
+            "seven_day_omelette": null,
+            "tangelo": null,
+            "iguana_necktie": null,
+            "omelette_promotional": null,
+            "nimbus_quill": { "utilization": 0.0, "resets_at": null },
+            "cinder_cove": null,
+            "amber_ladder": null,
+            "extra_usage": { "is_enabled": false, "utilization": 0.0 },
+            "limits": [
+                { "kind": "session", "group": "session", "percent": 33, "scope": null },
+                { "kind": "weekly_all", "group": "weekly", "percent": 35, "scope": null }
+            ]
+        });
+        let (tiers, extra) = parse_claude_usage(&body);
+        let names: Vec<&str> = tiers.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["five_hour", "seven_day"]);
+        // `extra_usage` carries a `utilization` of its own and must never
+        // be mistaken for a window.
+        assert!(!names.contains(&"extra_usage"));
+        assert!(extra.is_some(), "still parsed, just not as a ring");
     }
 
     #[test]
