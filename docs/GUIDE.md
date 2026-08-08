@@ -252,6 +252,8 @@ The sidebar project row also has **Open in terminal** — opens a terminal in th
 
 **What it is.** Full-text search across the body of every session, memory, and skill Termory has scanned.
 
+> One bound worth knowing: a single message longer than 1 MB is truncated when a record is read (you'll see an `… elided` notice in the transcript), and search only sees the part that was kept. In practice this affects a handful of old sessions where a runaway command dumped its entire output into one message — the CLIs themselves now cap that at write time.
+
 **Two ways in:**
 
 - The **Search** page (`⌘4`) — type a query; results are grouped by source with the matching snippet highlighted. Clicking a result opens the record scrolled to the first match.

@@ -448,6 +448,10 @@ mod kind {
     pub const PLAN: &str = "plan";
     pub const AGENT_SWITCHED: &str = "agent-switched";
     pub const MODEL_SWITCHED: &str = "model-switched";
+    /// Termory's own notice that the DETAIL read dropped part of a
+    /// record at `DETAIL_MAX_STRING_BYTES`. Deliberately NOT `TEXT`, so
+    /// it cannot drift the list card's `message_count`.
+    pub const ELIDED: &str = "elided";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -734,8 +738,10 @@ const SCAN_READ_BUF_SIZE: usize = 256 * 1024;
 /// every key the scan or the message builders look up is short, so a
 /// 64 KB+ key can never be one of them.
 ///
-/// Only the LIST scan elides. The DETAIL parsers pass `NO_STRING_LIMIT`,
-/// so what the user actually reads is byte-for-byte unchanged.
+/// The DETAIL parsers elide too, but far later — see
+/// `DETAIL_MAX_STRING_BYTES` (1 MiB, Codex's own number) — and they
+/// announce it. This constant is the tighter LIST-scan figure, safe to
+/// set this low precisely because the scan keeps no text at all.
 ///
 /// SCOPE: the cap is per string VALUE, not per record. A record built
 /// from thousands of individually-under-cap strings would still buffer
@@ -745,9 +751,38 @@ const SCAN_READ_BUF_SIZE: usize = 256 * 1024;
 /// giant strings, and a scan of the whole corpus peaks at 32 MB.
 const SCAN_MAX_STRING_BYTES: usize = 64 * 1024;
 
-/// `max_string_bytes` value meaning "emit every byte" — used by the
-/// detail parsers, which render what they read.
-const NO_STRING_LIMIT: usize = usize::MAX;
+/// Largest a single JSON string value may be on the DETAIL path, where
+/// the text really is shown to the user.
+///
+/// **This number is Codex's own**, not one invented here:
+/// `DEFAULT_OUTPUT_BYTES_CAP` (`codex-rs/utils/pty/src/lib.rs:12`), which
+/// `EXEC_OUTPUT_MAX_BYTES` (`core/src/exec.rs:76`) applies to everything
+/// it retains from a command, with the reason spelled out in its own
+/// comment: *"so a single runaway command cannot OOM the process by
+/// dumping huge amounts of data to stdout/stderr"*. Current Codex also
+/// shows only `TOOL_CALL_MAX_LINES` = **5** lines of tool output in its
+/// TUI (`tui/src/exec_cell/render.rs:33`), so a 1 MiB cap here still
+/// surfaces far more than the tool that wrote the file does.
+///
+/// This is therefore alignment with the official tool, not a divergence
+/// from it — and a record written by current Codex can never reach the
+/// cap, because Codex truncated it first. It only ever bites HISTORICAL
+/// data: on the machine this was measured, rollouts stopped carrying any
+/// line over 1 MiB after 2026-04 (max line by month: 156 MB, 5.3 MB,
+/// 55 KB, 42 KB, 41 KB), and exactly one session held 221 MB of the
+/// 231 MB total.
+///
+/// What it buys is NOT mainly "that session opens" — it is that SEARCH
+/// stops costing a gigabyte. `search_sessions` calls `get_session` for
+/// every record, so one 141 MB message was materialized on every search
+/// no matter what the user was looking for: measured 31 MB → **1103 MB**
+/// resident, 3.2 s, for a single query.
+///
+/// Unlike Codex, which truncates silently (`stdout_text.truncate`),
+/// Termory says so — see `kind::ELIDED`. It is a history browser: a
+/// bounded view is fine, a bounded view pretending to be complete is
+/// not.
+const DETAIL_MAX_STRING_BYTES: usize = 1024 * 1024;
 
 /// Longest prefix of `bytes` that ends on a UTF-8 character boundary.
 /// A sequence is at most four bytes, so only the last three can be a
@@ -799,6 +834,9 @@ struct RecordReader {
     /// The escape's value so far — read only to spot a high surrogate,
     /// which cannot be the last thing a string keeps.
     hex_value: u32,
+    /// Bytes dropped from this record because a string hit the cap. The
+    /// caller's result, so it survives the per-record state reset.
+    elided: u64,
 }
 
 impl RecordReader {
@@ -811,7 +849,9 @@ impl RecordReader {
         while i < chunk.len() {
             let byte = chunk[i];
             if self.escaped {
-                if !self.eliding {
+                if self.eliding {
+                    self.elided += 1;
+                } else {
                     out.push(byte);
                     self.string_bytes += 1;
                 }
@@ -822,13 +862,27 @@ impl RecordReader {
                 if byte == b'u' {
                     self.hex_left = 4;
                     self.hex_value = 0;
+                } else if !self.eliding && self.string_bytes >= max_string_bytes {
+                    // A TWO-char escape (`\n`, `\t`, `\"`, `\\`) just
+                    // closed. Neither this branch nor the `\\` arm consults
+                    // the budget — that is what keeps an escape whole — so
+                    // without this check a string made only of them never
+                    // reaches a branch that can elide and streams in FULL,
+                    // which is the unbounded read this cap exists to stop.
+                    // `"\n\n\n…"` (blank-line-heavy output) and `"\"…\""`
+                    // (a command dumping JSON) are both ordinary shapes for
+                    // the runaway output being defended against. `out` ends
+                    // on a complete escape here, so it is a legal stop.
+                    self.eliding = true;
                 }
                 i += 1;
                 continue;
             }
             match byte {
                 b'\\' if self.in_string => {
-                    if !self.eliding {
+                    if self.eliding {
+                        self.elided += 1;
+                    } else {
                         out.push(byte);
                         self.string_bytes += 1;
                     }
@@ -852,8 +906,23 @@ impl RecordReader {
                     self.hex_value = 0;
                     i += 1;
                 }
-                b'\n' if !self.in_string => {
-                    *self = Self::default();
+                // EVERY newline ends the record, `in_string` or not. A raw
+                // newline cannot appear inside a valid JSON string (it must
+                // be escaped), so for well-formed input this is identical to
+                // gating on `!in_string` — and for MALFORMED input it is the
+                // difference between losing one record and losing the rest of
+                // the file, because an unterminated string would otherwise
+                // swallow every following newline as string content. This is
+                // the resynchronisation `BufRead::lines()` gave for free.
+                b'\n' => {
+                    // Record boundary. `elided` is the caller's result and
+                    // is deliberately NOT reset here.
+                    self.in_string = false;
+                    self.escaped = false;
+                    self.eliding = false;
+                    self.string_bytes = 0;
+                    self.hex_left = 0;
+                    self.hex_value = 0;
                     return (i + 1, true);
                 }
                 _ => {
@@ -861,7 +930,9 @@ impl RecordReader {
                     // so the escape stays whole. Overshoots the cap by
                     // at most four bytes.
                     if self.hex_left > 0 {
-                        if !self.eliding {
+                        if self.eliding {
+                            self.elided += 1;
+                        } else {
                             out.push(byte);
                             self.string_bytes += 1;
                         }
@@ -897,12 +968,15 @@ impl RecordReader {
                     let run = &rest[..run_len];
                     if !self.in_string {
                         out.extend_from_slice(run);
-                    } else if !self.eliding {
+                    } else if self.eliding {
+                        self.elided += run_len as u64;
+                    } else {
                         let budget = max_string_bytes.saturating_sub(self.string_bytes);
                         if run.len() <= budget {
                             out.extend_from_slice(run);
                             self.string_bytes += run.len();
                         } else {
+                            let before = out.len();
                             out.extend_from_slice(&run[..budget]);
                             // Back off to a UTF-8 boundary — a split
                             // multi-byte character is invalid UTF-8 and
@@ -915,6 +989,13 @@ impl RecordReader {
                             // run-local check cannot see it.
                             let safe = utf8_safe_len(out);
                             out.truncate(safe);
+                            // Signed: the back-off can reach BELOW
+                            // `before`, when the half-written character
+                            // it removes was emitted by an earlier
+                            // chunk — so "kept" is negative there and an
+                            // unsigned subtraction underflows.
+                            let kept = out.len() as i64 - before as i64;
+                            self.elided += (run_len as i64 - kept) as u64;
                             self.eliding = true;
                         }
                     }
@@ -932,28 +1013,56 @@ impl RecordReader {
 /// Returns `false` at end of input — and on a read error, which ends the
 /// record stream exactly as the `BufRead::lines()` loops these calls
 /// replaced did. `max_string_bytes` caps individual JSON strings; pass
-/// `NO_STRING_LIMIT` to read the record verbatim.
-fn read_record<R: BufRead>(reader: &mut R, out: &mut Vec<u8>, max_string_bytes: usize) -> bool {
+/// pass `usize::MAX` to read the record verbatim (tests only — both
+/// production paths cap).
+fn read_record<R: BufRead>(
+    reader: &mut R,
+    out: &mut Vec<u8>,
+    max_string_bytes: usize,
+) -> Option<u64> {
     out.clear();
     let mut state = RecordReader::default();
     let mut saw_input = false;
-    loop {
+    let more = loop {
         let (consumed, done) = {
             let Ok(available) = reader.fill_buf() else {
-                return saw_input;
+                break saw_input;
             };
             if available.is_empty() {
                 // EOF. A final record with no trailing newline is still
                 // a record; a clean end has nothing buffered.
-                return saw_input;
+                break saw_input;
             }
             saw_input = true;
             state.feed(available, out, max_string_bytes)
         };
         reader.consume(consumed);
         if done {
-            return true;
+            break true;
         }
+    };
+    more.then_some(state.elided)
+}
+
+/// The notice a record leaves behind when the cap dropped part of it.
+/// Its own message rather than an append to the tool output, because
+/// `merge_tool_outputs` folds that output INTO a code fence — where an
+/// italic notice would render as literal asterisks.
+///
+/// `kind::ELIDED` keeps it out of `kind::TEXT`, which is what the LIST
+/// scan counts: a notice that counted would make every affected
+/// session's card disagree with its own transcript.
+fn elided_notice(elided: u64, timestamp: Option<String>) -> SessionMessage {
+    SessionMessage {
+        role: "system".to_string(),
+        text: format!(
+            "*[{} elided — open the original file to view the full output]*",
+            claude_format_file_size(elided)
+        ),
+        timestamp,
+        kind: kind::ELIDED.to_string(),
+        tool_use_id: None,
+        exit_code: None,
     }
 }
 
@@ -2971,7 +3080,8 @@ fn codex_scan_extract(path: &Path) -> ScanExtract {
     // Previous cumulative usage we've seen (any null `info` event
     // resets, so a fresh delta starts from zero on the next one).
     let mut prev_cumulative: Option<[u64; 4]> = None;
-    while read_record(&mut reader, &mut record, SCAN_MAX_STRING_BYTES) {
+    // The scan keeps no text, so what was dropped is of no interest here.
+    while read_record(&mut reader, &mut record, SCAN_MAX_STRING_BYTES).is_some() {
         if record_is_blank(&record) {
             continue;
         }
@@ -3229,7 +3339,8 @@ fn claude_scan_extract(path: &Path) -> ScanExtract {
     let mut daily: BTreeMap<String, [u64; 5]> = BTreeMap::new();
     let mut daily_hours: BTreeMap<String, [u64; 24]> = BTreeMap::new();
     let mut daily_hour_tokens: BTreeMap<String, [u64; 24]> = BTreeMap::new();
-    while read_record(&mut reader, &mut record, SCAN_MAX_STRING_BYTES) {
+    // The scan keeps no text, so what was dropped is of no interest here.
+    while read_record(&mut reader, &mut record, SCAN_MAX_STRING_BYTES).is_some() {
         if record_is_blank(&record) {
             continue;
         }
@@ -6265,9 +6376,10 @@ fn parse_claude_session(path: &Path) -> Result<SessionDetail, Box<dyn Error>> {
 
     // Stream record-by-record rather than `read_to_string` — these
     // JSONLs run to tens of MB and holding the whole file alongside the
-    // parsed messages doubles the peak for no benefit. `NO_STRING_LIMIT`
-    // keeps every byte: this is the DETAIL path, so what it reads is
-    // what the user sees.
+    // parsed messages doubles the peak for no benefit. The cap is
+    // `DETAIL_MAX_STRING_BYTES` — far looser than the scan's, and what
+    // it drops is announced by `elided_notice` rather than silently
+    // swallowed.
     let file = fs::File::open(path)?;
     let mut reader = std::io::BufReader::with_capacity(SCAN_READ_BUF_SIZE, file);
     let mut record = Vec::new();
@@ -6281,7 +6393,7 @@ fn parse_claude_session(path: &Path) -> Result<SessionDetail, Box<dyn Error>> {
         ..Default::default()
     };
 
-    while read_record(&mut reader, &mut record, NO_STRING_LIMIT) {
+    while let Some(elided) = read_record(&mut reader, &mut record, DETAIL_MAX_STRING_BYTES) {
         if record_is_blank(&record) {
             continue;
         }
@@ -6289,11 +6401,23 @@ fn parse_claude_session(path: &Path) -> Result<SessionDetail, Box<dyn Error>> {
             continue;
         };
         collect_claude_metadata(&mut conversation, &value);
+        let mut last_timestamp = None;
+        let mut surfaced = false;
         for message in claude_message_from_value(&value) {
             if message.kind == kind::TEXT {
                 conversation.visible_message_count += 1;
             }
+            last_timestamp = message.timestamp.clone();
             conversation.messages.push(message);
+            surfaced = true;
+        }
+        // See the matching gate in `parse_codex_session`: a record that
+        // rendered nothing hid nothing, and an ungated notice lands with
+        // no card above it.
+        if elided > 0 && surfaced {
+            conversation
+                .messages
+                .push(elided_notice(elided, last_timestamp));
         }
         if conversation.first_prompt.is_none() {
             match claude_first_prompt_from_value(&value) {
@@ -7834,9 +7958,10 @@ fn parse_codex_session(path: &Path, id: &str) -> Result<SessionDetail, Box<dyn E
     let mut session_from_state = codex_thread_from_state(id).ok();
     // Stream record-by-record rather than `read_to_string` — rollouts
     // run to hundreds of MB and holding the whole file alongside the
-    // parsed messages doubles the peak for no benefit. `NO_STRING_LIMIT`
-    // keeps every byte: this is the DETAIL path, so what it reads is
-    // what the user sees.
+    // parsed messages doubles the peak for no benefit. The cap is
+    // `DETAIL_MAX_STRING_BYTES` — far looser than the scan's, and what
+    // it drops is announced by `elided_notice` rather than silently
+    // swallowed.
     let file = fs::File::open(path)?;
     let mut reader = std::io::BufReader::with_capacity(SCAN_READ_BUF_SIZE, file);
     let mut record = Vec::new();
@@ -7854,7 +7979,7 @@ fn parse_codex_session(path: &Path, id: &str) -> Result<SessionDetail, Box<dyn E
     let mut latest_token_usage: Option<TokenStats> = None;
     let mut model: Option<String> = None;
 
-    while read_record(&mut reader, &mut record, NO_STRING_LIMIT) {
+    while let Some(elided) = read_record(&mut reader, &mut record, DETAIL_MAX_STRING_BYTES) {
         if record_is_blank(&record) {
             continue;
         }
@@ -7943,8 +8068,25 @@ fn parse_codex_session(path: &Path, id: &str) -> Result<SessionDetail, Box<dyn E
                 model = Some(m);
             }
         }
+        let record_timestamp = value.get("timestamp").and_then(value_to_string);
+        let mut surfaced = false;
         if let Some(message) = codex_message_from_value(&value) {
             messages.push(message);
+            surfaced = true;
+        }
+        // Only when this record actually rendered something. Gating on
+        // that is load-bearing twice over: Codex persists a user/assistant
+        // turn as BOTH a `response_item` and an `event_msg`, and the
+        // `response_item` copy deliberately returns None (the event_msg
+        // one is the canonical render) — so an ungated notice fired on
+        // both copies and told the user twice over that the same 1.4 MB
+        // was lost, once with no card above it at all. Records that
+        // render nothing (`session_meta`, and the Claude path's
+        // NULL_RENDERING attachments) produced the same orphan. And a
+        // record that surfaced nothing hid nothing: eliding it cost the
+        // user no visible content, so there is nothing to report.
+        if elided > 0 && surfaced {
+            messages.push(elided_notice(elided, record_timestamp));
         }
     }
 
@@ -19241,6 +19383,15 @@ mod tests {
     /// crosses `fill_buf` boundaries the way it does on a big file — a
     /// single-chunk test would never exercise the carried state.
     fn read_all_records(input: &[u8], chunk: usize, max_string_bytes: usize) -> Vec<String> {
+        read_all_records_counting(input, chunk, max_string_bytes).0
+    }
+
+    /// Same, plus the bytes `read_record` reported dropping.
+    fn read_all_records_counting(
+        input: &[u8],
+        chunk: usize,
+        max_string_bytes: usize,
+    ) -> (Vec<String>, u64) {
         struct Chunked<'a> {
             data: &'a [u8],
             pos: usize,
@@ -19267,19 +19418,21 @@ mod tests {
         };
         let mut out = Vec::new();
         let mut record = Vec::new();
-        while read_record(&mut reader, &mut record, max_string_bytes) {
+        let mut total = 0u64;
+        while let Some(elided) = read_record(&mut reader, &mut record, max_string_bytes) {
+            total += elided;
             out.push(String::from_utf8(record.clone()).expect("records stay valid UTF-8"));
         }
-        out
+        (out, total)
     }
 
     #[test]
     fn read_record_keeps_records_verbatim_under_no_limit() {
-        // The DETAIL parsers read with NO_STRING_LIMIT — what they get
+        // `usize::MAX` is the verbatim mode — what a reader gets
         // back must be byte-identical to the file, escapes and all.
         let input = b"{\"a\":\"x\\\"y\\\\z\",\"b\":[1,2]}\n{\"c\":\"line\\nbreak\"}\n";
         for chunk in [1, 3, 7, 4096] {
-            let records = read_all_records(input, chunk, NO_STRING_LIMIT);
+            let records = read_all_records(input, chunk, usize::MAX);
             assert_eq!(
                 records,
                 vec![
@@ -19298,7 +19451,7 @@ mod tests {
         // stray `\r` is JSON whitespace — so assert the records still
         // PARSE, and that a CRLF blank line is still recognised as blank.
         let input = b"{\"a\":1}\r\n\r\n{\"b\":2}\r\n";
-        let records = read_all_records(input, 3, NO_STRING_LIMIT);
+        let records = read_all_records(input, 3, usize::MAX);
         let parsed: Vec<Option<Value>> = records
             .iter()
             .filter(|r| !record_is_blank(r.as_bytes()))
@@ -19406,6 +19559,130 @@ mod tests {
     }
 
     #[test]
+    fn read_record_caps_a_string_made_only_of_two_char_escapes() {
+        // REGRESSION. The sibling test below used `\u200d`, which goes
+        // through the HEX path where the budget check already existed —
+        // so it passed while TWO-char escapes (`\n`, `\t`, `\"`, `\\`)
+        // had no check at all on either branch that handles them, and a
+        // string built only from those streamed in FULL. That is the
+        // unbounded read this whole reader exists to prevent, and both
+        // shapes are ordinary runaway output: blank-line-heavy dumps and
+        // a command printing JSON.
+        for unit in [r"\n", r"\t", r"\\", "\\\""] {
+            let body = unit.repeat(20_000); // 40 KB, no plain bytes at all
+            let input = format!("{{\"s\":\"{body}\"}}\n");
+            let records = read_all_records(input.as_bytes(), 4096, 1024);
+            assert_eq!(records.len(), 1);
+            serde_json::from_str::<Value>(&records[0])
+                .unwrap_or_else(|e| panic!("unit {unit:?} broke the JSON: {e}"));
+            assert!(
+                records[0].len() < 2048,
+                "unit {unit:?} was NOT capped: {} bytes",
+                records[0].len()
+            );
+        }
+    }
+
+    #[test]
+    fn read_record_resynchronises_after_an_unterminated_string() {
+        // REGRESSION. `BufRead::lines()` ended a line at every newline, so
+        // one malformed record cost exactly one record. Ending it only
+        // when `!in_string` meant an unterminated string swallowed every
+        // following newline as content — one corrupt record mid-file took
+        // the whole REST of the transcript with it, silently.
+        let input = b"{\"a\":1}\n{\"b\":\"unterminated\n{\"c\":3}\n{\"d\":4}\n";
+        let records = read_all_records(input, 3, usize::MAX);
+        let parsed: Vec<Value> = records
+            .iter()
+            .filter(|r| !record_is_blank(r.as_bytes()))
+            .filter_map(|r| serde_json::from_str(r).ok())
+            .collect();
+        assert_eq!(
+            parsed,
+            vec![
+                serde_json::json!({"a": 1}),
+                serde_json::json!({"c": 3}),
+                serde_json::json!({"d": 4})
+            ],
+            "only the malformed record is lost, not the rest of the file"
+        );
+    }
+
+    #[test]
+    fn the_detail_cap_makes_over_cap_text_unfindable_by_search() {
+        // NOT a regression test — a CONSEQUENCE test. `search_sessions`
+        // matches `detail.messages[].text`, which is the capped text, so
+        // the cap silently narrows what search can find. That was missed
+        // when the cap went in and is exactly the kind of downstream
+        // effect worth pinning: if someone later raises, lowers or
+        // removes DETAIL_MAX_STRING_BYTES, this test says out loud what
+        // else moves.
+        let dir = TestDir::new("codex-detail-search-reach");
+        let path = dir.path().join("rollout.jsonl");
+        // A needle before the cap and an identical one well past it.
+        let filler = "F".repeat(2 * 1024 * 1024);
+        let body = format!("NEEDLE_EARLY{filler}NEEDLE_LATE");
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                r#"{"timestamp":"2026-05-29T10:00:00Z","type":"session_meta","payload":{"id":"s1","cwd":"/w"}}"#,
+                format_args!(
+                    r#"{{"timestamp":"2026-05-29T10:00:01Z","type":"response_item","payload":{{"type":"function_call_output","call_id":"c1","output":"{body}"}}}}"#
+                ),
+            ),
+        )
+        .unwrap();
+
+        let detail = parse_codex_session(&path, "s1").expect("parses");
+        let all: String = detail.messages.iter().map(|m| m.text.as_str()).collect();
+        assert!(all.contains("NEEDLE_EARLY"), "text before the cap is kept");
+        assert!(
+            !all.contains("NEEDLE_LATE"),
+            "text past the cap is gone — and so is search's reach into it"
+        );
+        assert!(
+            detail.messages.iter().any(|m| m.kind == kind::ELIDED),
+            "the loss is announced, not silent"
+        );
+    }
+
+    #[test]
+    fn a_record_that_renders_nothing_leaves_no_elided_notice() {
+        // REGRESSION. Codex persists a turn as BOTH a `response_item` and
+        // an `event_msg`; the `response_item` copy renders nothing, so an
+        // ungated notice fired on both and reported the same loss TWICE —
+        // the first time with no card above it. And a record that
+        // surfaced nothing hid nothing, so there is nothing to report.
+        let dir = TestDir::new("codex-orphan-notice");
+        let path = dir.path().join("rollout.jsonl");
+        let huge = "C".repeat(3 * 1024 * 1024);
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                r#"{"timestamp":"2026-05-29T10:00:00Z","type":"session_meta","payload":{"id":"s1","cwd":"/w"}}"#,
+                // `response_item` + `message` renders nothing: its
+                // `event_msg` twin is the canonical copy.
+                format_args!(
+                    r#"{{"timestamp":"2026-05-29T10:00:01Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{huge}"}}]}}}}"#
+                ),
+            ),
+        )
+        .unwrap();
+        let detail = parse_codex_session(&path, "s1").expect("parses");
+        assert_eq!(
+            detail
+                .messages
+                .iter()
+                .filter(|m| m.kind == kind::ELIDED)
+                .count(),
+            0,
+            "a record that rendered nothing must not report a loss"
+        );
+    }
+
+    #[test]
     fn read_record_still_caps_a_string_made_only_of_escapes() {
         // Escape bytes are emitted without consulting the budget (that
         // is what keeps them whole), so a string with no plain runs at
@@ -19484,13 +19761,87 @@ mod tests {
     }
 
     #[test]
+    fn read_record_reports_every_byte_it_dropped() {
+        // The count is what the notice quotes, so an undercount would
+        // understate what the user is missing.
+        let body = "A".repeat(50_000);
+        let input = format!("{{\"s\":\"{body}\"}}\n");
+        for chunk in [7, 1024, 65_536] {
+            let (records, elided) = read_all_records_counting(input.as_bytes(), chunk, 1000);
+            assert_eq!(records.len(), 1);
+            assert_eq!(elided, 49_000, "chunk {chunk}");
+        }
+        // Nothing over the cap: nothing reported.
+        let (_, none) = read_all_records_counting(b"{\"s\":\"short\"}\n", 4, 1000);
+        assert_eq!(none, 0);
+    }
+
+    #[test]
+    fn codex_detail_caps_a_huge_output_and_says_so() {
+        // The whole point of DETAIL_MAX_STRING_BYTES: a runaway tool
+        // dump becomes readable instead of unrenderable, and the user is
+        // TOLD what was removed rather than shown a silently short fence.
+        let dir = TestDir::new("codex-detail-cap");
+        let path = dir.path().join("rollout.jsonl");
+        let huge = "B".repeat(3 * 1024 * 1024);
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                r#"{"timestamp":"2026-05-29T10:00:00Z","type":"session_meta","payload":{"id":"s1","cwd":"/w"}}"#,
+                format_args!(
+                    r#"{{"timestamp":"2026-05-29T10:00:01Z","type":"response_item","payload":{{"type":"function_call_output","call_id":"c1","output":"{huge}"}}}}"#
+                ),
+            ),
+        )
+        .unwrap();
+
+        let detail = parse_codex_session(&path, "s1").expect("parses");
+        let notice = detail
+            .messages
+            .iter()
+            .find(|m| m.kind == kind::ELIDED)
+            .expect("an elided record leaves a notice");
+        assert!(
+            notice.text.contains("MB elided"),
+            "notice quotes the size: {}",
+            notice.text
+        );
+        // Cap plus the message's own framing — nowhere near 3 MB.
+        let biggest = detail.messages.iter().map(|m| m.text.len()).max().unwrap();
+        assert!(
+            biggest < 2 * 1024 * 1024,
+            "capped near 1 MiB, got {biggest} bytes"
+        );
+        assert!(
+            detail
+                .messages
+                .iter()
+                .any(|m| m.kind == kind::TOOL_RESULT || m.text.contains("BBB")),
+            "the surviving prefix is still shown"
+        );
+    }
+
+    #[test]
+    fn the_elided_notice_is_not_counted_as_a_visible_message() {
+        // `message_count` on the list card comes from the SCAN, which
+        // counts kind::TEXT and never emits this notice. Giving the
+        // notice TEXT would make the card disagree with its own
+        // transcript on exactly the sessions this feature touches.
+        assert_ne!(kind::ELIDED, kind::TEXT);
+        let notice = elided_notice(1234, None);
+        assert_eq!(notice.kind, kind::ELIDED);
+        assert_eq!(notice.role, "system");
+    }
+
+    #[test]
     fn read_record_never_splits_a_record_on_a_string_newline() {
         // A `\n` INSIDE a JSON string is the two bytes `\` `n`, but a
         // reader that tracked no string state would still be fooled by a
         // raw newline smuggled into the input — and splitting there
         // turns one record into two unparseable halves.
         let input = "{\"a\":\"has \\\" quote\"}\n{\"b\":2}\n";
-        let records = read_all_records(input.as_bytes(), 2, NO_STRING_LIMIT);
+        let records = read_all_records(input.as_bytes(), 2, usize::MAX);
         assert_eq!(
             records,
             vec![
