@@ -234,6 +234,37 @@ fn applescript_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// A leading SPACE on every command we TYPE into a shell — Terminal.app's
+/// `do script` and iTerm's `write text`. Both deliver the command as
+/// KEYSTROKES, so it lands in the tty buffer while the shell is still
+/// sourcing its rc files, and **an rc file that reads a keystroke eats the
+/// first character of our command**.
+///
+/// The reported case is oh-my-zsh's update prompt (`tools/check_for_upgrade.sh:235`,
+/// the DEFAULT `prompt` mode, fired every 13 days): `read -r -k 1 option` takes
+/// the `c` of `cd '<project>' && claude`, leaving the shell to run
+/// `d '<project>' && claude` → `zsh: command not found: d`, and the CLI never
+/// starts. omz's own `has_typed_input` guard only covers text that already
+/// arrived BEFORE the check, which is a race we lose whenever the window is
+/// created slightly ahead of the keystrokes.
+///
+/// A space is the one prefix that is harmless in BOTH outcomes: omz's `read`
+/// sees it and falls to the `*)` arm (anything but `y`/`Y`/Enter means don't
+/// update), so our command survives intact; with no prompt the shell just
+/// ignores a leading blank — and under `HIST_IGNORE_SPACE` it also keeps this
+/// injected command out of the user's history, which is if anything an
+/// improvement. **Control characters do NOT work here** — `^U` was tried first
+/// and is the tty's kill character, swallowed by the line discipline before any
+/// reader sees it (measured under a pty: the prompt still ate the `c`).
+///
+/// The argv-based launchers need no prefix and must not get one: Ghostty /
+/// Alacritty / Kitty / WezTerm and every Linux and Windows branch pass the
+/// command as an ARGUMENT, where nothing can consume it.
+#[cfg(target_os = "macos")]
+fn typed(esc: &str) -> String {
+    format!(" {esc}")
+}
+
 /// AppleScript that runs `esc` (an already-escaped command) in Terminal.app.
 /// When Terminal isn't already running, `activate` opens a default empty
 /// window AND a bare `do script` opens a SECOND — two windows, one unused.
@@ -242,6 +273,8 @@ fn applescript_escape(s: &str) -> String {
 /// new window without disturbing the user's existing ones.
 #[cfg(target_os = "macos")]
 fn terminal_app_script(esc: &str) -> String {
+    // `do script` TYPES the text — see `typed` for why it carries a space.
+    let esc = typed(esc);
     format!(
         "tell application \"Terminal\"\n  if it is running then\n    do script \"{esc}\"\n  else\n    do script \"{esc}\" in window 1\n  end if\n  activate\nend tell"
     )
@@ -253,10 +286,15 @@ fn terminal_app_script(esc: &str) -> String {
 /// cold launch → reuse the window the launch creates (the `delay` lets it
 /// appear so the count check doesn't race; a new window is created if the
 /// user's startup preference opens none).
+///
+/// Only the `write text` branch carries the [`typed`] space: it is the one that
+/// sends KEYSTROKES to a shell. `create window … command` hands iTerm the
+/// command to RUN as the window's process, so no rc file is between us and it.
 #[cfg(target_os = "macos")]
 fn iterm_script(esc: &str) -> String {
+    let keys = typed(esc);
     format!(
-        "tell application \"iTerm\"\n  if it is running then\n    create window with default profile command \"{esc}\"\n  else\n    activate\n    delay 0.3\n    if (count of windows) is 0 then\n      create window with default profile command \"{esc}\"\n    else\n      tell current session of current window to write text \"{esc}\"\n    end if\n  end if\nend tell"
+        "tell application \"iTerm\"\n  if it is running then\n    create window with default profile command \"{esc}\"\n  else\n    activate\n    delay 0.3\n    if (count of windows) is 0 then\n      create window with default profile command \"{esc}\"\n    else\n      tell current session of current window to write text \"{keys}\"\n    end if\n  end if\nend tell"
     )
 }
 
@@ -643,9 +681,41 @@ mod tests {
         let s = terminal_app_script("echo hi");
         assert!(s.contains("if it is running then"), "{s}");
         // Cold launch → run in window 1 (reuse the launch's default window).
-        assert!(s.contains("do script \"echo hi\" in window 1"), "{s}");
+        assert!(s.contains("do script \" echo hi\" in window 1"), "{s}");
         // Already running → a fresh `do script` (its own new window).
-        assert!(s.contains("    do script \"echo hi\"\n  else"), "{s}");
+        assert!(s.contains("    do script \" echo hi\"\n  else"), "{s}");
+    }
+
+    // Everything TYPED into a shell leads with a space, so an rc file that
+    // reads a keystroke (oh-my-zsh's update prompt: `read -r -k 1`) eats the
+    // space instead of the first character of the command — see `typed`.
+    // Without it, `cd '/p' && claude` was left as `d '/p' && claude`
+    // ("zsh: command not found: d") whenever that prompt fired.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn typed_commands_lead_with_a_space_so_an_rc_prompt_cannot_eat_them() {
+        // Terminal.app types on BOTH branches (already running / cold launch).
+        let s = terminal_app_script("cd '/p' && claude");
+        assert_eq!(
+            s.matches("do script \" cd '/p' && claude\"").count(),
+            2,
+            "{s}"
+        );
+        assert!(!s.contains("do script \"cd '/p' && claude\""), "{s}");
+
+        let s = iterm_script("cd '/p' && claude");
+        assert!(
+            s.contains("write text \" cd '/p' && claude\""),
+            "the typed branch must lead with a space: {s}"
+        );
+        // iTerm's `create window … command` is NOT typed — it is the process
+        // iTerm runs, so it stays exactly as built.
+        assert_eq!(
+            s.matches("create window with default profile command \"cd '/p' && claude\"")
+                .count(),
+            2,
+            "{s}"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -656,7 +726,7 @@ mod tests {
         // Cold launch → reuse the launch window instead of a second one.
         assert!(s.contains("(count of windows) is 0"), "{s}");
         assert!(
-            s.contains("tell current session of current window to write text \"echo hi\""),
+            s.contains("tell current session of current window to write text \" echo hi\""),
             "{s}"
         );
     }
