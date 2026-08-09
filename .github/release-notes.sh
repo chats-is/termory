@@ -21,11 +21,21 @@ RANGE="${PREV:+$PREV..}${TAG}"
 
 # Emit one "### Title" section listing every commit of the given conventional
 # type in RANGE (scope dropped, leading "- " bullet). Silent if none.
+#
+# The version-bump commit is dropped: it is the release itself, not a change in
+# it, and with its `chore(release): ` prefix stripped it rendered as a bare
+# `- v1.4.2` bullet under Maintenance. Match the WHOLE scope, not a message
+# body — this filter used to read `^chore\(release\): bump` while every release
+# commit here has been `chore(release): vX.Y.Z` since at least v1.3.2, so it
+# never once matched and every published release carried the stray line.
+# Dropping the only member of a section removes the section too (`emit` prints
+# nothing for an empty list), and a release with nothing else in it falls back
+# to the "Maintenance and internal improvements." line below.
 emit() {
   local prefix="$1" title="$2" lines
   lines="$(git log "$RANGE" --no-merges --pretty='%s' \
     | { grep -E "^${prefix}(\([^)]+\))?!?: " || true; } \
-    | { grep -vE '^chore\(release\): bump' || true; } \
+    | { grep -vE '^chore\(release\):' || true; } \
     | sed -E "s/^${prefix}(\([^)]*\))?!?: //" \
     | sed -E 's/^/- /')"
   if [ -n "$lines" ]; then
@@ -43,7 +53,7 @@ emit_changelog() {
   emit test     '✅ Tests'
   emit build    '📦 Packaging'
   emit ci       '🔧 CI'
-  emit chore    '🧹 Maintenance' # `chore(release): bump` filtered out inside emit()
+  emit chore    '🧹 Maintenance' # the release commit itself is dropped in emit()
 }
 
 # --changelog: just the changelog, for the in-app updater dialog. Command
