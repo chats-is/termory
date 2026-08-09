@@ -125,7 +125,7 @@ It uses Claude Desktop's own **third-party ("3P")** mechanism, not env vars: Ter
 
 (This is unrelated to the **AI Gateways** feature below — Claude Desktop is just a provider; "3P" is Claude Desktop's own term for its third-party config.)
 
-### Advanced settings (per-provider options)
+### Advanced settings (per provider)
 
 Beyond the basic fields, each provider has an **Advanced settings** section where you add your own config entries — any setting the CLI supports that Termory doesn't have a dedicated field for. Each entry you add is merged into that CLI's config when you activate the provider (for Grok, when you **set it as default** — see below), and removed again when you switch away.
 
