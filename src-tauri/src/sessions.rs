@@ -10503,6 +10503,16 @@ fn claude_attachment_messages(value: &Value, timestamp: Option<String>) -> Vec<S
         // range shown, the total, and the cap, which is exactly what
         // explains a later re-Read of the same file, so it is surfaced
         // verbatim rather than as `*[attachment: …]*` + a JSON dump.
+        //
+        // **Claude itself never draws this one** (2.1.226): the type is
+        // in the hidden-attachment set the transcript filters against
+        // (`uIT`, consumed by the `.filter(x => !isHiddenAttachment(x))`
+        // in the transcript builder), so there is no official wording to
+        // match. It IS handed to the model, as the bare banner
+        // (`read_truncation_notice: e => [msg({content: banner})]` in
+        // `normalizeAttachmentForAPI`), and that bare-banner form is
+        // what is used here — the text Claude itself treats as the
+        // record's content, with nothing added around it.
         "read_truncation_notice" => match att.get("banner").and_then(value_to_string) {
             Some(banner) if !banner.trim().is_empty() => push(banner.trim().to_string()),
             // Shape drift must NOT silently drop the record — that is
@@ -10510,17 +10520,47 @@ fn claude_attachment_messages(value: &Value, timestamp: Option<String>) -> Vec<S
             // it instead so the raw fields stay visible.
             _ => push(claude_attachment_fallback_text(att, att_type)),
         },
-        // `context_tip`: `{tip: {tip, featureId, …}}` — a suggestion the
-        // CLI surfaced to the user (e.g. "grant access with /add-dir").
-        // The prose is the whole point; the ids around it are internal.
+        // `context_tip`: `{tip: {tip, action, featureId}}` — a suggestion
+        // the CLI surfaced to the user.
+        //
+        // Claude 2.1.226 gives this type no transcript rendering at all
+        // (absent from the attachment switch; its resume path drops it
+        // via `hcS`), so there is no upstream FIELD MAPPING to copy and
+        // this arm is Termory's own under rule 7. What that makes it is
+        // a completeness question, not a wording one: `action` is a
+        // real, user-meaningful field (`/add-dir <path>` — the command
+        // the tip is telling you to run) and it was being dropped on the
+        // floor along with the internal `featureId`. Dropping a payload
+        // field because a sibling field reads better is precisely the
+        // hiding rule 7 forbids. `featureId` stays out — an internal id,
+        // the same call every other arm here makes.
+        //
+        // (The `💡` this used to prepend was Termory decoration with
+        // nothing behind it and is gone, but that was never the bug.)
         "context_tip" => {
-            let tip = att
-                .get("tip")
+            let inner = att.get("tip");
+            let tip = inner
                 .and_then(|t| t.get("tip"))
-                .or_else(|| att.get("tip"))
+                .or(inner)
                 .and_then(value_to_string);
+            let action = inner
+                .and_then(|t| t.get("action"))
+                .and_then(value_to_string)
+                .filter(|a| !a.trim().is_empty());
             match tip {
-                Some(t) if !t.trim().is_empty() => push(format!("💡 {}", t.trim())),
+                Some(t) if !t.trim().is_empty() => {
+                    let mut text = t.trim().to_string();
+                    if let Some(action) = action {
+                        // Own line: the tip prose is a sentence and the
+                        // action is a command to run, so inline-coding it
+                        // keeps a slash command from reading as prose and
+                        // protects any markdown-special char in the path
+                        // (rule 3).
+                        text.push_str("\n\n");
+                        text.push_str(&wrap_inline_code(action.trim()));
+                    }
+                    push(text)
+                }
                 _ => push(claude_attachment_fallback_text(att, att_type)),
             }
         }
@@ -10530,15 +10570,34 @@ fn claude_attachment_messages(value: &Value, timestamp: Option<String>) -> Vec<S
         // markdown list** (`- {name}: {description}`), so the generic
         // fallback's compact-JSON dump was re-encoding readable prose
         // into 2.5 KB of escaped JSON on one line — 42 of them in this
-        // machine's history. Shaped after `skill_listing` above: a
-        // `{n} agents available` summary, then the lines verbatim.
+        // machine's history.
         //
-        // Unlike `skill_listing` this does NOT drop the initial one.
-        // That one returns null in Claude's own component
-        // (AttachmentMessage.tsx:280-290) which is why it is dropped
-        // there; no such official rule was found for this type, and
-        // `isInitial` here carries the FULL roster — the most useful
-        // form of it — so rule 7 keeps it.
+        // **The header is Claude's own string, read out of the shipped
+        // binary (2.1.226).** Its attachment component renders this type
+        // in the same switch as `skill_listing`:
+        //
+        //   case "agent_listing_delta": {
+        //     const added = arr(a.addedTypes);
+        //     if (a.isInitial || added.length === 0) return null;
+        //     return <>{<b>{added.length}</b>} agent {plural(n,"type")} available</>;
+        //   }
+        //
+        // Three corrections came out of that, and an earlier comment
+        // here asserted the opposite of all of them from the stale
+        // `videcoding/cli` clone, which predates this type:
+        //   * the noun is **agent TYPES**, not "agents" — these are
+        //     Task-tool subagent types, not running agents;
+        //   * the count is `addedTypes.len()`, and `removedTypes` does
+        //     not enter the label at all;
+        //   * `isInitial` IS dropped, exactly like `skill_listing` — the
+        //     claim that "no such official rule was found for this type"
+        //     was simply wrong.
+        //
+        // Termory still SURFACES the initial one and the roster lines
+        // (rule 7 — the transcript is the source of truth and the roster
+        // is recorded content the official TUI happens not to draw). The
+        // divergence being removed is the invented WORDING, not the
+        // decision to show it.
         "agent_listing_delta" => {
             let lines: Vec<String> = att
                 .get("addedLines")
@@ -10566,8 +10625,10 @@ fn claude_attachment_messages(value: &Value, timestamp: Option<String>) -> Vec<S
             }
             let mut text = String::new();
             if added > 0 {
-                let noun = if added == 1 { "agent" } else { "agents" };
-                text.push_str(&format!("{added} {noun} available"));
+                // Claude's own label, verbatim: `**{n}** agent
+                // {type|types} available`.
+                let noun = if added == 1 { "type" } else { "types" };
+                text.push_str(&format!("**{added}** agent {noun} available"));
             }
             if !removed.is_empty() {
                 if !text.is_empty() {
@@ -12128,10 +12189,14 @@ fn codex_function_call_message(
         }
         _ => {
             // Generic fallback — the unified `**Verb**(args)` shape
-            // (rule 2), with the tool's own name as the verb because
-            // Codex defines no display name for these
+            // (rule 2). Codex defines no display name for these
             // (`dispatched_tool_kind` sends them to
-            // `ToolCallKind::Other`, tool_dispatch.rs:273).
+            // `ToolCallKind::Other`, tool_dispatch.rs:273), so the verb
+            // comes from `codex_generic_tool_label`, which is the
+            // official GUI's rule for exactly this case rather than a
+            // Termory convention: `wait_agent` reads `Wait agent`, not
+            // the raw identifier. Printing the symbol verbatim was the
+            // divergence — the bold was never the invented part.
             //
             // This used to emit PLAIN text, so an unmapped tool rendered
             // as `⏺ wait({…})` — a bare verb sitting directly beside its
@@ -12140,6 +12205,7 @@ fn codex_function_call_message(
             // in real history here), so the fallback is a permanent
             // path, not a rare one, and it has to match the format every
             // other card uses.
+            let name = codex_generic_tool_label(&name);
             let args_summary = arguments
                 .as_deref()
                 .map(|args| compact(args, 200))
@@ -12305,6 +12371,68 @@ fn codex_patch_header(actions: &[CodexPatchAction]) -> String {
     format!("**Edited**({count} {noun})")
 }
 
+/// Display name for a Codex tool that has no card of its own.
+///
+/// **This is the official GUI's rule, not a Termory invention.** The
+/// ChatGPT app renders exactly this case — its string is
+/// `localConversation.dynamicToolCall`, `defaultMessage: "{toolName}"`,
+/// described in the bundle as *"Synthetic item shown for a dynamic tool
+/// call without a specialized renderer."* The value it interpolates is
+/// built (app.asar `webview/assets/subagent-activity-chip-group-*.js`,
+/// fn `eS`) as `perToolLabel[tool] ?? lowerCase(tool)`, then passed
+/// through `upperFirst` when the item leads its row. Every transcript
+/// card here stands alone, so it is always the leading form.
+///
+/// `lowerCase` is lodash's: split the identifier into words, lowercase
+/// each, join with spaces — so `exec_command` reads `Exec command` and
+/// `waitAgent` reads `Wait agent`. That word split is the whole point
+/// and is what a raw name misses: Codex tool names are snake_case
+/// identifiers, and printing one verbatim shows the user an internal
+/// symbol where the official GUI shows a phrase.
+///
+/// The domain is ASCII identifiers (every Codex tool name), so the
+/// split is on non-alphanumerics plus camelCase and letter/digit
+/// boundaries. lodash reaches the same result for those inputs through
+/// `hasUnicodeWord` → `unicodeWords`; the unicode-specific arms of that
+/// regex are deliberately not reproduced.
+fn codex_generic_tool_label(name: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut prev: Option<char> = None;
+    for ch in name.chars() {
+        if !ch.is_ascii_alphanumeric() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            prev = None;
+            continue;
+        }
+        // camelCase (`waitAgent`) and letter/digit (`gpt5`, `o3Mini`)
+        // boundaries start a new word, matching lodash `words`.
+        let boundary = match prev {
+            Some(p) => {
+                (p.is_ascii_lowercase() && ch.is_ascii_uppercase())
+                    || (p.is_ascii_digit() != ch.is_ascii_digit())
+            }
+            None => false,
+        };
+        if boundary && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        word.push(ch.to_ascii_lowercase());
+        prev = Some(ch);
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    let mut label = words.join(" ");
+    // `upperFirst` — the leading-item form.
+    if let Some(first) = label.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    label
+}
+
 /// Codex `custom_tool_call` (`payload.type = "custom_tool_call"`) is the
 /// modern shape for apply_patch and similar tools. Differs from
 /// `function_call` in:
@@ -12340,13 +12468,20 @@ fn codex_custom_tool_call_message(
         //
         // Codex defines no display name for it (`dispatched_tool_kind`
         // sends `exec` to `ToolCallKind::Other`, tool_dispatch.rs:273,
-        // and the TUI has no cell for it), so the tool's own name is
-        // the verb — nothing is invented here.
+        // and the TUI has no cell for it), and the ChatGPT app ships no
+        // code-mode card either — its locale set has no `codex.codeCell`
+        // /`codex.exec` family at all, so `exec` reaches the same
+        // "dynamic tool call without a specialized renderer" path every
+        // other unmapped tool does. So the verb comes from
+        // `codex_generic_tool_label` rather than a literal here: it is
+        // DERIVED by the official rule (`exec` → `Exec`), not a
+        // title-cased guess that happens to look like a display name.
         "exec" => {
+            let verb = codex_generic_tool_label(&name);
             let script = input.clone().unwrap_or_default();
             let script = script.trim();
             if script.is_empty() {
-                "**Exec**".to_string()
+                format!("**{verb}**")
             } else {
                 // 4-backtick fence: this is model-authored JS and a
                 // script containing ``` (heredocs, template literals,
@@ -12355,11 +12490,14 @@ fn codex_custom_tool_call_message(
                 // 4 backticks for unstructured content for this reason;
                 // the `js` hint costs nothing to drop since there is no
                 // syntax-highlight pass.
-                format!("**Exec**\n\n````\n{script}\n````")
+                format!("**{verb}**\n\n````\n{script}\n````")
             }
         }
         _ => {
-            // Generic custom tool: bold name + compact input.
+            // Generic custom tool: the official GUI's own label for a
+            // tool with no card (see `codex_generic_tool_label`) plus
+            // compact input.
+            let name = codex_generic_tool_label(&name);
             let compact_input = input
                 .as_deref()
                 .map(|s| compact(s, 200))
@@ -15039,13 +15177,18 @@ mod tests {
             None,
         )
         .unwrap();
+        // The verb is DERIVED by the official generic rule (`exec` →
+        // `Exec`), not written as a literal — the ChatGPT app has no
+        // code-mode card either, so `exec` lands on the same
+        // no-specialized-renderer path as any other unmapped tool.
         assert_eq!(msg.text, format!("**Exec**\n\n````\n{script}\n````"));
+        assert_eq!(codex_generic_tool_label("exec"), "Exec");
         // The whole script survives — the point of the change.
         assert!(msg.text.contains("text(r.output);"));
     }
 
     #[test]
-    fn codex_unmapped_tools_still_get_a_bold_verb() {
+    fn codex_unmapped_tools_use_the_official_generic_label() {
         // Rule 2 — every card is `**Verb**(args)`. Codex ships more
         // tools than this file maps; `wait` / `wait_agent` are both in
         // real history here and hit the generic arm, which used to emit
@@ -15060,16 +15203,42 @@ mod tests {
         )
         .unwrap();
         assert!(
-            wait.text.starts_with("**wait**("),
+            wait.text.starts_with("**Wait**("),
             "unmapped codex tool must keep the bold verb, got {:?}",
             wait.text
         );
+        // The word split is the part that matters: the ChatGPT app runs
+        // this exact case through lodash `lowerCase` + `upperFirst`, so
+        // the user sees a phrase, not the internal snake_case symbol.
         let bare = codex_function_call_message(
             &serde_json::json!({"type":"function_call","name":"wait_agent","call_id":"c2"}),
             None,
         )
         .unwrap();
-        assert_eq!(bare.text, "**wait_agent**");
+        assert_eq!(bare.text, "**Wait agent**");
+    }
+
+    #[test]
+    fn codex_generic_tool_label_matches_the_official_derivation() {
+        // Mirrors the ChatGPT app's `lowerCase(tool)` + `upperFirst`
+        // (app.asar, the `localConversation.dynamicToolCall` renderer).
+        // Underscores and camelCase both become word breaks; a
+        // single-word name only gets its first letter raised.
+        assert_eq!(codex_generic_tool_label("exec"), "Exec");
+        assert_eq!(codex_generic_tool_label("wait"), "Wait");
+        assert_eq!(codex_generic_tool_label("wait_agent"), "Wait agent");
+        assert_eq!(codex_generic_tool_label("exec_command"), "Exec command");
+        assert_eq!(codex_generic_tool_label("waitAgent"), "Wait agent");
+        assert_eq!(
+            codex_generic_tool_label("read_thread_terminal"),
+            "Read thread terminal"
+        );
+        // Letter/digit boundaries split too, as lodash `words` does.
+        assert_eq!(codex_generic_tool_label("gpt5Codex"), "Gpt 5 codex");
+        // Degenerate inputs must not panic or produce stray spaces.
+        assert_eq!(codex_generic_tool_label(""), "");
+        assert_eq!(codex_generic_tool_label("__"), "");
+        assert_eq!(codex_generic_tool_label("_a__b_"), "A b");
     }
 
     #[test]
@@ -15248,11 +15417,29 @@ mod tests {
         let tip = claude_attachment_messages(
             &serde_json::json!({"attachment":{
                 "type":"context_tip",
-                "tip":{"tip":"You can grant access with /add-dir","featureId":"outside-cwd"}
+                "tip":{"tip":"You can grant access with /add-dir","action":"/add-dir /Users/john/Documents/termory","featureId":"outside-cwd"}
             }}),
             None,
         );
-        assert_eq!(tip[0].text, "\u{1f4a1} You can grant access with /add-dir");
+        // Both payload fields survive: `action` is the command the tip
+        // is telling you to run, and dropping it because `tip` reads
+        // better is the hiding rule 7 forbids. `featureId` is an
+        // internal id and stays out. No `💡` — Termory decoration with
+        // nothing behind it.
+        assert_eq!(
+            tip[0].text,
+            "You can grant access with /add-dir\n\n`/add-dir /Users/john/Documents/termory`"
+        );
+        assert!(!tip[0].text.contains('\u{1f4a1}'));
+        // A tip with no action is just the prose — no stray blank line.
+        let no_action = claude_attachment_messages(
+            &serde_json::json!({"attachment":{
+                "type":"context_tip",
+                "tip":{"tip":"Try /compact","featureId":"x"}
+            }}),
+            None,
+        );
+        assert_eq!(no_action[0].text, "Try /compact");
         // No internal ids leak.
         assert!(!tip[0].text.contains("featureId"));
     }
@@ -15274,9 +15461,27 @@ mod tests {
             None,
         );
         assert_eq!(msgs.len(), 1);
+        // Header is Claude 2.1.226's own string — `**{n}** agent
+        // {type|types} available`. It counts addedTypes and says TYPES,
+        // not "agents"; the earlier "2 agents available" was invented.
         assert_eq!(
             msgs[0].text,
-            "2 agents available\n\n- claude: Catch-all for any task.\n- Explore: Read-only search agent."
+            "**2** agent types available\n\n- claude: Catch-all for any task.\n- Explore: Read-only search agent."
+        );
+        // Singular takes the singular noun, as Claude's `plural(n,"type")` does.
+        let one = claude_attachment_messages(
+            &serde_json::json!({"attachment":{
+                "type":"agent_listing_delta",
+                "addedTypes":["Explore"],
+                "addedLines":["- Explore: Read-only search agent."],
+                "removedTypes":[],"isInitial":false
+            }}),
+            None,
+        );
+        assert!(
+            one[0].text.starts_with("**1** agent type available"),
+            "singular noun, got {:?}",
+            one[0].text
         );
         // No raw JSON leaks through.
         assert!(!msgs[0].text.contains("addedTypes"));
