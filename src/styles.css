@@ -94,6 +94,19 @@ input {
   list-style-type: "- ";
 }
 
+/* Ordered lists MUST restate `decimal`, for two separate reasons — both
+ * of which turned `1. 2. 3.` into something that was not a number:
+ *   1. Tailwind's preflight sets `ol, ul, menu { list-style: none }`
+ *      (preflight.css:197-201). `ul` above overrides it; `ol` had
+ *      nothing, so a top-level ordered list rendered with NO marker.
+ *   2. `list-style-type` INHERITS, so an `ol` nested inside a `ul` picked
+ *      up that `"- "` and rendered as bullets.
+ * Every numbered list in a transcript (a plan, ranked findings, ordered
+ * steps) is one the CLI showed numbered. */
+.message-body ol {
+  list-style-type: decimal;
+}
+
 .message-body li {
   margin: 0.2em 0;
 }

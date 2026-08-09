@@ -296,7 +296,14 @@ The repo also contains `.audit-sources/` (gitignored) with shallow clones of `op
 Use upstream implementations as the reference for history data and message preview behavior:
 
 - Codex official source: https://github.com/openai/codex
-- Claude Code referenced CLI implementation: https://github.com/videcoding/cli
+- Claude Code referenced CLI implementation: https://github.com/videcoding/cli — **STALE and incomplete: it stopped in April 2026 and has none of the tools added since** (`ReportFindings`, `Artifact`, `Monitor`, `SendMessage`, …). Claude Code is closed source, so the authoritative reference for anything it lacks is **the shipped binary** — a Bun single-file executable with its JS strings in the clear. Locate a tool by its definition anchor and read the real values:
+  ```sh
+  python3 - <<'EOF'
+  import mmap; m=mmap.mmap(open('/Users/…/.local/bin/claude','rb').fileno(),0,access=mmap.ACCESS_READ)
+  i=m.find(b'userFacingName(){return"Monitor"}'); print(m[i:i+400].decode('utf-8','replace'))
+  EOF
+  ```
+  Grep for `"ToolName"` first to find the block, then read `userFacingName` / `renderToolUseMessage` verbatim — **do NOT assume the verb equals the tool name** (`ReportFindings` renders as `Code review`), and check whether `renderToolUseMessage` exists at all, since its absence means the TUI shows the verb with no arguments. Record the binary version next to anything recovered this way (these came from **2.1.226**).
 - Gemini CLI official source: https://github.com/google-gemini/gemini-cli
 - OpenCode official source: https://github.com/anomalyco/opencode
 - Grok Build official source: https://github.com/xai-org/grok-build (Rust; the token-usage ledgers are `crates/codegen/xai-chat-state/src/usage.rs` + `.../actor/state.rs`, the ACP wire shapes `crates/codegen/xai-grok-shell/src/extensions/notification.rs`)
@@ -321,7 +328,7 @@ For TUI tool-message rendering (every Termory branch cites a line here):
 - Codex exec/shell render: `.audit-sources/codex/codex-rs/tui/src/exec_cell/render.rs`, bash highlight alias at `codex-rs/tui/src/render/highlight.rs:533`
 - Claude tool-use wrapper: `.audit-sources/claude-code/src/components/messages/AssistantToolUseMessage.tsx:152` (assembles `<bold>{userFacingName}</bold>({renderToolUseMessage})`); per-tool: `src/tools/<Tool>/UI.tsx` (`userFacingName` + `renderToolUseMessage`)
 - Gemini ToolInfo render: `.audit-sources/gemini-cli/packages/cli/src/ui/components/messages/ToolShared.tsx:202`; type at `packages/cli/src/ui/types.ts:119` `IndividualToolCallDisplay`
-- OpenCode tool components: `.audit-sources/opencode/packages/tui/src/routes/session/index.tsx` — the per-tool renderers (now named functions: `Shell`/`Glob`/`Read`/`Grep`/`WebFetch`/`WebSearch`/`Write`/`Edit`/`ApplyPatch`/`TodoWrite`/`Question`/`Skill`/`Task`/`GenericTool`) + the `BlockTool` / `InlineTool` helpers. **OpenCode 1.17.x extracted the whole TUI into the `packages/tui` package** (the old `…/feature-plugins/system/session-v2.tsx` is gone). Citations in the OpenCode verb-mapping section have been re-verified against 1.17.11; message-type DATA now lives in `packages/tui/src/context/data.tsx`. See the audit-version note under "Per-platform verb mapping → OpenCode".
+- OpenCode tool components: `.audit-sources/opencode/packages/tui/src/routes/session/index.tsx` — the per-tool renderers (now named functions: `Shell`/`Glob`/`Read`/`Grep`/`WebFetch`/`WebSearch`/`Write`/`Edit`/`ApplyPatch`/`TodoWrite`/`Question`/`Skill`/`Task`/`Execute`/`GenericTool`) + the `BlockTool` / `InlineTool` helpers. **OpenCode 1.17.x extracted the whole TUI into the `packages/tui` package** (the old `…/feature-plugins/system/session-v2.tsx` is gone). Citations in the OpenCode verb-mapping section have been re-verified against 1.18.15; message-type DATA now lives in `packages/tui/src/context/data.tsx`. See the audit-version note under "Per-platform verb mapping → OpenCode".
 
 When behavior differs by version, match the locally installed or explicitly requested target version and cover it with a focused test. Tool-message rendering should reference the TUI source files above, not the doc sites — docs lag behind the actual UI for many of these tools.
 
@@ -489,7 +496,23 @@ or
 
 1. `{status}` glyph: `⏺` success, `✗` failure (Claude `constants/figures.ts:4` + Codex `exec_cell/render.rs:236`). Cross-platform — applied to every tool card.
 2. `{Verb}` text is platform-native (Claude `userFacingName`, OpenCode `routes/session/index.tsx`, Codex `exec_cell/render.rs`, Gemini `displayName`); the wrapper shape `**Verb**(args)` is identical across platforms.
-3. `{args}` always passes through `wrap_inline_code` (sessions.rs:48) so embedded backticks / `*` / `()` don't break markdown.
+3. `{args}` always passes through `wrap_inline_code` (sessions.rs:48) so embedded backticks / `*` / `()` don't break markdown. **This applies to EVERY line carrying user payload, not just the `**Verb**(…)` header** — the secondary `↳` lines (OpenCode Read's `Loaded`, Execute's child calls) are just as exposed, and both shipped bare until 2026-08-08.
+
+**What actually breaks, MEASURED through the real `MessageBody` pipeline** (not reasoned about — the first write-up of this got it wrong in both directions):
+
+| bare text | renders as | |
+|---|---|---|
+| ``echo `date` `` | `echo date` | ✗ backticks eaten |
+| `cp *a* dir/` | `cp a dir/` | ✗ `*x*` pair → italic |
+| `/a/ _tmp_ /b` | `/a/ tmp /b` | ✗ `_x_` at WORD BOUNDARIES → italic |
+| `/a[1](b)/c` | `/a1/c` | ✗ `[x](y)` → link |
+| `my_project/a_b.md` | `my_project/a_b.md` | ✓ INTRAWORD `_` is not emphasis in CommonMark |
+| `ls *.md` | `ls *.md` | ✓ a lone `*` needs a closing partner |
+| `/a[1]/c` | `/a[1]/c` | ✓ `[…]` with no `(…)` is not a link |
+
+The shell cases are the ones that bite in practice: a backtick command substitution is everyday syntax, and `*x*` glob pairs are common. **Bold is NOT a hazard by itself** — `**{branch}**` / `**{server}**` / `**{setting}**` were all checked with underscore-heavy real values (`feat_new_api`, `claude_ai_Google_Calendar`, `mcp__server__tool`) and every one survives, because intraword `_` does not emphasize. So do not "fix" those by wrapping them; that would only add noise.
+
+**Render it, don't reason about it.** `MessageBody` (react-markdown + remark-gfm) is cheap to drive from a scratch vitest file that dumps `container.textContent` — compare it to the source string and anything unequal is a bug. The raw string always looks right, and the official TUI is plain text so it has no opinion.
 4. **`⎿ ` prefix is REQUIRED on every summary line**, with one trailing space before the content. Tools without a structured summary skip the line entirely (Bash, generic MCP, etc.). NEVER put `⎿` inside a code fence — browser monospace fonts render U+23BF inconsistently, breaking column alignment.
 5. Summary content matches the per-tool Claude TUI component verbatim (count bolding, label pluralization). Examples:
    - `⎿ Read **N** lines` — `FileReadTool/UI.tsx:138-139`
@@ -507,7 +530,7 @@ or
 |---|---|---|
 | Codex | `Process exited with code N` / `Exit code: N` in the `function_call_output.output` wrapper (`ExecCommandToolOutput.response_text()` — context.rs:409) parsed by `codex_parse_exec_output` | Limited mode default; populates `exit_code` |
 | Claude | `tool_result.is_error: true` content block | No exit code field — `Error:` prefix has no `Exit code N` part |
-| OpenCode | `state.status === "error"` on a tool part (and `state.error.message` for the text); `assistant.error` for whole-message failures (`SessionErrorUnknown` shape per types.gen.ts:2905) | Body gets `✗ ` marker + 4-backtick `Error: {message}` fence; kind = `tool_error` so future UI can colour the card |
+| OpenCode | `state.status === "error"` on a tool part; `assistant.error` for whole-message failures. **The two carry the error text in DIFFERENT shapes** — see `opencode_error_text` below | Body gets `✗ ` marker + 4-backtick `Error: {message}` fence; kind = `tool_error` so future UI can colour the card |
 | Gemini | `status` field on each `toolCalls[]` entry; per `sessionUtils.ts:654-657` anything other than `'success'` (e.g. `'error'`, `'cancelled'`) maps to `CoreToolCallStatus.Error` | No exit code; body gets an `Error:` prefix |
 
 ### Per-platform verb mapping
@@ -539,7 +562,11 @@ Every Termory branch cites the exact source file that produces the verb in each 
 
 **Codex `custom_tool_call` / `custom_tool_call_output`** (`codex_custom_tool_call_message` / `codex_custom_tool_call_output_message`) — modern shape for apply_patch and similar tools, differs from `function_call`:
 * input arrives in an `input` field (raw text) instead of `arguments` (JSON-encoded args)
-* output is wrapped in a JSON envelope `{"output":"..."}` — the message handler unwraps `output` / `text` / `result` keys, falling back to raw on parse failure
+* output is EITHER a JSON envelope string (`{"output":"..."}` — unwrapped via `output` / `text` / `result`, raw on parse failure) **OR an ARRAY of content items** (`[{"type":"input_text","text":"…"}]`), which is what **Code Mode** emits, splitting one result across several items. `codex_tool_output_text` handles both. **The array form was unhandled until 2026-08-08**: `value_to_string` returns `None` for an array and the caller reads it through `?`, so the ENTIRE output message was dropped — every Code Mode script rendered its source with no result at all.
+
+**Codex Code Mode (`exec`) — the script is the ONLY record (LOCKED).** With `features.code_mode` on (core/tests/suite/code_mode.rs), the model writes a JS script that calls `tools.exec_command({...})` internally, arriving as a `custom_tool_call` named **`exec`** whose `input` is the **script source, not JSON args**. Its inner `tools.*` calls produce **NO rollout entries of their own** — verified on real data, where a 192-record session held `exec` calls and nothing else — because the TUI shows Code Mode through EventMsgs that Limited mode never persists. So the script plus its output is the whole history of what ran, and it renders as `**Exec**` + a ```js fence. It previously fell to the generic arm's `compact(input, 200)`, flattening a multi-line script to one truncated line (85 calls in this machine's history). **The verb is the tool's own name, not an invention**: Codex defines no display name for it (`dispatched_tool_kind` sends `exec` to `ToolCallKind::Other`, tool_dispatch.rs:273, and the TUI has no cell for it).
+
+**The `function_call` generic fallback is BOLD like every other card (rule 2).** It used to emit PLAIN text, so an unmapped tool rendered as `⏺ wait({…})` beside its siblings' bold `⏺ **Bash**(…)`. Codex ships more tools than this file maps — `wait` and `wait_agent` both appear in real history here — so the fallback is a permanent path, not a rare one. Tests: `codex_code_mode_keeps_the_whole_script`, `codex_code_mode_output_survives_the_array_form`, `codex_unmapped_tools_still_get_a_bold_verb` (the first and third mutation-verified; the fallback had NO test at all before, which is why the plain-text form survived).
 
 Without these handlers, modern apply_patch was silently dropped and no ```diff fence was emitted.
 
@@ -568,7 +595,10 @@ Without these handlers, modern apply_patch was silently dropped and no ```diff f
 | `ListMcpResources` | literal **`listMcpResources`** | `**listMcpResources**({server})` |
 | `McpAuth` | McpAuthTool.ts → literal `'{server} - authenticate (MCP)'` (the whole label IS the verb) | `**{server} - authenticate (MCP)**` |
 | `mcp__{server}__{tool}` (generic MCP) | — | `**MCP**({server}/{tool})` (matches Codex MCP) |
-| **SUPPRESSED in Claude TUI** — `TodoWrite` / `AskUserQuestion` / `EnterPlanMode` / `ExitPlanMode` / `ExitPlanModeV2` / `TaskCreate` / `TaskUpdate` / `TaskGet` / `TaskList` / `TaskStop` / `TaskOutput` / `ToolSearch` | userFacingName `''` AND renderToolUseMessage returns null | `claude_tool_use_text` returns `None` → no tool card emitted at all |
+| `ReportFindings` | **`userFacingName` is `'Code review'`** — NOT the tool name | `**Code review**({level} · {n} finding[s]})` (render: `${level??"review"} · ${n} ${plural}`) |
+| `Monitor` | `'Monitor'`; `renderToolUseMessage` returns `description` or **null** | `**Monitor**({description})`, or the bare verb when absent |
+| `Artifact` / `SendMessage` | `'Artifact'` / `'SendMessage'`; **neither defines `renderToolUseMessage` or `getToolUseSummary`** | `**Artifact**` / `**SendMessage**` — verb only, NO arguments |
+| **SUPPRESSED in Claude TUI** — `TodoWrite` / `AskUserQuestion` / `EnterPlanMode` / `ExitPlanMode` / `ExitPlanModeV2` / `TaskCreate` / `TaskUpdate` / `TaskGet` / `TaskList` / `TaskStop` / `TaskOutput` / `ToolSearch` | userFacingName `''` AND renderToolUseMessage returns null | **Termory RENDERS them all** (rule 7 — the transcript is the source of truth), via a per-tool body where one exists (`**Todos**`, `**Ask User Question**`) else the generic fallback. Pinned by `claude_unhide_hidden_tool_cards`. **This row used to claim `claude_tool_use_text` returns `None` → no card at all, which is the OPPOSITE of both the code and rule 7** — corrected 2026-08-08 after a render of all 88 real Claude sessions showed every one of these tools on screen (TaskUpdate 54, AskUserQuestion 38, TaskCreate 33, ToolSearch 30…). |
 
 **Claude content blocks** beyond `text` / `tool_use`:
 
@@ -609,11 +639,11 @@ Feature-gated wrappers not handled: `<github-webhook-activity>` (KAIROS_GITHUB_W
 
 **OpenCode** (`opencode_v2_tool_part_text`) — each tool header uses the unified `**Verb**(args)` shape but the verb text + body content stay platform-native (matching the per-tool functions in `routes/session/index.tsx` cited below). Body decorations (`\# description` BlockTool title, bash fence with `$ cmd` prefix, ```diff diff fence, `↳ Loaded` instruction-file list, `{✓/~/✕/☐}` todo icons) are preserved verbatim — only the header line was reshaped:
 
-(Source coordinates re-verified against OpenCode 1.17.11 `packages/tui/src/routes/session/index.tsx` — each renderer is now a named function, the durable anchor; inner sub-line numbers are approximate.)
+(Source coordinates re-verified against OpenCode 1.18.15 `packages/tui/src/routes/session/index.tsx` — each renderer is now a named function, the durable anchor; inner sub-line numbers are approximate.)
 
 - `Bash` / `Shell` (`function Shell`, l.2036): header `**Shell**({wrap_inline_code(cmd)})`. With output → followed by `\# {description ?? "Shell"}\n\n```bash\n$ {cmd}\n{output}\n```` (original BlockTool body). Without output → header alone (original InlineTool was `$ {cmd}`). Output resolution: `metadata.output ?? state.content` then `stripAnsi` (l.2041) to drop terminal colour codes.
 - `Glob` (`function Glob`, l.2132): `**Glob**(pattern: {wrap_inline_code(pattern)}, path: {wrap_inline_code(path)} — {N} match[es])` (singular/plural matched).
-- `Read` (`function Read`, l.2145): `**Read**({wrap_inline_code(filePath)} [other=...])` + per-entry `↳ Loaded {path}` lines using CommonMark hard breaks (`\` line terminator). `metadata.loaded` is the `instruction.resolve` array from `read.ts` — the auto-loaded instruction files (AGENTS.md / CLAUDE.md / etc.) the Read tool fetched alongside the requested file; surfaced because it's data, not decoration.
+- `Read` (`function Read`, l.2145): `**Read**({wrap_inline_code(filePath)} [other=...])` + per-entry ``↳ Loaded {wrap_inline_code(path)}`` lines using CommonMark hard breaks (`\` line terminator). **The path is inline code, per rule 3** — it was bare until 2026-08-08. See rule 3 for the measured list of what actually breaks; for a PATH the realistic case is a name containing `` ` `` or a `*x*` pair, and a history browser showing a path that differs from the one on disk is the worst version of this bug. `metadata.loaded` is the `instruction.resolve` array from `read.ts` — the auto-loaded instruction files (AGENTS.md / CLAUDE.md / etc.) the Read tool fetched alongside the requested file; surfaced because it's data, not decoration.
 - `Grep` (`function Grep`, l.2180): `**Grep**(pattern: {pattern}, path: {path} — {N} match[es])`.
 - `WebFetch` (`function WebFetch`, l.2193): `**WebFetch**({wrap_inline_code(url)})`.
 - `WebSearch` (`function WebSearch`, l.2201): `**{provider label}**({wrap_inline_code(query)} — {N} results)`. Verb is provider-derived per `webSearchProviderLabel` (`tool/websearch.ts`): `"parallel"` → `Parallel Web Search`, `"exa"` → `Exa Web Search`, otherwise → `Web Search` (default, with space — matches Claude's verb).
@@ -627,7 +657,15 @@ Feature-gated wrappers not handled: `<github-webhook-activity>` (KAIROS_GITHUB_W
 - generic (`function GenericTool`, l.1788): `**{name}**({input})` header + 4-backtick output fence when present.
 - `reasoning` part (`function ReasoningPart`, l.1572) → `format_reasoning_body` (unified italic blockquote — replaces the old `_Thinking:_` inline prefix).
 
-All tool cards emit a `⏺` / `✗` leading marker (Termory's own output). NOTE the 1.17 TUI no longer has a `status_marker` helper — `InlineTool` (l.1826) / `BlockTool` (l.1984) take `pending` / `complete` props and colour by `state.status`, the error path still carries `state.error.message`. Termory's mapping is unchanged: failed parts get the `✗` marker + a 4-backtick `Error: {message}` body, mirroring Codex / Claude / Gemini failure formatting.
+- `Execute` (`function Execute`, l.2358): `**Execute**` + one ``↳ {tool} {wrap_inline_code([k=v])} [(failed)]`` line per child call (args are inline code for the same rule-3 reason as Read's `↳ Loaded`). The **Code Mode** tool (`tool/code-mode.ts`, gated behind `experimentalCodeMode`) — unlike `Task` it spawns NO child session, so its child calls stream through `metadata.toolCalls` as `{tool, status, input?}` entries (code-mode.ts:21); `executeCalls` (index.tsx:2343) drops any entry missing a tool name or a known status, and Termory mirrors that filter. The header takes NO args because the TUI's own first content line is the bare word `execute`. The `↳` lines use the same CommonMark hard-break form as Read's `↳ Loaded` list. **Termory always fences the output; the TUI shows it only on a runtime error** (`showOutput`, l.2367) — the script's return value is summarized nowhere else on the card, so dropping it would hide content (rule 7).
+
+**The two OpenCode error sites have DIFFERENT wire shapes, and BOTH were read wrong until 2026-08-08 (LOCKED).** One shared helper, `opencode_error_text` (sessions.rs), now serves both — a mirror of the TUI's own `errorMessage()` (`packages/tui/src/util/error.ts:125-140`), which exists upstream for exactly this reason:
+- a failed TOOL PART carries `state.error` as a **plain STRING** (`ToolStateError.error: string`, sdk/js/src/gen/types.gen.ts:277-282)
+- a whole-message ASSISTANT failure carries a **NamedError OBJECT**, `{name, data: {message}}` (`NamedError.toObject()`, core/src/util/error.ts:55-60; e.g. `UnknownError` types.gen.ts:78-83)
+
+Both sites read `error.message` — a field NEITHER shape has. So every failed OpenCode tool card rendered a bare `Error` with the reason dropped, and an assistant-level failure (`*✕ {message}*`) surfaced **nothing at all**. Neither was caught because the one test covering it asserted a **fabricated** `{type, message}` shape OpenCode never writes — it passed while the production path was dead, the same trap the `auto_sync_*` tests hit. Mutate before believing a test that asserts an error surfaced. This documentation was wrong too (it cited a non-existent `SessionErrorUnknown` at types.gen.ts:2905), so it could not have caught the drift either. Tests: `opencode_failed_tool_card_carries_the_error_string`, `opencode_assistant_error_surfaces_below_text` (both mutation-verified against the old field read).
+
+All tool cards emit a `⏺` / `✗` leading marker (Termory's own output). NOTE the 1.17+ TUI has no `status_marker` helper — `InlineTool` / `BlockTool` take `pending` / `complete` props and colour by `state.status`. Termory's mapping is unchanged: failed parts get the `✗` marker + a 4-backtick `Error: {message}` body, mirroring Codex / Claude / Gemini failure formatting.
 
 Top-level `SessionMessage` types beyond the tool parts. **1.17 model change:** the message DATA is now constructed in `packages/tui/src/context/data.tsx` (the old single Match-arm dispatch is gone) and rendered by `UserMessage` / `AssistantMessage` in `routes/session/index.tsx`; `synthetic` and `compaction` are now PART types, not top-level message types. Termory's `opencode_v2_*` output is unchanged — these are the new source coordinates:
 
@@ -639,7 +677,9 @@ Top-level `SessionMessage` types beyond the tool parts. **1.17 model change:** t
 - `agent-switched` (constructed `context/data.tsx` l.136) → `▣ Switched agent to {Titlecase(agent)}`.
 - `model-switched` (constructed `context/data.tsx` l.146) → `◇ Switched model to {provider}/{id}[/{variant}]`.
 
-Audit reference is now OpenCode `1.17.11` (commit `77f2d22`) — up from the original `1.15.5` (`9324ef0`), which kept the TUI in `…/feature-plugins/system/session-v2.tsx`. 1.17.x **extracted the whole TUI into the `packages/tui` package**: tool rendering is now `packages/tui/src/routes/session/index.tsx` (per-tool named functions + `BlockTool`/`InlineTool` helpers) and message-type DATA is built in `packages/tui/src/context/data.tsx`. The verb-mapping citations above were re-verified against 1.17.11. **Structural changes from 1.15.5** (Termory's `opencode_v2_*` OUTPUT is unchanged — it's the unified `**Verb**(args)` format, independent of OpenCode's TUI): renderers are now functions (not Match arms); `synthetic` / `compaction` are PART types (not top-level message types); the `status_marker` helper is gone (replaced by `pending`/`complete` props on InlineTool/BlockTool). Per-tool body BEHAVIOUR (fences, icons, summaries) was spot-checked, not exhaustively re-diffed — if a specific tool's output looks off, diff that function in `routes/session/index.tsx` against `opencode_v2_tool_part_text`.
+**Audit sweep 2026-08-08** — all five upstreams re-fetched and diffed against the previously-audited commits. **Codex (`3aae5d8`) and Gemini (`cf22ac7`) render paths came back byte-identical** (`tui/src/exec_cell/`, `history_cell/`, `tool_dispatch.rs`, `markdown_render.rs`; `cli/src/ui/components/messages/`, `sessionUtils.ts`, `types.ts`) — no protocol changes either, so their verb mappings stand as documented. **Grok (`afbc0fb`)**: `acp/tracker.rs` (the verb source) unchanged and no tool block added or removed; the churn in `blocks/tool/edit.rs` is diff-reflow/syntect-styling internals and `web_fetch.rs` only swapped a private byte formatter for a shared one — nothing reaching markdown output. **Gemini's new `rewriteConversationFile`** (chatRecordingService.ts) can leave `session-*.jsonl.unreadable-<ts>` and `.tmp-<pid>` siblings; `is_gemini_session_file` requires a terminal `.json`/`.jsonl`, so both are already excluded — checked, not assumed. **OpenCode was the only one needing code changes** (the `execute` tool + the two error shapes above).
+
+Audit reference is now OpenCode `1.18.15` (commit `fe82a1b`) — up from `1.17.11` (`77f2d22`), and originally `1.15.5` (`9324ef0`), which kept the TUI in `…/feature-plugins/system/session-v2.tsx`. 1.17.x **extracted the whole TUI into the `packages/tui` package**: tool rendering is now `packages/tui/src/routes/session/index.tsx` (per-tool named functions + `BlockTool`/`InlineTool` helpers) and message-type DATA is built in `packages/tui/src/context/data.tsx`. The verb-mapping citations above were re-verified against 1.18.15. **Structural changes from 1.15.5** (Termory's `opencode_v2_*` OUTPUT is unchanged — it's the unified `**Verb**(args)` format, independent of OpenCode's TUI): renderers are now functions (not Match arms); `synthetic` / `compaction` are PART types (not top-level message types); the `status_marker` helper is gone (replaced by `pending`/`complete` props on InlineTool/BlockTool). Per-tool body BEHAVIOUR (fences, icons, summaries) was spot-checked, not exhaustively re-diffed — if a specific tool's output looks off, diff that function in `routes/session/index.tsx` against `opencode_v2_tool_part_text`.
 
 **Gemini CLI** (`gemini_tool_messages_from_value` + `gemini_thought_messages_from_value` + `gemini_part_to_string`) — `.audit-sources/gemini-cli/packages/cli/src/ui/components/messages/`:
 

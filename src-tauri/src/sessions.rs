@@ -8826,8 +8826,7 @@ fn opencode_v2_message_from_value(value: &Value, created: i64) -> Option<Session
             // set. Surface as an italic error notice on its own line.
             if let Some(error_message) = value
                 .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(value_to_string)
+                .and_then(opencode_error_text)
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
             {
@@ -9045,12 +9044,26 @@ fn opencode_v2_assistant_part_text(part: &Value) -> Option<String> {
 fn opencode_v2_tool_part_text(part: &Value) -> Option<String> {
     let card = opencode_v2_tool_part_card(part)?;
     let state = part.get("state");
-    let failed = state.and_then(|s| s.get("status")).and_then(Value::as_str) == Some("error");
+    let mut failed = state.and_then(|s| s.get("status")).and_then(Value::as_str) == Some("error");
+    // Code Mode reports an ABORT through `metadata.error: true` while
+    // still RETURNING successfully (code-mode.ts:203,285), so `status`
+    // stays "completed" — upstream's `Execute` keys on the metadata flag
+    // (index.tsx:2362). Without this a cancelled run showed ⏺ where the
+    // TUI shows ✗.
+    if !failed {
+        let meta = part
+            .get("provider")
+            .and_then(|p| p.get("metadata"))
+            .or_else(|| state.and_then(|s| s.get("metadata")))
+            .or_else(|| part.get("metadata"));
+        if meta.and_then(|m| m.get("error")).and_then(Value::as_bool) == Some(true) {
+            failed = true;
+        }
+    }
     let error_message = if failed {
         state
             .and_then(|s| s.get("error"))
-            .and_then(|e| e.get("message"))
-            .and_then(value_to_string)
+            .and_then(opencode_error_text)
     } else {
         None
     };
@@ -9201,8 +9214,12 @@ fn opencode_v2_tool_part_card(part: &Value) -> Option<String> {
             if !paths.is_empty() {
                 text.push('\\');
                 for path in &paths {
+                    // Inline code per rule 3, matching how Claude's
+                    // `nested_memory` attachment renders the same
+                    // "Loaded {path}" line. A bare path is eaten by
+                    // markdown when it holds a backtick or a `*x*` pair.
                     text.push_str("\n↳ Loaded ");
-                    text.push_str(path);
+                    text.push_str(&wrap_inline_code(path));
                     text.push('\\');
                 }
                 // Drop the trailing `\` on the last line so it doesn't
@@ -9421,6 +9438,96 @@ fn opencode_v2_tool_part_card(part: &Value) -> Option<String> {
             wrap_inline_code(&description)
         ));
     }
+    // routes/session/index.tsx:2358 Execute — the Code Mode tool
+    // (`experimentalCodeMode`, tool/code-mode.ts). Unlike Task it spawns
+    // no child session: the child tool calls stream through
+    // `metadata.toolCalls` as `{tool, status, input?}` entries
+    // (tool/code-mode.ts:21). The TUI's first content line is the bare
+    // word `execute`, so the unified header takes no args; each child
+    // call follows as a `↳` line, matching Read's `↳ Loaded` list.
+    if name == "execute" {
+        // The SCRIPT is the record of what ran — same reason the Codex
+        // `exec` branch keeps its source. Dropping it was worse than the
+        // generic fallback this replaced, which at least rendered
+        // `[code=…]`: a script whose `metadata.toolCalls` is empty (it
+        // only computed) left no trace of itself at all.
+        let script = input_string(input_record, "code").unwrap_or_default();
+        let mut text = "**Execute**".to_string();
+        if !script.trim().is_empty() {
+            text.push_str("\n\n````\n");
+            text.push_str(script.trim());
+            text.push_str("\n````");
+        }
+        let calls: Vec<String> = metadata
+            .and_then(|m| m.get("toolCalls"))
+            .and_then(Value::as_array)
+            .map(|calls| {
+                calls
+                    .iter()
+                    .filter_map(|call| {
+                        // executeCalls() (index.tsx:2343) drops entries
+                        // without both a tool name and a known status.
+                        let tool = call.get("tool").and_then(value_to_string)?;
+                        let status = call.get("status").and_then(Value::as_str)?;
+                        if !matches!(status, "running" | "completed" | "error") {
+                            return None;
+                        }
+                        let args = call
+                            .get("input")
+                            .and_then(Value::as_object)
+                            .map(|input| opencode_v2_input_other(input, &[]))
+                            .unwrap_or_default();
+                        let mut line = tool;
+                        if !args.is_empty() {
+                            // Rule 3 — the args hold user payload, and a
+                            // COMMAND is the worst case: `echo `date``
+                            // loses its backticks and `cp *a* dir/`
+                            // loses the glob pair. Measured through the
+                            // real react-markdown pipeline; see the
+                            // table under rule 3 for what does and does
+                            // not break (intraword `_` is fine).
+                            line.push(' ');
+                            line.push_str(&wrap_inline_code(&args));
+                        }
+                        if status == "error" {
+                            line.push_str(" (failed)");
+                        }
+                        Some(line)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !calls.is_empty() {
+            // With a script fence above, the list starts its own
+            // paragraph; without one it hangs off the header via a
+            // CommonMark hard break, like Read's `↳ Loaded` list.
+            let mut first = true;
+            for call in &calls {
+                if first {
+                    text.push_str(if script.trim().is_empty() {
+                        "\\\n↳ "
+                    } else {
+                        "\n\n↳ "
+                    });
+                    first = false;
+                } else {
+                    text.push_str("\\\n↳ ");
+                }
+                text.push_str(call);
+            }
+        }
+        // The TUI shows the output only on a runtime error
+        // (`showOutput`, index.tsx:2367) — Termory surfaces it either
+        // way per the never-hide rule, since the script's return value
+        // is summarized nowhere else on the card.
+        let body = strip_ansi(output.trim());
+        if !body.trim().is_empty() {
+            text.push_str("\n\n````\n");
+            text.push_str(body.trim());
+            text.push_str("\n````");
+        }
+        return Some(text);
+    }
     // session-v2.tsx:522 GenericTool fallback
     let input_text = input_record.map(opencode_v2_tool_input).unwrap_or_default();
     let header = if input_text.is_empty() {
@@ -9436,6 +9543,41 @@ fn opencode_v2_tool_part_card(part: &Value) -> Option<String> {
 }
 
 // Helper functions ported from TUI conventions.
+
+/// Pull the human-readable text out of an OpenCode error value, mirroring
+/// `errorMessage()` (packages/tui/src/util/error.ts:125-140).
+///
+/// The two error sites on the wire have DIFFERENT shapes, which is why
+/// this is one shared helper rather than a field access at each site:
+///   * a failed tool part carries `state.error` as a plain STRING
+///     (`ToolStateError.error: string`, sdk/js/src/gen/types.gen.ts:277-282)
+///   * a whole-message assistant failure carries a NamedError object,
+///     `{name, data: {message}}` (`NamedError.toObject()`,
+///     core/src/util/error.ts:55-60; e.g. `UnknownError` at
+///     types.gen.ts:78-83)
+///
+/// Both sites previously read `error.message`, a field neither shape has —
+/// so a failed tool card showed a bare `Error` with no reason, and an
+/// assistant-level failure surfaced nothing at all. The top-level
+/// `message` arm is kept because upstream's own helper tries it first.
+fn opencode_error_text(error: &Value) -> Option<String> {
+    value_to_string(error)
+        .or_else(|| error.get("message").and_then(value_to_string))
+        .or_else(|| {
+            error
+                .get("data")
+                .and_then(|data| data.get("message"))
+                .and_then(value_to_string)
+        })
+        // Last resort: the error NAME. Upstream's helper never returns
+        // empty (it falls through to the name, then a formatter, then
+        // "unknown error"), and some errors carry no message at all —
+        // `MessageOutputLengthError` is `NamedError.create(name, {})`
+        // with an EMPTY data (message-error.ts:4). Without this the
+        // assistant site has no fallback, so a reply truncated by the
+        // output-length limit rendered as if it had completed normally.
+        .or_else(|| error.get("name").and_then(value_to_string))
+}
 
 fn opencode_v2_input_other(input: &serde_json::Map<String, Value>, omit: &[&str]) -> String {
     let pairs = input
@@ -9968,9 +10110,35 @@ fn claude_message_from_value(value: &Value) -> Vec<SessionMessage> {
             if is_meta {
                 let text = claude_text_blocks(content).join("\n");
                 if let Some(display) = claude_display_text(&text) {
+                    // Don't stack `*[meta]*` on top of a notice that
+                    // already names itself. An isMeta record's content is
+                    // typically a wrapper `claude_display_text` has
+                    // ALREADY turned into `*[local-command-caveat]* …`,
+                    // so prefixing produced the doubled
+                    // `*[meta]* *[local-command-caveat]* Caveat: …` with
+                    // the body crammed onto the same line — two internal
+                    // tag names where the inner one already says what it
+                    // is. When the inner notice exists it stands alone
+                    // and its body moves to its own line; `*[meta]*` is
+                    // kept only for content that names itself nothing.
+                    let display = display.trim();
+                    let text = match display.strip_prefix("*[") {
+                        Some(rest) => match rest.split_once("]*") {
+                            Some((tag, body)) => {
+                                let body = body.trim();
+                                if body.is_empty() {
+                                    format!("*[{tag}]*")
+                                } else {
+                                    format!("*[{tag}]*\n\n{body}")
+                                }
+                            }
+                            None => format!("*[meta]* {display}"),
+                        },
+                        None => format!("*[meta]* {display}"),
+                    };
                     out.push(SessionMessage {
                         role: "system".to_string(),
-                        text: format!("*[meta]* {display}"),
+                        text,
                         timestamp: timestamp.clone(),
                         kind: kind::TEXT.to_string(),
                         tool_use_id: None,
@@ -10330,6 +10498,89 @@ fn claude_attachment_messages(value: &Value, timestamp: Option<String>) -> Vec<S
             let noun = if count == 1 { "skill" } else { "skills" };
             push(format!("{count} {noun} available"))
         }
+        // `read_truncation_notice`: `{banner}` — Read hit its token cap
+        // and served a partial view. The banner names the file, the line
+        // range shown, the total, and the cap, which is exactly what
+        // explains a later re-Read of the same file, so it is surfaced
+        // verbatim rather than as `*[attachment: …]*` + a JSON dump.
+        "read_truncation_notice" => match att.get("banner").and_then(value_to_string) {
+            Some(banner) if !banner.trim().is_empty() => push(banner.trim().to_string()),
+            // Shape drift must NOT silently drop the record — that is
+            // the opposite of the generic arm's promise. Fall through to
+            // it instead so the raw fields stay visible.
+            _ => push(claude_attachment_fallback_text(att, att_type)),
+        },
+        // `context_tip`: `{tip: {tip, featureId, …}}` — a suggestion the
+        // CLI surfaced to the user (e.g. "grant access with /add-dir").
+        // The prose is the whole point; the ids around it are internal.
+        "context_tip" => {
+            let tip = att
+                .get("tip")
+                .and_then(|t| t.get("tip"))
+                .or_else(|| att.get("tip"))
+                .and_then(value_to_string);
+            match tip {
+                Some(t) if !t.trim().is_empty() => push(format!("💡 {}", t.trim())),
+                _ => push(claude_attachment_fallback_text(att, att_type)),
+            }
+        }
+        // `agent_listing_delta`: the set of subagents available to the
+        // Task tool, as `{addedTypes, addedLines, removedTypes,
+        // isInitial, showConcurrencyNote}`. **`addedLines` is ALREADY a
+        // markdown list** (`- {name}: {description}`), so the generic
+        // fallback's compact-JSON dump was re-encoding readable prose
+        // into 2.5 KB of escaped JSON on one line — 42 of them in this
+        // machine's history. Shaped after `skill_listing` above: a
+        // `{n} agents available` summary, then the lines verbatim.
+        //
+        // Unlike `skill_listing` this does NOT drop the initial one.
+        // That one returns null in Claude's own component
+        // (AttachmentMessage.tsx:280-290) which is why it is dropped
+        // there; no such official rule was found for this type, and
+        // `isInitial` here carries the FULL roster — the most useful
+        // form of it — so rule 7 keeps it.
+        "agent_listing_delta" => {
+            let lines: Vec<String> = att
+                .get("addedLines")
+                .and_then(Value::as_array)
+                .map(|items| items.iter().filter_map(value_to_string).collect())
+                .unwrap_or_default();
+            let added = att
+                .get("addedTypes")
+                .and_then(Value::as_array)
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let removed: Vec<String> = att
+                .get("removedTypes")
+                .and_then(Value::as_array)
+                .map(|items| items.iter().filter_map(value_to_string).collect())
+                .unwrap_or_default();
+            if added == 0 && removed.is_empty() {
+                // A genuine no-op delta drops. But lines arriving with
+                // no types is shape drift, not a no-op — fall back so
+                // the record stays visible.
+                if lines.is_empty() {
+                    return Vec::new();
+                }
+                return push(claude_attachment_fallback_text(att, att_type));
+            }
+            let mut text = String::new();
+            if added > 0 {
+                let noun = if added == 1 { "agent" } else { "agents" };
+                text.push_str(&format!("{added} {noun} available"));
+            }
+            if !removed.is_empty() {
+                if !text.is_empty() {
+                    text.push_str(" · ");
+                }
+                text.push_str(&format!("removed: {}", removed.join(", ")));
+            }
+            if !lines.is_empty() {
+                text.push_str("\n\n");
+                text.push_str(&lines.join("\n"));
+            }
+            push(text)
+        }
         // AttachmentMessage.tsx:302-322 — queued_command wraps a prompt
         // that itself goes through the UserTextMessage XML-wrapper
         // dispatch chain (i.e. `<task-notification>` etc. apply).
@@ -10586,25 +10837,33 @@ fn claude_attachment_messages(value: &Value, timestamp: Option<String>) -> Vec<S
         // vanish silently. Even if we don't know how to format
         // `hook_success` / `async_hook_response` / `dynamic_skill`
         // nicely, the user can read the raw fields.
-        other => {
-            let mut extras = serde_json::Map::new();
-            if let Some(obj) = att.as_object() {
-                for (k, v) in obj {
-                    if k == "type" {
-                        continue;
-                    }
-                    extras.insert(k.clone(), v.clone());
-                }
+        other => push(claude_attachment_fallback_text(att, other)),
+    }
+}
+
+/// The generic attachment rendering: `*[attachment: {type}]*` plus a
+/// pretty JSON dump of every remaining field.
+///
+/// Extracted so a TYPED arm can fall back to it when its expected field
+/// is missing or changes shape. Those arms used to `return Vec::new()`,
+/// which silently dropped the record — the exact opposite of this
+/// fallback's promise that nothing on disk vanishes without a trace.
+fn claude_attachment_fallback_text(att: &Value, att_type: &str) -> String {
+    let mut extras = serde_json::Map::new();
+    if let Some(obj) = att.as_object() {
+        for (k, v) in obj {
+            if k == "type" {
+                continue;
             }
-            let header = format!("*[attachment: {other}]*");
-            if extras.is_empty() {
-                push(header)
-            } else {
-                let payload =
-                    serde_json::to_string_pretty(&Value::Object(extras)).unwrap_or_default();
-                push(format!("{header}\n\n````json\n{payload}\n````"))
-            }
+            extras.insert(k.clone(), v.clone());
         }
+    }
+    let header = format!("*[attachment: {att_type}]*");
+    if extras.is_empty() {
+        header
+    } else {
+        let payload = serde_json::to_string_pretty(&Value::Object(extras)).unwrap_or_default();
+        format!("{header}\n\n````json\n{payload}\n````")
     }
 }
 
@@ -11270,6 +11529,65 @@ fn claude_tool_use_text(name: &str, input: &Value) -> Option<String> {
                 format!("**listMcpResources**({})", wrap_inline_code(&server))
             }
         }
+        // The four tools below were read out of the SHIPPED BINARY
+        // (~/.local/bin/claude, 2.1.226) — Claude Code is closed source
+        // and the `.audit-sources/claude-code` reference (videcoding/cli)
+        // stopped in April, so it has none of them. Same technique the
+        // launcher-path helper was recovered with. All four were hitting
+        // the generic fallback and rendering `**{RawName}**({json})`.
+        //
+        // ReportFindings: `userFacingName(){return"Code review"}` — the
+        // verb is NOT the tool name, the only one of the four where the
+        // fallback got the name itself wrong.
+        // `renderToolUseMessage`: `${e.level??"review"} · ${t} ${xt(t,"finding")}`
+        "reportfindings" => {
+            let level = get("level").unwrap_or_else(|| "review".to_string());
+            let count = obj
+                .and_then(|o| o.get("findings"))
+                .and_then(Value::as_array)
+                .map(|f| f.len())
+                .unwrap_or(0);
+            let noun = if count == 1 { "finding" } else { "findings" };
+            format!("**Code review**({level} · {count} {noun})")
+        }
+        // Monitor: `userFacingName(){return"Monitor"}`;
+        // `renderToolUseMessage(e){if(!e.description)return null;return e.description}`
+        // — a null render means the TUI shows the bold verb alone.
+        "monitor" => match get("description") {
+            Some(d) if !d.trim().is_empty() => {
+                format!("**Monitor**({})", wrap_inline_code(d.trim()))
+            }
+            _ => "**Monitor**".to_string(),
+        },
+        // Artifact + SendMessage: `userFacingName` matches the tool name,
+        // and NEITHER defines `renderToolUseMessage` or
+        // `getToolUseSummary` (checked across each one's whole
+        // definition block), so the TUI renders the bold verb with no
+        // arguments at all — the generic fallback's JSON dump was
+        // showing content the official UI never does.
+        // Verb is the official `userFacingName`; the ARGUMENTS are kept
+        // even though neither tool defines `renderToolUseMessage` (so
+        // the TUI shows the verb alone). Rule 7 outranks TUI parity
+        // here: `SendMessage.message` IS the prompt handed to another
+        // agent, and dropping it erased the whole thing from the
+        // transcript. Reading "the official UI never shows this" as a
+        // reason to drop content is exactly the inversion rule 7
+        // forbids.
+        "artifact" | "sendmessage" => {
+            let verb = if lower == "artifact" {
+                "Artifact"
+            } else {
+                "SendMessage"
+            };
+            // Same compact-JSON arg form as this file's generic
+            // fallback — these are Claude tools, not OpenCode ones.
+            let json = serde_json::to_string(input).unwrap_or_default();
+            if json == "null" || json == "{}" {
+                format!("**{verb}**")
+            } else {
+                format!("**{verb}**({})", compact(&json, 200))
+            }
+        }
         // McpAuthTool userFacingName → '{server} - authenticate (MCP)'.
         // Whole label IS the verb (bold).
         "mcpauth" | "mcp_auth" => {
@@ -11463,12 +11781,16 @@ fn claude_display_text(text: &str) -> Option<String> {
     // streams. Also unwrap the inner `<persisted-output>` wrapper that
     // claude-code adds for long captured bash output.
     if text.contains("<bash-stdout>") || text.contains("<bash-stderr>") {
+        // Stripped for the same reason as `local-command-stdout` below,
+        // and this is the stronger case: `<bash-*>` is the ACTUAL
+        // captured terminal stream (`! git diff --color=always`), where
+        // the slash-command one is mostly the CLI's own prose.
         let stdout = extract_xml_tag_value(text, "bash-stdout")
             .map(|s| extract_xml_tag_value(&s, "persisted-output").unwrap_or(s))
-            .map(|s| s.trim().to_string())
+            .map(|s| strip_ansi(&s).trim().to_string())
             .filter(|s| !s.is_empty());
         let stderr = extract_xml_tag_value(text, "bash-stderr")
-            .map(|s| s.trim().to_string())
+            .map(|s| strip_ansi(&s).trim().to_string())
             .filter(|s| !s.is_empty());
         let combined = match (stdout, stderr) {
             (Some(o), Some(e)) => format!("{o}\n\n{e}"),
@@ -11505,11 +11827,25 @@ fn claude_display_text(text: &str) -> Option<String> {
     if let Some(bash_input) = extract_xml_tag_value(text, "bash-input") {
         return non_empty_xml_value(format!("! {bash_input}"));
     }
+    // Local slash-command output is TERMINAL output, so it carries ANSI
+    // escapes — `/model` writes `Kept model as \x1b[1mOpus 5\x1b[22m`,
+    // i.e. bold on/off around the name. The TUI consumes them as
+    // styling; passing them through put raw control characters on screen
+    // (real data, 2.1.220). Stripped like every other captured terminal
+    // stream here (OpenCode's Bash output and `shell` messages). The
+    // styling itself is dropped rather than converted to `**bold**`:
+    // these are arbitrary SGR codes (colour, dim, reverse), and a
+    // faithful ANSI→markdown mapping is a different job than making the
+    // text readable.
     if let Some(stdout) = extract_xml_tag_value(text, "local-command-stdout") {
-        return Some(non_empty_xml_value(stdout).unwrap_or_else(|| "(no content)".to_string()));
+        return Some(
+            non_empty_xml_value(strip_ansi(&stdout)).unwrap_or_else(|| "(no content)".to_string()),
+        );
     }
     if let Some(stderr) = extract_xml_tag_value(text, "local-command-stderr") {
-        return Some(non_empty_xml_value(stderr).unwrap_or_else(|| "(no content)".to_string()));
+        return Some(
+            non_empty_xml_value(strip_ansi(&stderr)).unwrap_or_else(|| "(no content)".to_string()),
+        );
     }
     // Feature-gated wrappers that Claude TUI drops via the generic
     // strip path. Termory surfaces each one as `*[wrapper-name]* {inner}`
@@ -11791,15 +12127,27 @@ fn codex_function_call_message(
             }
         }
         _ => {
-            // Generic fallback: `{name}({compact args})` as plain text.
+            // Generic fallback — the unified `**Verb**(args)` shape
+            // (rule 2), with the tool's own name as the verb because
+            // Codex defines no display name for these
+            // (`dispatched_tool_kind` sends them to
+            // `ToolCallKind::Other`, tool_dispatch.rs:273).
+            //
+            // This used to emit PLAIN text, so an unmapped tool rendered
+            // as `⏺ wait({…})` — a bare verb sitting directly beside its
+            // siblings' bold `⏺ **Bash**(…)`. Codex ships more tools
+            // than this file maps (`wait` and `wait_agent` both appear
+            // in real history here), so the fallback is a permanent
+            // path, not a rare one, and it has to match the format every
+            // other card uses.
             let args_summary = arguments
                 .as_deref()
                 .map(|args| compact(args, 200))
                 .unwrap_or_default();
             if args_summary.is_empty() {
-                name.clone()
+                format!("**{name}**")
             } else {
-                format!("{name}({args_summary})")
+                format!("**{name}**({args_summary})")
             }
         }
     };
@@ -11976,6 +12324,40 @@ fn codex_custom_tool_call_message(
             let header = codex_patch_header(&codex_parse_patch_actions(&patch));
             format!("{header}\n\n```diff\n{}\n```", patch.trim())
         }
+        // Codex **Code Mode** (`features.code_mode`, core/tests/suite/
+        // code_mode.rs). The model writes a JS script that calls
+        // `tools.exec_command({...})` internally, and `input` is that
+        // SCRIPT SOURCE — not JSON args like every other tool here.
+        //
+        // **The script is the only record of what ran.** Its inner
+        // `tools.*` calls produce NO rollout entries of their own
+        // (verified on real data: a 192-record session held `exec`
+        // calls and nothing else), because the TUI shows Code Mode
+        // through EventMsgs that Limited mode never persists. So the
+        // generic `compact(input, 200)` arm dropped most of every
+        // script onto one unreadable line — measured at 85 calls in
+        // this machine's history.
+        //
+        // Codex defines no display name for it (`dispatched_tool_kind`
+        // sends `exec` to `ToolCallKind::Other`, tool_dispatch.rs:273,
+        // and the TUI has no cell for it), so the tool's own name is
+        // the verb — nothing is invented here.
+        "exec" => {
+            let script = input.clone().unwrap_or_default();
+            let script = script.trim();
+            if script.is_empty() {
+                "**Exec**".to_string()
+            } else {
+                // 4-backtick fence: this is model-authored JS and a
+                // script containing ``` (heredocs, template literals,
+                // markdown output) would close a 3-backtick fence early
+                // and corrupt everything after it. The repo already uses
+                // 4 backticks for unstructured content for this reason;
+                // the `js` hint costs nothing to drop since there is no
+                // syntax-highlight pass.
+                format!("**Exec**\n\n````\n{script}\n````")
+            }
+        }
         _ => {
             // Generic custom tool: bold name + compact input.
             let compact_input = input
@@ -12005,14 +12387,36 @@ fn codex_custom_tool_call_message(
 /// file referenced above). We unwrap the JSON envelope and emit a
 /// tool_result message that `merge_tool_outputs` will fold back into
 /// the matching tool_use card.
+/// `custom_tool_call_output.output` is EITHER a plain string OR an ARRAY
+/// of content items (`[{"type":"input_text","text":"…"}]`) — **Code Mode
+/// uses the array form**, splitting one result across several items.
+///
+/// `value_to_string` returns `None` for an array, and the caller reads it
+/// through `?`, so the whole output message was DROPPED: every Code Mode
+/// script showed its source with no result at all (85 calls in this
+/// machine's history). The items are concatenated with no separator
+/// because Codex already terminates each one (`"…Output:\n"`).
+fn codex_tool_output_text(value: &Value) -> Option<String> {
+    if let Some(text) = value_to_string(value) {
+        return Some(text);
+    }
+    let joined = value
+        .as_array()?
+        .iter()
+        .filter_map(|item| item.get("text").and_then(value_to_string))
+        .collect::<Vec<_>>()
+        .join("");
+    (!joined.trim().is_empty()).then_some(joined)
+}
+
 fn codex_custom_tool_call_output_message(
     payload: &Value,
     timestamp: Option<String>,
 ) -> Option<SessionMessage> {
     let raw_output = payload
         .get("output")
-        .and_then(value_to_string)
-        .or_else(|| payload.get("content").and_then(value_to_string))?;
+        .and_then(codex_tool_output_text)
+        .or_else(|| payload.get("content").and_then(codex_tool_output_text))?;
     // Try JSON unwrap: many custom tool outputs use `{"output":"..."}`
     // / `{"text":"..."}` envelopes. Fall back to the raw string.
     let unwrapped = serde_json::from_str::<Value>(&raw_output)
@@ -12025,6 +12429,10 @@ fn codex_custom_tool_call_output_message(
                 .and_then(value_to_string)
         })
         .unwrap_or(raw_output);
+    // Same terminal-output rule as `codex_parse_exec_output`: a Code
+    // Mode script's result is whatever its inner `tools.*` calls printed,
+    // so it carries ANSI too (colour codes observed in real history).
+    let unwrapped = strip_ansi(&unwrapped);
     let trimmed = unwrapped.trim();
     if trimmed.is_empty() {
         return None;
@@ -12096,8 +12504,22 @@ struct CodexExecOutput {
     exit_code: Option<i64>,
 }
 
+/// Shell output is TERMINAL output, so it carries ANSI. Codex's own TUI
+/// consumes it per line through `ansi_escape_line`
+/// (`tui/src/exec_cell/render.rs:134,161,217`), turning the escapes into
+/// ratatui styling; markdown cannot express terminal styling, so Termory
+/// strips them instead — the same choice already made for OpenCode's
+/// Bash output and Claude's local-command output.
+///
+/// This is the LARGEST source of raw escapes in real history: 251
+/// `function_call_output` records here, an order of magnitude past the
+/// Claude side. Most are progress-spinner redraws (`\x1b[2K\x1b[1G` —
+/// erase line, cursor to column 1) which a terminal collapses onto one
+/// line, so leaving them in did not just show stray characters — it
+/// flattened an animation into a long run of repeated text.
 fn codex_parse_exec_output(text: &str) -> CodexExecOutput {
-    let trimmed = text.trim();
+    let stripped = strip_ansi(text);
+    let trimmed = stripped.trim();
     if trimmed.is_empty() {
         return CodexExecOutput::default();
     }
@@ -14574,6 +14996,311 @@ mod tests {
     }
 
     #[test]
+    fn codex_code_mode_output_survives_the_array_form() {
+        // `custom_tool_call_output.output` is an ARRAY for Code Mode.
+        // `value_to_string` returns None for an array and the caller
+        // reads it through `?`, so the entire result used to be dropped
+        // — the script rendered with no output at all. Shape verbatim
+        // from a real rollout.
+        let msg = codex_custom_tool_call_output_message(
+            &serde_json::json!({
+                "type":"custom_tool_call_output","call_id":"c1",
+                "output":[
+                    {"type":"input_text","text":"Script completed\nWall time 2.1 seconds\nOutput:\n"},
+                    {"type":"input_text","text":"./CLAUDE.md:17:- Grok Build\n"}
+                ]
+            }),
+            None,
+        )
+        .expect("array-form output must produce a message");
+        assert_eq!(
+            msg.text,
+            "Script completed\nWall time 2.1 seconds\nOutput:\n./CLAUDE.md:17:- Grok Build"
+        );
+        // The string form still works.
+        let plain = codex_custom_tool_call_output_message(
+            &serde_json::json!({"type":"custom_tool_call_output","call_id":"c2","output":"{\"output\":\"hi\"}"}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(plain.text, "hi");
+    }
+
+    #[test]
+    fn codex_code_mode_keeps_the_whole_script() {
+        // Code Mode: `input` is JS SOURCE, not JSON args, and the inner
+        // `tools.*` calls leave no rollout records of their own — so the
+        // script is the only record of what ran and must survive whole.
+        // The generic arm's `compact(input, 200)` flattened it to one
+        // truncated line. Script taken verbatim from real history.
+        let script = "const r = await tools.exec_command({\"cmd\":\"rg -n foo .\",\"workdir\":\"/w\"});\ntext(r.output);";
+        let msg = codex_custom_tool_call_message(
+            &serde_json::json!({"type":"custom_tool_call","name":"exec","input":script,"call_id":"c1"}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(msg.text, format!("**Exec**\n\n````\n{script}\n````"));
+        // The whole script survives — the point of the change.
+        assert!(msg.text.contains("text(r.output);"));
+    }
+
+    #[test]
+    fn codex_unmapped_tools_still_get_a_bold_verb() {
+        // Rule 2 — every card is `**Verb**(args)`. Codex ships more
+        // tools than this file maps; `wait` / `wait_agent` are both in
+        // real history here and hit the generic arm, which used to emit
+        // PLAIN text (`wait({…})`) beside its siblings' bold verbs.
+        // Arguments are verbatim from real rollouts.
+        let wait = codex_function_call_message(
+            &serde_json::json!({
+                "type":"function_call","name":"wait","call_id":"c1",
+                "arguments":"{\"cell_id\":\"12\",\"yield_time_ms\":10000,\"max_tokens\":2000}"
+            }),
+            None,
+        )
+        .unwrap();
+        assert!(
+            wait.text.starts_with("**wait**("),
+            "unmapped codex tool must keep the bold verb, got {:?}",
+            wait.text
+        );
+        let bare = codex_function_call_message(
+            &serde_json::json!({"type":"function_call","name":"wait_agent","call_id":"c2"}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(bare.text, "**wait_agent**");
+    }
+
+    #[test]
+    fn claude_tools_read_out_of_the_shipped_binary() {
+        // Claude Code is closed source and the repo reference stopped in
+        // April, so these four came out of ~/.local/bin/claude (2.1.226)
+        // — the same technique used for the launcher-path helper. All
+        // four were hitting the generic fallback as `**Raw**({json})`.
+
+        // `userFacingName(){return"Code review"}` — the verb is NOT the
+        // tool name. render: `${level??"review"} · ${n} ${plural}`.
+        assert_eq!(
+            claude_tool_use_text(
+                "ReportFindings",
+                &serde_json::json!({"level":"high","findings":[{"file":"a"},{"file":"b"}]})
+            ),
+            Some("**Code review**(high · 2 findings)".to_string())
+        );
+        assert_eq!(
+            claude_tool_use_text(
+                "ReportFindings",
+                &serde_json::json!({"findings":[{"file":"a"}]})
+            ),
+            Some("**Code review**(review · 1 finding)".to_string())
+        );
+        // `renderToolUseMessage` returns the description, or null → the
+        // TUI shows the bold verb alone.
+        assert_eq!(
+            claude_tool_use_text(
+                "Monitor",
+                &serde_json::json!({"description":"watch CI","timeoutMs":0})
+            ),
+            Some("**Monitor**(`watch CI`)".to_string())
+        );
+        assert_eq!(
+            claude_tool_use_text("Monitor", &serde_json::json!({"timeoutMs":0})),
+            Some("**Monitor**".to_string())
+        );
+        // Neither defines renderToolUseMessage nor getToolUseSummary, so
+        // the TUI renders the verb with NO arguments.
+        assert_eq!(
+            claude_tool_use_text("Artifact", &serde_json::json!({"action":"list"})),
+            Some("**Artifact**({\"action\":\"list\"})".to_string())
+        );
+        assert_eq!(
+            claude_tool_use_text("SendMessage", &serde_json::json!({"to":"a","message":"hi"})),
+            Some("**SendMessage**({\"to\":\"a\",\"message\":\"hi\"})".to_string())
+        );
+    }
+
+    #[test]
+    fn codex_shell_output_strips_terminal_escapes() {
+        // 251 real records carry ANSI, mostly spinner redraws
+        // (`\x1b[2K\x1b[1G` — erase line, cursor to column 1). A
+        // terminal collapses those onto one line; left in, they flatten
+        // an animation into a run of repeated text plus stray control
+        // bytes. Codex's own TUI consumes them via `ansi_escape_line`.
+        let parsed = codex_parse_exec_output(
+            "Chunk ID: 1\nExit code: 0\nOutput:\n[\u{2837}] applying...\u{1b}[2K\u{1b}[1G[\u{283f}] applying...done",
+        );
+        assert_eq!(
+            parsed.raw,
+            "[\u{2837}] applying...[\u{283f}] applying...done"
+        );
+        assert!(!parsed.raw.contains('\u{1b}'));
+        // The wrapper is still parsed — stripping must not break it.
+        assert_eq!(parsed.exit_code, Some(0));
+
+        // Code Mode results take the same path.
+        let out = codex_custom_tool_call_output_message(
+            &serde_json::json!({
+                "type":"custom_tool_call_output","call_id":"c1",
+                "output":[{"type":"input_text","text":"\u{1b}[36m<body>\u{1b}[39m ok"}]
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(out.text, "<body> ok");
+    }
+
+    #[test]
+    fn claude_local_command_output_strips_terminal_escapes() {
+        // `/model` writes bold-on/off around the name; the raw bytes
+        // reached the screen as control characters. Content verbatim
+        // from real history (2.1.220).
+        let out = claude_display_text(
+            "<local-command-stdout>Kept model as \u{1b}[1mOpus 5\u{1b}[22m</local-command-stdout>",
+        )
+        .unwrap();
+        assert_eq!(out, "Kept model as Opus 5");
+        assert!(!out.contains('\u{1b}'), "no escape bytes may survive");
+        // stderr takes the same path.
+        let err = claude_display_text(
+            "<local-command-stderr>\u{1b}[31mfailed\u{1b}[0m</local-command-stderr>",
+        )
+        .unwrap();
+        assert_eq!(err, "failed");
+        // Output that is ONLY escapes still degrades to the placeholder
+        // rather than an empty bubble.
+        let empty =
+            claude_display_text("<local-command-stdout>\u{1b}[2J</local-command-stdout>").unwrap();
+        assert_eq!(empty, "(no content)");
+    }
+
+    #[test]
+    fn claude_meta_does_not_stack_a_second_tag_on_a_named_notice() {
+        // An isMeta record's content is usually a wrapper that
+        // claude_display_text already turned into a named notice, so the
+        // old unconditional prefix produced
+        // `*[meta]* *[local-command-caveat]* Caveat: …` — two internal
+        // tag names, body crammed onto the same line. Content verbatim
+        // from real history (110 identical copies of it).
+        let msgs = claude_message_from_value(&serde_json::json!({
+            "type":"user","isMeta":true,
+            "message":{"role":"user","content":"<local-command-caveat>Caveat: The messages below were generated by the user while running local commands.</local-command-caveat>"}
+        }));
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(
+            msgs[0].text,
+            "*[local-command-caveat]*\n\nCaveat: The messages below were generated by the user while running local commands."
+        );
+        // The body is still there — this is a readability fix, not a drop.
+        assert!(msgs[0].text.contains("Caveat: The messages below"));
+        // And no doubled tag.
+        assert!(!msgs[0].text.contains("*[meta]*"));
+
+        // Content that names itself nothing keeps the `*[meta]*` marker.
+        let plain = claude_message_from_value(&serde_json::json!({
+            "type":"user","isMeta":true,
+            "message":{"role":"user","content":"plain meta text"}
+        }));
+        assert_eq!(plain[0].text, "*[meta]* plain meta text");
+    }
+
+    #[test]
+    fn claude_typed_attachment_arms_fall_back_instead_of_dropping() {
+        // Shape drift (a field renamed, or turned into an array) must
+        // leave the record VISIBLE via the generic dump, not silently
+        // delete it. These arms used to `return Vec::new()`.
+        for att in [
+            serde_json::json!({"type":"read_truncation_notice","banner":["now","an","array"]}),
+            serde_json::json!({"type":"context_tip","tipText":"moved field"}),
+            serde_json::json!({"type":"agent_listing_delta","addedLines":["- a: b"],"addedTypes":[],"removedTypes":[]}),
+        ] {
+            let msgs = claude_attachment_messages(&serde_json::json!({"attachment": att}), None);
+            assert_eq!(msgs.len(), 1, "drifted shape must still render");
+            assert!(
+                msgs[0].text.starts_with("*[attachment: "),
+                "expected the generic fallback, got {:?}",
+                msgs[0].text
+            );
+        }
+        // A genuine no-op delta still drops.
+        let noop = claude_attachment_messages(
+            &serde_json::json!({"attachment":{"type":"agent_listing_delta","addedTypes":[],"addedLines":[],"removedTypes":[]}}),
+            None,
+        );
+        assert!(noop.is_empty());
+    }
+
+    #[test]
+    fn claude_read_truncation_and_context_tip_render_their_prose() {
+        // Both carried real information the generic fallback buried in a
+        // JSON dump. Shapes verbatim from real history.
+        let trunc = claude_attachment_messages(
+            &serde_json::json!({"attachment":{
+                "type":"read_truncation_notice",
+                "banner":"[Truncated: PARTIAL view — /tmp/a.diff: showing lines 1-664 of 2101 total]"
+            }}),
+            None,
+        );
+        assert_eq!(
+            trunc[0].text,
+            "[Truncated: PARTIAL view — /tmp/a.diff: showing lines 1-664 of 2101 total]"
+        );
+        let tip = claude_attachment_messages(
+            &serde_json::json!({"attachment":{
+                "type":"context_tip",
+                "tip":{"tip":"You can grant access with /add-dir","featureId":"outside-cwd"}
+            }}),
+            None,
+        );
+        assert_eq!(tip[0].text, "\u{1f4a1} You can grant access with /add-dir");
+        // No internal ids leak.
+        assert!(!tip[0].text.contains("featureId"));
+    }
+
+    #[test]
+    fn claude_agent_listing_delta_renders_the_roster_not_json() {
+        // `addedLines` is ALREADY a markdown list, so the generic
+        // fallback re-encoded readable prose as 2.5 KB of escaped JSON
+        // on one line. Shape verbatim from real history.
+        let msgs = claude_attachment_messages(
+            &serde_json::json!({"attachment":{
+                "type":"agent_listing_delta",
+                "addedTypes":["claude","Explore"],
+                "addedLines":["- claude: Catch-all for any task.","- Explore: Read-only search agent."],
+                "removedTypes":[],
+                "isInitial":true,
+                "showConcurrencyNote":false
+            }}),
+            None,
+        );
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(
+            msgs[0].text,
+            "2 agents available\n\n- claude: Catch-all for any task.\n- Explore: Read-only search agent."
+        );
+        // No raw JSON leaks through.
+        assert!(!msgs[0].text.contains("addedTypes"));
+        assert!(!msgs[0].text.contains("{"));
+
+        // Removals are named; an empty delta produces nothing.
+        let removed = claude_attachment_messages(
+            &serde_json::json!({"attachment":{
+                "type":"agent_listing_delta","addedTypes":[],"addedLines":[],
+                "removedTypes":["Plan"],"isInitial":false
+            }}),
+            None,
+        );
+        assert_eq!(removed[0].text, "removed: Plan");
+        let empty = claude_attachment_messages(
+            &serde_json::json!({"attachment":{
+                "type":"agent_listing_delta","addedTypes":[],"addedLines":[],"removedTypes":[]
+            }}),
+            None,
+        );
+        assert!(empty.is_empty());
+    }
+
+    #[test]
     fn claude_unhide_hidden_tool_cards() {
         // Tools Claude TUI hides (`userFacingName: ''` +
         // `renderToolUseMessage: () => null`) are surfaced in Termory
@@ -16458,7 +17185,7 @@ mod tests {
             // Source order (offset, limit) — matches OpenCode's JS TUI,
             // which iterates the input object in insertion order. (Before
             // serde_json's preserve_order this came out alphabetically.)
-            "⏺ **Read**(`src/main.ts` [offset=10, limit=20])\\\n↳ Loaded src/main.ts"
+            "⏺ **Read**(`src/main.ts` [offset=10, limit=20])\\\n↳ Loaded `src/main.ts`"
         );
 
         // TodoWrite — todos rendered as a list with status icons.
@@ -16750,22 +17477,106 @@ mod tests {
 
     #[test]
     fn opencode_assistant_error_surfaces_below_text() {
-        // session-v2.tsx:339-353 — when assistant.error is set, a red
-        // notice box renders below the message body. Termory mirrors
-        // with an italic `*✕ {message}*` line.
+        // index.tsx:1546 — when assistant.error is set, a red notice box
+        // renders below the message body. Termory mirrors it with an
+        // italic `*✕ {message}*` line.
+        //
+        // The error is a NamedError object — `{name, data: {message}}`
+        // per `NamedError.toObject()` (core/src/util/error.ts:55-60) and
+        // `UnknownError` (types.gen.ts:78-83). This test used to assert a
+        // FABRICATED `{type, message}` shape that OpenCode never writes,
+        // so it passed while the production path surfaced nothing.
         let msg = opencode_v2_message_from_value(
             &serde_json::json!({
                 "type":"assistant",
                 "agent":"general",
                 "model":{"providerID":"x","id":"y","variant":""},
                 "content":[{"type":"text","text":"Working on it"}],
-                "error":{"type":"unknown","message":"Connection reset"},
+                "error":{"name":"UnknownError","data":{"message":"Connection reset"}},
                 "time":{"created":1_714_000_000_000_i64}
             }),
             1_714_000_000_000,
         )
         .unwrap();
         assert_eq!(msg.text, "Working on it\n\n*✕ Connection reset*");
+    }
+
+    #[test]
+    fn opencode_failed_tool_card_carries_the_error_string() {
+        // `ToolStateError.error` is a plain STRING (types.gen.ts:277-282),
+        // not an object — reading `.message` here produced a bare `Error`
+        // fence with the reason dropped on every failed OpenCode tool.
+        let card = opencode_v2_tool_part_text(&serde_json::json!({
+            "type":"tool",
+            "name":"read",
+            "state":{
+                "status":"error",
+                "input":{"filePath":"/tmp/missing.txt"},
+                "error":"ENOENT: no such file or directory"
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            card,
+            "✗ **Read**(`/tmp/missing.txt`)\n\n````\nError: ENOENT: no such file or directory\n````"
+        );
+    }
+
+    #[test]
+    fn opencode_execute_lists_its_child_tool_calls() {
+        // index.tsx:2358 Execute (Code Mode). Child calls stream through
+        // `metadata.toolCalls` as `{tool, status, input?}`
+        // (tool/code-mode.ts:21); a failed one gets a `(failed)` suffix.
+        let card = opencode_v2_tool_part_text(&serde_json::json!({
+            "type":"tool",
+            "name":"execute",
+            "state":{
+                "status":"completed",
+                "input":{"code":"await read({ filePath: '/x' })"},
+                "output":"done",
+                "metadata":{
+                    "toolCalls":[
+                        {"tool":"read","status":"completed","input":{"filePath":"/x"}},
+                        {"tool":"bash","status":"error","input":{"command":"ls"}},
+                        {"tool":"glob","status":"running"},
+                        {"status":"completed"}
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            card,
+            "⏺ **Execute**\n\n````\nawait read({ filePath: '/x' })\n````\n\n↳ read `[filePath=/x]`\\\n↳ bash `[command=ls]` (failed)\\\n↳ glob\n\n````\ndone\n````"
+        );
+    }
+
+    #[test]
+    fn execute_args_survive_markdown_metacharacters() {
+        // Rule 3. These lines go through react-markdown, so a bare path
+        // is not neutral text: `/a[1](b)/c` becomes a LINK rendering as
+        // `/a1/c`, and `_tmp_` becomes italic `tmp` — i.e. the user is
+        // shown a path that is not the one on disk. Verified through the
+        // real pipeline; asserting the wrapping here is the cheap proxy.
+        let card = opencode_v2_tool_part_text(&serde_json::json!({
+            "type":"tool",
+            "name":"execute",
+            "state":{
+                "status":"completed",
+                "input":{"code":"x"},
+                "metadata":{
+                    "toolCalls":[
+                        {"tool":"read","status":"completed","input":{"filePath":"/a[1](b)/c"}},
+                        {"tool":"bash","status":"completed","input":{"command":"ls _tmp_ `x`"}}
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            card,
+            "⏺ **Execute**\n\n````\nx\n````\n\n↳ read `[filePath=/a[1](b)/c]`\\\n↳ bash ``[command=ls _tmp_ `x`]``"
+        );
     }
 
     #[test]
