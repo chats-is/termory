@@ -43,6 +43,56 @@ Two app-scoping notes: switching **Codex** applies to the Codex CLI and the Code
 3. **Test** checks connectivity to the base URL before you rely on it.
 4. **Save**. Editing a provider that's currently active re-applies it immediately.
 
+### DeepSeek on Claude Code
+
+Providers → **Claude Code** → **Add provider**:
+
+| Field | Value |
+|-------|-------|
+| Name | `DeepSeek` |
+| Base URL | `https://api.deepseek.com/anthropic` |
+| API key | your DeepSeek key |
+| Model | `deepseek-v4-pro[1m]` |
+
+Expand **Advanced settings** and point Claude's three model sizes at DeepSeek:
+
+| Key | Value |
+|-----|-------|
+| `env.ANTHROPIC_DEFAULT_OPUS_MODEL` | `deepseek-v4-pro[1m]` |
+| `env.ANTHROPIC_DEFAULT_SONNET_MODEL` | `deepseek-v4-pro[1m]` |
+| `env.ANTHROPIC_DEFAULT_HAIKU_MODEL` | `deepseek-v4-flash` |
+
+`[1m]` after a model name asks for the 1M-token context window.
+
+Add any of these if you want them:
+
+| Key | Value | Effect |
+|-----|-------|--------|
+| `env.CLAUDE_CODE_AUTO_COMPACT_WINDOW` | `786432` | token count at which it auto-compacts |
+| `env.CLAUDE_CODE_SUBAGENT_MODEL` | `deepseek-v4-flash` | model used for subagents |
+| `env.CLAUDE_CODE_EFFORT_LEVEL` | `max` | reasoning effort |
+
+**Save**, then **Activate**. Start `claude` and you're on DeepSeek; click **Official** to switch back.
+
+### DeepSeek on Codex
+
+Providers → **Codex** → **Add provider**:
+
+| Field | Value |
+|-------|-------|
+| Name | `DeepSeek` |
+| Base URL | `https://api.deepseek.com` |
+| API key | your DeepSeek key |
+| Model | `deepseek-v4-pro` |
+
+You can also add this under **Advanced settings**:
+
+| Key | Value | Effect |
+|-----|-------|--------|
+| `model_reasoning_effort` | `high` | reasoning effort — `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` / `ultra`, and each provider can have its own |
+
+**Save**, then **Activate**. Start `codex` and you're on DeepSeek; click **Official** to switch back.
+
 ### Termory never fully overwrites your CLI config (the technical principle)
 
 This is the core guarantee: activating a provider **merges a few fields into your existing config — it never replaces the whole file.**
@@ -88,7 +138,7 @@ Beyond the basic fields, each provider has an **Advanced settings** section wher
 The tables below are just common examples — you can add any key/value the CLI accepts. The rules:
 
 - The **key** is a dot-path into the CLI's config — `a.b.c` creates nested structure.
-- The **value** is type-inferred for JSON/TOML targets: `true`/`false` → boolean, whole numbers → integer, decimals → float, anything else → string. (Gemini's `.env` keeps every value as a literal string.)
+- The **value** is type-inferred for JSON/TOML targets: `true`/`false` → boolean, whole numbers → integer, decimals → float, anything else → string. Two exceptions keep values as literal strings: Gemini's `.env`, and **any Claude Code key under `env.`** — Claude's `env` block is a string-to-string map, so a numeric value like `786432` is written as `"786432"` rather than a JSON number.
 - Keys owned by the dedicated fields (base URL / key / model) are **managed** — the editor blocks them, because those fields already control them.
 
 **Claude Code** → `~/.claude/settings.json`. The headline use is mapping Claude's Sonnet / Opus / Haiku sizes to specific upstream models (a new Claude provider is pre-seeded with these three rows):

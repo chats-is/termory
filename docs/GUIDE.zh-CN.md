@@ -45,6 +45,56 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 3. **测试**在你正式依赖它之前先检查与 Base URL 的连通性。
 4. **保存**。编辑当前已激活的供应商会立即重新生效。
 
+### 在 Claude Code 上用 DeepSeek
+
+供应商 → **Claude Code** → **添加供应商**:
+
+| 字段 | 值 |
+|------|-----|
+| 名称 | `DeepSeek` |
+| Base URL | `https://api.deepseek.com/anthropic` |
+| API key | 你的 DeepSeek key |
+| 模型 | `deepseek-v4-pro[1m]` |
+
+展开**高级设置**,把 Claude 的三档模型指向 DeepSeek:
+
+| 键 | 值 |
+|-----|-----|
+| `env.ANTHROPIC_DEFAULT_OPUS_MODEL` | `deepseek-v4-pro[1m]` |
+| `env.ANTHROPIC_DEFAULT_SONNET_MODEL` | `deepseek-v4-pro[1m]` |
+| `env.ANTHROPIC_DEFAULT_HAIKU_MODEL` | `deepseek-v4-flash` |
+
+模型名后加 `[1m]` 表示用 100 万 token 上下文。
+
+还可以按需加:
+
+| 键 | 值 | 作用 |
+|-----|-----|------|
+| `env.CLAUDE_CODE_AUTO_COMPACT_WINDOW` | `786432` | 到多少 token 自动压缩上下文 |
+| `env.CLAUDE_CODE_SUBAGENT_MODEL` | `deepseek-v4-flash` | 子代理用哪个模型 |
+| `env.CLAUDE_CODE_EFFORT_LEVEL` | `max` | 推理强度 |
+
+**保存**,**激活**。启动 `claude` 即在用 DeepSeek,点**官方**切回。
+
+### 在 Codex 上用 DeepSeek
+
+供应商 → **Codex** → **添加供应商**:
+
+| 字段 | 值 |
+|------|-----|
+| 名称 | `DeepSeek` |
+| Base URL | `https://api.deepseek.com` |
+| API key | 你的 DeepSeek key |
+| 模型 | `deepseek-v4-pro` |
+
+还可以在**高级设置**里加:
+
+| 键 | 值 | 作用 |
+|-----|-----|------|
+| `model_reasoning_effort` | `high` | 推理强度,可选 `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max` / `ultra`,每个供应商可以各配各的 |
+
+**保存**,**激活**。启动 `codex` 即在用 DeepSeek,点**官方**切回。
+
 ### Termory 不会全量覆盖你的 CLI 配置(技术原理)
 
 这是核心保证:激活某个供应商时,Termory **只把几个字段合并进你已有的配置——绝不替换整个文件。**
@@ -77,7 +127,7 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 
 (这和下面的 **AI 网关**功能无关——Claude Desktop 只是个供应商;"3P"是 Claude Desktop 自己对第三方配置的叫法。)
 
-### 高级设置(每个供应商的 options)
+### 高级设置(每个供应商的高级设置)
 
 除基本字段外,每个供应商都有**高级设置**区域,你可以在这里**自行添加**配置项——任何该 CLI 支持、而 Termory 没有专用字段的设置都行。你添加的每一项会在激活该供应商时合并进它的配置(Grok 是在**设为默认**时,见下文),切走时再移除。
 
@@ -90,7 +140,7 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 下面的表格只是常见示例——你可以添加任意该 CLI 接受的键值对。规则如下:
 
 - **键**是指向该 CLI 配置的点路径——`a.b.c` 会创建嵌套结构。
-- **值**对 JSON/TOML 目标做类型推断:`true`/`false` → 布尔,整数 → 整型,小数 → 浮点,其余 → 字符串。(Gemini 的 `.env` 一律按字面字符串保留。)
+- **值**对 JSON/TOML 目标做类型推断:`true`/`false` → 布尔,整数 → 整型,小数 → 浮点,其余 → 字符串。两个例外一律按字面字符串保留:Gemini 的 `.env`,以及 **Claude Code 中 `env.` 下的任何键**——Claude 的 `env` 是字符串到字符串的映射,所以 `786432` 这样的数值会写成 `"786432"` 而不是 JSON 数字。
 - 由专用字段(Base URL / 密钥 / 模型)掌管的键是**受管**的——编辑器会拦截,因为那些字段已在控制它们。
 
 **Claude Code** → `~/.claude/settings.json`。最典型用途是把 Claude 的 Sonnet / Opus / Haiku 三档映射到具体上游模型(新建 Claude 供应商时预置这三行):
