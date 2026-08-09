@@ -83,7 +83,7 @@ npm run build                                   # also the type-check
 ## Verifying a rendering change
 
 The app renders backend-produced markdown, so a rendering bug can live in either
-layer. Two probes, both used successfully:
+layer. Three probes, all used successfully:
 
 **Backend → real data.** Add a `#[ignore]` test in `sessions.rs` that walks real
 history and prints what the parser emits, run it, then delete it:
@@ -99,6 +99,39 @@ string. Anything unequal is a markdown-escaping bug.
 ```bash
 npx vitest run src/__render_probe.test.tsx     # from REPO ROOT
 ```
+
+**On screen → a UI you cannot otherwise reach.** Some surfaces only appear under
+a condition you cannot manufacture: the update dialog needs a genuinely newer
+release, and on a machine already running the latest there is no way to see it.
+Temporarily mount the component with a scripted fake, screenshot it, then
+`git checkout` the file. For the update dialog that meant a fake `Update` whose
+`downloadAndInstall` emits `Started` + `Progress` and **parks** — never
+`Finished`, never resolving, because resolving makes the real dialog call
+`relaunch()`:
+
+```tsx
+// TEMPORARY — revert. Mounted in place of the real `pendingUpdate`.
+const __TEMP_FAKE_UPDATE__ = {
+  version: "1.4.3",
+  body: "### 🐛 Bug Fixes\n- something",
+  async downloadAndInstall(cb?: (e: unknown) => void) {
+    const total = 48_500_000;
+    cb?.({ event: "Started", data: { contentLength: total } });
+    for (let i = 0; i < 42; i++) {              // park at a FIXED percentage:
+      await new Promise((r) => setTimeout(r, 120));
+      cb?.({ event: "Progress", data: { chunkLength: total / 100 } });
+    }
+    await new Promise(() => {});                // …so the screenshot is deterministic
+  }
+} as never;
+```
+
+Park at a fixed value rather than letting it run: a fake that completes leaves
+the dialog in its terminal state, and a screenshot timed against a moving number
+races the shutter. Two traps around this: a parked promise means the component
+is now stuck in that state, so editing the fake and relying on HMR shows you
+nothing (see the HMR gotcha below — restart instead); and `git checkout` the
+scaffolding the moment you have the pixels, before it rides along in a commit.
 
 Then confirm in the app with the driver. All three layers disagreeing is possible:
 a string can be correct in Rust, correct through react-markdown, and still land on
@@ -142,6 +175,15 @@ a screen the user never navigates to.
   user moves or resizes the window.
 - **Retina:** `-R` takes points; the PNG is 2x those numbers (1080x720 pt →
   2160x1440 px). Map image coords back with `screen = origin + image/2`.
+- **HMR swaps the module but does NOT reset React state — restart the app to
+  verify anything stateful.** Vite hot-reloads the webview in place, so a
+  component keeps the state it was already in. Cost an entire round here: the
+  update dialog was parked in its `installing` phase, the source was edited to
+  park at 42% of *downloading* instead, HMR applied the edit — and the screen
+  did not change, because `phase` had survived. It reads as "my edit didn't
+  take" and sends you back to re-check code that was already correct. The tell
+  is an edit that is visibly live in one respect (an icon or class changed)
+  while the state-dependent part is stale. `driver.mjs quit` then `launch`.
 - **`MessageBody`'s prop is `text`, not `content`.** Passing `content` renders an
   empty container and a probe silently reports nothing rendered.
 - **vitest only runs from the repo root.** From `src-tauri/` it resolves the config
