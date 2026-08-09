@@ -1,7 +1,7 @@
 import React from "react";
 import { relaunch } from "@tauri-apps/plugin-process";
 import type { Update } from "@tauri-apps/plugin-updater";
-import { Loader2, Sparkles } from "lucide-react";
+import { Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -100,27 +100,6 @@ export function UpdateDialog({
           </div>
         )}
 
-        {busy && (
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>{phase === "installing" ? t("update.installing") : t("update.downloading")}</span>
-              {phase === "downloading" && progressPct != null && (
-                <span className="tabular-nums">{progressPct}%</span>
-              )}
-            </div>
-            <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-              {/* Always start at 0% and only grow — never a fake mid-track
-                  position (or a segment that sweeps through the middle) that
-                  then snaps back to 0. Unknown total → stays 0% until the
-                  first chunk lands, which for the Tauri updater is ~immediate. */}
-              <div
-                className="h-full bg-primary transition-[width] duration-150"
-                style={{ width: `${progressPct ?? 0}%` }}
-              />
-            </div>
-          </div>
-        )}
-
         <DialogFooter>
           <Button
             type="button"
@@ -128,14 +107,28 @@ export function UpdateDialog({
             disabled={busy}
             onClick={onClose}
           >{t("update.later")}</Button>
+          {/* The label is the ONLY progress indicator — no separate bar, and
+              deliberately no spinner: the ticking percentage already says the
+              work is live, and a spinner beside it just competes with it.
+              `tabular-nums` keeps the button from resizing on every tick as the
+              digits change width.
+              Only the download phase has a number to show: the updater reports
+              chunks while downloading and nothing at all while it applies the
+              bundle, so `installing` is inherently indeterminate — which is
+              also why the label must switch rather than freeze at its last
+              percentage and read as stalled. A known total is not guaranteed
+              either (`contentLength` is optional), hence the plain-label
+              fallback rather than `0%`. */}
           <Button
             type="button"
+            className="tabular-nums"
             disabled={busy}
             onClick={() => void handleInstall()}
           >
-            {busy && <Loader2 className="size-4 animate-spin" />}
             {phase === "downloading"
-              ? t("update.downloading")
+              ? progressPct != null
+                ? t("update.downloadingPct", { pct: progressPct })
+                : t("update.downloading")
               : phase === "installing"
                 ? t("update.installing")
                 : t("update.downloadInstall")}

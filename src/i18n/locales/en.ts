@@ -338,6 +338,7 @@ export const en = {
   "toast.accountDeleted": "Account deleted.",
   "update.available": "Update available",
   "update.downloading": "Downloading…",
+  "update.downloadingPct": "Downloading… {pct}%",
   "update.later": "Later",
   "update.installing": "Installing…",
   "update.downloadInstall": "Update",

@@ -324,6 +324,7 @@ export const zhHans: Record<MessageKey, string> = {
   "toast.accountDeleted": "账号已删除。",
   "update.available": "有可用更新",
   "update.downloading": "下载中…",
+  "update.downloadingPct": "{pct}% 下载中…",
   "update.later": "稍后",
   "update.installing": "安装中…",
   "update.downloadInstall": "更新",

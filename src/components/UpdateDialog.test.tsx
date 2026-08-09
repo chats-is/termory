@@ -76,15 +76,37 @@ describe("UpdateDialog", () => {
     });
     expect(primaryButton().textContent).toContain("Downloading…");
 
-    // Known size + one chunk → a percentage shows in the download phase.
+    // Known size + one chunk → the percentage rides IN the button label, not
+    // in a separate progress row (there isn't one).
     emit({ event: "Started", data: { contentLength: 100 } });
     emit({ event: "Progress", data: { chunkLength: 50 } });
-    expect(screen.getByText("50%")).toBeTruthy();
+    expect(primaryButton().textContent).toContain("50%");
+    expect(primaryButton().textContent).toContain("Downloading…");
+    // Text only — no spinner beside the number. The ticking percentage is
+    // already the liveness signal; a spinner would just compete with it.
+    expect(primaryButton().querySelector("svg")).toBeNull();
 
-    // Finished → the updater applies the bundle → installing phase, no %.
+    // Finished → the updater applies the bundle → installing phase. That phase
+    // reports nothing, so the number must GO rather than freeze at its last
+    // value and read as stalled progress.
     emit({ event: "Finished" });
     expect(primaryButton().textContent).toContain("Installing…");
-    expect(screen.queryByText("50%")).toBeNull();
+    expect(primaryButton().textContent).not.toContain("%");
+  });
+
+  it("shows the plain label when the download size is unknown", async () => {
+    // `contentLength` is optional on the Started event, so there is no total to
+    // divide by. The label must stay plain rather than render `null%`/`NaN%` —
+    // the percentage now sits in the button, so a bad value is unmissable.
+    const { update, emit } = makeUpdate();
+    render(<UpdateDialog update={update} currentVersion="1.2.6" onClose={() => {}} />);
+    await act(async () => {
+      fireEvent.click(primaryButton());
+    });
+    emit({ event: "Started", data: {} });
+    emit({ event: "Progress", data: { chunkLength: 50 } });
+    expect(primaryButton().textContent).toBe("Downloading…");
+    expect(primaryButton().textContent).not.toContain("%");
   });
 
   it("on success shows the installed toast and relaunches", async () => {
