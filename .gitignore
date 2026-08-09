@@ -5,7 +5,14 @@ src-tauri/gen
 .DS_Store
 *.log
 .audit-sources/
-.claude/
+# `.claude/` holds machine-local state (settings.local.json) — ignored. The
+# exception is `skills/`: project tooling meant to be shared, which Claude Code
+# discovers from the checkout. Note the pattern must be `.claude/*`, not
+# `.claude/`: a trailing slash stops git descending into the directory at all,
+# so a negation inside it would never apply. Replace both lines with `.claude/`
+# to go back to ignoring everything.
+.claude/*
+!.claude/skills/
 
 # Tauri updater signing key backup — PRIVATE. Never commit. The repo is
 # public; leaking this key lets anyone sign malicious auto-updates.
