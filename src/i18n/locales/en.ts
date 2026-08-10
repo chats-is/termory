@@ -290,6 +290,7 @@ export const en = {
   "help.overrideIntro": "Extra settings merged into {app}'s config while this provider is active, and removed when you switch away.",
   "help.fetchingModels": "Fetching available models…",
   "help.modelsAvailable": "{n} models available",
+  "help.anthropicSubpath": "Anthropic API at {path}",
   "help.grokApiBackend": "The wire API each model entry uses — Grok's `api_backend`. Default leaves the field unset so Grok applies its own default, currently `chat_completions`.",
   "help.grokModels": "The models this provider adds to Grok's picker — each becomes one entry. ID is the model id sent upstream; name is the display label (defaults to the id).",
   "help.grokDefault": "Optional — the model Grok defaults to. Pick one of the models above; leave blank to set no default.",

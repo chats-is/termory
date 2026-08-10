@@ -1408,6 +1408,11 @@ pub struct Gateway {
     // UI. See the "Lenient config parsing" note above `providers_from_json`.
     #[serde(default, deserialize_with = "lenient_vec")]
     pub bindings: Vec<GatewayBinding>,
+    /// Last detection result. Read-only here (the frontend owns the write) and
+    /// needed so a TRAY-driven activate derives the same per-protocol base URL
+    /// the page does — currently just `anthropicPath`.
+    #[serde(default)]
+    pub capabilities: Option<GatewayCapabilities>,
     #[serde(default)]
     pub favicon: Option<String>,
 }
@@ -1460,25 +1465,46 @@ fn npm_for_protocol(p: GatewayProtocol) -> &'static str {
 /// Derive a CLI's real base URL from the gateway's path-less root: strip a
 /// trailing `/v1beta` or `/v1`, then re-add `/v1` for the OpenAI flavors
 /// (Anthropic / Gemini keep the bare root and append their own path).
-fn gateway_base_for_protocol(base: &str, p: GatewayProtocol) -> String {
+/// `anthropic_path` is the detected sub-path prefix (`GatewayCapabilities`),
+/// applied to Anthropic bindings ONLY — see `ANTHROPIC_SUBPATH`. Mirror of the
+/// frontend `gatewayBaseForProtocol`; keep the two in sync.
+fn gateway_base_for_protocol(
+    base: &str,
+    p: GatewayProtocol,
+    anthropic_path: Option<&str>,
+) -> String {
     let mut b = base.trim().trim_end_matches('/');
     b = b.strip_suffix("/v1beta").unwrap_or(b);
     b = b.strip_suffix("/v1").unwrap_or(b);
     match p {
         GatewayProtocol::OpenaiCompatible | GatewayProtocol::Openai => format!("{b}/v1"),
-        GatewayProtocol::Anthropic | GatewayProtocol::Gemini => b.to_string(),
+        GatewayProtocol::Anthropic => {
+            let sub = anthropic_path.unwrap_or("").trim_end_matches('/');
+            // Already ending in the prefix means the user typed the vendor's
+            // Anthropic URL as the gateway root; appending again would 404.
+            if sub.is_empty() || b.ends_with(sub) {
+                b.to_string()
+            } else {
+                format!("{b}{sub}")
+            }
+        }
+        GatewayProtocol::Gemini => b.to_string(),
     }
 }
 
 fn provider_from_binding(g: &Gateway, b: &GatewayBinding) -> Provider {
     let protocol = protocol_for_binding(b);
+    let anthropic_path = g
+        .capabilities
+        .as_ref()
+        .and_then(|c| c.anthropic_path.as_deref());
     let is_opencode = b.app == CliApp::Opencode;
     Provider {
         id: b.id.clone(),
         app: b.app,
         kind: ProviderKind::Custom,
         name: g.name.clone(),
-        base_url: gateway_base_for_protocol(&g.base_url, protocol),
+        base_url: gateway_base_for_protocol(&g.base_url, protocol, anthropic_path),
         api_key: g.api_key.clone(),
         model: b.model.clone(),
         npm: if is_opencode {
@@ -1675,6 +1701,7 @@ pub struct ModelListResult {
 //   - openaiCompatible → POST /v1/chat/completions   (@ai-sdk/openai-compatible) → OpenCode
 //   - openai           → POST /v1/responses          (@ai-sdk/openai)            → Codex + OpenCode
 //   - anthropic        → POST /v1/messages           (@ai-sdk/anthropic)         → Claude + OpenCode
+//                        ALSO probed at <root>/anthropic/v1/messages — see ANTHROPIC_SUBPATH
 //   - gemini           → GET  /v1beta/models?key= returns data (@ai-sdk/google)  → Gemini + OpenCode
 //     (Gemini-SPECIFIC path — a non-Gemini gateway 404s it, so data = support;
 //     contrast OpenAI's generic /v1/models which every compatible gateway answers)
@@ -1682,17 +1709,43 @@ pub struct ModelListResult {
 // used ONLY as autocomplete candidates — the gateway routes by model id,
 // so there's no reliable per-mode model split. Probes never spend tokens.
 
+/// Sub-path some vendors mount their Anthropic-compatible API under, while
+/// keeping the OpenAI-compatible API at the root. NOT a guess — measured
+/// against two live vendors (2026-08-10):
+///   DeepSeek  POST /v1/messages → **404**, POST /anthropic/v1/messages → 400
+///             (`/anthropic/v1/chat/completions` is itself a 404, so the two
+///              modes genuinely live at different prefixes)
+///   Moonshot  POST /v1/messages → **404**, POST /anthropic/v1/messages → 401
+/// The gateway's whole premise is ONE root serving several modes, so without
+/// this a DeepSeek gateway detects openai/openaiCompatible and reports
+/// `anthropic: false` — Claude Code + Claude Desktop become unbindable even
+/// though the vendor supports them. Only THIS prefix is probed: every entry
+/// here costs a request on every detect, so add one only with a measured
+/// vendor behind it (the same rule the CLI-search-path list follows).
+const ANTHROPIC_SUBPATH: &str = "/anthropic";
+
 /// Which API modes a gateway supports + a flat model-id catalog for the
 /// binding editor's autocomplete.
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayCapabilities {
     /// OpenAI Chat Completions (`/v1/chat/completions`) — `@ai-sdk/openai-compatible`.
+    #[serde(default)]
     pub openai_compatible: bool,
     /// OpenAI Responses (`/v1/responses`) — `@ai-sdk/openai`; Codex requires it.
+    #[serde(default)]
     pub openai: bool,
+    #[serde(default)]
     pub anthropic: bool,
+    #[serde(default)]
     pub gemini: bool,
+    /// Where the Anthropic Messages API answered, when it is NOT at the root:
+    /// the prefix to append to the gateway base for Anthropic bindings only
+    /// (`/anthropic`). `None` = at the root, the ordinary case. Detected, never
+    /// typed — `gateway_base_for_protocol` applies it so the tray and the page
+    /// derive the same URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_path: Option<String>,
     #[serde(default)]
     pub models: Vec<String>,
 }
@@ -3633,14 +3686,20 @@ pub async fn detect_gateway_apis(base_url: &str, api_key: &str) -> GatewayCapabi
     let chat_url = format!("{root}/v1/chat/completions");
     let responses_url = format!("{root}/v1/responses");
     let messages_url = format!("{root}/v1/messages");
+    let sub_messages_url = format!("{root}{ANTHROPIC_SUBPATH}/v1/messages");
     let oai_models_url = format!("{root}/v1/models");
     let gemini_models_url = format!("{root}/v1beta/models");
 
-    let (openai_compatible, openai, anthropic, gemini_list, oai_catalog) = tokio::join!(
+    let (openai_compatible, openai, anthropic_root, anthropic_sub, gemini_list, oai_catalog) = tokio::join!(
         // OpenAI / Anthropic gates — POST the real API endpoint.
         route_exists(with_bearer(client.post(&chat_url), api_key)),
         route_exists(with_bearer(client.post(&responses_url), api_key)),
         route_exists(with_anthropic(client.post(&messages_url), api_key)),
+        // The sub-path fallback runs CONCURRENTLY rather than only after the
+        // root probe misses: it costs one extra request either way, and
+        // sequencing it would add a whole round trip to every gateway that
+        // simply has no Anthropic mode.
+        route_exists(with_anthropic(client.post(&sub_messages_url), api_key)),
         // Gemini gate + its catalog in one GET (Gemini-specific path).
         fetch_models_list(
             client.get(&gemini_models_url).query(&[("key", api_key)]),
@@ -3656,11 +3715,17 @@ pub async fn detect_gateway_apis(base_url: &str, api_key: &str) -> GatewayCapabi
     models.sort();
     models.dedup();
 
+    // The ROOT wins whenever it answers — a gateway serving both is the
+    // ordinary layout, and recording a prefix there would send Claude down a
+    // longer path for no reason. The sub-path is a fallback, never a default.
+    let anthropic_path = (!anthropic_root && anthropic_sub).then(|| ANTHROPIC_SUBPATH.to_string());
+
     GatewayCapabilities {
         openai_compatible,
         openai,
-        anthropic,
+        anthropic: anthropic_root || anthropic_sub,
         gemini,
+        anthropic_path,
         models,
     }
 }
@@ -4233,21 +4298,55 @@ mod tests {
     fn gateway_base_for_protocol_derives_per_protocol() {
         // Path-less root + OpenAI flavors get /v1; Anthropic/Gemini stay bare.
         assert_eq!(
-            gateway_base_for_protocol("https://r.x", GatewayProtocol::Openai),
+            gateway_base_for_protocol("https://r.x", GatewayProtocol::Openai, None),
             "https://r.x/v1"
         );
         assert_eq!(
-            gateway_base_for_protocol("https://r.x/", GatewayProtocol::OpenaiCompatible),
+            gateway_base_for_protocol("https://r.x/", GatewayProtocol::OpenaiCompatible, None),
             "https://r.x/v1"
         );
         // A pasted /v1 or /v1beta is stripped before re-deriving.
         assert_eq!(
-            gateway_base_for_protocol("https://r.x/v1", GatewayProtocol::Gemini),
+            gateway_base_for_protocol("https://r.x/v1", GatewayProtocol::Gemini, None),
             "https://r.x"
         );
         assert_eq!(
-            gateway_base_for_protocol("https://r.x/v1beta", GatewayProtocol::Anthropic),
+            gateway_base_for_protocol("https://r.x/v1beta", GatewayProtocol::Anthropic, None),
             "https://r.x"
+        );
+    }
+
+    #[test]
+    fn gateway_base_applies_the_detected_anthropic_subpath() {
+        // DeepSeek's layout: OpenAI at the root, Anthropic under /anthropic.
+        let sub = Some("/anthropic");
+        assert_eq!(
+            gateway_base_for_protocol("https://api.deepseek.com", GatewayProtocol::Anthropic, sub),
+            "https://api.deepseek.com/anthropic"
+        );
+        // ONLY Anthropic — the other modes stay at the root they were probed at.
+        assert_eq!(
+            gateway_base_for_protocol("https://api.deepseek.com", GatewayProtocol::Openai, sub),
+            "https://api.deepseek.com/v1"
+        );
+        assert_eq!(
+            gateway_base_for_protocol("https://api.deepseek.com", GatewayProtocol::Gemini, sub),
+            "https://api.deepseek.com"
+        );
+        // A root the user already typed the vendor's Anthropic URL into must
+        // not get the prefix twice (that path 404s).
+        assert_eq!(
+            gateway_base_for_protocol(
+                "https://api.deepseek.com/anthropic",
+                GatewayProtocol::Anthropic,
+                sub
+            ),
+            "https://api.deepseek.com/anthropic"
+        );
+        // The version strip still runs underneath the prefix.
+        assert_eq!(
+            gateway_base_for_protocol("https://r.x/v1", GatewayProtocol::Anthropic, sub),
+            "https://r.x/anthropic"
         );
     }
 
@@ -4290,6 +4389,7 @@ mod tests {
             base_url: "https://gw.x".into(),
             api_key: "sk-1".into(),
             bindings: vec![],
+            capabilities: None,
             favicon: Some("data:img".into()),
         };
         // Claude binding → Anthropic base (bare root), no npm/models.
@@ -4306,6 +4406,62 @@ mod tests {
         let oc = provider_from_binding(&g, &binding(CliApp::Opencode, None));
         assert_eq!(oc.base_url, "https://gw.x/v1");
         assert_eq!(oc.npm.as_deref(), Some("@ai-sdk/openai-compatible"));
+    }
+
+    #[test]
+    fn provider_from_binding_carries_the_gateways_anthropic_subpath() {
+        // The TRAY activates through this path, so it must derive the same URL
+        // the page does — the detected prefix lives on the gateway's saved
+        // capabilities, not on the binding.
+        let g = Gateway {
+            name: "DeepSeek".into(),
+            base_url: "https://api.deepseek.com".into(),
+            api_key: "sk-1".into(),
+            bindings: vec![],
+            capabilities: Some(GatewayCapabilities {
+                anthropic: true,
+                anthropic_path: Some("/anthropic".into()),
+                ..Default::default()
+            }),
+            favicon: None,
+        };
+        let claude = provider_from_binding(&g, &binding(CliApp::Claude, None));
+        assert_eq!(claude.base_url, "https://api.deepseek.com/anthropic");
+        // Claude Desktop binds the same protocol, so it follows too.
+        let desktop = provider_from_binding(&g, &binding(CliApp::ClaudeDesktop, None));
+        assert_eq!(desktop.base_url, "https://api.deepseek.com/anthropic");
+        // Codex is unaffected — its mode was probed at the root.
+        let codex = provider_from_binding(&g, &binding(CliApp::Codex, None));
+        assert_eq!(codex.base_url, "https://api.deepseek.com/v1");
+    }
+
+    #[test]
+    fn gateway_capabilities_round_trip_through_the_stored_json() {
+        // providers.json is written by the FRONTEND, so the Rust side only
+        // reads it — a stored `anthropicPath` must survive that read (camelCase
+        // on the wire), and a gateway saved before this field must still parse.
+        let with_path: Gateway = serde_json::from_value(serde_json::json!({
+            "name": "DeepSeek",
+            "baseUrl": "https://api.deepseek.com",
+            "capabilities": { "anthropic": true, "anthropicPath": "/anthropic" },
+            "bindings": []
+        }))
+        .unwrap();
+        assert_eq!(
+            with_path
+                .capabilities
+                .and_then(|c| c.anthropic_path)
+                .as_deref(),
+            Some("/anthropic")
+        );
+        let legacy: Gateway = serde_json::from_value(serde_json::json!({
+            "name": "Old",
+            "baseUrl": "https://gw.x",
+            "capabilities": { "anthropic": true },
+            "bindings": []
+        }))
+        .unwrap();
+        assert!(legacy.capabilities.unwrap().anthropic_path.is_none());
     }
 
     #[test]

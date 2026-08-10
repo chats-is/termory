@@ -276,6 +276,7 @@ export const zhHant: Record<MessageKey, string> = {
   "help.overrideIntro": "此供應商啟用期間合併進 {app} 設定的額外設定,切換走時會移除。",
   "help.fetchingModels": "正在取得可用模型…",
   "help.modelsAvailable": "{n} 個可用模型",
+  "help.anthropicSubpath": "Anthropic 介面位於 {path}",
   "help.grokApiBackend": "每個模型條目使用的介面協定 —— Grok 的 api_backend。選「預設」則不寫入該欄位,由 Grok 套用自身預設值（目前為 chat_completions）。",
   "help.grokModels": "該供應商加入 Grok 選擇器的模型 —— 每個生成一條。ID 是傳送給上游的模型 id;name 是顯示名(留空用 id)。",
   "help.grokDefault": "可選 —— Grok 預設使用的模型。從上面清單裡選一個;留空則不設預設。",

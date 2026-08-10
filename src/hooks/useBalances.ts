@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { BALANCE_CHANGED_EVENT } from "@/constants";
 import { balanceCredsKey, mergeBalanceResult } from "@/lib/balance-utils";
-import type { Provider, ProviderBalance } from "@/types";
+import type { BalanceSubject, ProviderBalance } from "@/types";
 
 /** Manual-refresh failure toast, split over two lines: the part before
  * the first ": " (e.g. "HTTP 429 Too Many Requests") as the title, the
@@ -24,18 +24,24 @@ function balanceErrorToast(error: string) {
 }
 
 /** A successful balance holds this long before the AUTOMATIC pass
- * re-queries. Longer than the quota's 2 min: a wallet moves only when
- * the user spends, and every query costs a request to a third party's
- * billing endpoint. */
-const BALANCE_STALE_MS = 5 * 60_000;
+ * re-queries. **Deliberately the same window as the quota's
+ * `QUOTA_STALE_MS`** (user decision 2026-08-10) — the two features
+ * refresh on one schedule, so "when does this number update" has a
+ * single answer wherever it is shown. It was 5 min at first, reasoning
+ * that a wallet moves only when the user spends; the shorter window is
+ * still bounded by the same manual floor below and by the states that
+ * never re-query at all. Keep the two constants in step. */
+const BALANCE_STALE_MS = 2 * 60_000;
 /** A FAILED query retries much sooner, so a transient blip doesn't mute
  * the amount for the full stale window. Applies to both the automatic
  * pass and the manual cooldown. */
 const BALANCE_ERROR_RETRY_MS = 60_000;
 /** Manual-refresh floor: the button shows disabled this long after a
- * success so a click cannot hammer the vendor's billing endpoint.
- * SEPARATE from the automatic window above — a user clicking at the
- * two-minute mark should get a fetch, not silence until five. */
+ * success so a click cannot hammer the vendor's billing endpoint. Same
+ * value as the quota's `QUOTA_MIN_INTERVAL_MS`, and now the same as the
+ * automatic window too — still a SEPARATE constant, because the two
+ * answer different questions (what a background pass may do vs what a
+ * click may do) and one moving is not a reason for the other to. */
 const BALANCE_MIN_INTERVAL_MS = 120_000;
 
 /** Results survive route remounts. Keyed by provider id; each entry
@@ -88,16 +94,21 @@ function isFresh(
 }
 
 /**
- * Balance state for the providers on screen: the per-provider fetch with
+ * Balance state for the wallets on screen: the per-subject fetch with
  * its two floors, the module cache that survives route remounts, the
  * automatic pass, the manual-refresh cooldown clock, and the backend's
  * own results arriving as events.
  *
- * One IPC per provider, cheap by construction: an unrecognised base URL
+ * A SUBJECT is anything carrying `{id, baseUrl, apiKey}` — a custom
+ * provider on the Providers tab, or a gateway on the Gateways tab. The
+ * hook never reads anything else, so a gateway needs no stand-in
+ * provider object (and no invented `app`) to be queried.
+ *
+ * One IPC per subject, cheap by construction: an unrecognised base URL
  * returns `unsupported` having made no request at all, and that verdict
  * is cached indefinitely.
  */
-export function useBalances(providers: Provider[]) {
+export function useBalances(subjects: BalanceSubject[]) {
   const [balances, setBalances] = React.useState<
     Record<string, ProviderBalance>
   >(() =>
@@ -121,9 +132,9 @@ export function useBalances(providers: Provider[]) {
   }, []);
 
   const refreshBalance = React.useCallback(
-    async (provider: Provider, manual = false) => {
-      const id = provider.id;
-      const credsKey = balanceCredsKey(provider);
+    async (subject: BalanceSubject, manual = false) => {
+      const id = subject.id;
+      const credsKey = balanceCredsKey(subject);
       if (inFlight.current.has(id)) return;
       // Manual clicks measure against the cooldown floor, the automatic
       // pass against the longer freshness window.
@@ -132,8 +143,12 @@ export function useBalances(providers: Provider[]) {
       inFlight.current.add(id);
       setLoading((cur) => new Set(cur).add(id));
       try {
+        // Send exactly the declared subject, not whatever object the
+        // caller happened to hold: a Provider carries its `options` and a
+        // base64 favicon, a Gateway its whole binding list, and none of it
+        // is read by the query.
         const result = await invoke<ProviderBalance>("fetch_provider_balance", {
-          provider
+          subject: { id, baseUrl: subject.baseUrl, apiKey: subject.apiKey }
         });
         // Store under the id WE asked for, never `result.providerId`: a
         // backend that ever echoed a different id would otherwise write
@@ -164,7 +179,7 @@ export function useBalances(providers: Provider[]) {
   // of each provider's balance INPUTS rather than the array: the page
   // rebuilds its provider list on every render, and depending on the
   // array itself would re-run this each time.
-  const credsFingerprint = providers
+  const credsFingerprint = subjects
     .map((p) => `${p.id} ${balanceCredsKey(p)}`)
     .join("");
   // When a provider's credentials change, note the moment. A result the
@@ -173,8 +188,8 @@ export function useBalances(providers: Provider[]) {
   // flight when the user edited the provider — see the listener below.
   const credsChangedAt = React.useRef<Record<string, number>>({});
   React.useEffect(() => {
-    const onScreen = new Set(providers.map((p) => p.id));
-    for (const p of providers) {
+    const onScreen = new Set(subjects.map((p) => p.id));
+    for (const p of subjects) {
       const cached = cachedBalances[p.id];
       if (cached && cached.credsKey !== balanceCredsKey(p)) {
         credsChangedAt.current[p.id] = Date.now();
@@ -193,17 +208,17 @@ export function useBalances(providers: Provider[]) {
   // a provider switch) arrive as events, so the page reflects them with
   // no request of its own. Only for a provider currently on screen —
   // the payload carries the id it was fetched for.
-  const providersRef = React.useRef(providers);
-  providersRef.current = providers;
+  const subjectsRef = React.useRef(subjects);
+  subjectsRef.current = subjects;
   React.useEffect(() => {
     const unlisten = listen<ProviderBalance>(BALANCE_CHANGED_EVENT, (event) => {
       const result = event.payload;
       if (!result?.providerId) return;
-      const provider = providersRef.current.find(
+      const subject = subjectsRef.current.find(
         (p) => p.id === result.providerId
       );
       // Not on screen — the page isn't asking this question.
-      if (!provider) return;
+      if (!subject) return;
       // Fetched BEFORE the user edited this provider, so it describes the
       // previous {baseUrl, apiKey}. The payload carries no record of the
       // credentials it used, and storing it would stamp it with the
@@ -211,7 +226,7 @@ export function useBalances(providers: Provider[]) {
       // re-fetch, leaving the old account's balance on the new card.
       const changedAt = credsChangedAt.current[result.providerId];
       if (changedAt && result.queriedAt < changedAt) return;
-      const credsKey = balanceCredsKey(provider);
+      const credsKey = balanceCredsKey(subject);
       const prev = cachedBalances[result.providerId];
       // Out-of-order guard: with the page and the tray both fetching, a
       // slower result can arrive after a newer one — never roll back.
@@ -230,7 +245,7 @@ export function useBalances(providers: Provider[]) {
   // timer for the whole list — a timer per provider would be N timers
   // re-armed on every render.
   const [, tick] = React.useReducer((n: number) => n + 1, 0);
-  const soonestExpiry = providers.reduce((soonest, p) => {
+  const soonestExpiry = subjects.reduce((soonest, p) => {
     const entry = balances[p.id];
     if (!entry) return soonest;
     const expiry = entry.queriedAt + balanceMinIntervalMs(entry);

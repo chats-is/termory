@@ -256,6 +256,27 @@ describe("gatewayBaseForProtocol", () => {
       "https://r.x/gw/v1"
     );
   });
+  it("appends the detected Anthropic sub-path, and only for Anthropic", () => {
+    // DeepSeek's layout: OpenAI at the root, Anthropic under /anthropic.
+    const sub = "/anthropic";
+    expect(gatewayBaseForProtocol("https://api.deepseek.com", "anthropic", sub)).toBe(
+      "https://api.deepseek.com/anthropic"
+    );
+    expect(gatewayBaseForProtocol("https://api.deepseek.com", "openai", sub)).toBe(
+      "https://api.deepseek.com/v1"
+    );
+    expect(gatewayBaseForProtocol("https://api.deepseek.com", "gemini", sub)).toBe(
+      "https://api.deepseek.com"
+    );
+    // A root that already IS the vendor's Anthropic URL must not double it.
+    expect(
+      gatewayBaseForProtocol("https://api.deepseek.com/anthropic", "anthropic", sub)
+    ).toBe("https://api.deepseek.com/anthropic");
+    // The version strip still runs underneath the prefix.
+    expect(gatewayBaseForProtocol("https://r.x/v1", "anthropic", sub)).toBe(
+      "https://r.x/anthropic"
+    );
+  });
 });
 
 describe("appProtocols", () => {
@@ -314,6 +335,24 @@ describe("providerFromBinding", () => {
   it("Codex binding gets a /v1 base (derived openai protocol)", () => {
     const codex = providerFromBinding(gateway, { id: "b-codex", app: "codex" });
     expect(codex.baseUrl).toBe("https://r.x/v1");
+  });
+  it("carries the gateway's detected Anthropic sub-path into Claude bindings", () => {
+    // DeepSeek: one gateway root, Anthropic mounted under /anthropic.
+    const deepseek: Gateway = {
+      ...gateway,
+      baseUrl: "https://api.deepseek.com",
+      capabilities: caps({ openai: true, anthropic: true, anthropicPath: "/anthropic" })
+    };
+    expect(providerFromBinding(deepseek, { id: "b1", app: "claude" }).baseUrl).toBe(
+      "https://api.deepseek.com/anthropic"
+    );
+    expect(
+      providerFromBinding(deepseek, { id: "b2", app: "claude-desktop" }).baseUrl
+    ).toBe("https://api.deepseek.com/anthropic");
+    // Codex keeps the root it was probed at.
+    expect(providerFromBinding(deepseek, { id: "b3", app: "codex" }).baseUrl).toBe(
+      "https://api.deepseek.com/v1"
+    );
   });
   it("Claude Desktop binding: anthropic base, no npm, but carries its models", () => {
     const cd = providerFromBinding(gateway, {

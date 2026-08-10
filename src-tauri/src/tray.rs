@@ -217,10 +217,11 @@ static BALANCE: Mutex<Vec<(CliApp, TrayBalance)>> = Mutex::new(Vec::new());
 /// one would let a quota fetch suppress a balance fetch.
 static BALANCE_LAST_FETCH: Mutex<Vec<(CliApp, std::time::Instant, bool)>> = Mutex::new(Vec::new());
 
-/// A wallet moves only when the user spends, and every query costs a
-/// request to a third party's billing endpoint — so the successful floor
-/// is longer than the quota's 120s.
-const BALANCE_TRAY_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+/// Same window as the quota's `QUOTA_TRAY_MIN_INTERVAL` and as the page's
+/// `BALANCE_STALE_MS` — balance and quota refresh on ONE schedule (user
+/// decision 2026-08-10). It was 300s at first, on the reasoning that a
+/// wallet moves only when the user spends.
+const BALANCE_TRAY_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
 /// After a failure, retry sooner so one blip doesn't mute the row for the
 /// full window.
 const BALANCE_TRAY_ERROR_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
@@ -1421,7 +1422,7 @@ fn spawn_balance_fetch(app: &AppHandle, cli: CliApp, provider: Provider) {
     set_balance_marker(cli, false);
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        let result = crate::balance::fetch_balance(&provider).await;
+        let result = crate::balance::fetch_balance(&(&provider).into()).await;
         refresh_balance(&handle, cli, &result);
     });
 }
@@ -1459,6 +1460,46 @@ fn clear_balance_entry(app: &AppHandle, cli: CliApp) {
     if had {
         update_cli_row_title(app, cli);
     }
+}
+
+/// Which CLI row, if any, currently NAMES this provider — i.e. the row
+/// whose balance suffix reports that same wallet.
+///
+/// Exists so a fetch the PAGE made can feed `refresh_balance`, the way the
+/// quota IPC already calls `refresh_quota`: without it the page's result
+/// was invisible to the tray, so opening the menu re-queried the wallet
+/// the page had just read, and the tray's own figure stayed older than
+/// the one on screen.
+///
+/// It has to be a LOOKUP rather than the quota's direct `(cli, result)`
+/// because the two features are keyed differently: a quota belongs to a
+/// CLI by nature (one official login each), while the page queries per
+/// CARD — and most cards are not what any row points at. Those return
+/// `None` and leave the tray untouched, marker included. A disabled tool
+/// has no row at all (`build_menu` skips it), so it can never match.
+pub fn balance_row_cli(provider_id: &str) -> Option<CliApp> {
+    let rows = CLI_ROWS.lock().ok()?;
+    cli_for_balance_provider(
+        rows.iter()
+            .map(|r| (r.cli, r.balance_provider.as_ref().map(|p| p.id.as_str()))),
+        provider_id,
+    )
+}
+
+/// The lookup itself, split out so it is testable — a `CliRow` owns a live
+/// `Submenu` handle and cannot be built in a unit test.
+fn cli_for_balance_provider<'a>(
+    rows: impl IntoIterator<Item = (CliApp, Option<&'a str>)>,
+    provider_id: &str,
+) -> Option<CliApp> {
+    // A hand-edited providers.json can hold an id-less entry; an empty id
+    // must not match another empty one and hang someone else's wallet on
+    // that row.
+    if provider_id.is_empty() {
+        return None;
+    }
+    rows.into_iter()
+        .find_map(|(cli, id)| (id == Some(provider_id)).then_some(cli))
 }
 
 /// Central sink for every completed balance fetch, whatever triggered it:
@@ -3058,29 +3099,62 @@ mod tests {
     }
 
     #[test]
+    fn a_page_fetch_only_reaches_the_row_that_names_that_provider() {
+        // Rows as `build_menu` leaves them: Codex pointing at a custom
+        // provider, Claude at Official (no balance), Gemini at another.
+        let rows = || {
+            [
+                (CliApp::Codex, Some("p-deepseek")),
+                (CliApp::Claude, None),
+                (CliApp::Gemini, Some("p-openrouter")),
+            ]
+        };
+        assert_eq!(
+            cli_for_balance_provider(rows(), "p-deepseek"),
+            Some(CliApp::Codex)
+        );
+        assert_eq!(
+            cli_for_balance_provider(rows(), "p-openrouter"),
+            Some(CliApp::Gemini)
+        );
+        // The page queries every card, so most of its fetches belong to no
+        // row — those must leave the tray (and its throttle marker) alone.
+        assert_eq!(cli_for_balance_provider(rows(), "p-inactive"), None);
+        // An id-less entry (hand-edited providers.json) must not match a
+        // row that also has none.
+        assert_eq!(
+            cli_for_balance_provider([(CliApp::Codex, Some(""))], ""),
+            None
+        );
+        assert_eq!(cli_for_balance_provider(rows(), ""), None);
+    }
+
+    #[test]
     fn balance_fetch_allowed_applies_the_outcome_specific_floor() {
-        // Same shape as the quota's: no marker ⇒ fetch; a success holds
-        // the long floor, a failure only the short one.
-        assert!(balance_fetch_allowed(None, SEC_300, SEC_60));
+        // Same shape as the quota's — and now the same floors: no marker
+        // ⇒ fetch; a success holds the long floor, a failure only the
+        // short one. The function takes both as arguments, so this pins
+        // the RULE; the constants live at the top of the file.
+        assert!(balance_fetch_allowed(None, SEC_120, SEC_60));
         assert!(!balance_fetch_allowed(
             Some((SEC_10, true)),
-            SEC_300,
+            SEC_120,
             SEC_60
         ));
         assert!(!balance_fetch_allowed(
             Some((SEC_10, false)),
-            SEC_300,
+            SEC_120,
             SEC_60
         ));
         // Past the short floor: a failure retries, a success still waits.
         assert!(balance_fetch_allowed(
             Some((SEC_90, false)),
-            SEC_300,
+            SEC_120,
             SEC_60
         ));
         assert!(!balance_fetch_allowed(
             Some((SEC_90, true)),
-            SEC_300,
+            SEC_120,
             SEC_60
         ));
     }
@@ -3088,7 +3162,7 @@ mod tests {
     const SEC_10: std::time::Duration = std::time::Duration::from_secs(10);
     const SEC_60: std::time::Duration = std::time::Duration::from_secs(60);
     const SEC_90: std::time::Duration = std::time::Duration::from_secs(90);
-    const SEC_300: std::time::Duration = std::time::Duration::from_secs(300);
+    const SEC_120: std::time::Duration = std::time::Duration::from_secs(120);
 
     #[test]
     fn quota_fetch_allowed_applies_the_outcome_specific_floor() {

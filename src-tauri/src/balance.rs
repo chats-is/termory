@@ -49,6 +49,35 @@ use std::time::Duration;
 // Wire types (camelCase to the frontend)
 // ===================================================================
 
+/// What a balance query actually needs: an identity to tag the result
+/// with, plus the two fields the module header describes as its whole
+/// input. A `Provider` satisfies it (`From` below), and so does an **AI
+/// Gateway** — one `{baseUrl, apiKey}` bound to several CLIs — which is
+/// why the query takes this rather than a `Provider`. A gateway has no
+/// `app` and is not a provider; making it pose as one would have meant
+/// inventing a CLI for it just to satisfy a field the query never reads.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BalanceSubject {
+    /// Tags the result. The CALLER's id — the frontend caches under the
+    /// id it asked for, never the one that comes back.
+    pub id: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+}
+
+impl From<&Provider> for BalanceSubject {
+    fn from(p: &Provider) -> Self {
+        Self {
+            id: p.id.clone(),
+            base_url: p.base_url.clone(),
+            api_key: p.api_key.clone(),
+        }
+    }
+}
+
 /// Outcome of one balance query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -332,10 +361,10 @@ fn parse_body(vendor: BalanceVendor, body: &Value) -> Vec<BalanceEntry> {
 // Query
 // ===================================================================
 
-/// Fetch the provider's balance. Never fails: an unrecognised host, a
+/// Fetch the subject's balance. Never fails: an unrecognised host, a
 /// missing key, a dead network and a moved response shape are all
 /// states in the result.
-pub async fn fetch_balance(p: &Provider) -> ProviderBalance {
+pub async fn fetch_balance(p: &BalanceSubject) -> ProviderBalance {
     // Vendor first, key second: with an unknown host the key is
     // irrelevant, and `Unsupported` is the state that hides the UI.
     let Some(vendor) = detect_vendor(&p.base_url) else {
@@ -437,6 +466,44 @@ pub async fn fetch_balance(p: &Provider) -> ProviderBalance {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_subject_reads_a_gateway_as_well_as_a_provider() {
+        // A GATEWAY carries no `app` and `kind: "gateway"` — the fields a
+        // `Provider` requires. The query never reads them, so the subject
+        // asks only for what it uses; deserializing a gateway used to fail
+        // outright, which is why the Gateways page could not query at all.
+        let gw: BalanceSubject = serde_json::from_value(json!({
+            "kind": "gateway",
+            "id": "gw1",
+            "name": "DeepSeek",
+            "baseUrl": "https://api.deepseek.com",
+            "apiKey": "sk-1",
+            "bindings": [{ "id": "b1", "app": "codex" }]
+        }))
+        .unwrap();
+        assert_eq!(gw.id, "gw1");
+        assert_eq!(gw.base_url, "https://api.deepseek.com");
+        assert_eq!(gw.api_key, "sk-1");
+
+        // …and a provider still resolves to the same three fields, through
+        // the IPC's own JSON path and through `From`.
+        let p: BalanceSubject = serde_json::from_value(json!({
+            "kind": "custom",
+            "id": "p1",
+            "app": "codex",
+            "name": "DeepSeek",
+            "baseUrl": "https://api.deepseek.com/v1",
+            "apiKey": "sk-2"
+        }))
+        .unwrap();
+        assert_eq!((p.id.as_str(), p.api_key.as_str()), ("p1", "sk-2"));
+
+        // A subject with neither field set is still readable — it resolves
+        // to `Unsupported`/`NoKey` rather than failing to parse.
+        let bare: BalanceSubject = serde_json::from_value(json!({ "id": "x" })).unwrap();
+        assert!(bare.base_url.is_empty() && bare.api_key.is_empty());
+    }
 
     #[test]
     fn detect_vendor_reads_the_host_through_any_path_suffix() {

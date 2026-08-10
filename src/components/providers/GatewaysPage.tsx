@@ -17,6 +17,7 @@ import {
   TooltipContent,
   TooltipTrigger
 } from "@/components/ui/tooltip";
+import { BalanceInline } from "./BalanceInline";
 import { BrandIcon } from "@/components/BrandIcon";
 import { EmptyState } from "@/components/EmptyState";
 import {
@@ -30,6 +31,7 @@ import {
   maskKey,
   providerFromBinding
 } from "@/lib/provider-utils";
+import { useBalances } from "@/hooks/useBalances";
 import type { ActiveState, CliApp, Gateway, GatewayBinding } from "@/types";
 import { useT } from "@/i18n";
 
@@ -96,6 +98,15 @@ export function GatewaysPage({
     grok: null
   });
   const [busy, setBusy] = React.useState<string | null>(null);
+
+  // Wallet balance per GATEWAY, keyed by the gateway's own id. A gateway
+  // is one {baseUrl, apiKey}, i.e. exactly one wallet, however many CLIs
+  // it is bound to — so the reading belongs on the gateway card, not
+  // repeated on each binding row. `useBalances` takes the narrow
+  // {id, baseUrl, apiKey} subject, which a Gateway already satisfies; no
+  // stand-in Provider is synthesized for it.
+  const { balances, balanceLoading, balanceInCooldown, refreshBalance } =
+    useBalances(gateways);
 
   // All gateway bindings materialized as providers — passed to the
   // reverse-derivation so a binding's synthesized id can be matched.
@@ -452,6 +463,18 @@ export function GatewaysPage({
                     </div>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
+                    {/* The gateway's own wallet. Inside the action cluster
+                        rather than under the base URL: it is live account
+                        state, not a stored setting, and the cluster is the
+                        row's `items-center` column — the name block beside
+                        it is two lines of text with a different baseline.
+                        Self-hiding, so a relay gateway looks as before. */}
+                    <BalanceInline
+                      balance={balances[gateway.id]}
+                      loading={balanceLoading.has(gateway.id)}
+                      cooldown={balanceInCooldown(gateway.id)}
+                      onRefresh={() => void refreshBalance(gateway, true)}
+                    />
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <Button

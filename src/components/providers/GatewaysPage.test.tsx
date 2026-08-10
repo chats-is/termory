@@ -8,9 +8,11 @@ import {
   type RenderOptions
 } from "@testing-library/react";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { setFormatLocale } from "@/lib/format";
 import { blankGateway, maskKey, providerFromBinding } from "@/lib/provider-utils";
-import type { ActiveState, CliApp, Gateway } from "@/types";
+import type { ActiveState, CliApp, Gateway, ProviderBalance } from "@/types";
 import { toast } from "sonner";
+import { __resetBalanceCacheForTests } from "@/hooks/useBalances";
 import { GatewaysPage } from "./GatewaysPage";
 
 // GatewaysPage calls invoke() for `provider_active_states` on mount (and after
@@ -25,8 +27,18 @@ vi.mock("sonner", () => ({
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   ask: vi.fn().mockResolvedValue(true)
 }));
+// The page reads each gateway's wallet through `useBalances`, which
+// subscribes to the backend's balance-changed event. Unmocked, the real
+// `listen` rejects against a missing Tauri host and vitest reports it as
+// an unhandled error.
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn().mockResolvedValue(() => {})
+}));
 
 beforeEach(() => {
+  // The balance cache is module-level (it survives route remounts by
+  // design), so one test's reading would otherwise seed the next one's.
+  __resetBalanceCacheForTests();
   invokeMock.mockReset();
   vi.mocked(toast.error).mockClear();
   vi.mocked(toast.success).mockClear();
@@ -194,5 +206,80 @@ describe("GatewaysPage — delete cleanup", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete AI Gateway" }));
     await waitFor(() => expect(setGateways).toHaveBeenCalled());
     expect(toast.error).not.toHaveBeenCalled();
+  });
+});
+
+describe("GatewaysPage — gateway balance", () => {
+  // A gateway is ONE {baseUrl, apiKey} = one wallet, however many CLIs it
+  // binds — so the reading is fetched under the GATEWAY's id and rendered
+  // once on its card, not repeated per binding row.
+  function balance(over: Partial<ProviderBalance> = {}): ProviderBalance {
+    return {
+      providerId: "gw1",
+      status: "ok",
+      entries: [{ currency: "USD", remaining: 89.42, depleted: false }],
+      queriedAt: Date.now(),
+      ...over
+    };
+  }
+
+  it("queries with the gateway's own id + creds and shows the amount", async () => {
+    setFormatLocale("en-US");
+    const seen: { id: string; baseUrl?: string; apiKey?: string }[] = [];
+    invokeMock.mockImplementation((cmd: string, args: Record<string, unknown>) => {
+      if (cmd === "fetch_provider_balance") {
+        const subject = args.subject as { id: string; baseUrl?: string; apiKey?: string };
+        seen.push(subject);
+        return Promise.resolve(balance({ providerId: subject.id }));
+      }
+      return Promise.resolve(cmd === "provider_active_states" ? [] : null);
+    });
+
+    render(
+      <GatewaysPage
+        gateways={[{ ...codexGateway(), id: "gw1" }]}
+        setGateways={vi.fn()}
+        addSignal={0}
+        markActive={vi.fn()}
+        activeProviderIds={{}}
+        installed={ALL_INSTALLED}
+        codexFollowForBinding={vi.fn().mockResolvedValue(undefined)}
+      />
+    );
+
+    expect(await screen.findByText("$89.42")).toBeInTheDocument();
+    // ONE query, for the gateway itself — not one per binding, and not
+    // under a binding's id (which would be a second wallet lookup for the
+    // same credentials).
+    expect(seen).toEqual([
+      { id: "gw1", baseUrl: "https://gw.example.com", apiKey: "sk-test-key" }
+    ]);
+  });
+
+  it("renders no balance row for a gateway whose host has no wallet API", async () => {
+    invokeMock.mockImplementation((cmd: string) =>
+      Promise.resolve(
+        cmd === "fetch_provider_balance"
+          ? balance({ status: "unsupported", entries: [] })
+          : cmd === "provider_active_states"
+            ? []
+            : null
+      )
+    );
+    render(
+      <GatewaysPage
+        gateways={[{ ...codexGateway(), id: "gw1" }]}
+        setGateways={vi.fn()}
+        addSignal={0}
+        markActive={vi.fn()}
+        activeProviderIds={{}}
+        installed={ALL_INSTALLED}
+        codexFollowForBinding={vi.fn().mockResolvedValue(undefined)}
+      />
+    );
+    await screen.findByRole("button", { name: "Edit AI Gateway" });
+    // The value slot holds a balance or nothing at all — never a status
+    // word. Most gateways are exactly this case.
+    expect(screen.queryByLabelText("Refresh balance")).not.toBeInTheDocument();
   });
 });

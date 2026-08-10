@@ -158,6 +158,42 @@ describe("GatewayEditor — detection + binding", () => {
     expect(screen.getByLabelText("Apply OpenCode")).not.toBeDisabled();
   });
 
+  it("re-detects when the key is cleared and the SAME key pasted back", async () => {
+    // Reported: clearing the API key wipes the detected capabilities (every
+    // binding goes unavailable), and pasting the identical key back leaves it
+    // that way — the dedup memo still held those creds, so no probe ran and
+    // there was no way back to a bindable state.
+    setup();
+    await fillCredsAndDetect();
+    invokeMock.mockClear();
+
+    const keyField = screen.getByLabelText("API key");
+    fireEvent.change(keyField, { target: { value: "" } });
+    // Clearing throws the result away — that part is correct, the caps
+    // belonged to the old credentials.
+    expect(screen.getByLabelText("Apply Claude Code")).toBeDisabled();
+
+    fireEvent.change(keyField, { target: { value: "sk-test-key" } });
+    await waitFor(
+      () =>
+        expect(invokeMock).toHaveBeenCalledWith(
+          "detect_gateway_apis",
+          expect.objectContaining({ apiKey: "sk-test-key" })
+        ),
+      { timeout: 2000 }
+    );
+    await waitFor(() =>
+      expect(screen.getByLabelText("Apply Claude Code")).not.toBeDisabled()
+    );
+    // …and settles: the result arriving must not re-arm the effect that
+    // produced it (the memo now also reads `caps`, which the detect sets).
+    const detects = () =>
+      invokeMock.mock.calls.filter((c) => c[0] === "detect_gateway_apis").length;
+    const settled = detects();
+    await new Promise((r) => setTimeout(r, 1200));
+    expect(detects()).toBe(settled);
+  });
+
   it("only offers a binding for an INSTALLED app, even when the gateway supports it", async () => {
     // Claude Desktop + Codex not installed; Claude Code + the rest installed.
     setup({}, true, {

@@ -255,16 +255,26 @@ export function GatewayEditor({
   // Auto-detect (debounced) once BOTH base URL and API key are entered —
   // so detection doesn't fire (and bindings don't appear) on a half-
   // filled form. A keyless gateway can still be probed with the manual
-  // "Detect APIs" button. Fires once per unique (baseUrl, apiKey).
+  // "Detect APIs" button.
+  //
+  // The dedup memo only applies while the RESULT for those creds is still on
+  // screen (`caps`). Editing either field throws the result away — correctly,
+  // it described the old credentials — so a memo that outlived it made
+  // restoring the same value unrecoverable: clear the API key (every binding
+  // goes unavailable), paste the identical key back, and the sig matched, no
+  // probe ran, and the editor sat with no capabilities and no way to get them
+  // back short of the manual refresh button. Reported bug; gating on `caps`
+  // keeps the memo's real job (don't re-probe creds we already have an answer
+  // for) and drops the case where there is no answer left.
   React.useEffect(() => {
     const base = baseUrl.trim();
     const key = apiKey.trim();
     if (!base || !key) return;
-    if (lastTried.current === `${base}\n${key}`) return;
+    if (caps && lastTried.current === `${base}\n${key}`) return;
     const t = setTimeout(() => void detect(), 700);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseUrl, apiKey]);
+  }, [baseUrl, apiKey, caps]);
 
   const setBind = (app: CliApp, patch: Partial<BindDraft>) =>
     setBinds((cur) => ({ ...cur, [app]: { ...cur[app], ...patch } }));
@@ -538,6 +548,14 @@ export function GatewayEditor({
                     {detecting
                       ? t("help.fetchingModels")
                       : t("help.modelsAvailable", { n: caps?.models?.length ?? 0 })}
+                  </span>
+                )}
+                {/* The Anthropic mode was found under a sub-path, so a Claude
+                    binding's real base URL is not the root the user typed —
+                    say so rather than rewriting it invisibly. */}
+                {!detecting && caps?.anthropicPath && (
+                  <span className="text-xs text-muted-foreground truncate">
+                    {t("help.anthropicSubpath", { path: caps.anthropicPath })}
                   </span>
                 )}
               </div>

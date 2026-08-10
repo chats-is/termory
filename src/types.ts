@@ -211,6 +211,11 @@ export type GatewayCapabilities = {
   openai: boolean;
   anthropic: boolean;
   gemini: boolean;
+  /** Sub-path prefix where the Anthropic Messages API answered, when it is NOT
+   * at the root (DeepSeek / Moonshot mount it at `/anthropic` while keeping the
+   * OpenAI-compatible API at the root). Detected, never typed; applied by
+   * `gatewayBaseForProtocol` to Anthropic bindings only. */
+  anthropicPath?: string;
   models: string[];
 };
 
@@ -347,15 +352,29 @@ export type BalanceEntry = {
   depleted: boolean;
 };
 
-/** Result of `fetch_provider_balance` for one provider (backend
+/** What a balance query needs (backend `balance::BalanceSubject`): an id
+ * to tag the result with, plus the `{baseUrl, apiKey}` pair the vendor is
+ * recognised and queried from. Both a `Provider` and a `Gateway` satisfy
+ * it structurally, which is the point — a gateway is one wallet bound to
+ * several CLIs and has no `app`, so it is a balance subject without being
+ * a provider. */
+export type BalanceSubject = {
+  id: string;
+  baseUrl?: string;
+  apiKey?: string;
+};
+
+/** Result of `fetch_provider_balance` for one subject (backend
  * `balance.rs`). The IPC never rejects: every failure rides in `status`
  * + `error`.
  *
  * `entries` is a LIST because DeepSeek reports its balance per currency
  * and can return more than one; every other vendor yields exactly one. */
 export type ProviderBalance = {
-  /** The `Provider.id` this belongs to — results are keyed by it so one
-   * can never be rendered under another card. */
+  /** The subject id this belongs to (a provider's or a gateway's) —
+   * results are keyed by it so one can never be rendered under another
+   * card. Named for the provider case it shipped with; the wire field is
+   * unchanged. */
   providerId: string;
   status: BalanceStatus;
   entries?: BalanceEntry[];

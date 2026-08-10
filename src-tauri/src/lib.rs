@@ -761,18 +761,34 @@ async fn fetch_provider_models(provider: Provider) -> Result<ModelListResult, St
     Ok(fetch_models(&provider).await)
 }
 
-/// Account balance for ONE custom provider, inferred from its
-/// `base_url` (see `balance.rs`). Termory's providers are all
-/// third-party endpoints, so there is no login to read — the provider's
-/// own `api_key` is what queries the vendor's wallet.
+/// Account balance for ONE wallet, inferred from its `base_url` (see
+/// `balance.rs`). The subject is a custom PROVIDER or an AI GATEWAY —
+/// both are third-party endpoints the user typed in, so there is no
+/// login to read and the subject's own `api_key` is what queries the
+/// vendor's wallet.
 ///
 /// Never returns Err: an unrecognised host (the common case — every
-/// relay and gateway), a missing key, and a failed request are all
-/// states inside the result, so the card renders per-state instead of
-/// raising a toast.
+/// relay), a missing key, and a failed request are all states inside
+/// the result, so the card renders per-state instead of raising a toast.
 #[tauri::command]
-async fn fetch_provider_balance(provider: Provider) -> Result<balance::ProviderBalance, String> {
-    Ok(balance::fetch_balance(&provider).await)
+async fn fetch_provider_balance(
+    handle: tauri::AppHandle,
+    subject: balance::BalanceSubject,
+) -> Result<balance::ProviderBalance, String> {
+    let result = balance::fetch_balance(&subject).await;
+    // Keep the tray's balance row in sync with what the page just fetched
+    // (no extra network hit) — the same handoff `fetch_subscription_quota`
+    // does, and it also makes page and tray share ONE throttle marker, so
+    // opening the menu no longer re-queries a wallet the page just read.
+    //
+    // Only when a row actually names this provider: the page queries per
+    // CARD, and a provider active nowhere belongs on no row. Keyed by the
+    // id we ASKED for, never `result.provider_id` — same rule the
+    // frontend cache follows.
+    if let Some(cli) = tray::balance_row_cli(&subject.id) {
+        tray::refresh_balance(&handle, cli, &result);
+    }
+    Ok(result)
 }
 
 /// Official-account subscription quota (5-hour / weekly rate-limit

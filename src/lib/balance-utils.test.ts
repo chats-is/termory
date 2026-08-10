@@ -8,7 +8,7 @@ import {
   mergeBalanceResult
 } from "./balance-utils";
 import { blankProvider } from "./provider-utils";
-import type { BalanceEntry, ProviderBalance } from "@/types";
+import type { BalanceEntry, Provider, ProviderBalance } from "@/types";
 
 function result(over: Partial<ProviderBalance> = {}): ProviderBalance {
   return {
@@ -205,8 +205,20 @@ describe("balanceCredsKey", () => {
     expect(balanceCredsKey({ ...base, baseUrl: "https://openrouter.ai" })).not.toBe(same);
     // …or a different account's wallet at the same vendor.
     expect(balanceCredsKey({ ...base, apiKey: "sk-b" })).not.toBe(same);
-    // Fields the answer does NOT depend on must not invalidate it.
-    expect(balanceCredsKey({ ...base, name: "renamed", model: "x" })).toBe(same);
+    // Fields the answer does NOT depend on must not invalidate it. Passed
+    // as a whole Provider (not an object literal) because the parameter is
+    // now the narrow `BalanceSubject` — a provider still satisfies it
+    // structurally, which is what lets a GATEWAY be a subject too.
+    const renamed: Provider = { ...base, name: "renamed", model: "x" };
+    expect(balanceCredsKey(renamed)).toBe(same);
+    // …and a gateway, which carries no `app` at all, is a valid subject.
+    expect(
+      balanceCredsKey({
+        id: "gw1",
+        baseUrl: base.baseUrl,
+        apiKey: base.apiKey
+      })
+    ).toBe(same);
   });
 
   it("cannot be forged by moving the split point", () => {

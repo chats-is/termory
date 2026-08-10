@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { blankProvider } from "@/lib/provider-utils";
-import type { Provider, ProviderBalance } from "@/types";
+import type { BalanceSubject, Provider, ProviderBalance } from "@/types";
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
@@ -56,8 +56,8 @@ describe("useBalances", () => {
   it("fetches every provider on screen and keys results by provider id", async () => {
     const a = provider({ id: "a" });
     const b = provider({ id: "b", baseUrl: "https://openrouter.ai/api/v1" });
-    invokeMock.mockImplementation((_cmd, args: { provider: Provider }) =>
-      Promise.resolve(result({ providerId: args.provider.id }))
+    invokeMock.mockImplementation((_cmd, args: { subject: BalanceSubject }) =>
+      Promise.resolve(result({ providerId: args.subject.id }))
     );
 
     const { result: hook } = renderHook(() => useBalances([a, b]));
@@ -164,11 +164,13 @@ describe("useBalances", () => {
     await waitFor(() => expect(hook.current.balanceLoading.has("p1")).toBe(false));
   });
 
-  it("measures a manual click against the cooldown, not the stale window", async () => {
-    // Two independent floors: the automatic pass holds a success for
-    // 5 min, a click only for the 2 min cooldown. One shared floor would
-    // make a click at 2:30 silently do nothing while its button looked
-    // enabled — the state balanceInCooldown exists to show.
+  it("holds a click and the automatic pass to the same window, and shows it", async () => {
+    // The two floors are separate constants that currently carry the SAME
+    // value (they track the quota's, user decision 2026-08-10): inside the
+    // window neither the click nor the automatic pass fetches, past it
+    // both do. `balanceInCooldown` is what makes the refused click
+    // visible — a disabled button rather than a click that silently does
+    // nothing.
     invokeMock.mockResolvedValue(result({ queriedAt: Date.now() }));
     const p = provider();
     const { result: hook } = renderHook(() => useBalances([p]));
@@ -184,8 +186,7 @@ describe("useBalances", () => {
     });
     expect(invokeMock).toHaveBeenCalledTimes(1);
 
-    // Past the cooldown but inside the automatic window: the click
-    // fetches, the automatic pass still does not.
+    // Past the window: the button re-enables and BOTH paths fetch.
     vi.useFakeTimers();
     vi.setSystemTime(Date.now() + 150_000);
     expect(hook.current.balanceInCooldown("p1")).toBe(false);
@@ -193,10 +194,14 @@ describe("useBalances", () => {
       await hook.current.refreshBalance(p, true);
     });
     expect(invokeMock).toHaveBeenCalledTimes(2);
+    // …and so does the automatic pass, which is the point: with the two
+    // windows equal, whatever the click may do the background pass may do
+    // too. (The stub answers with a fixed `queriedAt`, so the stored entry
+    // is still the original one and both floors measure from it.)
     await act(async () => {
       await hook.current.refreshBalance(p);
     });
-    expect(invokeMock).toHaveBeenCalledTimes(2);
+    expect(invokeMock).toHaveBeenCalledTimes(3);
   });
 
   it("keeps the previous amount when a refresh fails", async () => {

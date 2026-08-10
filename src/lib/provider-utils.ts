@@ -516,10 +516,16 @@ export function appProtocols(
  * gateway stores no API-version path; each protocol's CLI gets the path it
  * expects: OpenAI a trailing `/v1`, Anthropic the bare root (Claude appends
  * `/v1` itself), Gemini the bare root (it appends `/v1beta`). Any version
- * suffix pasted into the root is stripped first so it's never doubled. */
+ * suffix pasted into the root is stripped first so it's never doubled.
+ *
+ * `anthropicPath` is the DETECTED sub-path prefix from `GatewayCapabilities`
+ * (`/anthropic` — DeepSeek and Moonshot keep the OpenAI-compatible API at the
+ * root and mount Anthropic under it). It applies to the Anthropic protocol
+ * only. Mirror of the Rust `gateway_base_for_protocol`; keep the two in sync. */
 export function gatewayBaseForProtocol(
   base: string,
-  protocol: GatewayProtocol
+  protocol: GatewayProtocol,
+  anthropicPath?: string
 ): string {
   // Reduce to the gateway's bare ROOT (strip any API-version suffix the
   // user may have pasted), then apply each protocol's path convention.
@@ -532,8 +538,14 @@ export function gatewayBaseForProtocol(
     case "openai":
       // Both OpenAI flavors live under /v1 (chat/completions vs responses).
       return `${b}/v1`;
-    case "anthropic":
-      return b; // bare root — Claude Code appends /v1 itself
+    case "anthropic": {
+      // Bare root — Claude Code appends /v1 itself — plus the detected
+      // sub-path when the vendor doesn't serve Anthropic at the root. A root
+      // already ending in it means the user typed the vendor's Anthropic URL
+      // as the gateway base; appending again would 404.
+      const sub = (anthropicPath ?? "").replace(/\/+$/, "");
+      return !sub || b.endsWith(sub) ? b : `${b}${sub}`;
+    }
     case "gemini":
       return b; // bare root — Gemini appends /v1beta itself
   }
@@ -575,7 +587,11 @@ export function providerFromBinding(gateway: Gateway, binding: GatewayBinding): 
     app: binding.app,
     kind: "custom",
     name: gateway.name,
-    baseUrl: gatewayBaseForProtocol(gateway.baseUrl ?? "", protocol),
+    baseUrl: gatewayBaseForProtocol(
+      gateway.baseUrl ?? "",
+      protocol,
+      gateway.capabilities?.anthropicPath
+    ),
     apiKey: gateway.apiKey ?? "",
     model: binding.model ?? "",
     favicon: gateway.favicon

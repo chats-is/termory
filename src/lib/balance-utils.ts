@@ -1,5 +1,5 @@
 import { formatCurrency } from "@/lib/format";
-import type { BalanceEntry, Provider, ProviderBalance } from "@/types";
+import type { BalanceEntry, BalanceSubject, ProviderBalance } from "@/types";
 
 /**
  * What the VALUE slot shows. The slot holds a balance and nothing else —
@@ -141,6 +141,6 @@ export function mergeBalanceResult(
  *
  * NUL as the separator because it cannot occur in either field.
  */
-export function balanceCredsKey(p: Provider): string {
+export function balanceCredsKey(p: BalanceSubject): string {
   return `${p.baseUrl ?? ""}\u0000${p.apiKey ?? ""}`;
 }
