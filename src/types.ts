@@ -321,6 +321,48 @@ export type SubscriptionQuota = {
   queriedAt?: number;
 };
 
+/** Outcome of one custom-provider balance query (backend `BalanceStatus`).
+ *
+ * `unsupported` and `noKey` are NOT failures — they are the ordinary
+ * state of most providers (any relay, any gateway, any half-filled
+ * entry), so the card renders NOTHING for them rather than an error. */
+export type BalanceStatus =
+  | "ok"
+  | "unsupported"
+  | "no_key"
+  | "auth_failed"
+  | "error";
+
+/** One wallet amount, in MAJOR currency units (the backend converts
+ * Novita's 0.0001-USD minor unit at parse time). `total` / `used` come
+ * only from OpenRouter, the one vendor reporting the granted/spent pair. */
+export type BalanceEntry = {
+  currency: string;
+  remaining: number;
+  total?: number;
+  used?: number;
+  /** The account can no longer spend — the vendor's own flag where it
+   * has one (DeepSeek `is_available`, which can be false with a
+   * non-zero balance), else `remaining <= 0`. */
+  depleted: boolean;
+};
+
+/** Result of `fetch_provider_balance` for one provider (backend
+ * `balance.rs`). The IPC never rejects: every failure rides in `status`
+ * + `error`.
+ *
+ * `entries` is a LIST because DeepSeek reports its balance per currency
+ * and can return more than one; every other vendor yields exactly one. */
+export type ProviderBalance = {
+  /** The `Provider.id` this belongs to — results are keyed by it so one
+   * can never be rendered under another card. */
+  providerId: string;
+  status: BalanceStatus;
+  entries?: BalanceEntry[];
+  error?: string;
+  queriedAt: number;
+};
+
 /** One saved official-login snapshot (see backend `accounts.rs`). The
  * token payload never leaves the backend; this is the display view. */
 export type SavedAccount = {

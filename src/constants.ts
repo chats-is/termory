@@ -99,6 +99,13 @@ export const ACTIVE_STATE_REFRESH_EVENT = "termory:providers-refresh";
 // QUOTA_CHANGED_EVENT in src-tauri/src/quota.rs.
 export const QUOTA_CHANGED_EVENT = "termory:quota-changed";
 
+// Backend pushes a `ProviderBalance` after every balance fetch it made
+// itself (the tray fetches on menu open, at startup, and after a provider
+// switch or edit), so the Providers page reflects it without its own
+// request and both share one throttle marker. Rust mirror:
+// BALANCE_CHANGED_EVENT in src-tauri/src/balance.rs.
+export const BALANCE_CHANGED_EVENT = "termory:balance-changed";
+
 // Backend pushes `{ app, ok, error? }` when its account auto-sync reached an
 // outcome worth reporting for that CLI: it rewrote the saved entry for the
 // account currently logged in (a token rotation, a re-login run in the

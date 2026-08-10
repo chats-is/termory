@@ -609,7 +609,7 @@ fn parse_claude_usage(body: &serde_json::Value) -> (Vec<QuotaTier>, Option<Extra
 /// Anthropic error envelope `{"error": {"type": ..., "message": ...}}`
 /// (a top-level `message` is also accepted). Non-JSON / unexpected
 /// bodies fall back to the raw text, truncated.
-fn http_error_message(status: reqwest::StatusCode, body: &str) -> String {
+pub(crate) fn http_error_message(status: reqwest::StatusCode, body: &str) -> String {
     match api_error_detail(body) {
         Some(detail) => format!("HTTP {status}: {detail}"),
         None => format!("HTTP {status}"),
@@ -1918,7 +1918,7 @@ pub async fn fetch_quota(app: CliApp) -> SubscriptionQuota {
     }
 }
 
-fn now_millis() -> i64 {
+pub(crate) fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

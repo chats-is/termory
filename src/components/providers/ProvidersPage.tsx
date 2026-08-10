@@ -46,6 +46,7 @@ import type {
   TestResult
 } from "@/types";
 import { QUOTA_SUPPORTED, useQuotas } from "@/hooks/useQuotas";
+import { useBalances } from "@/hooks/useBalances";
 import { BrandIcon } from "@/components/BrandIcon";
 import { EmptyState } from "@/components/EmptyState";
 import { useT, type MessageKey } from "@/i18n";
@@ -755,6 +756,13 @@ export function ProvidersPage({
     () => [...providersForApp, ...gatewayBoundForApp.map((g) => g.synth)],
     [providersForApp, gatewayBoundForApp]
   );
+  // Wallet balance for the cards on screen (src/hooks/useBalances.ts).
+  // Driven off `allProvidersForApp` so gateway-binding cards are covered
+  // too — a binding can point straight at a vendor, and the query only
+  // ever needs a base URL and a key.
+  const { balances, balanceLoading, balanceInCooldown, refreshBalance } =
+    useBalances(allProvidersForApp);
+
   const activeState = activeStates[app];
   // The "in use" id. OpenCode's matchedProviderId is resolved by the live
   // default-slot id (not by creds), so it's already unambiguous — running it
@@ -1514,6 +1522,10 @@ export function ProvidersPage({
                   settingDefault={settingDefault === p.id}
                   testing={testing === p.id}
                   activatable={installed[app]}
+                  balance={balances[p.id]}
+                  balanceLoading={balanceLoading.has(p.id)}
+                  balanceCooldown={balanceInCooldown(p.id)}
+                  onRefreshBalance={() => void refreshBalance(p, true)}
                   onToggleEnabled={isMulti ? () => void toggleEnabled(p) : undefined}
                   onSetDefault={() => void setAsDefault(p)}
                   onEdit={() => startEdit(p)}
@@ -1542,6 +1554,10 @@ export function ProvidersPage({
                   settingDefault={settingDefault === synth.id}
                   testing={testing === synth.id}
                   activatable={installed[app]}
+                  balance={balances[synth.id]}
+                  balanceLoading={balanceLoading.has(synth.id)}
+                  balanceCooldown={balanceInCooldown(synth.id)}
+                  onRefreshBalance={() => void refreshBalance(synth, true)}
                   onToggleEnabled={
                     isMulti ? () => void toggleGatewayEnabled(synth) : undefined
                   }

@@ -1,4 +1,5 @@
 mod accounts;
+mod balance;
 mod claude_auth;
 mod claude_desktop;
 mod codex_follow;
@@ -648,6 +649,7 @@ async fn activate_provider(
     .await
     .map_err(|err| err.to_string())??;
     let _ = tray::rebuild_menu(&app);
+    tray::invalidate_balance_all(&app);
     Ok(())
 }
 
@@ -700,6 +702,7 @@ async fn set_default_provider(
     .await
     .map_err(|err| err.to_string())??;
     let _ = tray::rebuild_menu(&app);
+    tray::invalidate_balance_all(&app);
     Ok(())
 }
 
@@ -717,6 +720,7 @@ async fn delete_provider(app: tauri::AppHandle, provider: Provider) -> Result<()
     .await
     .map_err(|err| err.to_string())??;
     let _ = tray::rebuild_menu(&app);
+    tray::invalidate_balance_all(&app);
     Ok(())
 }
 
@@ -740,6 +744,7 @@ async fn deactivate_provider(
     .await
     .map_err(|err| err.to_string())??;
     let _ = tray::rebuild_menu(&handle);
+    tray::invalidate_balance_all(&handle);
     Ok(())
 }
 
@@ -754,6 +759,20 @@ async fn test_provider_api(provider: Provider) -> Result<TestResult, String> {
 #[tauri::command]
 async fn fetch_provider_models(provider: Provider) -> Result<ModelListResult, String> {
     Ok(fetch_models(&provider).await)
+}
+
+/// Account balance for ONE custom provider, inferred from its
+/// `base_url` (see `balance.rs`). Termory's providers are all
+/// third-party endpoints, so there is no login to read — the provider's
+/// own `api_key` is what queries the vendor's wallet.
+///
+/// Never returns Err: an unrecognised host (the common case — every
+/// relay and gateway), a missing key, and a failed request are all
+/// states inside the result, so the card renders per-state instead of
+/// raising a toast.
+#[tauri::command]
+async fn fetch_provider_balance(provider: Provider) -> Result<balance::ProviderBalance, String> {
+    Ok(balance::fetch_balance(&provider).await)
 }
 
 /// Official-account subscription quota (5-hour / weekly rate-limit
@@ -891,6 +910,7 @@ async fn write_app_providers(
     .await
     .map_err(|e| e.to_string())??;
     let _ = tray::rebuild_menu(&app);
+    tray::invalidate_balance_all(&app);
     Ok(())
 }
 
@@ -929,6 +949,7 @@ async fn write_app_gateways(app: tauri::AppHandle, value: serde_json::Value) -> 
     // exactly like `write_app_providers` does — this is its sibling and needs
     // the same rebuild.
     let _ = tray::rebuild_menu(&app);
+    tray::invalidate_balance_all(&app);
     Ok(())
 }
 
@@ -1286,6 +1307,7 @@ pub fn run() {
             follow_codex_sessions,
             test_provider_api,
             fetch_subscription_quota,
+            fetch_provider_balance,
             fetch_provider_models,
             fetch_provider_favicon,
             detect_gateway_apis,
@@ -1366,6 +1388,12 @@ pub fn run() {
             // tray click (menu open, rate-limited in trigger_quota_refresh)
             // and whenever the Providers page fetches via IPC.
             tray::trigger_quota_refresh(app.handle());
+            // Same one-shot for any CLI row already pointing at a custom
+            // provider, so its wallet shows on the FIRST menu open. Like
+            // the quota there is no polling after this — but unlike it
+            // there is no watcher path either: a wallet moves when the
+            // user spends somewhere else, which leaves no local trace.
+            tray::trigger_balance_refresh(app.handle());
             // One catch-up pass over each CLI's saved account for the login
             // it is currently on. The watcher keeps them in step from here
             // — Claude's Keychain included, through the files beside its

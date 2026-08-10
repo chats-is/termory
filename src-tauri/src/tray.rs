@@ -168,9 +168,62 @@ struct CliRow {
     /// Whether this row carries the quota suffix (CLI supported AND
     /// Official active).
     shows_quota: bool,
+    /// The custom provider this row currently names, when one is active.
+    /// `Some` ⇒ the row carries the BALANCE suffix instead of the quota
+    /// one — the two are mutually exclusive by construction: quota
+    /// belongs to the official login, a balance to the third-party
+    /// account the row is pointing at.
+    ///
+    /// The whole `Provider` is kept (not just its id) so a fetch needs no
+    /// disk read to recover the credentials: the triggers run on the main
+    /// thread, where re-reading providers.json is exactly the cost the
+    /// cached-row design exists to avoid.
+    balance_provider: Option<Provider>,
 }
 
 static CLI_ROWS: Mutex<Vec<CliRow>> = Mutex::new(Vec::new());
+
+/// One CLI row's cached balance. Keyed by CLI because a row shows exactly
+/// one — the provider it currently names — and tagged with that
+/// provider's id so a switch can't leave the previous provider's number
+/// under the new one's name.
+///
+/// Stores the API's own values, NOT a rendered string: a language change
+/// re-labels the cached figure instead of freezing the locale it was
+/// fetched under (same rule as `TrayTier`).
+#[derive(Clone, PartialEq)]
+struct TrayBalance {
+    provider_id: String,
+    entries: Vec<TrayBalanceEntry>,
+    /// When the fetch behind these figures COMPLETED. Two fetches for one
+    /// CLI can overlap — `invalidate_balance_all` clears the throttle
+    /// marker, so a provider mutation starts a second one while the first
+    /// is still out — and without this the later ARRIVAL wins even when
+    /// it carries the older reading.
+    queried_at: i64,
+}
+
+#[derive(Clone, PartialEq)]
+struct TrayBalanceEntry {
+    remaining: f64,
+    total: Option<f64>,
+    currency: String,
+}
+
+static BALANCE: Mutex<Vec<(CliApp, TrayBalance)>> = Mutex::new(Vec::new());
+
+/// Balance throttle, deliberately its OWN marker rather than the quota's:
+/// the two query different endpoints on different schedules, and sharing
+/// one would let a quota fetch suppress a balance fetch.
+static BALANCE_LAST_FETCH: Mutex<Vec<(CliApp, std::time::Instant, bool)>> = Mutex::new(Vec::new());
+
+/// A wallet moves only when the user spends, and every query costs a
+/// request to a third party's billing endpoint — so the successful floor
+/// is longer than the quota's 120s.
+const BALANCE_TRAY_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+/// After a failure, retry sooner so one blip doesn't mute the row for the
+/// full window.
+const BALANCE_TRAY_ERROR_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// A saved-login row's live handle, kept so an account switch can move the
 /// checkmark IN PLACE. A full `set_menu` closes an open menu on macOS, and the
@@ -264,7 +317,36 @@ fn rebuild_if_installed_stale(app: &AppHandle, installed: &InstallSnapshot) -> b
 
 /// Compose a CLI row title from its base + (when shown) the cached
 /// plan/quota suffix: "Claude Code · Official (Max) · 🟢 12% 5h · …".
-fn cli_row_title(base: &str, shows_quota: bool, cli: CliApp, labels: &TrayLabels) -> String {
+fn cli_row_title(
+    base: &str,
+    shows_quota: bool,
+    balance_provider: Option<&Provider>,
+    cli: CliApp,
+    labels: &TrayLabels,
+) -> String {
+    // A custom provider is live: the row names IT, so the suffix is that
+    // account's wallet. Mutually exclusive with the quota suffix by
+    // construction — `shows_quota` requires Official, `balance_provider`
+    // requires a custom provider.
+    if let Some(p) = balance_provider {
+        let Some(b) = BALANCE
+            .lock()
+            .ok()
+            .and_then(|g| g.iter().find(|(c, _)| *c == cli).map(|(_, b)| b.clone()))
+        else {
+            return base.to_string();
+        };
+        // Cached under a DIFFERENT provider — the row was switched and no
+        // fetch for the new one has landed. Showing the old number under
+        // the new name is the one wrong answer here.
+        if b.provider_id != p.id {
+            return base.to_string();
+        }
+        return match balance_row_label(&b) {
+            Some(label) => format!("{base} · {label}"),
+            None => base.to_string(),
+        };
+    }
     if !shows_quota {
         return base.to_string();
     }
@@ -283,6 +365,55 @@ fn cli_row_title(base: &str, shows_quota: bool, cli: CliApp, labels: &TrayLabels
         title = format!("{title} · {label}");
     }
     title
+}
+
+/// Money for the tray, without `Intl`: `$12.50`, `¥89.44`, `12.50 SEK`.
+/// Whole amounts drop the `.00` (a wallet reading "$100" beats "$100.00"
+/// in a menu line). Unknown codes keep the code as a suffix rather than
+/// inventing a symbol.
+fn format_balance_amount(value: f64, currency: &str) -> String {
+    let num = if value.fract().abs() < f64::EPSILON {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.2}")
+    };
+    match currency {
+        "USD" => format!("${num}"),
+        "CNY" => format!("¥{num}"),
+        code => format!("{num} {code}"),
+    }
+}
+
+/// The row's balance suffix: one amount per currency, joined — DeepSeek
+/// reports per-currency and can return several. A granted total (only
+/// OpenRouter has one) rides along as `remaining / total`.
+///
+/// **No pressure glyph**, unlike every quota segment: 🟢🟡🔴 encode how
+/// much of a LIMIT is spent, and a balance has no limit to divide by, so
+/// any glyph would be invented. Same call `balance_label` makes for
+/// grok's prepaid balance.
+fn balance_row_label(b: &TrayBalance) -> Option<String> {
+    if b.entries.is_empty() {
+        return None;
+    }
+    Some(
+        b.entries
+            .iter()
+            .map(|e| {
+                let remaining = format_balance_amount(e.remaining, &e.currency);
+                match e.total {
+                    Some(total) => {
+                        format!(
+                            "{remaining} / {}",
+                            format_balance_amount(total, &e.currency)
+                        )
+                    }
+                    None => remaining,
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" · "),
+    )
 }
 
 /// Localized labels for the menu's static rows (Open / Official / Exit). The
@@ -431,6 +562,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             } = event
             {
                 trigger_quota_refresh(tray.app_handle());
+                trigger_balance_refresh(tray.app_handle());
                 // Also re-check recent-session work status on open, so a
                 // crashed session's stale status clears even without a
                 // filesystem event (it splices live into the open menu).
@@ -931,6 +1063,16 @@ fn apply_switch(app: &AppHandle, cli: CliApp, set: &CliProviders, provider_id: O
     if let Err(err) = rebuild_menu(app) {
         log::error!("tray menu rebuild failed: {err}");
     }
+    // The row's SUBJECT just changed, so its cached wallet describes the
+    // provider that was live a moment ago. The six provider-mutating IPCs
+    // do this too — and it has to be on BOTH surfaces (see the LOCKED rule
+    // under "Saved official logins"): the page and the tray are two front
+    // ends over one state, and wiring an invalidation into only one leaves
+    // the other as a silent way around it. Missing here it was not a wrong
+    // NUMBER — `cli_row_title` refuses a figure cached under a different
+    // provider — but the new provider's balance then waited for the next
+    // menu open, while the same switch made from the page refreshed at once.
+    invalidate_balance_all(app);
     // Tell any open Providers page to re-derive active state from disk.
     use tauri::Emitter;
     let _ = app.emit("termory:providers-changed", ());
@@ -1157,6 +1299,222 @@ pub fn force_quota_refresh(app: &AppHandle, cli: CliApp) {
         return;
     }
     spawn_quota_fetch(app, cli);
+}
+
+/// The custom provider a CLI row currently names, if any — the one whose
+/// wallet the row's balance suffix describes. `None` for Official and for
+/// an unmanaged config (the row names no provider, so there is no account
+/// to report a balance for).
+fn active_custom_provider(set: &CliProviders, active: &ActiveChoice) -> Option<Provider> {
+    let id = active.id.as_deref()?;
+    set.rows
+        .iter()
+        .find(|r| r.provider.id == id)
+        .map(|r| r.provider.clone())
+}
+
+/// Async, rate-limited balance fetch + row update for every CLI whose row
+/// currently names a custom provider. Used by the menu-open (tray click)
+/// hook and the one-shot warm-up at startup — the same two entry points
+/// the quota has, minus the watcher: a wallet changes when the user
+/// spends somewhere else, which produces no local signal to watch.
+pub fn trigger_balance_refresh(app: &AppHandle) {
+    // Settings → Tools: a disabled tool's row is hidden, so nothing would
+    // render the number.
+    let disabled = crate::config::disabled_sources();
+    // Read the cached rows rather than resolving providers from disk —
+    // the callers are the tray-click handler and startup, both on the
+    // main thread. An EMPTY cache means the menu hasn't been built yet
+    // (startup warm-up); nothing to fetch for until it has, and the
+    // build itself schedules the first pass.
+    let targets: Vec<(CliApp, Provider)> = CLI_ROWS
+        .lock()
+        .map(|rows| {
+            rows.iter()
+                .filter(|r| !disabled.contains(r.cli.key()))
+                .filter_map(|r| r.balance_provider.clone().map(|p| (r.cli, p)))
+                .collect()
+        })
+        .unwrap_or_default();
+    for (cli, provider) in targets {
+        if !balance_fetch_allowed(
+            balance_marker(cli),
+            BALANCE_TRAY_MIN_INTERVAL,
+            BALANCE_TRAY_ERROR_RETRY,
+        ) {
+            continue;
+        }
+        spawn_balance_fetch(app, cli, provider);
+    }
+}
+
+/// A provider was switched, edited or deleted — a row's SUBJECT may have
+/// changed, so every cached figure now describes a question that may no
+/// longer be asked. Drop them all and fetch again, bypassing the floor.
+///
+/// Mirrors what `invalidate_quota` does for an account switch and for the
+/// same reason: a retained figure belongs to an identity, and once the
+/// identity can have changed, keeping it is worse than showing nothing.
+///
+/// Clears EVERY CLI rather than one: a single providers.json write can
+/// move any number of rows (a gateway binding edit touches each CLI it is
+/// bound to), and the cost of an unnecessary clear is one re-fetch,
+/// against the cost of a missed one — a stale wallet under a different
+/// provider's name.
+pub fn invalidate_balance_all(app: &AppHandle) {
+    let cleared: Vec<CliApp> = BALANCE
+        .lock()
+        .map(|mut g| g.drain(..).map(|(c, _)| c).collect())
+        .unwrap_or_default();
+    if let Ok(mut guard) = BALANCE_LAST_FETCH.lock() {
+        guard.clear();
+    }
+    for cli in cleared {
+        update_cli_row_title(app, cli);
+    }
+    // Scheduled on the main thread so it lands AFTER the caller's own
+    // rebuild has recorded which provider each row now names — the fetch
+    // reads those fresh rows to decide what to query.
+    let handle = app.clone();
+    let queued = app.run_on_main_thread(move || {
+        trigger_balance_refresh(&handle);
+    });
+    if let Err(err) = queued {
+        log::error!("tray balance refresh could not reach the main thread: {err}");
+    }
+}
+
+fn balance_marker(cli: CliApp) -> Option<(std::time::Duration, bool)> {
+    let guard = BALANCE_LAST_FETCH.lock().ok()?;
+    guard
+        .iter()
+        .find(|(c, _, _)| *c == cli)
+        .map(|(_, at, ok)| (at.elapsed(), *ok))
+}
+
+fn set_balance_marker(cli: CliApp, ok: bool) {
+    if let Ok(mut guard) = BALANCE_LAST_FETCH.lock() {
+        let now = std::time::Instant::now();
+        match guard.iter_mut().find(|(c, _, _)| *c == cli) {
+            Some(entry) => *entry = (cli, now, ok),
+            None => guard.push((cli, now, ok)),
+        }
+    }
+}
+
+/// Same shape as `quota_fetch_allowed`: no marker ⇒ always fetch, else the
+/// outcome-specific floor.
+fn balance_fetch_allowed(
+    marker: Option<(std::time::Duration, bool)>,
+    ok_floor: std::time::Duration,
+    err_floor: std::time::Duration,
+) -> bool {
+    match marker {
+        None => true,
+        Some((elapsed, ok)) => elapsed >= if ok { ok_floor } else { err_floor },
+    }
+}
+
+fn spawn_balance_fetch(app: &AppHandle, cli: CliApp, provider: Provider) {
+    // Mark pre-flight as failed-shape so an in-flight attempt only blocks
+    // the short window; the completed fetch overwrites it.
+    set_balance_marker(cli, false);
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = crate::balance::fetch_balance(&provider).await;
+        refresh_balance(&handle, cli, &result);
+    });
+}
+
+/// Whether a freshly-arrived reading should replace the held one.
+///
+/// Two reasons it should not, both extracted here so they are testable
+/// (the update itself needs an `AppHandle`):
+///  * **older**: two fetches for one CLI can overlap —
+///    `invalidate_balance_all` clears the throttle marker, so a provider
+///    mutation starts a second while the first is still out — and without
+///    this the later ARRIVAL wins even carrying the older reading;
+///  * **identical**: `set_text` on a menu the user has OPEN is not free,
+///    and a wallet is usually unchanged between two menu opens.
+fn balance_supersedes(cur: &TrayBalance, next: &TrayBalance) -> bool {
+    if cur.queried_at > next.queried_at {
+        return false;
+    }
+    // Compare the READING, not the record: `queried_at` differs on every
+    // fetch, so folding it into the comparison would make "unchanged"
+    // unreachable and the guard a no-op (which is exactly what the test
+    // for it caught).
+    cur.provider_id != next.provider_id || cur.entries != next.entries
+}
+
+fn clear_balance_entry(app: &AppHandle, cli: CliApp) {
+    let had = BALANCE
+        .lock()
+        .map(|mut g| {
+            let before = g.len();
+            g.retain(|(c, _)| *c != cli);
+            g.len() != before
+        })
+        .unwrap_or(false);
+    if had {
+        update_cli_row_title(app, cli);
+    }
+}
+
+/// Central sink for every completed balance fetch, whatever triggered it:
+/// stamp the shared throttle marker, push the result to the frontend, and
+/// update the row IN PLACE.
+pub fn refresh_balance(app: &AppHandle, cli: CliApp, result: &crate::balance::ProviderBalance) {
+    let ok = matches!(result.status, crate::balance::BalanceStatus::Ok);
+    set_balance_marker(cli, ok);
+    // Let an open Providers page reflect a fetch it did not make.
+    {
+        use tauri::Emitter;
+        let _ = app.emit(crate::balance::BALANCE_CHANGED_EVENT, result);
+    }
+    if !ok {
+        // `unsupported` / `no_key` are DEFINITIVE — decided locally with
+        // no request — and both mean the row must stop claiming a
+        // balance. Any other failure keeps the last good figure, the same
+        // no-flicker rule the quota follows.
+        if matches!(
+            result.status,
+            crate::balance::BalanceStatus::Unsupported | crate::balance::BalanceStatus::NoKey
+        ) {
+            clear_balance_entry(app, cli);
+        }
+        return;
+    }
+    let next = TrayBalance {
+        provider_id: result.provider_id.clone(),
+        entries: result
+            .entries
+            .iter()
+            .map(|e| TrayBalanceEntry {
+                remaining: e.remaining,
+                total: e.total,
+                currency: e.currency.clone(),
+            })
+            .collect(),
+        queried_at: result.queried_at,
+    };
+    let changed = BALANCE
+        .lock()
+        .map(|mut g| match g.iter_mut().find(|(c, _)| *c == cli) {
+            Some((_, cur)) if !balance_supersedes(cur, &next) => false,
+            Some((_, cur)) => {
+                *cur = next;
+                true
+            }
+            None => {
+                g.push((cli, next));
+                true
+            }
+        })
+        .unwrap_or(false);
+    if changed {
+        update_cli_row_title(app, cli);
+    }
 }
 
 /// Rebuild the tray menu so checkmarks reflect the current active
@@ -1526,7 +1884,13 @@ fn update_cli_row_title(app: &AppHandle, cli: CliApp) {
             .map(|rows| {
                 if let Some(row) = rows.iter().find(|r| r.cli == cli) {
                     let labels = tray_labels();
-                    let title = cli_row_title(&row.base_title, row.shows_quota, cli, &labels);
+                    let title = cli_row_title(
+                        &row.base_title,
+                        row.shows_quota,
+                        row.balance_provider.as_ref(),
+                        cli,
+                        &labels,
+                    );
                     row.submenu.set_text(title).is_ok()
                 } else {
                     false
@@ -2051,7 +2415,14 @@ fn build_menu(app: &AppHandle, installed: &InstallSnapshot) -> tauri::Result<Men
         // and gluing it onto a custom (or unknown) endpoint's row would
         // read as that endpoint's usage.
         let shows_quota = crate::quota::supports_quota(cli) && active.official;
-        let title = cli_row_title(&base_title, shows_quota, cli, &labels);
+        let balance_provider = active_custom_provider(&set, &active);
+        let title = cli_row_title(
+            &base_title,
+            shows_quota,
+            balance_provider.as_ref(),
+            cli,
+            &labels,
+        );
         let mut sub = SubmenuBuilder::new(app, title);
 
         let official =
@@ -2124,6 +2495,7 @@ fn build_menu(app: &AppHandle, installed: &InstallSnapshot) -> tauri::Result<Men
             submenu: sub,
             base_title,
             shows_quota,
+            balance_provider,
         });
     }
     // Whether anything sits between "Open" and "Exit": the recent region
@@ -2421,6 +2793,303 @@ mod tests {
     // The floor decision behind both quota-refresh entry points. The
     // marker itself lives in a `static`, so the rule is tested here as the
     // pure function the two call sites share.
+    /// Populate the balance cache for one CLI, as a completed fetch would.
+    fn seed_balance(cli: CliApp, provider_id: &str, remaining: f64, queried_at: i64) {
+        let mut g = BALANCE.lock().unwrap();
+        g.retain(|(c, _)| *c != cli);
+        g.push((
+            cli,
+            TrayBalance {
+                provider_id: provider_id.into(),
+                entries: vec![TrayBalanceEntry {
+                    remaining,
+                    total: None,
+                    currency: "CNY".into(),
+                }],
+                queried_at,
+            },
+        ));
+    }
+
+    // The headline rule of the whole feature: one row slot, Official
+    // takes the quota, a custom provider takes ITS balance, and never
+    // both. Distinct CLIs per test — the caches are process statics and
+    // the suite runs in parallel.
+    #[test]
+    fn a_later_arrival_carrying_an_older_reading_does_not_win() {
+        // invalidate_balance_all clears the throttle marker, so a
+        // provider mutation can start a second fetch while the first is
+        // still out. Arrival order is not reading order.
+        let held = TrayBalance {
+            provider_id: "p".into(),
+            entries: vec![TrayBalanceEntry {
+                remaining: 10.0,
+                total: None,
+                currency: "USD".into(),
+            }],
+            queried_at: 2_000,
+        };
+        let older = TrayBalance {
+            queried_at: 1_000,
+            ..held.clone()
+        };
+        assert!(!balance_supersedes(&held, &older));
+        let newer = TrayBalance {
+            queried_at: 3_000,
+            entries: vec![TrayBalanceEntry {
+                remaining: 9.0,
+                total: None,
+                currency: "USD".into(),
+            }],
+            ..held.clone()
+        };
+        assert!(balance_supersedes(&held, &newer));
+    }
+
+    #[test]
+    fn an_unchanged_reading_does_not_redraw_the_row() {
+        // A wallet is usually the same between two menu opens, and
+        // set_text on an OPEN menu is not free.
+        let held = TrayBalance {
+            provider_id: "p".into(),
+            entries: vec![TrayBalanceEntry {
+                remaining: 10.0,
+                total: None,
+                currency: "USD".into(),
+            }],
+            queried_at: 2_000,
+        };
+        let same_again = TrayBalance {
+            queried_at: 5_000,
+            ..held.clone()
+        };
+        assert!(!balance_supersedes(&held, &same_again));
+    }
+
+    #[test]
+    fn a_custom_providers_row_carries_its_balance() {
+        let cli = CliApp::Opencode;
+        let p = provider("p-opencode", "codex", "custom", "DeepSeek");
+        seed_balance(cli, "p-opencode", 89.44, 1_000);
+        let title = cli_row_title(
+            "OpenCode · DeepSeek",
+            false,
+            Some(&p),
+            cli,
+            &TrayLabels::default(),
+        );
+        assert_eq!(title, "OpenCode · DeepSeek · ¥89.44");
+    }
+
+    #[test]
+    fn the_two_suffixes_are_mutually_exclusive_at_the_source() {
+        // Both flags are derived from the SAME ActiveChoice in build_menu,
+        // and this is where "quota for Official, balance for a custom
+        // provider, never both" actually holds — a row is never handed
+        // both, so testing cli_row_title's precedence would only assert
+        // an unreachable case.
+        let set = CliProviders {
+            rows: vec![ProviderRow {
+                provider: provider("p", "codex", "custom", "DeepSeek"),
+                from_gateway: false,
+            }],
+            standalone: vec![],
+            all: vec![],
+        };
+        let cases = [
+            // Official: quota, no balance.
+            (
+                ActiveChoice {
+                    id: None,
+                    official: true,
+                },
+                true,
+                false,
+            ),
+            // A custom provider: balance, no quota.
+            (
+                ActiveChoice {
+                    id: Some("p".into()),
+                    official: false,
+                },
+                false,
+                true,
+            ),
+            // Unmanaged — the CLI points somewhere Termory doesn't know:
+            // neither, because the row names no account at all.
+            (
+                ActiveChoice {
+                    id: None,
+                    official: false,
+                },
+                false,
+                false,
+            ),
+        ];
+        for (active, want_quota, want_balance) in cases {
+            let shows_quota = crate::quota::supports_quota(CliApp::Codex) && active.official;
+            let balance = active_custom_provider(&set, &active);
+            assert_eq!(shows_quota, want_quota, "quota for {:?}", active.id);
+            assert_eq!(
+                balance.is_some(),
+                want_balance,
+                "balance for {:?}",
+                active.id
+            );
+            assert!(!(shows_quota && balance.is_some()), "both suffixes at once");
+        }
+    }
+
+    #[test]
+    fn a_row_shows_no_balance_cached_under_a_different_provider() {
+        // The user switched providers and no fetch for the new one has
+        // landed yet. Showing the previous provider's figure under the new
+        // name is the one wrong answer available here.
+        let cli = CliApp::Grok;
+        let p = provider("p-new", "codex", "custom", "New");
+        seed_balance(cli, "p-old", 89.44, 1_000);
+        let title = cli_row_title(
+            "Grok Build · New",
+            false,
+            Some(&p),
+            cli,
+            &TrayLabels::default(),
+        );
+        assert_eq!(title, "Grok Build · New");
+    }
+
+    #[test]
+    fn active_custom_provider_names_the_in_use_provider_only() {
+        let set = CliProviders {
+            rows: vec![
+                ProviderRow {
+                    provider: provider("a", "codex", "custom", "A"),
+                    from_gateway: false,
+                },
+                ProviderRow {
+                    provider: provider("b", "codex", "custom", "B"),
+                    from_gateway: false,
+                },
+            ],
+            standalone: vec![],
+            all: vec![],
+        };
+        // Official / unmanaged name no provider, so there is no account
+        // whose balance the row could be reporting.
+        assert!(active_custom_provider(&set, &ActiveChoice::default()).is_none());
+        let active = ActiveChoice {
+            id: Some("b".into()),
+            official: false,
+        };
+        assert_eq!(
+            active_custom_provider(&set, &active).map(|p| p.id),
+            Some("b".to_string())
+        );
+    }
+
+    #[test]
+    fn balance_row_label_joins_currencies_and_carries_a_granted_total() {
+        // DeepSeek reports per-currency and can return several; only
+        // OpenRouter carries a total, and it rides as remaining / total.
+        let b = TrayBalance {
+            provider_id: "p1".into(),
+            entries: vec![
+                TrayBalanceEntry {
+                    remaining: 89.44,
+                    total: None,
+                    currency: "CNY".into(),
+                },
+                TrayBalanceEntry {
+                    remaining: 20.75,
+                    total: Some(25.0),
+                    currency: "USD".into(),
+                },
+            ],
+            queried_at: 0,
+        };
+        assert_eq!(
+            balance_row_label(&b).as_deref(),
+            // `$25`, not `$25.00`: whole amounts drop the cents, the same
+            // look the existing credits line already has (`$3 / $10`).
+            Some("¥89.44 · $20.75 / $25")
+        );
+    }
+
+    #[test]
+    fn balance_row_label_carries_no_pressure_glyph() {
+        // Every quota segment leads with 🟢/🟡/🔴 because it reports how
+        // much of a LIMIT is spent. A balance has no limit to divide by,
+        // so a glyph here would be invented — same call the prepaid
+        // balance makes.
+        let b = TrayBalance {
+            provider_id: "p1".into(),
+            entries: vec![TrayBalanceEntry {
+                remaining: 0.0,
+                total: None,
+                currency: "USD".into(),
+            }],
+            queried_at: 0,
+        };
+        let label = balance_row_label(&b).unwrap();
+        for glyph in ["\u{1F7E2}", "\u{1F7E1}", "\u{1F534}"] {
+            assert!(!label.contains(glyph), "{label} carries a pressure glyph");
+        }
+        // A zero balance is still a balance, not an absence.
+        assert_eq!(label, "$0");
+    }
+
+    #[test]
+    fn balance_amount_drops_the_cents_only_when_whole() {
+        assert_eq!(format_balance_amount(100.0, "USD"), "$100");
+        assert_eq!(format_balance_amount(12.5, "USD"), "$12.50");
+        assert_eq!(format_balance_amount(89.44, "CNY"), "¥89.44");
+        // An unknown code keeps the code rather than inventing a symbol.
+        assert_eq!(format_balance_amount(12.5, "SEK"), "12.50 SEK");
+    }
+
+    #[test]
+    fn balance_row_label_is_absent_without_entries() {
+        let b = TrayBalance {
+            provider_id: "p1".into(),
+            entries: vec![],
+            queried_at: 0,
+        };
+        assert!(balance_row_label(&b).is_none());
+    }
+
+    #[test]
+    fn balance_fetch_allowed_applies_the_outcome_specific_floor() {
+        // Same shape as the quota's: no marker ⇒ fetch; a success holds
+        // the long floor, a failure only the short one.
+        assert!(balance_fetch_allowed(None, SEC_300, SEC_60));
+        assert!(!balance_fetch_allowed(
+            Some((SEC_10, true)),
+            SEC_300,
+            SEC_60
+        ));
+        assert!(!balance_fetch_allowed(
+            Some((SEC_10, false)),
+            SEC_300,
+            SEC_60
+        ));
+        // Past the short floor: a failure retries, a success still waits.
+        assert!(balance_fetch_allowed(
+            Some((SEC_90, false)),
+            SEC_300,
+            SEC_60
+        ));
+        assert!(!balance_fetch_allowed(
+            Some((SEC_90, true)),
+            SEC_300,
+            SEC_60
+        ));
+    }
+
+    const SEC_10: std::time::Duration = std::time::Duration::from_secs(10);
+    const SEC_60: std::time::Duration = std::time::Duration::from_secs(60);
+    const SEC_90: std::time::Duration = std::time::Duration::from_secs(90);
+    const SEC_300: std::time::Duration = std::time::Duration::from_secs(300);
+
     #[test]
     fn quota_fetch_allowed_applies_the_outcome_specific_floor() {
         let ok_floor = std::time::Duration::from_secs(120);
