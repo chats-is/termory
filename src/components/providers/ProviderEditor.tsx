@@ -538,7 +538,7 @@ export function ProviderEditor({
                           <Button
                             type="button"
                             variant="ghost"
-                            size="icon"
+                            size="icon-sm"
                             className="text-destructive hover:text-destructive hover:bg-destructive/10"
                             aria-label={t("providers.removeModel")}
                             onClick={() =>
@@ -708,7 +708,7 @@ export function ProviderEditor({
                                 <Button
                                   type="button"
                                   variant="ghost"
-                                  size="icon"
+                                  size="icon-sm"
                                   className="text-destructive hover:text-destructive hover:bg-destructive/10"
                                   aria-label={t("providers.removeOverride")}
                                   onClick={() =>

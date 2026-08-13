@@ -113,7 +113,6 @@ export function InstallGuide({
                   aria-label={
                     isDownloadUrl ? t("install.openDownload") : t("install.copyCommand")
                   }
-                  className="size-7"
                 >
                   {isDownloadUrl ? (
                     <ExternalLink className="size-4" />

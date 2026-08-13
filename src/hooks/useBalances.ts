@@ -74,8 +74,8 @@ function freshnessMs(result: ProviderBalance): number {
 }
 
 /** Per-result MANUAL floor: the full cooldown after a success, the short
- * retry window after a failure. */
-export function balanceMinIntervalMs(result?: ProviderBalance): number {
+ * retry window after a failure. Module-private — nothing outside reads it. */
+function balanceMinIntervalMs(result?: ProviderBalance): number {
   return result?.status === "ok"
     ? BALANCE_MIN_INTERVAL_MS
     : BALANCE_ERROR_RETRY_MS;

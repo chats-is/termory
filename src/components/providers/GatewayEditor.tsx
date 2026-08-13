@@ -564,8 +564,8 @@ export function GatewayEditor({
                   <Button
                     type="button"
                     variant="ghost"
-                    size="icon"
-                    className="size-7 shrink-0"
+                    size="icon-sm"
+                    className="shrink-0"
                     aria-label={t("providers.detectApis")}
                     disabled={
                       !baseUrl.trim() ||
@@ -775,8 +775,8 @@ export function GatewayEditor({
                                     <Button
                                       type="button"
                                       variant="ghost"
-                                      size="icon"
-                                      className="size-8 shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
+                                      size="icon-sm"
+                                      className="shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
                                       aria-label={t("providers.removeModel")}
                                       onClick={() =>
                                         setBind(app, {
@@ -873,8 +873,8 @@ export function GatewayEditor({
                                     <Button
                                       type="button"
                                       variant="ghost"
-                                      size="icon"
-                                      className="size-8 shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
+                                      size="icon-sm"
+                                      className="shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
                                       aria-label={t("providers.removeModel")}
                                       onClick={() =>
                                         setBind(app, {
@@ -1024,8 +1024,8 @@ export function GatewayEditor({
                                     <Button
                                       type="button"
                                       variant="ghost"
-                                      size="icon"
-                                      className="size-8 shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
+                                      size="icon-sm"
+                                      className="shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
                                       aria-label={t("providers.removeOverride")}
                                       onClick={() =>
                                         setBind(app, {

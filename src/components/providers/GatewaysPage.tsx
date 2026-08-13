@@ -477,11 +477,17 @@ export function GatewaysPage({
                     />
                     <Tooltip>
                       <TooltipTrigger asChild>
+                        {/* `icon-sm` (32px), NOT the 28px override this pair
+                            used to carry: it is the size every other icon
+                            button in the app uses — the binding rows below,
+                            every ProviderCard action, the quota and balance
+                            refreshes — and the balance item now sits in this
+                            same cluster, so a 28px neighbour left it 4px
+                            taller than the icons beside it. */}
                         <Button
                           type="button"
                           variant="ghost"
-                          size="icon"
-                          className="size-7"
+                          size="icon-sm"
                           aria-label={t("providers.editGateway")}
                           onClick={() => startEdit(gateway)}
                         >
@@ -497,8 +503,8 @@ export function GatewaysPage({
                         <Button
                           type="button"
                           variant="ghost"
-                          size="icon"
-                          className="size-7 text-destructive hover:text-destructive hover:bg-destructive/10"
+                          size="icon-sm"
+                          className="text-destructive hover:text-destructive hover:bg-destructive/10"
                           aria-label={t("providers.deleteGateway")}
                           onClick={() => void deleteGateway(gateway)}
                         >
