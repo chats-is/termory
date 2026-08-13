@@ -80,19 +80,21 @@ describe("InstallGuide", () => {
     expect(openUrl).toHaveBeenCalledWith("https://claude.ai/download");
   });
 
-  it("shows Grok's installer for the current platform", () => {
+  it("shows Grok's installers, npm first, for the current platform", () => {
     render(<InstallGuide app="grok" rechecking={false} onRecheck={() => {}} />);
 
+    // npm leads on every OS (the canonical tab order), so it is the tab
+    // shown by default and curl now needs a click.
+    expect(screen.getByText("npm install -g @xai-official/grok")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "curl" }));
+    expect(screen.getByText("curl -fsSL https://x.ai/cli/install.sh | bash")).toBeTruthy();
+
     if (IS_WINDOWS) {
-      // grok is multi-method on Windows now (curl + powershell); curl is the
-      // default tab, so switch to powershell to see its command.
       fireEvent.click(screen.getByRole("button", { name: "powershell" }));
       expect(screen.getByText("irm https://x.ai/cli/install.ps1 | iex")).toBeTruthy();
-      expect(screen.queryByText("curl -fsSL https://x.ai/cli/install.sh | bash")).toBeNull();
     } else {
-      // mac/linux: curl is the only method → shown directly, no tab bar.
-      expect(screen.getByText("curl -fsSL https://x.ai/cli/install.sh | bash")).toBeTruthy();
-      expect(screen.queryByText("irm https://x.ai/cli/install.ps1 | iex")).toBeNull();
+      // The PowerShell installer is Windows-only and must not be offered.
+      expect(screen.queryByRole("button", { name: "powershell" })).toBeNull();
     }
   });
 });

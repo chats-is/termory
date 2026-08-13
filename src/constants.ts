@@ -296,6 +296,11 @@ export const CLI_INSTALL: Record<
     binary: "grok",
     url: "https://docs.x.ai/build/overview",
     methods: [
+      // `@xai-official/grok` verified on the registry (latest 1.0.3, bin
+      // `grok`, os darwin/linux/win32). Its postinstall drops the real
+      // binary into `$GROK_HOME/bin` — which `cli_search_paths` already
+      // probes for grok — so an npm install is detected like any other.
+      { id: "npm", label: "npm", command: "npm install -g @xai-official/grok" },
       {
         id: "curl",
         label: "curl",
