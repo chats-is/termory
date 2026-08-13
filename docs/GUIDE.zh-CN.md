@@ -12,7 +12,7 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 
 | # | 入口 | 作用 |
 |---|------|------|
-| 1 | **[供应商 Providers](#1-providers供应商)** | 管理每个 CLI 的 API 供应商并切换当前激活项;管理 AI Gateway;查看官方额度;保存与切换 Codex / Claude Code / Grok Build 账号。 |
+| 1 | **[供应商 Providers](#1-providers供应商)** | 管理每个 CLI 的 API 供应商并切换当前激活项;管理 AI Gateway;查看官方额度与账户余额;保存与切换 Codex / Claude Code / Grok Build 账号。 |
 | 2 | **[记录 Records](#2-records记录)** | 浏览所有会话、记忆文件、技能;恢复、迁移或删除。 |
 | 3 | **[收藏 Favorites](#3-favorites收藏)** | 你标星的消息,以快照形式保存。 |
 | 4 | **[搜索 Search](#4-search搜索)** | 跨全部历史的全文搜索,外加 `⌘K` 快速搜索面板。 |
@@ -194,6 +194,12 @@ Codex 给每个会话打上创建时所用供应商的标记,而 `codex resume` 
 
 不想每次都被问?**设置 → 供应商切换 → 切换 Codex 时保留所有会话**打开后,所有项目自动跟随、不再提示——这也正是让 Codex 切换能直接在菜单栏完成、无需打开窗口的开关。
 
+### 账户余额
+
+当一个供应商或网关直接指向 Termory 认识的厂商时(DeepSeek、SiliconFlow、StepFun、OpenRouter、Novita),卡片会在按钮旁显示该账户的余额,例如 **余额 ¥89.42**,边上还有一个刷新按钮。它用的就是你已经填好的那把 API 密钥,不会额外发送任何东西,请求也只发往该厂商自己的域名。
+
+没有可显示的东西时这一行根本不出现——中转站或任何 Termory 不认识的主机、还没填密钥的卡片、以及没有余额接口的厂商,也就是大多数卡片。读到过的数字会一直留着:刷新失败时只有按钮会变。它最快每 2 分钟重新读一次,菜单栏那一行也会显示各 CLI 当前所用供应商的同一个数字。
+
 ### AI Gateway(网关)
 
 一个 **AI Gateway** 就是一组 `{Base URL, API 密钥}`,可能同时支持多种 API 格式(OpenAI、Anthropic、Gemini……)。与其把同一把密钥分别加到每个 CLI,你只需添加一次:
@@ -201,6 +207,25 @@ Codex 给每个会话打上创建时所用供应商的标记,而 `codex resume` 
 1. 打开 **AI Gateways** 标签 → **添加**一个网关,填 Base URL 和密钥。
 2. 点**检测 API**——Termory 探测网关支持哪些 API 格式。
 3. **应用**到格式匹配的每个 CLI(一个网关 → 多个 CLI,一把密钥)。
+
+**示例——一把 DeepSeek 密钥同时给 Claude Code 和 Codex 用。**添加网关时只填**主机地址**,不要带任何 API 路径:
+
+| 字段 | 值 |
+|------|-----|
+| 名称 | `DeepSeek` |
+| Base URL | `https://api.deepseek.com` |
+| API 密钥 | 你的 DeepSeek 密钥 |
+
+检测会在根路径找到 OpenAI 格式,在 `/anthropic` 下找到 Anthropic 格式——DeepSeek 的 Anthropic 接口不在根路径上——编辑器会告诉你它在哪("Anthropic 接口位于 /anthropic")。勾上这两个 CLI,各填一个模型:
+
+| 绑定到 | 模型 |
+|--------|------|
+| Claude Code | `deepseek-v4-pro[1m]` |
+| Codex | `deepseek-v4-pro` |
+
+**保存**,再逐个**激活**。每个 CLI 都会拿到它自己的客户端期望的地址——Claude Code 是 `https://api.deepseek.com/anthropic`,Codex 是 `https://api.deepseek.com/v1`——你自己一个 API 路径都不用填。
+
+绑定同样支持**高级设置**,所以上面 DeepSeek 示例里那几个 Claude 模型档位路由键在这里照样能用;网关卡片也和供应商卡片一样显示**账户余额**。
 
 已绑定的网关也会出现在各 CLI 的供应商列表中(仅可查看 / 激活——编辑请到 AI Gateways 标签)。
 

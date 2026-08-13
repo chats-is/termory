@@ -59,6 +59,8 @@ Don't use one of these tools? Turn it off in **Settings → Tools** and it disap
 
 Every CLI keeps its own library of named API profiles — your OpenRouter key, a local model, an alternate gateway, or the official login. Pick the one you want and Termory sets it up for that CLI; the next launch just uses it. Switch from the app or straight from the macOS menu bar. Switching **Codex** covers the Codex CLI and the Codex desktop app at once — they share one config and login — and either install alone is enough: with just the desktop app (now the unified **ChatGPT** app), everything from provider switching to adding accounts still works. **Claude Desktop** is a provider here too — Termory writes its native third-party (3P) config, so you can switch the desktop app just like a CLI; it's managed as its own app, entirely separate from Claude Code.
 
+Point a provider — or one **AI Gateway** bound to several CLIs — straight at a vendor Termory recognises and its card shows that account's wallet balance, read with the key you already entered. Cards with nothing to show (a relay, a missing key) simply don't carry the row.
+
 Going back to **Official** restores your original setup exactly — your native login (OAuth tokens and credentials) is never overwritten, so you can bounce between providers as often as you like without re-logging-in.
 
 ## Download

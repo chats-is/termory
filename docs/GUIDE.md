@@ -10,7 +10,7 @@ Termory has six destinations on the left activity rail (`⌘1`–`⌘6`), plus a
 
 | # | Destination | What it does |
 |---|-------------|--------------|
-| 1 | **[Providers](#1-providers)** | Manage each CLI's API providers and switch the active one; manage AI Gateways; view official quota; save and switch Codex / Claude Code / Grok Build accounts. |
+| 1 | **[Providers](#1-providers)** | Manage each CLI's API providers and switch the active one; manage AI Gateways; view official quota and account balances; save and switch Codex / Claude Code / Grok Build accounts. |
 | 2 | **[Records](#2-records)** | Browse every session, memory file, and skill; resume, migrate, or delete them. |
 | 3 | **[Favorites](#3-favorites)** | Messages you've starred, saved as snapshots. |
 | 4 | **[Search](#4-search)** | Full-text search across all history, plus a `⌘K` quick-search palette. |
@@ -192,6 +192,12 @@ Codex tags every session with the provider active when it was created, and `code
 
 Don't want to be asked? **Settings → Provider switching → Keep all sessions on a Codex switch** makes every project follow automatically, with no prompt — and that's also what lets a Codex switch complete straight from the menu bar without opening the window.
 
+### Account balance
+
+When a provider or gateway points straight at a vendor Termory recognises — DeepSeek, SiliconFlow, StepFun, OpenRouter, Novita — its card shows that account's wallet next to the buttons, e.g. **Balance ¥89.42**, with a refresh button beside it. It is read with the API key you already entered; nothing else is sent, and the request goes to that vendor's own domain.
+
+The row simply isn't there when there is nothing to show — a relay or any host Termory doesn't recognise, a card with no key yet, or a vendor with no balance API — which is most cards. A number that was read once stays put: if a refresh fails, only the button changes. It re-reads at most every 2 minutes, and the menu-bar row carries the same figure for whichever provider a CLI is currently on.
+
 ### AI Gateways
 
 A **gateway** is a single `{base URL, API key}` that may speak several API formats at once (OpenAI, Anthropic, Gemini…). Instead of adding the same key separately to each CLI, add the gateway once:
@@ -199,6 +205,25 @@ A **gateway** is a single `{base URL, API key}` that may speak several API forma
 1. Open the **AI Gateways** tab → **Add** a gateway with its base URL and key.
 2. Click **Detect APIs** — Termory probes which API formats the gateway answers.
 3. **Apply** it to each CLI whose format matches (one gateway → many CLIs, one key).
+
+**Example — one DeepSeek key for both Claude Code and Codex.** Add the gateway with the **bare host**, no API path:
+
+| Field | Value |
+|-------|-------|
+| Name | `DeepSeek` |
+| Base URL | `https://api.deepseek.com` |
+| API key | your DeepSeek key |
+
+Detection finds the OpenAI format at the root and the Anthropic one under `/anthropic` — DeepSeek does not serve Anthropic at the root — and the editor tells you where it landed ("Anthropic API at /anthropic"). Tick the two CLIs and give each a model:
+
+| Bind to | Model |
+|---------|-------|
+| Claude Code | `deepseek-v4-pro[1m]` |
+| Codex | `deepseek-v4-pro` |
+
+**Save**, then **Activate** each binding. Every CLI gets the URL its own client expects — `https://api.deepseek.com/anthropic` for Claude Code, `https://api.deepseek.com/v1` for Codex — so you never type an API path yourself.
+
+A binding takes the same **Advanced settings** as a standalone provider, so the Claude size-routing keys from the DeepSeek example above work here too, and the gateway card carries the same **Account balance** as a provider card.
 
 Bound gateways also appear in each CLI's provider list (view/activate only — edit them from the Gateways tab).
 
