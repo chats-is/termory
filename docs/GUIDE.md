@@ -93,6 +93,56 @@ You can also add this under **Advanced settings**:
 
 **Save**, then **Activate**. Start `codex` and you're on DeepSeek; click **Official** to switch back.
 
+### One DeepSeek gateway bound to Claude Code and Codex
+
+One key for both CLIs, instead of adding it twice.
+
+Providers → **AI Gateways** → **Add provider**:
+
+| Field | Value |
+|-------|-------|
+| Name | `DeepSeek` |
+| Base URL | `https://api.deepseek.com` |
+| API key | your DeepSeek key |
+
+The base URL is the bare host — no `/v1`, no `/anthropic`; each binding adds the path its own CLI needs.
+
+Under **Apply to tools**, tick **Claude Code** and expand it:
+
+| Field | Value |
+|-------|-------|
+| Model | `deepseek-v4-pro[1m]` |
+
+In its **Advanced settings**, point Claude's three model sizes at DeepSeek:
+
+| Key | Value |
+|-----|-------|
+| `env.ANTHROPIC_DEFAULT_OPUS_MODEL` | `deepseek-v4-pro[1m]` |
+| `env.ANTHROPIC_DEFAULT_SONNET_MODEL` | `deepseek-v4-pro[1m]` |
+| `env.ANTHROPIC_DEFAULT_HAIKU_MODEL` | `deepseek-v4-flash` |
+
+Add any of these if you want them:
+
+| Key | Value | Effect |
+|-----|-------|--------|
+| `env.CLAUDE_CODE_AUTO_COMPACT_WINDOW` | `786432` | token count at which it auto-compacts |
+| `env.CLAUDE_CODE_SUBAGENT_MODEL` | `deepseek-v4-flash` | model used for subagents |
+| `env.CLAUDE_CODE_EFFORT_LEVEL` | `max` | reasoning effort |
+
+Then tick **Codex** and expand it:
+
+| Field | Value |
+|-------|-------|
+| Model | `deepseek-v4-pro` |
+
+Its **Advanced settings** can take this too:
+
+| Key | Value | Effect |
+|-----|-------|--------|
+| `model_reasoning_effort` | `high` | reasoning effort |
+
+**Create**, then **Activate** each of the two rows. Start `claude` or `codex` and you're on DeepSeek; click **Official** to switch back.
+
 ### Termory never fully overwrites your CLI config (the technical principle)
 
 This is the core guarantee: activating a provider **merges a few fields into your existing config — it never replaces the whole file.**
@@ -134,6 +184,8 @@ Beyond the basic fields, each provider has an **Advanced settings** section wher
 1. In the provider editor, expand **Advanced settings**.
 2. Click **Add** to get a new row, then fill in the **KEY** and **VALUE**.
 3. Add as many rows as you need; use a row's remove button to drop one. **Save** the provider.
+
+**An AI Gateway binding works the same way**: expand a tool's row in the gateway editor and it has its own **Advanced settings**, with the same keys and rules as that CLI's section below (a Claude Code binding is pre-seeded with the same three size-routing rows). A binding's settings belong to that binding alone — the gateway's other tools are unaffected.
 
 The tables below are just common examples — you can add any key/value the CLI accepts. The rules:
 
@@ -202,28 +254,11 @@ The row simply isn't there when there is nothing to show — a relay or any host
 
 A **gateway** is a single `{base URL, API key}` that may speak several API formats at once (OpenAI, Anthropic, Gemini…). Instead of adding the same key separately to each CLI, add the gateway once:
 
-1. Open the **AI Gateways** tab → **Add** a gateway with its base URL and key.
-2. Click **Detect APIs** — Termory probes which API formats the gateway answers.
-3. **Apply** it to each CLI whose format matches (one gateway → many CLIs, one key).
+1. Open the **AI Gateways** tab → **Add provider**, and fill in the base URL and API key.
+2. Detection runs on its own a moment later — Termory probes which API formats the gateway answers. Under **Apply to tools**, a tool whose format wasn't found stays greyed out; the refresh button re-probes.
+3. Tick the tools you want, give each a model, and **Create**. Then **Activate** each row on the gateway's card (one gateway → many CLIs, one key).
 
-**Example — one DeepSeek key for both Claude Code and Codex.** Add the gateway with the **bare host**, no API path:
-
-| Field | Value |
-|-------|-------|
-| Name | `DeepSeek` |
-| Base URL | `https://api.deepseek.com` |
-| API key | your DeepSeek key |
-
-Detection finds the OpenAI format at the root and the Anthropic one under `/anthropic` — DeepSeek does not serve Anthropic at the root — and the editor tells you where it landed ("Anthropic API at /anthropic"). Tick the two CLIs and give each a model:
-
-| Bind to | Model |
-|---------|-------|
-| Claude Code | `deepseek-v4-pro[1m]` |
-| Codex | `deepseek-v4-pro` |
-
-**Save**, then **Activate** each binding. Every CLI gets the URL its own client expects — `https://api.deepseek.com/anthropic` for Claude Code, `https://api.deepseek.com/v1` for Codex — so you never type an API path yourself.
-
-A binding takes the same **Advanced settings** as a standalone provider, so the Claude size-routing keys from the DeepSeek example above work here too, and the gateway card carries the same **Account balance** as a provider card.
+For a worked example, see **[One DeepSeek gateway bound to Claude Code and Codex](#one-deepseek-gateway-bound-to-claude-code-and-codex)** above.
 
 Bound gateways also appear in each CLI's provider list (view/activate only — edit them from the Gateways tab).
 

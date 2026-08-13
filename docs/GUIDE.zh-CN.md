@@ -26,7 +26,7 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 
 ## 1. Providers(供应商)
 
-**是什么。** Termory 为每个 CLI 维护一套**供应商**——即不同 API 平台的命名配置,每个含 Base URL、API 密钥、模型。一个 CLI 的供应商互相独立:为 Claude Code 你可以同时存一个 OpenRouter 配置、一个本地模型、一个官方登录,随时切换激活哪个。左侧的**供应商**页面(默认首页)就是管理它们的地方。
+**是什么。** Termory 为每个 CLI 维护一套**供应商**——即不同 API 平台的命名配置,每个含 Base URL、API key、模型。一个 CLI 的供应商互相独立:为 Claude Code 你可以同时存一个 OpenRouter 配置、一个本地模型、一个官方登录,随时切换激活哪个。左侧的**供应商**页面(默认首页)就是管理它们的地方。
 
 ### 切换当前供应商
 
@@ -40,7 +40,7 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 
 ### 添加或编辑供应商
 
-1. 点**添加供应商**,填**名称**,以及 **Base URL**、**API 密钥**、**模型**。
+1. 点**添加供应商**,填**名称**,以及 **Base URL**、**API key**、**模型**。
 2. Base URL 和密钥填好后,模型字段会自动给出可用模型建议(也可手动输入)。
 3. **测试**在你正式依赖它之前先检查与 Base URL 的连通性。
 4. **保存**。编辑当前已激活的供应商会立即重新生效。
@@ -95,6 +95,56 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 
 **保存**,**激活**。启动 `codex` 即在用 DeepSeek,点**官方**切回。
 
+### 用 DeepSeek 网关绑定 Claude Code 和 Codex
+
+一把 key 同时给两个 CLI 用,不用各加一遍。
+
+供应商 → **AI Gateways** → **添加供应商**:
+
+| 字段 | 值 |
+|------|-----|
+| 名称 | `DeepSeek` |
+| Base URL | `https://api.deepseek.com` |
+| API key | 你的 DeepSeek key |
+
+Base URL 只填主机地址,不带 `/v1` 也不带 `/anthropic`,路径由每个绑定自己补。
+
+在**应用到工具**里勾上 **Claude Code**,展开填:
+
+| 字段 | 值 |
+|------|-----|
+| 模型 | `deepseek-v4-pro[1m]` |
+
+它的**高级设置**里把 Claude 的三档模型指向 DeepSeek:
+
+| 键 | 值 |
+|-----|-----|
+| `env.ANTHROPIC_DEFAULT_OPUS_MODEL` | `deepseek-v4-pro[1m]` |
+| `env.ANTHROPIC_DEFAULT_SONNET_MODEL` | `deepseek-v4-pro[1m]` |
+| `env.ANTHROPIC_DEFAULT_HAIKU_MODEL` | `deepseek-v4-flash` |
+
+还可以按需加:
+
+| 键 | 值 | 作用 |
+|-----|-----|------|
+| `env.CLAUDE_CODE_AUTO_COMPACT_WINDOW` | `786432` | 到多少 token 自动压缩上下文 |
+| `env.CLAUDE_CODE_SUBAGENT_MODEL` | `deepseek-v4-flash` | 子代理用哪个模型 |
+| `env.CLAUDE_CODE_EFFORT_LEVEL` | `max` | 推理强度 |
+
+再勾上 **Codex**,展开填:
+
+| 字段 | 值 |
+|------|-----|
+| 模型 | `deepseek-v4-pro` |
+
+它的**高级设置**里还可以加:
+
+| 键 | 值 | 作用 |
+|-----|-----|------|
+| `model_reasoning_effort` | `high` | 推理强度 |
+
+**创建**,再分别**激活**这两行。启动 `claude` 或 `codex` 即在用 DeepSeek,点**官方**切回。
+
 ### Termory 不会全量覆盖你的 CLI 配置(技术原理)
 
 这是核心保证:激活某个供应商时,Termory **只把几个字段合并进你已有的配置——绝不替换整个文件。**
@@ -112,7 +162,7 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 | Grok Build | `~/.grok/config.toml` | `~/.grok/auth.json`(auth.x.ai 登录) |
 | Claude Desktop | `…/Claude{,-3p}/claude_desktop_config.json` + `Claude-3p/configLibrary/` 里的 profile | Claude Desktop 自己的 claude.ai 登录 |
 
-(Codex 是唯一一种配置与某个凭据共用一个文件的情况——即便如此 Termory 仍是**合并**:它设置 `auth_mode` 和 API 密钥,但保留你的 `tokens`,因此 ChatGPT 登录得以存活。)
+(Codex 是唯一一种配置与某个凭据共用一个文件的情况——即便如此 Termory 仍是**合并**:它设置 `auth_mode` 和 API key,但保留你的 `tokens`,因此 ChatGPT 登录得以存活。)
 
 **切回官方是对称操作:** Termory 移除它追加的覆盖字段,其余原样保留。由于原生登录从未被覆盖,CLI 会立即重新使用它——无需重新登录。
 
@@ -120,7 +170,7 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 
 除了五个 CLI,Termory 还能把 **Claude Desktop** 桌面应用切到第三方供应商,仅限 **macOS 和 Windows**(标签到处都显示,但只在能运行该应用的平台上才可激活)。Claude Desktop 没有终端历史,所以它只出现在 **Providers** 页和 **AI Gateway**,不出现在 会话/记忆/技能里。
 
-它用的是 Claude Desktop 自带的**第三方("3P")**机制,不是环境变量:Termory 把 `deploymentMode` 翻成 `3p`,并往它的配置库写一份供应商 profile(你的 Base URL + API 密钥);"官方"则翻回 `1p` 并删除该 profile。和 CLI 有两点不同:
+它用的是 Claude Desktop 自带的**第三方("3P")**机制,不是环境变量:Termory 把 `deploymentMode` 翻成 `3p`,并往它的配置库写一份供应商 profile(你的 Base URL + API key);"官方"则翻回 `1p` 并删除该 profile。和 CLI 有两点不同:
 
 - **端点必须 Anthropic 兼容**,且**模型 ID 必须是 Claude 名**(`claude-sonnet-4-6`、`anthropic/claude-…`;末尾加 `[1m]` 表示 1M 上下文)。Claude Desktop 会拒绝非 Claude 模型名,所以编辑器会拦住保存。模型列表是可选的——留空则 Claude Desktop 自动从端点发现。
 - **没有分档路由**、也没有主"Model"字段——只有可选的模型列表 + 通用的高级设置(合并进供应商 profile)。
@@ -136,6 +186,8 @@ Termory 在左侧导航栏有六个入口(`⌘1`–`⌘6`),外加一个 macOS �
 1. 在供应商编辑器里展开**高级设置**。
 2. 点**添加**新增一行,填入**键**和**值**。
 3. 需要几行加几行;用每行的删除按钮去掉一行。最后**保存**。
+
+**AI Gateway 的绑定也一样**:在网关编辑器里展开某个工具那一行,它有自己的**高级设置**,键和规则与下面对应 CLI 的完全相同(Claude Code 绑定同样预置那三行档位路由)。绑定的设置只属于该绑定,不影响同一网关的其他工具。
 
 下面的表格只是常见示例——你可以添加任意该 CLI 接受的键值对。规则如下:
 
@@ -196,36 +248,19 @@ Codex 给每个会话打上创建时所用供应商的标记,而 `codex resume` 
 
 ### 账户余额
 
-当一个供应商或网关直接指向 Termory 认识的厂商时(DeepSeek、SiliconFlow、StepFun、OpenRouter、Novita),卡片会在按钮旁显示该账户的余额,例如 **余额 ¥89.42**,边上还有一个刷新按钮。它用的就是你已经填好的那把 API 密钥,不会额外发送任何东西,请求也只发往该厂商自己的域名。
+当一个供应商或网关直接指向 Termory 认识的厂商时(DeepSeek、SiliconFlow、StepFun、OpenRouter、Novita),卡片会在按钮旁显示该账户的余额,例如 **余额 ¥89.42**,边上还有一个刷新按钮。它用的就是你已经填好的那把 API key,不会额外发送任何东西,请求也只发往该厂商自己的域名。
 
 没有可显示的东西时这一行根本不出现——中转站或任何 Termory 不认识的主机、还没填密钥的卡片、以及没有余额接口的厂商,也就是大多数卡片。读到过的数字会一直留着:刷新失败时只有按钮会变。它最快每 2 分钟重新读一次,菜单栏那一行也会显示各 CLI 当前所用供应商的同一个数字。
 
 ### AI Gateway(网关)
 
-一个 **AI Gateway** 就是一组 `{Base URL, API 密钥}`,可能同时支持多种 API 格式(OpenAI、Anthropic、Gemini……)。与其把同一把密钥分别加到每个 CLI,你只需添加一次:
+一个 **AI Gateway** 就是一组 `{Base URL, API key}`,可能同时支持多种 API 格式(OpenAI、Anthropic、Gemini……)。与其把同一把密钥分别加到每个 CLI,你只需添加一次:
 
-1. 打开 **AI Gateways** 标签 → **添加**一个网关,填 Base URL 和密钥。
-2. 点**检测 API**——Termory 探测网关支持哪些 API 格式。
-3. **应用**到格式匹配的每个 CLI(一个网关 → 多个 CLI,一把密钥)。
+1. 打开 **AI Gateways** 标签 → **添加供应商**,填 Base URL 和 API key。
+2. 稍等片刻会自动检测——Termory 探测网关支持哪些 API 格式。**应用到工具**里,没检测到对应格式的工具保持灰色;右侧刷新按钮可手动重测。
+3. 勾上要用的工具,各填一个模型,点**创建**。再到网关卡片上对每一行点**激活**(一个网关 → 多个 CLI,一把密钥)。
 
-**示例——一把 DeepSeek 密钥同时给 Claude Code 和 Codex 用。**添加网关时只填**主机地址**,不要带任何 API 路径:
-
-| 字段 | 值 |
-|------|-----|
-| 名称 | `DeepSeek` |
-| Base URL | `https://api.deepseek.com` |
-| API 密钥 | 你的 DeepSeek 密钥 |
-
-检测会在根路径找到 OpenAI 格式,在 `/anthropic` 下找到 Anthropic 格式——DeepSeek 的 Anthropic 接口不在根路径上——编辑器会告诉你它在哪("Anthropic 接口位于 /anthropic")。勾上这两个 CLI,各填一个模型:
-
-| 绑定到 | 模型 |
-|--------|------|
-| Claude Code | `deepseek-v4-pro[1m]` |
-| Codex | `deepseek-v4-pro` |
-
-**保存**,再逐个**激活**。每个 CLI 都会拿到它自己的客户端期望的地址——Claude Code 是 `https://api.deepseek.com/anthropic`,Codex 是 `https://api.deepseek.com/v1`——你自己一个 API 路径都不用填。
-
-绑定同样支持**高级设置**,所以上面 DeepSeek 示例里那几个 Claude 模型档位路由键在这里照样能用;网关卡片也和供应商卡片一样显示**账户余额**。
+完整示例见上文 **[用 DeepSeek 网关绑定 Claude Code 和 Codex](#用-deepseek-网关绑定-claude-code-和-codex)**。
 
 已绑定的网关也会出现在各 CLI 的供应商列表中(仅可查看 / 激活——编辑请到 AI Gateways 标签)。
 
@@ -417,7 +452,7 @@ Claude Code 的凭据存放在 macOS 钥匙串中(`.credentials.json` 作为回�
 | 文件 | 内容 |
 |------|------|
 | `config.json` | 界面偏好。不含密钥。 |
-| `providers.json` | 保存的供应商和网关——**含 API 密钥**。 |
+| `providers.json` | 保存的供应商和网关——**含 API key**。 |
 | `favorites.json` | 标星消息的快照。 |
 
 ### Termory 会修改我的历史吗?
