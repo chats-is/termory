@@ -165,7 +165,7 @@ export const zhHans: Record<MessageKey, string> = {
 
   "providers.official": "官方",
   "providers.upgradeAvailable": "新版本 {version}",
-  "providers.upgradeAvailableHint": "有新版本可用 —— 请通过安装程序升级。",
+  "providers.upgradeAvailableHint": "有新版本可用 —— 打开应用进行更新。",
   "providers.upgradeClickToRun": "点击升级：",
   "providers.upgradeRunning": "升级中",
   "providers.upgradeDone": "{app} 已升级",

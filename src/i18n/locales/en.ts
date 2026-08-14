@@ -177,7 +177,7 @@ export const en = {
   "providers.official": "Official",
   "providers.upgradeAvailable": "New {version}",
   "providers.upgradeAvailableHint":
-    "A newer version is available — upgrade with your installer.",
+    "A newer version is available — open the app to update.",
   "providers.upgradeClickToRun": "Click to upgrade:",
   "providers.upgradeRunning": "Upgrading",
   "providers.upgradeDone": "{app} upgraded",
