@@ -861,7 +861,12 @@ Windows lists shells because it has **no `$SHELL` equivalent** — `%COMSPEC%` i
 
 **Frontend**: a saved id that is no longer on offer (terminal uninstalled, or a row this build dropped) shows as `Default` rather than a blank Select trigger — `SettingsPage` checks the saved value against the fetched list. The config is deliberately NOT rewritten: reinstalling that terminal restores the choice, and the backend already treats an unknown id as Default.
 
-**Verification status**: macOS's AppleScript paths are the only ones exercised on real hardware. The macOS `open -na` branch, all of Linux, and all of Windows have unit tests only.
+**Verification status** (2026-08-15, real hardware):
+- **macOS** — the AppleScript paths, plus the `open -na` branch: with Ghostty installed and NOT on PATH it is listed (so the row can only have come from the `.app` check) and the launch lands in the project dir with the user's own `$SHELL` at the prompt.
+- **Windows** — three things, the first two being what the design rests on. (1) `start` really does hand the new console to the OS's **"default terminal application"** setting: launching works under Console Host, under Windows Terminal, and under "Let Windows decide". That is what makes it correct for NO row to name a terminal — the setting is honored without Termory touching it. (2) An npm-installed CLI (**gemini**, a `.cmd` shim) starts through the picker — the case the pwsh→powershell default put at risk, since a `.ps1` shim under a Restricted execution policy would have failed where `cmd` had worked. It did not. (3) The `PowerShell 7` row runs pwsh 7 — including when `where.exe pwsh` resolves to `%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`, the Store **execution alias** (a 0-byte reparse point) that a winget msstore install leaves on PATH; `start` handles it fine.
+- **Linux** — unit tests only.
+
+**A handed-off console shows Windows Terminal's DEFAULT profile — do not read that as a bug.** WT does not profile-match a console created outside it, so a tab from `start` is labelled `default` with the default profile's icon whatever shell is inside; it looked exactly like Windows PowerShell 5.1 while `$PSVersionTable` said 7. `start powershell` / `start cmd` / any externally-created console behave the same. Making the tab say "PowerShell" would mean launching `wt -p "<profile>"` — naming a terminal again, and overriding the very setting the design exists to honor.
 
 ## Verification
 

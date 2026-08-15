@@ -15,8 +15,9 @@
 //! Each platform's argv construction is a pure function
 //! (`mac_open_args` / `linux_open_command` / `windows_open_command`) so
 //! the per-terminal flags are unit-testable on any dev machine; only the
-//! spawn is `#[cfg]`-gated. Only macOS is verified on real hardware —
-//! Linux / Windows are best-effort.
+//! spawn is `#[cfg]`-gated. macOS and Windows are exercised on real
+//! hardware (see CLAUDE.md "Terminal picker" for exactly what was, and
+//! what was not); Linux has unit tests only.
 
 use serde::Serialize;
 use std::process::Command;
