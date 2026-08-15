@@ -408,7 +408,7 @@ The Settings page (`⌘6`) has these sections:
 | **Provider switching** | **Keep all sessions on a Codex switch** — Codex lists resumable sessions per provider, so moving between Official and a third-party API hides the other side's. Off (default), Termory asks which projects should follow. On, every project follows automatically with no prompt — which also lets a switch from the menu bar finish without opening the window. |
 | **Startup** | **Launch at login** — start Termory automatically when you log in (tray only, no window). |
 | **Language** | English / 简体中文 / 繁體中文. Changes apply immediately. |
-| **Terminal** | Which terminal opens when you resume a session. Only terminals found on this machine are listed; "auto" uses your OS default. |
+| **Terminal** | Which terminal opens when you resume a session. Only what's found on this machine is listed, and **Default** follows your OS. On Windows the list is *shells* instead (PowerShell 7 / PowerShell / CMD) — which terminal app hosts them stays whatever you set in Windows itself. |
 | **Storage** | Shows the `~/.termory/` data directory with an **Open** button. |
 | **Search history** | How many recent searches are stored, with a **Clear** button. |
 | **Keyboard shortcuts** | A reference list (see below). |

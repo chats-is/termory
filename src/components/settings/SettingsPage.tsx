@@ -63,6 +63,10 @@ const SHORTCUTS: { keys: string[]; labelKey: MessageKey }[] = [
   { keys: ["Esc"], labelKey: "settings.shortcuts.closePalette" }
 ];
 
+/** Shown until `detect_terminals` answers, and the fallback the picker
+ * falls back TO — the backend's own list always leads with this row. */
+const DEFAULT_TERMINALS = [{ id: "auto", label: "Default" }];
+
 /** One drag-sortable Settings → Tools row. dnd-kit's `useSortable`
  * animates the transform while a sibling is dragged; only the grip icon
  * gets the drag listeners so the Switch stays a plain click target. */
@@ -146,9 +150,8 @@ export function SettingsPage({
   const [termoryDir, setTermoryDir] = React.useState<string | null>(null);
   const [checking, setChecking] = React.useState(false);
   const [terminal, setTerminal] = React.useState("auto");
-  const [terminals, setTerminals] = React.useState<{ id: string; label: string }[]>([
-    { id: "auto", label: "Default" }
-  ]);
+  const [terminals, setTerminals] =
+    React.useState<{ id: string; label: string }[]>(DEFAULT_TERMINALS);
 
   React.useEffect(() => {
     setMounted(true);
@@ -166,8 +169,15 @@ export function SettingsPage({
           getConfig<string>("terminal"),
           invoke<{ id: string; label: string }[]>("detect_terminals")
         ]);
+        const options = list.length > 0 ? list : DEFAULT_TERMINALS;
         if (list.length > 0) setTerminals(list);
-        if (saved) setTerminal(saved);
+        // A saved id that isn't on offer any more shows as Default, not
+        // as a blank trigger: the terminal may have been uninstalled, or
+        // the row may be gone from this build (Windows dropped its
+        // Windows Terminal row). The config is deliberately NOT rewritten
+        // — reinstalling that terminal restores the choice by itself, and
+        // the backend already treats an unknown id as Default.
+        if (saved && options.some((tm) => tm.id === saved)) setTerminal(saved);
       } catch {
         /* keep defaults */
       }

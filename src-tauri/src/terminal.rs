@@ -1,10 +1,22 @@
 //! Terminal launching for the tray's "recent sessions → resume" action.
 //!
-//! `detect()` lists the mainstream terminals actually installed on this OS
-//! (the Settings dropdown shows them + "Auto"); `open(id, project, cmd)`
-//! launches the chosen one, `cd`-ing into `project` and running `cmd`.
-//! Only macOS is verified on the dev machine — Linux / Windows are
-//! best-effort. An unknown / "auto" id falls back to the OS default.
+//! Three steps, and nothing else: `detect()` lists what's installed on
+//! this OS (plus a "Default" row), the user's pick is read from the
+//! `terminal` config key, and `open(id, project, cmd)` launches it,
+//! `cd`-ing into `project` and running `cmd`. An unrecognized or empty
+//! id — including "auto" — is the Default row and falls back to the OS's
+//! own choice.
+//!
+//! Per-OS shape differs in what the list MEANS: on macOS and Linux the
+//! rows are terminal apps (the shell is always the user's `$SHELL`), on
+//! Windows they are SHELLS, because Windows has no `$SHELL` equivalent
+//! and the terminal app comes from its own OS setting instead.
+//!
+//! Each platform's argv construction is a pure function
+//! (`mac_open_args` / `linux_open_command` / `windows_open_command`) so
+//! the per-terminal flags are unit-testable on any dev machine; only the
+//! spawn is `#[cfg]`-gated. Only macOS is verified on real hardware —
+//! Linux / Windows are best-effort.
 
 use serde::Serialize;
 use std::process::Command;
@@ -38,8 +50,10 @@ fn with_cd(project: Option<&str>, cmd: &str) -> String {
     }
 }
 
-/// Is `bin` resolvable on PATH?
-#[cfg(not(target_os = "windows"))]
+/// Is `bin` resolvable on PATH? Linux only — macOS detects by `.app`
+/// (see [`mac_app_installed`]) because a Dock-launched process inherits
+/// launchd's bare PATH, where none of these terminals appear.
+#[cfg(target_os = "linux")]
 fn which(bin: &str) -> bool {
     let mut c = Command::new("which");
     c.arg(bin);
@@ -179,25 +193,92 @@ pub fn new_session(source: &str, project: Option<&str>) -> Result<(), String> {
 // macOS
 // ===================================================================
 
+/// A macOS terminal the picker can offer: the `.app` name (both the
+/// detection check and what `open` launches) and the flags that precede
+/// the command. One definition drives detection and launch alike — the
+/// app name used to be written here AND again as a literal in `open()`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct MacTerminal {
+    id: &'static str,
+    label: &'static str,
+    app: &'static str,
+    pre_args: &'static [&'static str],
+}
+
+/// App names from Claude Code's own launcher
+/// (deepLink/terminalLauncher.ts `MACOS_TERMINALS`) — note kitty's app
+/// bundle is lowercase `kitty.app`. Order is the picker's display order.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const MAC_TERMINALS: &[MacTerminal] = &[
+    // iTerm has no argv interface — it's driven by AppleScript, so its
+    // pre-args are unused and `open()` handles it by id.
+    MacTerminal {
+        id: "iterm",
+        label: "iTerm",
+        app: "iTerm",
+        pre_args: &[],
+    },
+    MacTerminal {
+        id: "ghostty",
+        label: "Ghostty",
+        app: "Ghostty",
+        pre_args: &["-e"],
+    },
+    MacTerminal {
+        id: "alacritty",
+        label: "Alacritty",
+        app: "Alacritty",
+        pre_args: &["-e"],
+    },
+    MacTerminal {
+        id: "kitty",
+        label: "Kitty",
+        app: "kitty",
+        pre_args: &[],
+    },
+    MacTerminal {
+        id: "wezterm",
+        label: "WezTerm",
+        app: "WezTerm",
+        pre_args: &["start", "--"],
+    },
+];
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn mac_terminal(id: &str) -> Option<&'static MacTerminal> {
+    MAC_TERMINALS.iter().find(|t| t.id == id)
+}
+
+/// Is this terminal's `.app` installed? Two `exists()` checks, no
+/// subprocess.
+///
+/// This replaced a `which` probe, which missed a GUI-only install:
+/// Kitty, Alacritty and WezTerm keep their CLI inside the bundle and only
+/// land on PATH if the user links it, so those three were undetectable
+/// however plainly they sat in `/Applications`. A `which` probe is also
+/// useless in the shipped app — a Dock-launched process inherits
+/// launchd's bare PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), the measured
+/// fact recorded in CLAUDE.md — so nothing is lost by dropping it, and
+/// detection now matches how `open()` launches: by the bundle.
+#[cfg(target_os = "macos")]
+fn mac_app_installed(app: &str) -> bool {
+    use std::path::Path;
+    let name = format!("{app}.app");
+    if Path::new("/Applications").join(&name).exists() {
+        return true;
+    }
+    crate::home_dir().is_some_and(|home| home.join("Applications").join(&name).exists())
+}
+
 #[cfg(target_os = "macos")]
 pub fn detect() -> Vec<TerminalOption> {
-    use std::path::Path;
-    // "auto" IS Terminal.app on macOS — don't list Terminal again separately.
-    let mut v = vec![opt("auto", "Default (Terminal)")];
-    if Path::new("/Applications/iTerm.app").exists() {
-        v.push(opt("iterm", "iTerm"));
-    }
-    if which("ghostty") || Path::new("/Applications/Ghostty.app").exists() {
-        v.push(opt("ghostty", "Ghostty"));
-    }
-    if which("alacritty") {
-        v.push(opt("alacritty", "Alacritty"));
-    }
-    if which("kitty") {
-        v.push(opt("kitty", "Kitty"));
-    }
-    if which("wezterm") {
-        v.push(opt("wezterm", "WezTerm"));
+    // "auto" is the system default, which on macOS IS Terminal.app —
+    // `open`'s fallback branch lands there, so don't list it again.
+    let mut v = vec![opt("auto", "Default")];
+    for t in MAC_TERMINALS {
+        if mac_app_installed(t.app) {
+            v.push(opt(t.id, t.label));
+        }
     }
     v
 }
@@ -205,24 +286,18 @@ pub fn detect() -> Vec<TerminalOption> {
 #[cfg(target_os = "macos")]
 pub fn open(id: &str, project: Option<&str>, cmd: &str) -> Result<(), String> {
     let shell_cmd = with_cd(project, cmd);
-    match id {
-        "iterm" => {
+    match mac_terminal(id) {
+        // AppleScript has no argv interface, so iTerm can't go through
+        // the table-driven path below.
+        Some(t) if t.id == "iterm" => {
             let esc = applescript_escape(&shell_cmd);
             spawn_args("osascript", &["-e", &iterm_script(&esc)])
         }
-        "ghostty" => {
-            // App-based launch works whether or not the CLI is on PATH.
-            let run = format!("{shell_cmd}; exec $SHELL");
-            spawn_args(
-                "open",
-                &["-na", "Ghostty", "--args", "-e", "bash", "-lc", &run],
-            )
-        }
-        "alacritty" => cli("alacritty", &["-e"], &shell_cmd),
-        "kitty" => cli("kitty", &[], &shell_cmd),
-        "wezterm" => cli("wezterm", &["start", "--"], &shell_cmd),
-        // "auto" / "terminal" / unknown → Terminal.app.
-        _ => {
+        // Everything else launches from its own row — no app name is
+        // written a second time here.
+        Some(t) => open_app(t, &shell_cmd),
+        // "auto" / unknown → Terminal.app.
+        None => {
             let esc = applescript_escape(&shell_cmd);
             spawn_args("osascript", &["-e", &terminal_app_script(&esc)])
         }
@@ -302,18 +377,32 @@ fn iterm_script(esc: &str) -> String {
 // Linux
 // ===================================================================
 
+/// The Linux terminals the picker can offer: `(binary, id, label)`.
+///
+/// A const rather than an inline array so the list has ONE definition:
+/// `detect()` builds the picker from it and
+/// `every_linux_list_entry_has_a_launch_arm` walks the same rows, so an
+/// entry added here without a `linux_open_command` arm fails the test.
+/// It used to be inline, with the test hand-copying the ids — a third
+/// copy that could agree with neither.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const LINUX_TERMINALS: &[(&str, &str, &str)] = &[
+    ("gnome-terminal", "gnome-terminal", "GNOME Terminal"),
+    ("konsole", "konsole", "Konsole"),
+    ("xfce4-terminal", "xfce4-terminal", "XFCE Terminal"),
+    ("mate-terminal", "mate-terminal", "MATE Terminal"),
+    ("tilix", "tilix", "Tilix"),
+    ("ghostty", "ghostty", "Ghostty"),
+    ("alacritty", "alacritty", "Alacritty"),
+    ("kitty", "kitty", "Kitty"),
+    ("wezterm", "wezterm", "WezTerm"),
+    ("xterm", "xterm", "xterm"),
+];
+
 #[cfg(target_os = "linux")]
 pub fn detect() -> Vec<TerminalOption> {
     let mut v = vec![opt("auto", "Default")];
-    for (bin, id, label) in [
-        ("gnome-terminal", "gnome-terminal", "GNOME Terminal"),
-        ("konsole", "konsole", "Konsole"),
-        ("xfce4-terminal", "xfce4-terminal", "XFCE Terminal"),
-        ("alacritty", "alacritty", "Alacritty"),
-        ("kitty", "kitty", "Kitty"),
-        ("wezterm", "wezterm", "WezTerm"),
-        ("xterm", "xterm", "xterm"),
-    ] {
+    for &(bin, id, label) in LINUX_TERMINALS {
         if which(bin) {
             v.push(opt(id, label));
         }
@@ -366,6 +455,30 @@ fn linux_open_command(id: &str, shell_cmd: &str) -> Option<LinuxLaunch> {
                 ),
             ],
         },
+        // mate-terminal's `-x` takes the rest of the line, which is what
+        // our bash argv vector needs (Claude Code's own launcher uses the
+        // same flag, deepLink/terminalLauncher.ts `launchLinuxTerminal`).
+        "mate-terminal" => launch("mate-terminal", &["-x"]),
+        // Tilix takes ONE string, like xfce4-terminal above — its `-e` is
+        // registered `GOptionArg.STRING` (application.d) and `cmdparams.d`
+        // never joins leftover argv back onto it, so `-e bash -lc <script>`
+        // gives it just `bash` and leaves `-lc` as an unknown option. Its
+        // man page says the opposite ("all text after this parameter"),
+        // and the reference launcher passes an argv vector here, so BOTH
+        // are wrong; the source wins. Not run against a real tilix — but
+        // the single-string form is correct either way, which is why it's
+        // safe without one.
+        "tilix" => LinuxLaunch {
+            program: "tilix",
+            args: vec![
+                "-e".to_string(),
+                format!(
+                    "bash -lc '{}; exec $SHELL'",
+                    shell_cmd.replace('\'', "'\\''")
+                ),
+            ],
+        },
+        "ghostty" => launch("ghostty", &["-e"]),
         "alacritty" => launch("alacritty", &["-e"]),
         "kitty" => launch("kitty", &[]),
         "wezterm" => launch("wezterm", &["start", "--"]),
@@ -415,15 +528,33 @@ pub fn open(id: &str, project: Option<&str>, cmd: &str) -> Result<(), String> {
     Err("no terminal emulator found".to_string())
 }
 
-// ===================================================================
-// Shared POSIX CLI launcher (macOS)
-// ===================================================================
-
+/// Launch a terminal from its table row: `open -na <App> --args
+/// <pre_args> bash -lc '<cmd>; exec $SHELL'` — the shape the Ghostty arm
+/// has always used, and the one Claude Code's own launcher uses for all
+/// four of these (`launchMacosTerminal`, which likewise passes `-e` /
+/// `start` inside `--args`).
+///
+/// There is deliberately no CLI branch: a Dock-launched process inherits
+/// launchd's bare PATH (`/usr/bin:/bin:/usr/sbin:/sbin`, the measured
+/// fact in CLAUDE.md), so a `which` fallback could only ever fire in
+/// `npm run tauri:dev` — i.e. the branch under test would never be the
+/// branch users get.
 #[cfg(target_os = "macos")]
-fn cli(bin: &str, pre_args: &[&str], shell_cmd: &str) -> Result<(), String> {
-    let mut c = Command::new(bin);
-    c.args(bash_lc_args(pre_args, shell_cmd));
+fn open_app(t: &MacTerminal, shell_cmd: &str) -> Result<(), String> {
+    let mut c = Command::new("open");
+    c.args(mac_open_args(t, shell_cmd));
     spawn(c)
+}
+
+/// The argv for that launch — cfg-free so the four per-terminal forms are
+/// unit-testable on any dev OS, the same reason `linux_open_command` and
+/// `windows_open_command` are pure. Getting a terminal's flags wrong is
+/// exactly how the Tilix row shipped broken.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn mac_open_args(t: &MacTerminal, shell_cmd: &str) -> Vec<String> {
+    let mut args: Vec<String> = vec!["-na".into(), t.app.into(), "--args".into()];
+    args.extend(bash_lc_args(t.pre_args, shell_cmd));
+    args
 }
 
 #[cfg(target_os = "macos")]
@@ -437,26 +568,55 @@ fn spawn_args(bin: &str, args: &[&str]) -> Result<(), String> {
 // Windows
 // ===================================================================
 
+/// Is `bin` resolvable on PATH? (Windows counterpart of `which`.)
+#[cfg(target_os = "windows")]
+fn where_(bin: &str) -> bool {
+    let mut c = Command::new("where");
+    c.arg(bin);
+    // Timed + silent: `process::probe` applies the no-console-window
+    // flag, without which one flashes for every `where` invocation
+    // (GUI-subsystem parent).
+    crate::process::probe(c, crate::process::PROBE_TIMEOUT)
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// The shell a row that does NOT name one hosts — `Default` and
+/// `Terminal`. Windows has no `$SHELL` equivalent to read (`%COMSPEC%`
+/// is the constant `cmd.exe`, not a preference), so unlike macOS/Linux
+/// this cannot follow the user's configuration and has to be chosen.
+/// Newest PowerShell first, `cmd` only on a box that has neither.
+#[cfg(target_os = "windows")]
+fn default_shell() -> WinShell {
+    if where_("pwsh") {
+        WinShell::Pwsh
+    } else if where_("powershell") {
+        WinShell::PowerShell
+    } else {
+        WinShell::Cmd
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub fn detect() -> Vec<TerminalOption> {
-    fn where_(bin: &str) -> bool {
-        let mut c = Command::new("where");
-        c.arg(bin);
-        // Timed + silent: `process::probe` applies the no-console-window
-        // flag, without which one flashes for every `where` invocation
-        // (GUI-subsystem parent).
-        crate::process::probe(c, crate::process::PROBE_TIMEOUT)
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    }
-    // "auto" IS cmd on Windows — don't list Command Prompt again separately.
-    let mut v = vec![opt("auto", "Default (cmd)")];
-    if where_("wt") {
-        v.push(opt("wt", "Windows Terminal"));
+    // This list is SHELLS, not terminal apps — the terminal app is the
+    // OS's own "default terminal application" setting, which `start`
+    // honors for every row (see `windows_open_command`). Naming a
+    // terminal here would override the one thing the user configured for
+    // himself, so no row does.
+    let mut v = vec![opt("auto", "Default")];
+    // `pwsh` (PowerShell 7+) and `powershell` (the built-in 5.1) are
+    // SEPARATE binaries that can both be installed, so both are probed;
+    // the newer one is listed first. Only 7+ carries a version in its
+    // label — the bare name is the one the user knows.
+    if where_("pwsh") {
+        v.push(opt("pwsh", "PowerShell 7"));
     }
     if where_("powershell") {
         v.push(opt("powershell", "PowerShell"));
     }
+    // Unconditional: cmd.exe is part of Windows.
+    v.push(opt("cmd", "CMD"));
     v
 }
 
@@ -480,60 +640,81 @@ struct WindowsLaunch {
     hide_helper_console: bool,
 }
 
+/// A shell for the rows that don't name one. WT's positional commandline
+/// REPLACES the profile's shell rather than running inside it (Microsoft's
+/// `--appendCommandLine` is documented as appending "instead of replacing
+/// it"), and passing NO commandline means our resume command never runs —
+/// so one has to be named. `-NoExit` / `/K` keep the prompt afterwards, the
+/// Windows counterpart of the `exec $SHELL` the unix branches append.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum WinShell {
+    Pwsh,
+    PowerShell,
+    Cmd,
+}
+
+impl WinShell {
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    fn args(self, cmd: &str) -> Vec<String> {
+        let argv: &[&str] = match self {
+            WinShell::Pwsh => &["pwsh", "-NoExit", "-Command"],
+            WinShell::PowerShell => &["powershell", "-NoExit", "-Command"],
+            WinShell::Cmd => &["cmd", "/K"],
+        };
+        argv.iter()
+            .map(|a| (*a).to_string())
+            .chain([cmd.to_string()])
+            .collect()
+    }
+}
+
 /// Pure command construction for the Windows terminal launch — cfg-free
 /// so it unit-tests on every dev OS (mirror of the
 /// `windows_claude_dir_matches` precedent; the Windows runtime is the
 /// path that never runs locally). The spawn site (`open`) stays gated.
+///
+/// EVERY row goes through `cmd /C start <shell> …`, and that is the
+/// point: `start` creates a console, and Windows hosts a new console in
+/// whatever the user picked under "default terminal application" — so the
+/// terminal APP follows their setting and is never named here. What the
+/// rows pick is the SHELL, which Windows has no configured default for;
+/// `probe` supplies it for `Default` and for an id we don't recognize.
+///
+/// The project dir rides as the spawn cwd (see [`WindowsLaunch::cwd`]),
+/// never inside the command string.
+///
+/// `probe` is a CLOSURE, not a value: a row that names its own shell
+/// never reads it, and evaluating it eagerly cost those clicks up to two
+/// `where` spawns on the tray's main thread for a result thrown away.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn windows_open_command(id: &str, project: Option<&str>, cmd: &str) -> WindowsLaunch {
-    match id {
-        "wt" => {
-            // Windows Terminal: -d sets the start dir, then the command.
-            let mut args: Vec<String> = Vec::new();
-            if let Some(p) = project {
-                args.extend(["-d".to_string(), p.to_string()]);
-            }
-            args.extend(["cmd".to_string(), "/k".to_string(), cmd.to_string()]);
-            WindowsLaunch {
-                program: "wt",
-                args,
-                cwd: None,
-                hide_helper_console: false,
-            }
-        }
-        "powershell" => {
-            let full = match project {
-                Some(p) => format!("cd '{}'; {}", p.replace('\'', "''"), cmd),
-                None => cmd.to_string(),
-            };
-            WindowsLaunch {
-                program: "powershell",
-                args: vec!["-NoExit".to_string(), "-Command".to_string(), full],
-                cwd: None,
-                hide_helper_console: false,
-            }
-        }
-        // "auto" / "cmd" / unknown → Command Prompt. The project dir
-        // rides as the spawn cwd (see WindowsLaunch.cwd), NOT as a
-        // `cd /d` inside the command string.
-        _ => WindowsLaunch {
-            program: "cmd",
-            args: vec![
-                "/C".to_string(),
-                "start".to_string(),
-                "cmd".to_string(),
-                "/K".to_string(),
-                cmd.to_string(),
-            ],
-            cwd: project.map(str::to_string),
-            hide_helper_console: true,
-        },
+fn windows_open_command(
+    id: &str,
+    project: Option<&str>,
+    cmd: &str,
+    probe: impl FnOnce() -> WinShell,
+) -> WindowsLaunch {
+    let shell = match id {
+        "pwsh" => WinShell::Pwsh,
+        "powershell" => WinShell::PowerShell,
+        "cmd" => WinShell::Cmd,
+        // "auto", and any id this build doesn't know (a stale config, or
+        // one written by a newer version) — the probe decides.
+        _ => probe(),
+    };
+    let mut args = vec!["/C".to_string(), "start".to_string()];
+    args.extend(shell.args(cmd));
+    WindowsLaunch {
+        program: "cmd",
+        args,
+        cwd: project.map(str::to_string),
+        hide_helper_console: true,
     }
 }
 
 #[cfg(target_os = "windows")]
 pub fn open(id: &str, project: Option<&str>, cmd: &str) -> Result<(), String> {
-    let launch = windows_open_command(id, project, cmd);
+    let launch = windows_open_command(id, project, cmd, default_shell);
     let mut c = Command::new(launch.program);
     c.args(&launch.args);
     if let Some(dir) = &launch.cwd {
@@ -592,6 +773,76 @@ mod tests {
         assert!(linux_open_command("auto", "claude").is_none());
     }
 
+    // A list entry with no launch arm is worse than no entry at all:
+    // `linux_open_command` returns None for an unknown id, so picking
+    // Tilix would silently open whatever the fallback chain finds first.
+    // The macOS launch forms were the only ones no test could see — and
+    // a wrong flag is exactly how the Tilix row shipped broken. Verbatim
+    // argv, one per shape: `-e`, no flag, `start --`.
+    #[test]
+    fn mac_open_args_build_each_terminals_launch() {
+        let args = |id| mac_open_args(mac_terminal(id).unwrap(), "cd '/p' && claude");
+        assert_eq!(
+            args("alacritty"),
+            vec![
+                "-na",
+                "Alacritty",
+                "--args",
+                "-e",
+                "bash",
+                "-lc",
+                "cd '/p' && claude; exec $SHELL"
+            ]
+        );
+        // kitty takes the command with no flag before it, and its bundle
+        // is lowercase.
+        assert_eq!(
+            args("kitty"),
+            vec![
+                "-na",
+                "kitty",
+                "--args",
+                "bash",
+                "-lc",
+                "cd '/p' && claude; exec $SHELL"
+            ]
+        );
+        assert_eq!(&args("wezterm")[3..5], ["start", "--"]);
+        assert_eq!(&args("ghostty")[..4], ["-na", "Ghostty", "--args", "-e"]);
+    }
+
+    #[test]
+    fn every_linux_list_entry_has_a_launch_arm() {
+        assert!(!LINUX_TERMINALS.is_empty());
+        for &(_, id, _) in LINUX_TERMINALS {
+            assert!(
+                linux_open_command(id, "claude").is_some(),
+                "no launch arm for {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn linux_open_command_mate_takes_the_rest_of_the_line() {
+        // -x, not -e: mate-terminal's `-e` wants a single string.
+        let l = linux_open_command("mate-terminal", "claude").unwrap();
+        assert_eq!(l.program, "mate-terminal");
+        assert_eq!(l.args, vec!["-x", "bash", "-lc", "claude; exec $SHELL"]);
+    }
+
+    // Tilix's `-e` is a single-string GOption, so the command must arrive
+    // as ONE argument — an argv vector would hand it `bash` and leave
+    // `-lc` to be rejected as an unknown option.
+    #[test]
+    fn linux_open_command_tilix_passes_one_string_not_an_argv_vector() {
+        let l = linux_open_command("tilix", "echo 'hi'").unwrap();
+        assert_eq!(l.program, "tilix");
+        assert_eq!(
+            l.args,
+            vec!["-e", "bash -lc 'echo '\\''hi'\\''; exec $SHELL'"]
+        );
+    }
+
     #[test]
     fn linux_open_command_xfce_wraps_the_whole_command_and_escapes_quotes() {
         let l = linux_open_command("xfce4-terminal", "echo 'hi'").unwrap();
@@ -621,46 +872,79 @@ mod tests {
     // windows_open_command is deliberately cfg-free so these run on
     // every dev OS — the Windows launch path otherwise only executes
     // on real Windows hardware.
+    // Only the `wt` row may name a terminal app: `start` hands the new
+    // console to whatever the user set as their default terminal
+    // application, and naming one overrides that setting — which is the
+    // whole reason picking a SHELL must not drag a terminal along.
     #[test]
-    fn windows_open_command_wt_sets_start_dir_then_command() {
-        let l = windows_open_command("wt", Some("C:\\proj"), "codex resume x");
-        assert_eq!(l.program, "wt");
+    fn no_windows_row_names_a_terminal_every_one_goes_through_start() {
+        for id in [
+            "auto",
+            "pwsh",
+            "powershell",
+            "cmd",
+            // A `wt` left in an older config, and anything a newer build
+            // might write: both are just unknown ids now.
+            "wt",
+            "an-id-from-a-newer-build",
+        ] {
+            let l = windows_open_command(id, None, "claude", || WinShell::PowerShell);
+            assert_eq!(l.program, "cmd", "{id}");
+            assert_eq!(&l.args[..2], ["/C", "start"], "{id}");
+            assert!(!l.args.iter().any(|a| a == "wt"), "{id} named a terminal");
+            // The OUTER cmd /C helper's console must be hidden — `start`
+            // opens the real terminal window.
+            assert!(l.hide_helper_console, "{id}");
+        }
+    }
+
+    // The list picks a SHELL. An explicit row is exactly what it says;
+    // only Default (and an id this build doesn't know) takes the probe.
+    #[test]
+    fn windows_rows_select_their_own_shell_and_default_takes_the_probe() {
+        let args = |id, probe| windows_open_command(id, None, "claude", move || probe).args;
         assert_eq!(
-            l.args,
-            vec!["-d", "C:\\proj", "cmd", "/k", "codex resume x"]
+            args("pwsh", WinShell::Cmd),
+            vec!["/C", "start", "pwsh", "-NoExit", "-Command", "claude"]
         );
-        assert!(!l.hide_helper_console);
-        // No project → no -d pair.
-        let l = windows_open_command("wt", None, "codex");
-        assert_eq!(l.args, vec!["cmd", "/k", "codex"]);
+        assert_eq!(
+            args("powershell", WinShell::Cmd),
+            vec!["/C", "start", "powershell", "-NoExit", "-Command", "claude"]
+        );
+        assert_eq!(
+            args("cmd", WinShell::Pwsh),
+            vec!["/C", "start", "cmd", "/K", "claude"]
+        );
+        // Default follows the probe, whatever it found.
+        assert_eq!(
+            args("auto", WinShell::Pwsh),
+            vec!["/C", "start", "pwsh", "-NoExit", "-Command", "claude"]
+        );
+        assert_eq!(
+            args("auto", WinShell::PowerShell),
+            vec!["/C", "start", "powershell", "-NoExit", "-Command", "claude"]
+        );
     }
 
     #[test]
-    fn windows_open_command_powershell_escapes_single_quotes() {
-        let l = windows_open_command("powershell", Some("C:\\o'brien"), "claude");
-        assert_eq!(l.program, "powershell");
-        assert_eq!(
-            l.args,
-            vec!["-NoExit", "-Command", "cd 'C:\\o''brien'; claude"]
-        );
-        assert!(!l.hide_helper_console);
-    }
-
-    #[test]
-    fn windows_open_command_default_uses_start_with_spawn_cwd() {
-        let l = windows_open_command("auto", Some("C:\\My Docs\\proj"), "claude");
-        assert_eq!(l.program, "cmd");
+    fn windows_open_command_keeps_the_project_dir_out_of_the_command_string() {
         // The project dir must NOT appear inside the command string — a
         // nested `cd /d "…"` hits the MSVCRT-vs-cmd quoting mismatch
         // and mangled real paths (the original Windows bug). It rides
-        // as the spawn cwd; `start`'s new console inherits it.
-        assert_eq!(l.args, vec!["/C", "start", "cmd", "/K", "claude"]);
-        assert_eq!(l.cwd.as_deref(), Some("C:\\My Docs\\proj"));
-        // The OUTER cmd /C helper's console must be hidden — `start`
-        // opens the real terminal window.
-        assert!(l.hide_helper_console);
-        let l = windows_open_command("cmd", None, "claude");
-        assert_eq!(l.args, vec!["/C", "start", "cmd", "/K", "claude"]);
+        // as the spawn cwd; `start`'s new console inherits it. This now
+        // holds for the PowerShell rows too, which used to build their
+        // own `cd '<p>';` prefix.
+        for id in ["auto", "pwsh", "powershell", "cmd"] {
+            let l = windows_open_command(id, Some("C:\\My Docs\\o'brien"), "claude", || {
+                WinShell::Pwsh
+            });
+            assert_eq!(l.cwd.as_deref(), Some("C:\\My Docs\\o'brien"), "{id}");
+            assert!(
+                !l.args.iter().any(|a| a.contains("My Docs")),
+                "{id} put the path in the command"
+            );
+        }
+        let l = windows_open_command("auto", None, "claude", || WinShell::Pwsh);
         assert_eq!(l.cwd, None);
     }
 
