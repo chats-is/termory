@@ -598,13 +598,56 @@ fn default_shell() -> WinShell {
     }
 }
 
+/// Where Git for Windows keeps the bash it means for outside callers.
+///
+/// **Not a PATH probe, and not `where git-bash` either.** `bash` on PATH
+/// is `%SystemRoot%\System32\bash.exe` — **WSL's** entry point — so
+/// probing for it can resolve to a different OS entirely and run the
+/// resume command against a filesystem where the project path means
+/// nothing. `git-bash.exe` avoids that collision but is not on PATH: the
+/// installer adds `{app}\cmd`, while `git-bash.exe` sits at `{app}`
+/// itself (`install.iss`: `Filename: {app}\git-bash.exe`) — confirmed by
+/// `where.exe git-bash` finding nothing on a real install.
+///
+/// So: Git's own install dirs, and ONLY the ones the installer can
+/// produce. `DefaultDirName={pf}\Git` with `PrivilegesRequired=none`
+/// (install.iss), and Inno's `{pf}` is an alias for `{autopf}` — Program
+/// Files for an admin install, `%LOCALAPPDATA%\Programs` for a per-user
+/// one. `bin\bash.exe` (not `usr\bin`) is the wrapper Git ships for
+/// external callers.
+///
+/// An install directory the user CHANGED at setup time is therefore not
+/// found, and the row simply doesn't appear — the same degradation as any
+/// terminal we can't locate. The registry would answer for any location
+/// (`Software\GitForWindows\InstallPath`), but that is a second lookup
+/// mechanism, with a subprocess and a parser, for a case the defaults
+/// already cover.
+#[cfg(target_os = "windows")]
+fn git_bash_path() -> Option<std::path::PathBuf> {
+    [
+        ("ProgramFiles", "Git"),
+        ("ProgramFiles(x86)", "Git"),
+        ("LOCALAPPDATA", "Programs\\Git"),
+    ]
+    .iter()
+    .filter_map(|(var, sub)| std::env::var_os(var).map(|root| (root, sub)))
+    .map(|(root, sub)| {
+        std::path::PathBuf::from(root)
+            .join(sub)
+            .join("bin")
+            .join("bash.exe")
+    })
+    .find(|p| p.exists())
+}
+
 #[cfg(target_os = "windows")]
 pub fn detect() -> Vec<TerminalOption> {
     // This list is SHELLS, not terminal apps — the terminal app is the
     // OS's own "default terminal application" setting, which `start`
     // honors for every row (see `windows_open_command`). Naming a
     // terminal here would override the one thing the user configured for
-    // himself, so no row does.
+    // himself, so no row does. Git Bash is a shell by this measure too:
+    // its window still comes from that setting, not from mintty.
     let mut v = vec![opt("auto", "Default")];
     // `pwsh` (PowerShell 7+) and `powershell` (the built-in 5.1) are
     // SEPARATE binaries that can both be installed, so both are probed;
@@ -618,6 +661,9 @@ pub fn detect() -> Vec<TerminalOption> {
     }
     // Unconditional: cmd.exe is part of Windows.
     v.push(opt("cmd", "CMD"));
+    if git_bash_path().is_some() {
+        v.push(opt("git-bash", "Git Bash"));
+    }
     v
 }
 
@@ -688,13 +734,40 @@ impl WinShell {
 /// `probe` is a CLOSURE, not a value: a row that names its own shell
 /// never reads it, and evaluating it eagerly cost those clicks up to two
 /// `where` spawns on the tray's main thread for a result thrown away.
+///
+/// `git_bash` is the resolved absolute path from [`git_bash_path`], since
+/// that one shell cannot be named by a bare word — see the arm below.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn windows_open_command(
     id: &str,
     project: Option<&str>,
     cmd: &str,
     probe: impl FnOnce() -> WinShell,
+    git_bash: Option<&str>,
 ) -> WindowsLaunch {
+    // Git Bash is the one row launched by PATH rather than by name, and
+    // it needs two things the other rows don't. (1) `start` treats a
+    // QUOTED first token as the window title, and this path has spaces —
+    // hence the empty title argument ahead of it. (2) `exec bash` at the
+    // end is the Windows counterpart of the unix `exec $SHELL`: it leaves
+    // the user at a bash prompt in the project dir once the CLI exits.
+    // A stale `git-bash` in the config with Git since uninstalled falls
+    // through to the probe, exactly like any other unknown id.
+    if let ("git-bash", Some(bash)) = (id, git_bash) {
+        return WindowsLaunch {
+            program: "cmd",
+            args: vec![
+                "/C".to_string(),
+                "start".to_string(),
+                String::new(),
+                bash.to_string(),
+                "-lc".to_string(),
+                format!("{cmd}; exec bash"),
+            ],
+            cwd: project.map(str::to_string),
+            hide_helper_console: true,
+        };
+    }
     let shell = match id {
         "pwsh" => WinShell::Pwsh,
         "powershell" => WinShell::PowerShell,
@@ -715,7 +788,14 @@ fn windows_open_command(
 
 #[cfg(target_os = "windows")]
 pub fn open(id: &str, project: Option<&str>, cmd: &str) -> Result<(), String> {
-    let launch = windows_open_command(id, project, cmd, default_shell);
+    let bash = git_bash_path();
+    let launch = windows_open_command(
+        id,
+        project,
+        cmd,
+        default_shell,
+        bash.as_deref().and_then(|p| p.to_str()),
+    );
     let mut c = Command::new(launch.program);
     c.args(&launch.args);
     if let Some(dir) = &launch.cwd {
@@ -877,6 +957,50 @@ mod tests {
     // console to whatever the user set as their default terminal
     // application, and naming one overrides that setting — which is the
     // whole reason picking a SHELL must not drag a terminal along.
+    const GIT_BASH: &str = "C:\\Program Files\\Git\\bin\\bash.exe";
+
+    // Git Bash is a SHELL row like the others — same `start`, same spawn
+    // cwd — but it is named by PATH rather than by a bare word, and that
+    // brings the one quoting rule the others don't need: `start` reads a
+    // QUOTED first token as the window TITLE, and this path has spaces,
+    // so an empty title has to precede it.
+    #[test]
+    fn windows_git_bash_row_passes_an_empty_title_before_the_quoted_path() {
+        let l = windows_open_command(
+            "git-bash",
+            Some("C:\\proj"),
+            "claude --resume x",
+            || WinShell::Pwsh,
+            Some(GIT_BASH),
+        );
+        assert_eq!(l.program, "cmd");
+        assert_eq!(
+            l.args,
+            vec![
+                "/C",
+                "start",
+                "",
+                GIT_BASH,
+                "-lc",
+                "claude --resume x; exec bash"
+            ]
+        );
+        assert_eq!(l.cwd.as_deref(), Some("C:\\proj"));
+        assert!(l.hide_helper_console);
+    }
+
+    // Git uninstalled since the pick was saved: the row behaves like any
+    // other id this build can't resolve — the probe decides — rather than
+    // launching a path that isn't there.
+    #[test]
+    fn windows_git_bash_without_git_falls_back_to_the_probe() {
+        let l = windows_open_command("git-bash", None, "claude", || WinShell::PowerShell, None);
+        assert_eq!(
+            l.args,
+            vec!["/C", "start", "powershell", "-NoExit", "-Command", "claude"]
+        );
+    }
+
     #[test]
     fn no_windows_row_names_a_terminal_every_one_goes_through_start() {
         for id in [
@@ -889,7 +1013,7 @@ mod tests {
             "wt",
             "an-id-from-a-newer-build",
         ] {
-            let l = windows_open_command(id, None, "claude", || WinShell::PowerShell);
+            let l = windows_open_command(id, None, "claude", || WinShell::PowerShell, None);
             assert_eq!(l.program, "cmd", "{id}");
             assert_eq!(&l.args[..2], ["/C", "start"], "{id}");
             assert!(!l.args.iter().any(|a| a == "wt"), "{id} named a terminal");
@@ -903,7 +1027,7 @@ mod tests {
     // only Default (and an id this build doesn't know) takes the probe.
     #[test]
     fn windows_rows_select_their_own_shell_and_default_takes_the_probe() {
-        let args = |id, probe| windows_open_command(id, None, "claude", move || probe).args;
+        let args = |id, probe| windows_open_command(id, None, "claude", move || probe, None).args;
         assert_eq!(
             args("pwsh", WinShell::Cmd),
             vec!["/C", "start", "pwsh", "-NoExit", "-Command", "claude"]
@@ -935,17 +1059,21 @@ mod tests {
         // as the spawn cwd; `start`'s new console inherits it. This now
         // holds for the PowerShell rows too, which used to build their
         // own `cd '<p>';` prefix.
-        for id in ["auto", "pwsh", "powershell", "cmd"] {
-            let l = windows_open_command(id, Some("C:\\My Docs\\o'brien"), "claude", || {
-                WinShell::Pwsh
-            });
+        for id in ["auto", "pwsh", "powershell", "cmd", "git-bash"] {
+            let l = windows_open_command(
+                id,
+                Some("C:\\My Docs\\o'brien"),
+                "claude",
+                || WinShell::Pwsh,
+                Some(GIT_BASH),
+            );
             assert_eq!(l.cwd.as_deref(), Some("C:\\My Docs\\o'brien"), "{id}");
             assert!(
                 !l.args.iter().any(|a| a.contains("My Docs")),
                 "{id} put the path in the command"
             );
         }
-        let l = windows_open_command("auto", None, "claude", || WinShell::Pwsh);
+        let l = windows_open_command("auto", None, "claude", || WinShell::Pwsh, None);
         assert_eq!(l.cwd, None);
     }
 
