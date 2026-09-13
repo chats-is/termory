@@ -753,9 +753,6 @@ fn account_row_label(a: &crate::accounts::TrayAccount) -> String {
     }
 }
 
-/// Push the current saved-login state onto the cached row handles. Returns
-/// false when the cache can't express it — no rows, or the SET of accounts
-/// changed (added / removed / reordered) — leaving the caller to rebuild.
 /// Whether a tray account row should be clickable.
 ///
 /// **ONE definition, used by BOTH the build path and the in-place
@@ -775,28 +772,66 @@ fn account_row_enabled(app: &AppHandle, cli: CliApp, a: &crate::accounts::TrayAc
     !a.needs_relogin && !crate::accounts::login_in_progress(app, cli)
 }
 
+/// Whether the cached rows still describe the live accounts — same ids, same
+/// count, same order — for every CLI the menu carries a submenu for.
+///
+/// The CLIs come from the SUBMENU list, never from the cached rows: a user
+/// with nothing saved has a menu whose account-row cache is legitimately
+/// EMPTY, and that menu is already correct. Reading the CLIs off the rows made
+/// an empty cache indistinguishable from "cache unusable", so the tray-click
+/// refresh rebuilt on EVERY click — and `set_menu` closes an open menu on
+/// macOS, so the menu dismissed itself the moment it appeared, for exactly the
+/// users who had no saved login. Going through the submenu list also catches
+/// the inverse: the FIRST account saved under a CLI that had none, which a
+/// row-derived list could never see either.
+///
+/// Pure over the ids so both directions are pinned by tests — the function
+/// that applies the update needs real menu handles and cannot be unit-tested.
+fn account_rows_current(
+    menu_clis: &[CliApp],
+    cached: &[(CliApp, String)],
+    live: &[(CliApp, String)],
+) -> bool {
+    menu_clis.iter().all(|cli| {
+        cached
+            .iter()
+            .filter(|(c, _)| c == cli)
+            .map(|(_, id)| id)
+            .eq(live.iter().filter(|(c, _)| c == cli).map(|(_, id)| id))
+    })
+}
+
+/// Push the current saved-login state onto the cached row handles. Returns
+/// false when the cache can't express it — the SET of accounts changed
+/// (added / removed / reordered) under a CLI the menu carries a submenu for —
+/// leaving the caller to rebuild.
 fn apply_account_rows(app: &AppHandle, rows: &[AccountRow]) -> bool {
-    if rows.is_empty() {
+    // The submenu list is the same gate `build_menu` applied (installed AND
+    // not disabled), so this compares exactly the CLIs that could own a row.
+    // A poisoned cache says nothing about the menu — rebuild.
+    let menu_clis: Vec<CliApp> = match CLI_ROWS.lock() {
+        Ok(g) => g.iter().map(|r| r.cli).collect(),
+        Err(_) => return false,
+    };
+    let live: Vec<(CliApp, Vec<crate::accounts::TrayAccount>)> = menu_clis
+        .iter()
+        .map(|&cli| (cli, crate::accounts::tray_accounts(cli)))
+        .collect();
+    let live_ids: Vec<(CliApp, String)> = live
+        .iter()
+        .flat_map(|(cli, accounts)| accounts.iter().map(|a| (*cli, a.id.clone())))
+        .collect();
+    let cached_ids: Vec<(CliApp, String)> = rows.iter().map(|r| (r.cli, r.id.clone())).collect();
+    if !account_rows_current(&menu_clis, &cached_ids, &live_ids) {
         return false;
     }
-    let mut clis: Vec<CliApp> = Vec::new();
-    for row in rows {
-        if !clis.contains(&row.cli) {
-            clis.push(row.cli);
-        }
-    }
-    for cli in clis {
-        let live = crate::accounts::tray_accounts(cli);
-        let cached: Vec<&AccountRow> = rows.iter().filter(|r| r.cli == cli).collect();
-        if live.len() != cached.len() || live.iter().zip(&cached).any(|(a, r)| a.id != r.id) {
-            return false;
-        }
-        for (a, row) in live.iter().zip(&cached) {
+    for (cli, accounts) in &live {
+        for (a, row) in accounts.iter().zip(rows.iter().filter(|r| r.cli == *cli)) {
             if row.item.set_text(account_row_label(a)).is_err()
                 || row.item.set_checked(a.active).is_err()
                 || row
                     .item
-                    .set_enabled(account_row_enabled(app, cli, a))
+                    .set_enabled(account_row_enabled(app, *cli, a))
                     .is_err()
             {
                 return false;
@@ -2773,6 +2808,61 @@ mod tests {
             "baseUrl": "https://api.example.com", "apiKey": "sk-test"
         }))
         .expect("provider fixture")
+    }
+
+    /// `(cli, id)` pairs for the pure account-cache comparison.
+    fn ids(pairs: &[(CliApp, &str)]) -> Vec<(CliApp, String)> {
+        pairs.iter().map(|(c, i)| (*c, i.to_string())).collect()
+    }
+
+    /// The regression that made the tray menu dismiss itself: with no saved
+    /// login the row cache is empty, and treating that as "cache unusable"
+    /// sent every tray click through a full `set_menu` rebuild — which closes
+    /// the menu the click just opened.
+    #[test]
+    fn account_rows_current_accepts_an_empty_cache_when_nothing_is_saved() {
+        let menu = [CliApp::Claude, CliApp::Codex];
+        assert!(account_rows_current(&menu, &[], &[]));
+    }
+
+    /// The inverse a row-derived CLI list could never see: the FIRST account
+    /// saved under a CLI that had none still needs the rebuild.
+    #[test]
+    fn account_rows_current_rejects_an_empty_cache_once_an_account_exists() {
+        let menu = [CliApp::Claude, CliApp::Codex];
+        let live = ids(&[(CliApp::Codex, "acc-1")]);
+        assert!(!account_rows_current(&menu, &[], &live));
+    }
+
+    #[test]
+    fn account_rows_current_accepts_an_unchanged_set() {
+        let menu = [CliApp::Codex, CliApp::Claude];
+        let mut rows = ids(&[(CliApp::Codex, "a"), (CliApp::Codex, "b")]);
+        rows.extend(ids(&[(CliApp::Claude, "c")]));
+        assert!(account_rows_current(&menu, &rows, &rows));
+    }
+
+    #[test]
+    fn account_rows_current_rejects_a_changed_count_id_or_order() {
+        let menu = [CliApp::Codex];
+        let cached = ids(&[(CliApp::Codex, "a"), (CliApp::Codex, "b")]);
+        let removed = ids(&[(CliApp::Codex, "a")]);
+        assert!(!account_rows_current(&menu, &cached, &removed));
+        let renamed = ids(&[(CliApp::Codex, "a"), (CliApp::Codex, "z")]);
+        assert!(!account_rows_current(&menu, &cached, &renamed));
+        // Reordered — the handles are zipped positionally, so order matters.
+        let reordered = ids(&[(CliApp::Codex, "b"), (CliApp::Codex, "a")]);
+        assert!(!account_rows_current(&menu, &cached, &reordered));
+    }
+
+    /// A CLI with no submenu owns no rows, so its accounts are not compared —
+    /// otherwise a tool switched OFF in Settings → Tools would rebuild the
+    /// menu on every click, the same dismiss-itself bug by another route.
+    #[test]
+    fn account_rows_current_ignores_clis_the_menu_has_no_submenu_for() {
+        let menu = [CliApp::Codex];
+        let live = ids(&[(CliApp::Claude, "acc-1")]);
+        assert!(account_rows_current(&menu, &[], &live));
     }
 
     #[test]
