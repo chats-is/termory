@@ -122,6 +122,45 @@ pub fn credential_cli_for_path(path: &std::path::Path) -> Option<CliApp> {
         // Matched by FULL path, not basename: `.claude.lock` is an
         // ordinary-looking name and one anywhere else is not Claude's.
         _ if claude_credential_signal_path().as_deref() == Some(path) => Some(CliApp::Claude),
+        // The two locks Claude's secure-storage layer takes INSIDE the
+        // config dir, recovered from the shipped binary (**2.1.270**; the
+        // `videcoding/cli` clone predates both).
+        //
+        // * `.storage-write.lock` — held for every secure-storage write.
+        //   `XBn()` wraps the write in `lock(join(b_(), ".storage-write"))`
+        //   and `proper-lockfile` mkdirs `` `${file}.lock` `` beside it.
+        //   `performLogout` calls it around `secureStorage.delete()`, which
+        //   is what makes a LOGOUT visible at all: on macOS the credential
+        //   is a Keychain entry whose deletion moves no file.
+        // * `.oauth_refresh.lock` — the CURRENT refresh lock. `mvr()` takes
+        //   it first and the `<config-dir>.lock` above only as its
+        //   best-effort legacy partner. `V$n()` passes it as an explicit
+        //   `lockfilePath`, so no second `.lock` is appended.
+        //
+        // `.storage-write.lock` is NOT Claude-login-exclusive and cannot be
+        // made so: it guards the whole secrets document (`designOauth`,
+        // `enterpriseGateway`, `trustedDeviceToken`, `coworkRemoteDevice`,
+        // `mcpXaaIdp`, `pluginSecrets`, `gatewayTrust`,
+        // `mcpDiscoveryCacheKey`), and the file name carries no payload to
+        // say which one moved. `mutate()` also takes the lock BEFORE running
+        // its callback, so even a no-op mutation fires it.
+        //
+        // Neither needs a watch of its own — both sit under the config dir,
+        // already a RECURSIVE static target — and neither may join
+        // `watcher::claude_signal_paths`, whose entries get a NON-recursive
+        // watch on their parent: registering the config dir a second time
+        // makes notify's two owners of one path fight, downgrading the
+        // recursive watch that sessions, memory and skills rely on.
+        //
+        // Known gap, deliberately not covered: Claude resolves this dir
+        // through `CLAUDE_SECURESTORAGE_CONFIG_DIR` when that is DEFINED,
+        // falling back to the config dir only when it is unset. Setting that
+        // override moves both locks and these stop matching.
+        ".storage-write.lock" | ".oauth_refresh.lock"
+            if crate::claude_auth::config_dir().as_deref() == path.parent() =>
+        {
+            Some(CliApp::Claude)
+        }
         _ => None,
     }
 }
@@ -2653,9 +2692,36 @@ mod tests {
             claude_identity_signal_path().as_deref(),
             Some(tmp.join(".claude.json").as_path())
         );
+        // The secure-storage locks, INSIDE the config dir.
+        // `.storage-write.lock` is the only trace a macOS logout leaves —
+        // the Keychain delete moves no file, but `performLogout` wraps it
+        // in this lock.
+        assert_eq!(
+            credential_cli_for_path(&tmp.join(".claude/.storage-write.lock")),
+            Some(CliApp::Claude)
+        );
+        assert_eq!(
+            credential_cli_for_path(&tmp.join(".claude/.oauth_refresh.lock")),
+            Some(CliApp::Claude)
+        );
+        // `.oauth_refresh.lock` is passed as an explicit `lockfilePath`, so
+        // proper-lockfile appends nothing — a doubled suffix is not a path
+        // Claude ever writes.
+        assert_eq!(
+            credential_cli_for_path(&tmp.join(".claude/.oauth_refresh.lock.lock")),
+            None
+        );
         // Same basename somewhere else is not Claude's lock.
         assert_eq!(
             credential_cli_for_path(Path::new("/somewhere/else/.claude.lock")),
+            None
+        );
+        assert_eq!(
+            credential_cli_for_path(Path::new("/elsewhere/.storage-write.lock")),
+            None
+        );
+        assert_eq!(
+            credential_cli_for_path(Path::new("/elsewhere/.oauth_refresh.lock")),
             None
         );
         // A lock on a DIFFERENT path — Claude locks mailboxes, markers and

@@ -370,6 +370,59 @@ pub(crate) fn read_credentials_uncached() -> Option<JsonValue> {
     file_read()
 }
 
+/// Fingerprint of the `claudeAiOauth` entry as this process last saw it.
+/// `None` = never asked. The absent-credential state gets its own value, so
+/// a LOGOUT reads as a change rather than as a return to the initial state.
+static LAST_OAUTH_FINGERPRINT: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+
+/// Stamped when there is no `claudeAiOauth` entry at all (logged out). Any
+/// real credential hashes to something else with overwhelming odds.
+const OAUTH_FINGERPRINT_ABSENT: u64 = 0;
+
+/// Has Claude's OAuth credential changed since this process last asked?
+///
+/// **Why this exists.** The filesystem signal that reveals a macOS logout is
+/// `.storage-write.lock`, and that lock guards the WHOLE secrets document —
+/// `designOauth`, `enterpriseGateway`, `trustedDeviceToken`,
+/// `coworkRemoteDevice`, `mcpXaaIdp`, `pluginSecrets`, `gatewayTrust`,
+/// `mcpDiscoveryCacheKey`. Its name carries no payload, so the event cannot
+/// say WHICH secret moved. This answers that locally: it fingerprints the
+/// `claudeAiOauth` subtree ALONE, so a write to any of the others reports
+/// "unchanged" and costs one credential read — never a quota fetch, a tray
+/// repaint or an account-store pass.
+///
+/// **Reads UNCACHED deliberately**, which is also what makes the caller
+/// correct. The 30s Keychain cache would otherwise answer a logout with the
+/// credential that was just deleted — and its access token stays valid
+/// server-side, so the quota query would SUCCEED and re-stamp stale numbers
+/// as fresh. Not a corner case: `read_credentials_uncached` RE-PRIMES that
+/// cache, so any read seconds earlier leaves it live. The re-prime is also
+/// why a real change costs nothing extra — the fetch that follows reads the
+/// value this call just refreshed.
+///
+/// **Exactly ONE caller** (`watcher::route_credential_change`): asking
+/// CONSUMES the stamp, so a second caller would silently eat the first's
+/// change.
+pub(crate) fn oauth_credential_changed() -> bool {
+    use std::hash::{Hash, Hasher};
+    let fingerprint = read_credentials_uncached()
+        .as_ref()
+        .and_then(|doc| doc.get("claudeAiOauth"))
+        .filter(|entry| !entry.is_null())
+        .map(|entry| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            entry.to_string().hash(&mut hasher);
+            hasher.finish()
+        })
+        .unwrap_or(OAUTH_FINGERPRINT_ABSENT);
+    let mut last = LAST_OAUTH_FINGERPRINT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let changed = *last != Some(fingerprint);
+    *last = Some(fingerprint);
+    changed
+}
+
 /// Drop the Keychain read cache. Called when an EXTERNAL writer is known to
 /// have changed the credential (the `claude auth login` child exiting) so
 /// even display reads pick up the new state immediately. No-op off macOS /
@@ -440,6 +493,75 @@ pub(crate) fn delete_credentials() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gate that keeps `.storage-write.lock` from over-triggering: that
+    /// lock fires for EVERY secret in the document, so the quota refresh
+    /// behind it must run only when the LOGIN moved.
+    ///
+    /// Asserts transitions, never the first call: the fingerprint is a
+    /// process-global that other tests in this binary may already have
+    /// stamped.
+    #[test]
+    fn oauth_credential_changed_tracks_the_login_and_ignores_other_secrets() {
+        let _g = crate::testutils::lock_home();
+        let tmp = std::env::temp_dir().join("termory-oauth-fingerprint");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".claude")).unwrap();
+        let _h = crate::testutils::override_home(&tmp);
+        let _e = crate::testutils::EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
+        let path = tmp.join(".claude/.credentials.json");
+
+        let write = |doc: serde_json::Value| std::fs::write(&path, doc.to_string()).unwrap();
+        let oauth = |token: &str| serde_json::json!({ "accessToken": token, "expiresAt": 1_800_000_000_000_i64 });
+
+        // Establish a baseline, whatever this process saw before.
+        write(serde_json::json!({ "claudeAiOauth": oauth("at-1") }));
+        oauth_credential_changed();
+        assert!(!oauth_credential_changed(), "unchanged document");
+
+        // Another SECRET in the same document moves — this is the
+        // `.storage-write.lock` over-trigger, and it must stop at the gate.
+        write(serde_json::json!({
+            "claudeAiOauth": oauth("at-1"),
+            "mcpXaaIdp": { "srv": { "idToken": "id-1", "expiresAt": 1 } },
+            "pluginSecrets": { "p": { "k": "v" } },
+        }));
+        assert!(
+            !oauth_credential_changed(),
+            "a write to another secret is not a login change"
+        );
+
+        // A token refresh IS a change.
+        write(serde_json::json!({
+            "claudeAiOauth": oauth("at-2"),
+            "mcpXaaIdp": { "srv": { "idToken": "id-1", "expiresAt": 1 } },
+            "pluginSecrets": { "p": { "k": "v" } },
+        }));
+        assert!(oauth_credential_changed(), "rotated access token");
+        assert!(!oauth_credential_changed(), "same token twice");
+
+        // A LOGOUT drops the entry while the document survives — the case
+        // the whole signal exists for.
+        write(serde_json::json!({ "pluginSecrets": { "p": { "k": "v" } } }));
+        assert!(oauth_credential_changed(), "logout");
+        assert!(!oauth_credential_changed(), "still logged out");
+
+        // An explicit null says the same thing as an absent key, so it must
+        // NOT read as a fresh change on top of a logout.
+        write(serde_json::json!({ "claudeAiOauth": serde_json::Value::Null }));
+        assert!(!oauth_credential_changed(), "null is the absent state");
+
+        // Logging back in.
+        write(serde_json::json!({ "claudeAiOauth": oauth("at-3") }));
+        assert!(oauth_credential_changed(), "login");
+
+        // The document disappearing entirely is the same absent state.
+        std::fs::remove_file(&path).unwrap();
+        assert!(oauth_credential_changed(), "credential file removed");
+        assert!(!oauth_credential_changed(), "still gone");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
     use crate::testutils::{lock_home, EnvVarGuard};
     use serde_json::json;
 

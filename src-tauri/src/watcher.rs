@@ -333,20 +333,7 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
                     });
                 }
                 for cli in credential_clis {
-                    crate::tray::force_quota_refresh(&app_handle, cli);
-                    // Same signal, second consumer: the saved snapshot of
-                    // the account now logged in is a copy of this file, so
-                    // it just went stale. This is the whole real-time path
-                    // — Claude's Keychain included, via the lock above —
-                    // and the only other trigger is one catch-up pass at
-                    // launch (`accounts::sync_accounts_at_launch`).
-                    //
-                    // Off this thread — the read can spawn `security(1)`
-                    // and this loop still has the burst to drain.
-                    let handle = app_handle.clone();
-                    tauri::async_runtime::spawn_blocking(move || {
-                        crate::accounts::sync_live_account_if_idle(&handle, cli)
-                    });
+                    route_credential_change(&app_handle, cli);
                 }
             }
 
@@ -426,21 +413,50 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
             // with nothing to correct it (measured: one burst, 31 codex
             // path events, `find_cli_binary=None`, and no second burst
             // ever came). So bin-dir events are noted, not discarded.
+            //
+            // A CREDENTIAL event is the same mistake with a worse outcome.
+            // On macOS the only trace a LOGOUT leaves is a lock under the
+            // config dir, it arrives whenever the user happened to type
+            // `/logout`, and a rescan is settling whenever a CLI has been
+            // writing session files — which is exactly what they were doing
+            // a moment earlier. Swallowed, the signal never comes again: the
+            // tray keeps a signed-out account's numbers until some later
+            // click happens to land past the two-minute success floor.
+            //
+            // The identity signal is deliberately NOT carried over. It feeds
+            // only the account sync, and `.claude.json` is written from 159
+            // places, so another one lands within moments by construction.
             let settle_until = Instant::now() + SETTLE_WINDOW;
             let mut install_settled_late = false;
+            let mut credential_settled_late: Vec<crate::providers::CliApp> = Vec::new();
             loop {
                 let now = Instant::now();
                 if now >= settle_until {
                     break;
                 }
                 match rx.recv_timeout(settle_until - now) {
-                    Ok(Ok(event)) if event_touches_install(&event, &install_targets) => {
-                        install_settled_late = true;
+                    Ok(Ok(event)) => {
+                        if event_touches_install(&event, &install_targets) {
+                            install_settled_late = true;
+                        }
+                        for cli in event_credential_clis(&event) {
+                            if !credential_settled_late.contains(&cli) {
+                                credential_settled_late.push(cli);
+                            }
+                        }
                     }
-                    Ok(_) => continue,
+                    // A watcher-level error carries no paths to classify.
+                    Ok(Err(_)) => continue,
                     Err(mpsc::RecvTimeoutError::Timeout) => break,
                     Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 }
+            }
+
+            // Same routing the in-burst branch uses, so when a credential
+            // change landed cannot change what it means. Its own gate still
+            // applies: a lock taken for some OTHER secret stops there.
+            for cli in credential_settled_late {
+                route_credential_change(&app_handle, cli);
             }
 
             // A bin dir changed while we were settling: re-probe now
@@ -467,6 +483,46 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
 /// and OS metadata noise (`.DS_Store`). If only filtered files
 /// changed, the data we'd surface is identical to last scan, so a
 /// re-scan would be pure cost.
+/// Everything one CLI's credential change sets off.
+///
+/// **Claude is GATED, and the gate is the point.** Its signal
+/// (`.storage-write.lock`) guards the whole secrets document, so it fires
+/// for `mcpXaaIdp`, `pluginSecrets`, `gatewayTrust` and the rest too —
+/// events with nothing to do with the login. `oauth_credential_changed()`
+/// fingerprints the `claudeAiOauth` subtree alone and answers locally: a
+/// write to any other secret stops HERE, having cost one credential read,
+/// with no quota fetch, no tray repaint and no account-store pass. It reads
+/// uncached, which is also what makes the refresh below correct — the 30s
+/// Keychain cache would answer a LOGOUT with the credential that was just
+/// deleted, whose access token is still valid server-side, so the query
+/// would SUCCEED and re-stamp the stale numbers as fresh. The other CLIs
+/// need no gate: their signal IS their credential file.
+///
+/// Past the gate, two consumers:
+///
+/// 1. **Quota**, bypassing the normal rate limits — a login/logout means the
+///    cached state is wrong by definition (`force_quota_refresh` keeps its
+///    own 10s burst floor).
+/// 2. **Account snapshot**, because the saved copy of the login that just
+///    changed went stale with it. This is the whole real-time path —
+///    Claude's Keychain included — and the only other trigger is one
+///    catch-up pass at launch (`accounts::sync_accounts_at_launch`).
+///
+/// The whole body runs OFF the caller's thread: the gate and the sync both
+/// spawn `security(1)`, and the watcher loop has a burst to get back to.
+fn route_credential_change(app_handle: &AppHandle, cli: crate::providers::CliApp) {
+    let handle = app_handle.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if cli == crate::providers::CliApp::Claude
+            && !crate::claude_auth::oauth_credential_changed()
+        {
+            return;
+        }
+        crate::tray::force_quota_refresh(&handle, cli);
+        crate::accounts::sync_live_account_if_idle(&handle, cli);
+    });
+}
+
 /// CLIs whose OAuth credential file this event touched. The
 /// path→CLI mapping is owned by quota.rs (`credential_cli_for_path`,
 /// next to the credential readers) so the watcher can't drift from
