@@ -69,17 +69,116 @@ pub fn claude_credential_signal_path() -> Option<PathBuf> {
 /// and the same file a logout clears.
 ///
 /// **Deliberately NOT part of `credential_cli_for_path`.** This is Claude's
-/// whole global config, written from 159 places in its source — startup
+/// whole global config, written from 158 `saveGlobalConfig` call sites —
+/// startup
 /// counters, changelog fetch times, skill-usage tracking. Routing it there
 /// would hand every one of those writes to `force_quota_refresh`, which
 /// bypasses the normal two-minute floor, and turn a feature documented as
 /// having "THREE triggers (NO periodic polling)" into an Anthropic API call
-/// every ten seconds while Claude is in use. The account sync consumes it
-/// alone: a pass that finds nothing costs one credential read and writes
-/// nothing, and the watcher's debounce collapses a flurry of config writes
-/// into a single one.
+/// every ten seconds while Claude is in use. `watcher::route_identity_change`
+/// consumes it instead, and both halves it drives are FREE: an account-sync
+/// pass that finds nothing costs one credential read and writes nothing, and
+/// the logout check reads one key and makes no request. The watcher's
+/// debounce collapses a flurry of config writes into a single one.
 pub fn claude_identity_signal_path() -> Option<PathBuf> {
     crate::accounts::claude_json_path().ok()
+}
+
+/// Is Claude SIGNED OUT, according to its own global config?
+///
+/// A logout deletes `oauthAccount` from `.claude.json` and a login writes it
+/// back (`storeOAuthAccountInfo`), so the one file carries BOTH directions —
+/// which is why the path above is named for the IDENTITY, not for the login.
+/// Measured on a real `claude auth logout`: the key is gone afterwards and
+/// every other key survives untouched.
+///
+/// **This is the trace a logout can always be trusted to leave.** On macOS
+/// the credential itself is a Keychain entry whose deletion moves no file;
+/// the locks around that write are version-specific names recovered from a
+/// shipped binary; and the entry can even SURVIVE the logout, rebuilt around
+/// `coworkRemoteDevice`. `oauthAccount` is none of those things — it is
+/// Claude's own record of who is signed in, read here with one local file
+/// read: no `security(1)` spawn, no request, nothing version-specific.
+///
+/// **Cheap enough that the many-writers rule does not apply.** That rule (see
+/// above) forbids handing this file to `force_quota_refresh`, where an API
+/// call per write turns a no-polling feature into a request every ten
+/// seconds. Consulting this key costs a read and parse of `.claude.json`
+/// instead — about a millisecond, no request of its own — and on the
+/// overwhelming majority of its 158 `saveGlobalConfig` writers the answer is
+/// "still signed in", which does nothing at all.
+///
+/// That is about THIS path. A real logout still makes one request, through
+/// the credential route: `.storage-write.lock` moves in the same burst, its
+/// gate sees the credential gone, and the fetch that follows returns
+/// `not_found`. The two cooperate rather than duplicate — this path clears
+/// IMMEDIATELY and is subject to no floor, and the `invalidate_quota` it
+/// calls drops the rate-limit marker, which is what lets that fetch through
+/// instead of being refused by `QUOTA_FORCE_FLOOR`.
+///
+/// `false` for anything unreadable or not an object: the watcher fires ON
+/// the write, so a read can land mid-write, and a torn file must never be
+/// mistaken for a logout.
+fn claude_signed_out() -> bool {
+    let Some(path) = claude_identity_signal_path() else {
+        return false;
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let Some(obj) = doc.as_object() else {
+        return false;
+    };
+    obj.get("oauthAccount").is_none_or(|v| v.is_null())
+}
+
+/// Whether this process last saw Claude SIGNED IN. `None` = never looked.
+static LAST_SIGNED_IN: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+
+/// Did Claude JUST sign out — did the state change, not merely end up there?
+///
+/// Signing out is an EVENT; being signed out is a STATE that persists.
+/// `.claude.json` keeps being written afterwards (158 `saveGlobalConfig` call
+/// sites), so a caller testing the state would re-fire on every one of those
+/// writes. Firing `invalidate_quota` repeatedly is not the harmless no-op it
+/// looks like: it drops the rate-limit marker each time, which is what makes
+/// the tray's own floor stop holding, and every tray click through the
+/// signed-out stretch then spends a real request.
+///
+/// So the transition is what is reported, and only `signed in -> signed out`
+/// counts.
+///
+/// **With no baseline yet, signed-IN is assumed** — `!= Some(false)`, not
+/// `== Some(true)`. A baseline is only ever established by an earlier call,
+/// and the first call can BE the logout: Termory starts, the warm-up fetch
+/// puts numbers on the tray, and the user signs out before anything else has
+/// written `.claude.json`. Requiring a recorded `true` swallows exactly that
+/// case. The cost of the assumption is one extra fire when Termory starts up
+/// ALREADY signed out — a clear with nothing to clear, once, because the
+/// baseline is recorded on the way out.
+///
+/// Asking CONSUMES the transition, so this keeps exactly ONE caller
+/// (`watcher::route_identity_change`), the same rule
+/// `oauth_credential_changed` follows.
+pub fn claude_just_signed_out() -> bool {
+    // The READ happens under the lock, not before it. Two watcher bursts can
+    // have their `spawn_blocking` tasks in flight at once, and with the read
+    // outside, one task's read can land before the logout write and the
+    // other's after: the later reader reports the transition and stores
+    // "signed out", then the earlier one stores "signed in" on top. That
+    // leaves the baseline claiming a login nobody has, and the next
+    // `.claude.json` write reports the SAME logout a second time — exactly
+    // the repeat this function exists to prevent. Read, compare and store
+    // have to be one step. The lock is held across a file read, which is
+    // fine: one caller, and it runs only on identity events.
+    let mut last = LAST_SIGNED_IN.lock().unwrap_or_else(|e| e.into_inner());
+    let signed_in = !claude_signed_out();
+    let just_left = *last != Some(false) && !signed_in;
+    *last = Some(signed_in);
+    just_left
 }
 
 /// Which CLI a credential-file path belongs to — the single list the
@@ -448,16 +547,25 @@ fn parse_claude_credentials(content: &str) -> Credential {
         }
     };
 
+    // A document that PARSED but carries no OAuth entry is a LOGOUT, not a
+    // corrupt file — and `not_found` is the only status that CLEARS the
+    // display. `refresh_quota` keeps the last good numbers for every other
+    // failure, deliberately, so a transient error cannot blank the tray.
+    //
+    // Claude's own logout leaves exactly this shape whenever the account
+    // holds a `coworkRemoteDevice`: `performLogout` deletes the
+    // secure-storage document and then WRITES IT BACK carrying only that key,
+    // so the entry still exists with no `claudeAiOauth` inside (measured —
+    // `['claudeAiOauth','coworkRemoteDevice']` became `['coworkRemoteDevice']`).
+    // Reported as `ParseError` that state is PERMANENT: every later fetch
+    // parses the same document and reaches the same verdict, so a signed-out
+    // account's numbers stay on the tray for good.
     let Some(entry) = parsed
         .get("claudeAiOauth")
         .or_else(|| parsed.get("claude.ai_oauth"))
+        .filter(|v| !v.is_null())
     else {
-        return (
-            None,
-            None,
-            CredentialStatus::ParseError,
-            Some("No OAuth entry found in credentials".to_string()),
-        );
+        return (None, None, CredentialStatus::NotFound, None);
     };
 
     // Subscription plan, stored at login by Claude Code itself
@@ -466,16 +574,24 @@ fn parse_claude_credentials(content: &str) -> Credential {
     let field = |k: &str| entry.get(k).and_then(|v| v.as_str());
     let plan = claude_plan_label(field("subscriptionType"), field("rateLimitTier"));
 
+    // An OAuth block with no usable token: `not_found` too, but for a
+    // DIFFERENT reason than the missing entry above, and at a cost worth
+    // naming. Claude writes this shape itself — `grn()` blanks
+    // `accessToken`/`refreshToken` and zeroes `expiresAt` the moment the IdP
+    // rejects a refresh token as dead — so it means "this login is broken,
+    // go sign in again", not "nobody is signed in".
+    //
+    // `Expired` is the status that SAYS that, and the page keeps its card up
+    // for it. But `Expired` routes through `quota_for_credential`, which
+    // tries the query and reports a plain failure when it fails — and a plain
+    // failure KEEPS the last good numbers, permanently, because every later
+    // fetch reaches the same verdict. Showing a dead account's old usage
+    // forever is worse than showing nothing, so this clears. The cost is
+    // real: the user loses the prompt to re-authenticate and sees an empty
+    // section instead.
     let access_token = match entry.get("accessToken").and_then(|v| v.as_str()) {
         Some(t) if !t.is_empty() => t.to_string(),
-        _ => {
-            return (
-                None,
-                plan,
-                CredentialStatus::ParseError,
-                Some("accessToken is empty or missing".to_string()),
-            );
-        }
+        _ => return (None, None, CredentialStatus::NotFound, None),
     };
 
     if let Some(expires_at) = entry.get("expiresAt") {
@@ -2051,18 +2167,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_claude_credentials_missing_entry_is_parse_error() {
+    fn parse_claude_credentials_missing_entry_is_not_found() {
+        // A document with no OAuth entry is a LOGOUT, not a corrupt file —
+        // and `not_found` is the only status that clears the display. See
+        // `a_signed_out_credential_document_reports_not_found` for the real
+        // shapes Claude leaves behind.
         let (token, _, status, _) = parse_claude_credentials("{}");
         assert!(token.is_none());
-        assert_eq!(status, CredentialStatus::ParseError);
+        assert_eq!(status, CredentialStatus::NotFound);
     }
 
     #[test]
-    fn parse_claude_credentials_empty_token_is_parse_error() {
+    fn parse_claude_credentials_empty_token_is_not_found() {
         let content = json!({ "claudeAiOauth": { "accessToken": "" } }).to_string();
         let (token, _, status, _) = parse_claude_credentials(&content);
         assert!(token.is_none());
-        assert_eq!(status, CredentialStatus::ParseError);
+        assert_eq!(status, CredentialStatus::NotFound);
     }
 
     #[test]
@@ -2682,11 +2802,12 @@ mod tests {
             Some(CliApp::Claude)
         );
         // The LOGIN signal must NOT be here. `.claude.json` is Claude's
-        // whole global config, written from 159 places in its source, and
+        // whole global config, written from 158 `saveGlobalConfig` call sites, and
         // this map feeds `force_quota_refresh` — which bypasses its own
         // rate floor. Routing it here turned a feature documented as
         // having no periodic polling into an API call every ten seconds
-        // while Claude was in use. The account sync consumes it directly.
+        // while Claude was in use. `watcher::route_identity_change` consumes
+        // it directly instead.
         assert_eq!(credential_cli_for_path(&tmp.join(".claude.json")), None);
         assert_eq!(
             claude_identity_signal_path().as_deref(),
@@ -2730,6 +2851,164 @@ mod tests {
             credential_cli_for_path(&tmp.join(".claude/tasks.lock")),
             None
         );
+    }
+
+    /// The three shapes a signed-out Claude leaves behind must all report
+    /// `not_found` — the ONLY status `refresh_quota` clears on. Reported as
+    /// `ParseError` (what the first two used to do) the stale numbers are
+    /// permanent: every later fetch parses the same document and reaches the
+    /// same verdict.
+    #[test]
+    fn a_signed_out_credential_document_reports_not_found() {
+        // What `performLogout` leaves when the account holds a device
+        // identity: the entry is DELETED and then written back carrying only
+        // that key. Measured on a real logout.
+        let (token, _, status, _) = parse_claude_credentials(
+            &json!({ "coworkRemoteDevice": { "d1": { "privateKeyPkcs8B64": "k" } } }).to_string(),
+        );
+        assert_eq!(status, CredentialStatus::NotFound);
+        assert!(token.is_none());
+
+        // An explicit null says the same thing as the key being absent.
+        let (_, _, status, _) = parse_claude_credentials(
+            &json!({ "claudeAiOauth": serde_json::Value::Null }).to_string(),
+        );
+        assert_eq!(status, CredentialStatus::NotFound);
+
+        // A dead refresh token: Claude's own `grn()` blanks the tokens in
+        // place rather than removing the block.
+        let (_, plan, status, _) = parse_claude_credentials(
+            &json!({
+                "claudeAiOauth": {
+                    "accessToken": "", "refreshToken": "", "expiresAt": 0,
+                    "subscriptionType": "pro",
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(status, CredentialStatus::NotFound);
+        // The plan is dropped with the rest: `not_found` carries none, and
+        // reporting a plan for an account that is signed out is noise.
+        assert_eq!(plan, None);
+
+        // A genuinely CORRUPT file is still a parse error — it says nothing
+        // about whether anyone is signed in, so it must not clear the tray.
+        let (_, _, status, _) = parse_claude_credentials("{\"claudeAiOauth\": ");
+        assert_eq!(status, CredentialStatus::ParseError);
+
+        // And a real login still parses.
+        let (token, plan, status, _) = parse_claude_credentials(
+            &json!({
+                "claudeAiOauth": {
+                    "accessToken": "at", "expiresAt": far_future_ms(),
+                    "subscriptionType": "max", "rateLimitTier": "default_claude_max_20x",
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(status, CredentialStatus::Valid);
+        assert_eq!(token.as_deref(), Some("at"));
+        assert_eq!(plan.as_deref(), Some("Max 20x"));
+    }
+
+    /// `.claude.json` losing `oauthAccount` is the one trace a logout is
+    /// guaranteed to leave — the Keychain emits nothing, and its entry can
+    /// even survive a logout. Anything unreadable reads as "still signed in":
+    /// the watcher fires ON the write, so a read can land mid-write.
+    #[test]
+    fn claude_signed_out_reads_the_identity_key() {
+        use crate::testutils::{lock_home, override_home, EnvVarGuard};
+        let _g = lock_home();
+        let tmp = std::env::temp_dir().join("termory-signed-out");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _h = override_home(&tmp);
+        let _e = EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
+        let path = tmp.join(".claude.json");
+        let write = |v: serde_json::Value| std::fs::write(&path, v.to_string()).unwrap();
+
+        write(json!({
+            "numStartups": 42,
+            "oauthAccount": { "accountUuid": "u-1", "emailAddress": "a@example.com" },
+        }));
+        assert!(!claude_signed_out(), "signed in");
+
+        // What a real `claude auth logout` leaves: the key gone, the rest of
+        // the document untouched.
+        write(json!({ "numStartups": 42 }));
+        assert!(claude_signed_out(), "signed out");
+
+        write(json!({ "oauthAccount": serde_json::Value::Null }));
+        assert!(claude_signed_out(), "null is the absent state");
+
+        // Torn mid-write, and valid JSON that is not an object: neither is a
+        // logout.
+        std::fs::write(&path, "{\"numStartups\": 4").unwrap();
+        assert!(!claude_signed_out(), "torn write");
+        std::fs::write(&path, "[]").unwrap();
+        assert!(!claude_signed_out(), "not an object");
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(!claude_signed_out(), "no file");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Signing out is an EVENT; being signed out is a STATE. `.claude.json`
+    /// keeps being written afterwards, and `invalidate_quota` drops the
+    /// rate-limit marker every time it runs — so re-firing on the state would
+    /// leave the tray's floor permanently cleared and every click through the
+    /// signed-out stretch would spend a real request.
+    #[test]
+    fn claude_just_signed_out_reports_the_transition_only_once() {
+        use crate::testutils::{lock_home, override_home, EnvVarGuard};
+        let _g = lock_home();
+        let tmp = std::env::temp_dir().join("termory-just-signed-out");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _h = override_home(&tmp);
+        let _e = EnvVarGuard::unset("CLAUDE_CONFIG_DIR");
+        let path = tmp.join(".claude.json");
+        let signed_in = |yes: bool| {
+            let doc = if yes {
+                json!({ "numStartups": 1, "oauthAccount": { "accountUuid": "u-1" } })
+            } else {
+                json!({ "numStartups": 1 })
+            };
+            std::fs::write(&path, doc.to_string()).unwrap();
+        };
+
+        // Establish a baseline, whatever this process saw before.
+        signed_in(true);
+        claude_just_signed_out();
+        assert!(!claude_just_signed_out(), "still signed in");
+
+        // The logout fires ONCE…
+        signed_in(false);
+        assert!(claude_just_signed_out(), "the transition");
+
+        // …and every later write while still signed out does not. This is
+        // the whole point: `.claude.json` has 158 writers.
+        assert!(!claude_just_signed_out(), "still signed out");
+        assert!(!claude_just_signed_out(), "still signed out");
+
+        // Signing back in is not a logout, and arms the next one.
+        signed_in(true);
+        assert!(!claude_just_signed_out(), "login is not a logout");
+        signed_in(false);
+        assert!(claude_just_signed_out(), "the next logout fires again");
+
+        // Unreadable states read as "signed in" (a torn file must never be
+        // mistaken for a logout), so leaving one does NOT count as a
+        // transition on its own…
+        std::fs::write(&path, "{\"numStartups\": 1").unwrap();
+        assert!(!claude_just_signed_out(), "torn write");
+        // …and the real logout after it fires, because that torn read left
+        // the baseline at signed-IN.
+        signed_in(false);
+        assert!(claude_just_signed_out(), "logout after a torn read");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

@@ -321,15 +321,21 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
                 let mut credential_clis: Vec<crate::providers::CliApp> =
                     events.iter().flat_map(event_credential_clis).collect();
                 credential_clis.dedup();
-                let identity_touched = events.iter().any(event_touches_claude_identity);
-                if identity_touched && !credential_clis.contains(&crate::providers::CliApp::Claude)
-                {
+                if events.iter().any(event_touches_claude_identity) {
+                    // Only the account sync is shared with the credential
+                    // route, so only IT is suppressed when both fire in one
+                    // burst — which a logout does, `.storage-write.lock` and
+                    // these writes interleaving inside ~300ms (measured).
+                    // `route_identity_change` takes this as a parameter
+                    // precisely because it is the CALLER that knows what else
+                    // ran in the burst; the logout half it does on its own,
+                    // unconditionally, being the half the credential route
+                    // cannot do.
+                    let synced_by_credential_route =
+                        credential_clis.contains(&crate::providers::CliApp::Claude);
                     let handle = app_handle.clone();
                     tauri::async_runtime::spawn_blocking(move || {
-                        crate::accounts::sync_live_account_if_idle(
-                            &handle,
-                            crate::providers::CliApp::Claude,
-                        )
+                        route_identity_change(&handle, synced_by_credential_route)
                     });
                 }
                 for cli in credential_clis {
@@ -423,9 +429,10 @@ pub fn start(app_handle: AppHandle) -> notify::Result<WatcherHandle> {
             // tray keeps a signed-out account's numbers until some later
             // click happens to land past the two-minute success floor.
             //
-            // The identity signal is deliberately NOT carried over. It feeds
-            // only the account sync, and `.claude.json` is written from 159
-            // places, so another one lands within moments by construction.
+            // The identity signal is deliberately NOT carried over.
+            // `.claude.json` has 158 `saveGlobalConfig` writers, so another
+            // one lands within moments by construction and re-runs
+            // `route_identity_change` — the logout clear included.
             let settle_until = Instant::now() + SETTLE_WINDOW;
             let mut install_settled_late = false;
             let mut credential_settled_late: Vec<crate::providers::CliApp> = Vec::new();
@@ -535,10 +542,63 @@ fn event_credential_clis(event: &notify::Event) -> Vec<crate::providers::CliApp>
         .collect()
 }
 
+/// The other half of Claude's identity signal: `.claude.json`.
+///
+/// **This route CLEARS, and only clears.** A logout is `oauthAccount`
+/// disappearing, and acting on it needs no request — which is what lets this
+/// file drive the quota at all despite the locked rule keeping it out of
+/// `credential_cli_for_path`: that map ends in `force_quota_refresh`, where
+/// an API call per write would turn a no-polling feature into a request every
+/// ten seconds. Reading one key costs a parse of `.claude.json` (~1 ms) and
+/// on the overwhelming majority of its 158 `saveGlobalConfig` writers the
+/// answer is "still signed in", which does nothing at all.
+///
+/// **The reverse is deliberately NOT here.** A login must not restore the
+/// numbers this cleared: the account signing in may be a DIFFERENT one, and
+/// hanging the previous login's usage under the new name is worse than
+/// showing nothing. Coming back is a real fetch's job, and the display stays
+/// empty until one lands.
+///
+/// It is also the only trace a logout is GUARANTEED to leave. The Keychain
+/// emits no event of its own; the locks around the credential write are
+/// version-specific names lifted from a shipped binary; and the credential
+/// entry can survive the logout entirely, rebuilt around `coworkRemoteDevice`.
+///
+/// `invalidate_quota` rather than a plain clear: the numbers belong to a
+/// login that is gone, the rate-limit marker dates a fetch made under it, and
+/// an open Providers page — which keeps its OWN copy — has no other way to
+/// learn of a logout typed into a terminal.
+///
+/// TWO consumers ride this one signal, and they are not alike. The logout
+/// clear is this route's alone and always runs. The account sync is SHARED
+/// with `route_credential_change`, so the caller passes what else ran in the
+/// burst and it is skipped when that route already covered it.
+fn route_identity_change(app_handle: &AppHandle, synced_by_credential_route: bool) {
+    let cli = crate::providers::CliApp::Claude;
+    // An add-account flow logs claude out LOCALLY on purpose, so an absent
+    // key describes the flow, not the user's account — the same reason
+    // `spawn_quota_fetch` refuses to fetch while one is running.
+    //
+    // The TRANSITION, never the state: `.claude.json` keeps being written
+    // long after the logout, and `invalidate_quota` drops the rate-limit
+    // marker every time it runs — re-firing on each of those writes leaves
+    // the tray's floor permanently cleared, so every click through the
+    // signed-out stretch spends a real request.
+    if !crate::accounts::login_in_progress(app_handle, cli)
+        && crate::quota::claude_just_signed_out()
+    {
+        crate::tray::invalidate_quota(app_handle, cli);
+    }
+    if !synced_by_credential_route {
+        crate::accounts::sync_live_account_if_idle(app_handle, cli);
+    }
+}
+
 /// Both Claude signal files: the credential one (routed to the quota too)
-/// and the login one (the account sync alone — see
-/// `quota::claude_identity_signal_path` for why it must not reach the
-/// quota). The watch needs their parents either way.
+/// and the IDENTITY one (`route_identity_change` — the account sync, plus
+/// the logout clear; see `quota::claude_identity_signal_path` for why it
+/// must not reach `force_quota_refresh`). The watch needs their parents
+/// either way.
 fn claude_signal_paths() -> Vec<PathBuf> {
     [
         crate::quota::claude_credential_signal_path(),
@@ -571,10 +631,10 @@ fn credential_signal_parents() -> Vec<PathBuf> {
 ///
 /// Kept apart from `event_credential_clis` on purpose: that map also feeds
 /// `force_quota_refresh`, and this file is Claude's whole global config,
-/// written from 159 places in its source. Routing it there would turn a
-/// feature with no periodic polling into an API call every ten seconds
-/// while Claude is in use. The account sync consumes it alone — see
-/// `quota::claude_identity_signal_path`.
+/// written from 158 `saveGlobalConfig` call sites. Routing it there would
+/// turn a feature with no periodic polling into an API call every ten
+/// seconds while Claude is in use. `route_identity_change` consumes it
+/// instead — see `quota::claude_identity_signal_path`.
 fn event_touches_claude_identity(event: &notify::Event) -> bool {
     crate::quota::claude_identity_signal_path()
         .is_some_and(|signal| event.paths.iter().any(|p| p == &signal))
