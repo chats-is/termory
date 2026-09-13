@@ -4699,7 +4699,7 @@ dependencies = [
 
 [[package]]
 name = "termory"
-version = "1.4.9"
+version = "1.5.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
