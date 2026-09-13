@@ -1611,8 +1611,28 @@ pub fn rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
     })
 }
 
+/// Full rebuild reusing the install set the VISIBLE menu was built with.
+///
+/// **The probe must NOT run here (LOCKED).** Every caller is already ON the
+/// main thread — the queued closures in `rebuild_menu`, `refresh_accounts`,
+/// `commit_recent` and `update_cli_row_title` — and `detect_install_snapshot`
+/// spawns an interactive shell for each CLI the fixed-dir scan misses, about a
+/// second apiece, paid on the thread that draws the menu.
+///
+/// Nothing is lost, because none of those callers is ASKING about installs:
+/// they rebuild because an account, a provider, a row title or a spliced
+/// region moved. A changed install set has its own TWO paths, both probing off
+/// the main thread and both passing the result in — `refresh_installed_with`
+/// (the watcher's bin-dir branch and the `detect_clis` IPC) and
+/// `rebuild_if_installed_stale` (`commit_recent`, from the caller's snapshot).
+///
+/// `None` means no menu has ever been built, which also means there is no tray
+/// to set one on: `do_rebuild_menu_with` would no-op, so skip it outright.
 fn do_rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
-    do_rebuild_menu_with(app, detect_install_snapshot())
+    let Some(installed) = INSTALLED.lock().ok().and_then(|g| g.clone()) else {
+        return Ok(());
+    };
+    do_rebuild_menu_with(app, installed)
 }
 
 /// Full rebuild from an already-probed install snapshot (callers that
@@ -1764,21 +1784,31 @@ pub fn refresh_installed_with(app: &AppHandle, installed: InstallSnapshot) {
 /// open (tray click) so a CRASHED Claude session's stale "Working"
 /// clears promptly: a crash leaves the `<pid>.json` untouched (no
 /// filesystem event), so the normal watcher-driven refresh never fires
-/// for it; this re-runs the liveness probe on demand. Cheap — only the
-/// small `~/.claude/sessions/` dir is re-read (on the caller thread);
-/// the cached recent list is re-read + re-attached on the main thread,
-/// so the base list is never stale.
+/// for it; this re-runs the liveness probe on demand.
+///
+/// **Both reads run on a SPAWNED thread (LOCKED).** The only caller is the
+/// tray CLICK, which is delivered on the main thread while the menu is
+/// opening — and `detect_install_snapshot` spawns an interactive shell per
+/// CLI the fixed-dir scan misses, ~1s each, so doing it inline froze the very
+/// menu this call exists to refresh. (`claude_work_statuses` re-reads only the
+/// small `~/.claude/sessions/` dir, but it rides along for the same reason.)
+/// The cached recent list is still re-read + re-attached ON the main thread,
+/// inside the queued task, so the base list is never stale and the whole
+/// compare→store→splice stays serialized with every other menu mutation.
 pub fn refresh_work_status(app: &AppHandle) {
-    let statuses = crate::sessions::claude_work_statuses();
-    let installed = detect_install_snapshot();
     let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        let mut recent = match RECENT.lock() {
-            Ok(g) => g.clone(),
-            Err(_) => return,
-        };
-        attach_work_statuses(&mut recent, &statuses);
-        commit_recent(&handle, &installed, recent);
+    std::thread::spawn(move || {
+        let statuses = crate::sessions::claude_work_statuses();
+        let installed = detect_install_snapshot();
+        let inner = handle.clone();
+        let _ = handle.run_on_main_thread(move || {
+            let mut recent = match RECENT.lock() {
+                Ok(g) => g.clone(),
+                Err(_) => return,
+            };
+            attach_work_statuses(&mut recent, &statuses);
+            commit_recent(&inner, &installed, recent);
+        });
     });
 }
 

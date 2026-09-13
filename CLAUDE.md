@@ -681,6 +681,7 @@ Per-app on/off switches plus a drag-sortable order. Stored in config.json as `so
 - **The refresh splices the dynamic region IN PLACE, never `set_menu`** — on macOS a full rebuild CLOSES an open menu, and refreshes must apply immediately without dismissing it. Any splice failure falls back to a full rebuild.
 - ONE deliberate exception: an installed-set change forces a full rebuild even from the menu-open path, because the splice cannot refresh the per-CLI submenus.
 - **ALL menu mutations are QUEUED on the main thread.** The queue serialises concurrent refreshers that would otherwise interleave remove/insert ops or write back a stale menu handle. A mutex cannot replace it: worker-holds-lock-waits-main against main-waits-lock deadlocks.
+- **The INSTALL PROBE never runs on the main thread (LOCKED).** `detect_install_snapshot` spawns an interactive shell for every CLI the fixed-dir scan misses (~1s each), so a queued rebuild must take the set the visible menu was built with (`INSTALLED`) rather than re-probe — the callers rebuild because an account, provider, title or region moved, not because installs did. A changed install set arrives through the two paths that probe OFF the main thread and pass the result in: `refresh_installed_with` (watcher bin-dir branch + `detect_clis` IPC) and `rebuild_if_installed_stale`. Same rule for anything hanging off the tray CLICK, which is delivered on the main thread WHILE the menu opens — `refresh_work_status` spawns a thread for exactly this.
 
 **Recent-session live work status (Claude-only)**
 
