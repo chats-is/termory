@@ -137,6 +137,56 @@ Then confirm in the app with the driver. All three layers disagreeing is possibl
 a string can be correct in Rust, correct through react-markdown, and still land on
 a screen the user never navigates to.
 
+## Reaching the menu bar (the tray)
+
+The tray is where the quota, the balance, the provider checkmarks and the
+recent-session list actually render, and **none of it is in the window** —
+`shot` can never show it. It IS reachable, through the accessibility API
+rather than coordinates:
+
+```bash
+osascript -e 'tell application "System Events" to tell process "Termory" \
+  to click menu bar item 1 of menu bar 2'
+sleep 1
+screencapture -x /tmp/tray.png                     # whole screen; the menu is in it
+sips -c 1200 1400 --cropOffset 0 1700 /tmp/tray.png --out /tmp/tray-crop.png
+osascript -e 'tell application "System Events" to key code 53'   # esc, dismiss
+```
+
+`menu bar 2` is the status-bar item (`menu bar 1` is the app's own menu).
+Verified: it opened the real menu and the crop read
+`Codex · 官方 (Free) · 🟢 0% 月` off the CLI row.
+
+- **`name of every menu bar item of menu bar 2` returns `missing value`** — the
+  item has no AX name, so index it (`menu bar item 1`) and read the result from
+  a screenshot. Do not try to assert on AX text.
+- **`screencapture -R` is no use here**: the menu is its own window layer
+  outside the app's rect. Capture the full screen and crop with `sips -c
+  <h> <w> --cropOffset <top> <left>` (note: HEIGHT then WIDTH).
+- **Opening the menu is not side-effect free, by design** — a tray click fires
+  the rate-limited quota and balance refreshes, the work-status re-probe and the
+  account-row refresh. That is usually what you want to observe; just don't read
+  a screenshot taken 200ms after the click as the settled state.
+- Dismiss with esc (`key code 53`) before doing anything else, or the open menu
+  swallows the next keystrokes.
+
+**A tray change that needs a credential to move can be staged without touching
+one.** Moving a CLI's auth file aside is, to Termory, a real logout:
+
+```bash
+cp -p ~/.codex/auth.json /tmp/bak.json && mv ~/.codex/auth.json /tmp/moved.json
+# …wait ~10s, open the menu, screenshot: the row loses its quota suffix…
+mv /tmp/moved.json ~/.codex/auth.json && shasum ~/.codex/auth.json /tmp/bak.json
+```
+
+Verified end to end: `Codex · 官方 (Free) · 🟢 0% 月` → `Codex · 官方` in ~12s,
+and back again on restore, with every other row untouched (which is also how you
+confirm the update went through `Submenu::set_text` rather than a rebuild).
+**`cp -p` first and compare checksums after** — this is the user's real login.
+Delete the copy when done; it is a credential sitting in `/tmp`. Claude is the
+one CLI this does NOT work for: its credential is a Keychain entry, so there is
+no file to move.
+
 ## Gotchas
 
 - **The first search after a launch takes ~4x longer than the rest.**
@@ -165,7 +215,9 @@ a screen the user never navigates to.
   coordinates**, so whatever window happens to be topmost there receives the click
   — observed live: a click meant for the app's find bar activated the terminal
   behind it. Navigate by keyboard (`cmd+k`, arrows, `return`, `esc`). The driver
-  deliberately exposes no click command.
+  deliberately exposes no click command. **This bans COORDINATES, not clicking**
+  — an accessibility click on a named element carries no coordinates and cannot
+  land on the wrong window; that is how the menu bar is reached, below.
 - **`screencapture -R` grabs a screen REGION, not a window.** Any window on top of
   Termory lands in the PNG. Every driver command raises the app first; if you call
   `screencapture` yourself, raise first or you will screenshot your own terminal
@@ -209,3 +261,5 @@ a screen the user never navigates to.
 | `launch` returns "build failed" | Read `/tmp/termory-dev.log`; it greps for `error:` / `could not compile`. |
 | Footer shows 同步失败 / "Sync failed" | Seen once after rapid quit/relaunch cycles, with nothing in the dev log and one healthy process. It cleared itself on the next scan — switch routes (`route 1; route 2`) to re-trigger one. Only chase it if it repeats. |
 | Palette empty / Enter lands on the Search page | The first search hadn't finished. See the cold-search gotcha; `search --wait 30000`. |
+| Menu-bar click does nothing / `missing value` | `missing value` is the normal return — the status item has no AX name. Screenshot to see whether the menu opened; if it didn't, the app is not running or Accessibility permission is missing. |
+| Keystrokes go nowhere after a tray screenshot | The menu is still open and eating them. `osascript -e 'tell application "System Events" to key code 53'`. |
