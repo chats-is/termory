@@ -106,6 +106,7 @@ import { matchingLoweredIndices } from "@/lib/search-utils";
 import { revealLabelKey } from "@/lib/platform";
 import { ActivityRail } from "@/components/ActivityRail";
 import { ListItemMenu } from "@/components/ListItemMenu";
+import { useContextMenuGuard } from "@/hooks/useContextMenuGuard";
 import { BrandIcon } from "@/components/BrandIcon";
 import { CommandPalette } from "@/components/CommandPalette";
 import { CopyMenu } from "@/components/CopyMenu";
@@ -169,6 +170,9 @@ export function App() {
   }, []);
 
   const t = useT();
+  // Sidebar project rows open a right-click menu — see the hook for why its
+  // own opening click must not select an item.
+  const menuGuard = useContextMenuGuard();
   const { ready: localeReady } = useI18n();
   // Keep the macOS tray's static rows (Open / Official / Exit) on the app
   // language — re-pushed whenever `t` (the locale) changes. Gated on
@@ -1255,10 +1259,16 @@ export function App() {
                           group.source === "OpenCode" ||
                           group.source === "Grok" ? (
                             <ContextMenu key={projKey}>
-                              <ContextMenuTrigger asChild>
+                              <ContextMenuTrigger
+                                asChild
+                                {...menuGuard.triggerProps}
+                              >
                                 {projRow}
                               </ContextMenuTrigger>
-                              <ContextMenuContent className="w-56">
+                              <ContextMenuContent
+                                className="w-56"
+                                {...menuGuard.contentProps}
+                              >
                                 {/* Open the project's source dir (its cwd) in
                                     Finder. May be gone (renamed/migrated) → toast. */}
                                 <ContextMenuItem

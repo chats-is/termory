@@ -26,6 +26,7 @@ import {
   type MigrateResult
 } from "@/lib/migrate";
 import { useT } from "@/i18n";
+import { useContextMenuGuard } from "@/hooks/useContextMenuGuard";
 
 /**
  * Right-click context menu for a list row (`children` becomes the
@@ -76,6 +77,7 @@ export function ListItemMenu({
   children: React.ReactNode;
 }) {
   const t = useT();
+  const guard = useContextMenuGuard();
   const resumeCmd = source && id ? resumeCommandFor(source, id) : null;
 
   const copy = (value: string) => {
@@ -143,8 +145,10 @@ export function ListItemMenu({
 
   return (
     <ContextMenu>
-      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-      <ContextMenuContent className="w-52">
+      <ContextMenuTrigger asChild {...guard.triggerProps}>
+        {children}
+      </ContextMenuTrigger>
+      <ContextMenuContent className="w-52" {...guard.contentProps}>
         {!sourceMissing && (
           <>
             <ContextMenuItem onSelect={() => void revealItemInDir(path)}>

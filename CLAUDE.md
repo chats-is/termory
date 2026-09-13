@@ -896,6 +896,8 @@ Everything in that directory is stock shadcn output — Tooltip, Command, Button
 
 Rows carry `select-none` so a right-click does not text-select the row. The Favorites menu drops session-management actions (they act on the SOURCE session, and delete would remove it) and, when the source session is gone, also drops reveal and resume.
 
+**Every right-click menu takes `useContextMenuGuard` — trigger AND content (LOCKED).** WebKit fires `contextmenu` on right-button DOWN, so the content is mounted before the button comes back UP, and near the viewport bottom Radix's collision shift slides it up until an ITEM sits under the cursor. Radix `MenuItem` clicks any item that gets a `pointerup` with no `pointerdown` of its own, so that release RAN the item — right-clicking one of the last rows of a scrolled list opened the migrate folder picker instead of a menu. The guard swallows exactly that one release. `src/components/ui/*` is stock shadcn, so the fix cannot live in the primitive; a new menu that forgets the hook is a silent regression.
+
 **No manual "re-scan" entries.** The watcher covers everything Termory surfaces: the static CLI data dirs plus a recursive watch on each project cwd, debounced into one re-scan. **The sources-changed emit is gated on window visibility** — while hidden the re-scan still runs for the tray, but the full result is not serialized to a frontend nobody is looking at. The frontend re-scans on window focus, SILENTLY: focus fires on every activation, so toggling the global loading flag would flash the refresh indicator.
 
 ## Decided against — do not propose these again

@@ -461,3 +461,53 @@ describe("ListItemMenu — sourceMissing (deleted favorite)", () => {
     expect(screen.getByText("Copy message ID")).toBeTruthy();
   });
 });
+
+// The right-click that opens the menu also RELEASES over it: macOS WebKit
+// fires `contextmenu` on right-button down, and near the viewport bottom
+// Radix shifts the content up until it fits, so an item sits under the
+// cursor. Without the guard MenuItem turns that release into a click and
+// runs the action — observed in the real app as "Migrate session…" opening a
+// folder picker on a right-click near the bottom of the list.
+describe("ListItemMenu — the opening right-click cannot select an item", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    openMock.mockReset();
+    askMock.mockReset();
+  });
+
+  it("ignores a pointerup that has no pointerdown of its own", async () => {
+    render(
+      <ListItemMenu
+        path="/u/.claude/projects/-p/s1.jsonl"
+        id="s1"
+        source="Claude"
+        project="/proj"
+      >
+        <button>row</button>
+      </ListItemMenu>
+    );
+    fireEvent.contextMenu(screen.getByText("row"));
+    const migrate = await screen.findByText("Migrate session…");
+    fireEvent.pointerUp(migrate);
+    expect(openMock).not.toHaveBeenCalled();
+    // …and the menu is still open for a real click.
+    expect(screen.getByText("Migrate session…")).toBeTruthy();
+  });
+
+  it("still selects on an ordinary click", async () => {
+    openMock.mockResolvedValue(null); // user cancels the folder picker
+    render(
+      <ListItemMenu
+        path="/u/.claude/projects/-p/s1.jsonl"
+        id="s1"
+        source="Claude"
+        project="/proj"
+      >
+        <button>row</button>
+      </ListItemMenu>
+    );
+    fireEvent.contextMenu(screen.getByText("row"));
+    await userEvent.click(await screen.findByText("Migrate session…"));
+    await waitFor(() => expect(openMock).toHaveBeenCalled());
+  });
+});
