@@ -548,46 +548,22 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| {
             handle_menu_event(app, event.id.as_ref());
         })
-        // A click on the tray icon is also "the menu is opening" —
-        // kick off a (rate-limited) quota refresh so the quota info
-        // rows stay current without any background polling. The fetch
-        // lands after the menu is already on screen, so the updated
-        // numbers show from the NEXT open (floors: 2 min after a
-        // success, 60s after a failure — QUOTA_TRAY_MIN_INTERVAL /
-        // QUOTA_TRAY_ERROR_RETRY).
         .on_tray_icon_event(|tray, event| {
+            if signals_menu_opening(&event) {
+                on_menu_opening(tray.app_handle());
+            }
+            // Windows/Linux: LEFT click (release) opens the app window —
+            // the menu is on right click, see show_menu_on_left_click(false)
+            // above. (Linux appindicator trays don't deliver click events
+            // at all, so in practice this is the Windows path.)
+            #[cfg(not(target_os = "macos"))]
             if let tauri::tray::TrayIconEvent::Click {
-                button,
-                button_state,
+                button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
                 ..
             } = event
             {
-                trigger_quota_refresh(tray.app_handle());
-                trigger_balance_refresh(tray.app_handle());
-                // Also re-check recent-session work status on open, so a
-                // crashed session's stale status clears even without a
-                // filesystem event (it splices live into the open menu).
-                refresh_work_status(tray.app_handle());
-                // And re-apply the account rows, for the same reason: an
-                // add-account flow greys them out (`account_row_enabled`),
-                // but STARTING one rebuilds nothing — so without this the
-                // menu would still be the one built before the login, with
-                // rows that look clickable and silently do nothing. Also
-                // in place, so it can't dismiss the menu.
-                refresh_accounts(tray.app_handle());
-                // Windows/Linux: LEFT click (release) opens the app
-                // window — the menu is on right click, see
-                // show_menu_on_left_click(false) above. (Linux
-                // appindicator trays don't deliver click events at
-                // all, so in practice this is the Windows path.)
-                #[cfg(not(target_os = "macos"))]
-                if button == tauri::tray::MouseButton::Left
-                    && button_state == tauri::tray::MouseButtonState::Up
-                {
-                    show_main_window(tray.app_handle());
-                }
-                #[cfg(target_os = "macos")]
-                let _ = (button, button_state);
+                show_main_window(tray.app_handle());
             }
         })
         .build(app)?;
@@ -597,6 +573,51 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         *g = Some(installed);
     }
     Ok(())
+}
+
+/// Whether a tray event means "the menu is about to open" — the moment the
+/// refreshes in `on_menu_opening` run.
+///
+/// macOS uses the pointer ENTERING the icon, not the click. On macOS 27 a
+/// click on the status item never reaches tray-icon's `mouseDown`, so no
+/// `Click` event is emitted at all — measured on 27.0 (26A428) with
+/// tray-icon 0.23.1: real clicks produced only `Enter`/`Move`/`Leave`, and
+/// the quota sat frozen from the last launch. `Enter` still arrives, on
+/// every macOS version, and it lands BEFORE the click, so the fetch starts
+/// earlier than a click-driven one could. The cost is a pass-over with no
+/// click, which every consumer already absorbs: the quota and balance
+/// fetches sit behind their floors, and the other two update in place.
+///
+/// Elsewhere the click is the signal — Windows delivers it reliably.
+fn signals_menu_opening(event: &tauri::tray::TrayIconEvent) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        matches!(event, tauri::tray::TrayIconEvent::Enter { .. })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        matches!(event, tauri::tray::TrayIconEvent::Click { .. })
+    }
+}
+
+/// The menu is about to open — bring what it shows up to date, without any
+/// background polling. Every step is rate-limited or applied in place, so
+/// none of them can dismiss the menu.
+fn on_menu_opening(app: &AppHandle) {
+    // Floors: 2 min after a success, 60s after a failure —
+    // QUOTA_TRAY_MIN_INTERVAL / QUOTA_TRAY_ERROR_RETRY.
+    trigger_quota_refresh(app);
+    trigger_balance_refresh(app);
+    // Re-check recent-session work status, so a crashed session's stale
+    // status clears even without a filesystem event (it splices live into
+    // the open menu).
+    refresh_work_status(app);
+    // And re-apply the account rows, for the same reason: an add-account
+    // flow greys them out (`account_row_enabled`), but STARTING one
+    // rebuilds nothing — so without this the menu would still be the one
+    // built before the login, with rows that look clickable and silently
+    // do nothing.
+    refresh_accounts(app);
 }
 
 /// Minimum spacing between quota fetches per CLI — same window as the
@@ -2893,6 +2914,57 @@ mod tests {
         let menu = [CliApp::Codex];
         let live = ids(&[(CliApp::Claude, "acc-1")]);
         assert!(account_rows_current(&menu, &[], &live));
+    }
+
+    fn tray_events() -> [(&'static str, tauri::tray::TrayIconEvent); 3] {
+        use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent, TrayIconId};
+        let id = || TrayIconId::new("termory-main");
+        let position = tauri::PhysicalPosition::new(0.0, 0.0);
+        let rect = tauri::Rect::default();
+        [
+            (
+                "enter",
+                TrayIconEvent::Enter {
+                    id: id(),
+                    position,
+                    rect,
+                },
+            ),
+            (
+                "move",
+                TrayIconEvent::Move {
+                    id: id(),
+                    position,
+                    rect,
+                },
+            ),
+            (
+                "click",
+                TrayIconEvent::Click {
+                    id: id(),
+                    position,
+                    rect,
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Down,
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_opens_the_menu_on_enter_because_the_click_never_arrives() {
+        for (name, event) in tray_events() {
+            assert_eq!(signals_menu_opening(&event), name == "enter", "{name}");
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn other_platforms_open_the_menu_on_click() {
+        for (name, event) in tray_events() {
+            assert_eq!(signals_menu_opening(&event), name == "click", "{name}");
+        }
     }
 
     #[test]

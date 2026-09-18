@@ -672,6 +672,8 @@ Per-app on/off switches plus a drag-sortable order. Stored in config.json as `so
 
 **Click model per OS**: macOS left click opens the menu; Windows/Linux put the menu on RIGHT click and open the window on left click. Linux appindicator trays deliver no click events at all.
 
+**"Tray click" below means MENU-OPENING, and on macOS that is the pointer ENTERING the icon, not the click (LOCKED).** On macOS 27 a click on the status item never reaches tray-icon's `mouseDown`, so `TrayIconEvent::Click` is never emitted and every click-driven refresh silently stops — measured on 27.0 with tray-icon 0.23.1, where real clicks produced only `Enter`/`Move`/`Leave`. `signals_menu_opening` picks the event per OS and `on_menu_opening` runs the four refreshes. A pass-over with no click costs nothing new: every refresh is floored or in place. **Do not move macOS back to `Click`**; Windows keeps it.
+
 **Recent sessions**
 
 - A record with neither a title nor a snippet is DROPPED rather than rendered as a placeholder — several such rows are indistinguishable, and this menu exists to click the conversation you mean. Filter on the recent-sessions mapping, not the shared picked vector (it also feeds the project list, and a project whose sessions are untitled is still somewhere you work), and filter BEFORE the take so the list stays at full length.

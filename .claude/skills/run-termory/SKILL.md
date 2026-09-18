@@ -163,10 +163,13 @@ Verified: it opened the real menu and the crop read
 - **`screencapture -R` is no use here**: the menu is its own window layer
   outside the app's rect. Capture the full screen and crop with `sips -c
   <h> <w> --cropOffset <top> <left>` (note: HEIGHT then WIDTH).
-- **Opening the menu is not side-effect free, by design** — a tray click fires
-  the rate-limited quota and balance refreshes, the work-status re-probe and the
-  account-row refresh. That is usually what you want to observe; just don't read
-  a screenshot taken 200ms after the click as the settled state.
+- **The accessibility click does NOT fire the menu-opening refreshes.** It
+  presses the button directly, so the icon never sees the pointer arrive — and
+  on macOS the refreshes (quota, balance, work status, account rows) hang off
+  the pointer ENTERING the icon (see CLAUDE.md, menu-bar tray). A menu opened
+  this way shows whatever was already cached. To exercise the refreshes, a real
+  pointer has to cross the icon; a synthesized `CGEvent` does not reach the
+  menu bar while the screen is locked.
 - Dismiss with esc (`key code 53`) before doing anything else, or the open menu
   swallows the next keystrokes.
 
