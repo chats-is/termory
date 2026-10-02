@@ -29,7 +29,7 @@ be true:
 
 ```bash
 node .claude/skills/run-termory/driver.mjs launch          # idempotent; prints window bounds
-node .claude/skills/run-termory/driver.mjs route 2         # Cmd-1..6 rail: providers/records/favorites/search/stats/settings
+node .claude/skills/run-termory/driver.mjs route 3         # Cmd-1..7 rail: providers/router/records/favorites/search/stats/settings
 node .claude/skills/run-termory/driver.mjs search "Wait agent"
 node .claude/skills/run-termory/driver.mjs shot /tmp/x.png     # look before selecting
 node .claude/skills/run-termory/driver.mjs key down down return
@@ -54,7 +54,7 @@ A verified end-to-end flow — find a rendered tool card and land on it.
 ```bash
 D=.claude/skills/run-termory/driver.mjs
 node $D launch
-node $D route 2
+node $D route 3
 node $D search "Wait agent"     # Cmd-K palette; first search is slow, see below
 node $D shot /tmp/hits.png      # LOOK: which row is the one you want?
 node $D key down down return    # move N rows, open it
@@ -262,7 +262,7 @@ no file to move.
 | A keyboard command does nothing | Accessibility permission missing for the terminal app, or focus went elsewhere — `shot` first to see actual state. |
 | `Cannot find module '.../src-tauri/src/test/setup.ts'` | You ran `npx vitest` from `src-tauri/`. Run it from the repo root. |
 | `launch` returns "build failed" | Read `/tmp/termory-dev.log`; it greps for `error:` / `could not compile`. |
-| Footer shows 同步失败 / "Sync failed" | Seen once after rapid quit/relaunch cycles, with nothing in the dev log and one healthy process. It cleared itself on the next scan — switch routes (`route 1; route 2`) to re-trigger one. Only chase it if it repeats. |
+| Footer shows 同步失败 / "Sync failed" | Seen once after rapid quit/relaunch cycles, with nothing in the dev log and one healthy process. It cleared itself on the next scan — switch routes (`route 1; route 3`) to re-trigger one. Only chase it if it repeats. |
 | Palette empty / Enter lands on the Search page | The first search hadn't finished. See the cold-search gotcha; `search --wait 30000`. |
 | Menu-bar click does nothing / `missing value` | `missing value` is the normal return — the status item has no AX name. Screenshot to see whether the menu opened; if it didn't, the app is not running or Accessibility permission is missing. |
 | Keystrokes go nowhere after a tray screenshot | The menu is still open and eating them. `osascript -e 'tell application "System Events" to key code 53'`. |

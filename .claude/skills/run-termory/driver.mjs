@@ -19,7 +19,7 @@
 //   search [--wait ms] <query>
 //                     Cmd-K palette, type <query>, wait for results.
 //                     First search after a launch waits 25s (see below).
-//   route <1-6>       Cmd-1..6 — providers/records/favorites/search/stats/settings
+//   route <1-7>       Cmd-1..7 — providers/router/records/favorites/search/stats/settings
 //   quit              quit the app (leaves `npm run tauri:dev` to exit)
 //
 // Every command raises the app first. That is not politeness: screencapture
@@ -218,7 +218,7 @@ function search(argv) {
 
 function route(n) {
   const i = Number(n);
-  if (!(i >= 1 && i <= 6)) throw new Error("usage: route <1-6>");
+  if (!(i >= 1 && i <= 7)) throw new Error("usage: route <1-7>");
   key([`cmd+${i}`]);
 }
 
@@ -237,7 +237,7 @@ try {
       if (isRunning()) osa(`tell application "System Events" to tell process "${APP}" to click menu item "Quit Termory" of menu 1 of menu bar item "Termory" of menu bar 1`);
       break;
     default:
-      console.error("commands: launch | settle [ms] | bounds | shot <file> | paste <text> | key <spec>… | search <q> | route <1-6> | quit");
+      console.error("commands: launch | settle [ms] | bounds | shot <file> | paste <text> | key <spec>… | search <q> | route <1-7> | quit");
       process.exit(2);
   }
 } catch (e) {
