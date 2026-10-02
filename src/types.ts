@@ -244,11 +244,12 @@ export type GatewayBinding = {
 };
 
 /** A gateway entry, stored in the unified `providers` array of
- * providers.json discriminated by `kind: "gateway"` (alongside per-CLI
+ * providers.json discriminated by `kind: "gateway"` — the local router's own
+ * entry is the same shape under `kind: "router"` (alongside per-CLI
  * providers whose `kind` is "official"/"custom"). A gateway is a kind of
  * provider that fans one `{baseUrl, apiKey}` out to several CLIs. */
 export type Gateway = {
-  kind: "gateway";
+  kind: "gateway" | "router";
   id: string;
   name: string;
   baseUrl?: string;
@@ -466,6 +467,88 @@ export type Route =
   | "stats"
   | "favorites"
   | "providers"
+  | "router"
   | "settings";
+
+// ---- Local router (src-tauri/src/router.rs) ----
+
+export type RouterProtocol = "anthropic" | "openai-responses" | "openai-chat" | "gemini";
+export type RouterStrategy = "failover" | "round-robin";
+export type RouterCandidateKind = "live" | "account" | "provider" | "gateway";
+
+export type RouterUpstreamPref = { key: string; enabled: boolean };
+
+export type RouterConfigView = {
+  autostart: boolean;
+  /** Bind address: 127.0.0.1 (this machine), 0.0.0.0 / :: (LAN), or an IP. */
+  host: string;
+  port: number;
+  hasApiKey: boolean;
+  apiKeyMasked: string;
+  strategy: RouterStrategy;
+  upstreams: RouterUpstreamPref[];
+};
+
+export type RouterCandidate = {
+  key: string;
+  kind: RouterCandidateKind;
+  app: CliApp | null;
+  label: string;
+  detail: string;
+  protocols: RouterProtocol[];
+  available: boolean;
+  reason: string | null;
+  /** Machine-readable form of `reason` for the page's translation; null for
+   * a free-form reason (the raw `reason` is shown then). */
+  reasonCode: string | null;
+  enabled: boolean;
+};
+
+export type RouterUpstreamHealth = {
+  key: string;
+  requests: number;
+  failures: number;
+  streak: number;
+  lastError: string | null;
+  cooldownUntil: number | null;
+  lastUsedAt: number | null;
+};
+
+/** One model the router offers (`router_models`). */
+export type RouterModel = {
+  id: string;
+  /** Enabled sources that list it, in page order. */
+  sources: string[];
+  /** False while every listing source is cooling down for it. */
+  available: boolean;
+};
+
+export type RouterStatus = {
+  running: boolean;
+  host: string;
+  port: number;
+  startedAt: number | null;
+  baseUrl: string;
+  /** The URL other devices use, when the router is open to the LAN. */
+  lanUrl: string | null;
+  upstreams: RouterUpstreamHealth[];
+};
+
+export type RouterPageState = {
+  config: RouterConfigView;
+  candidates: RouterCandidate[];
+  status: RouterStatus;
+  /** Listen-address choices: 127.0.0.1, 0.0.0.0, then each interface IP. */
+  listenAddresses: { address: string; interface: string | null }[];
+};
+
+export type RouterConfigPatch = Partial<{
+  autostart: boolean;
+  host: string;
+  port: number;
+  apiKey: string;
+  strategy: RouterStrategy;
+  upstreams: RouterUpstreamPref[];
+}>;
 
 export type Pane = "sessions" | "memory" | "skills";

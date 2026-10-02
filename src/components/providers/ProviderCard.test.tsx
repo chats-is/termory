@@ -155,6 +155,29 @@ describe("ProviderCard — test/connectivity", () => {
     expect(toggle.getAttribute("data-slot")).not.toBe("tooltip-trigger");
     expect(toggle.closest('[data-slot="tooltip-trigger"]')).not.toBeNull();
   });
+
+  // Only ENABLING is activation: an enabled slot (e.g. a router slot while
+  // the router is stopped) must stay removable.
+  it("keeps Disable clickable on a non-activatable card whose slot is enabled", () => {
+    const onToggle = vi.fn();
+    render(
+      <ProviderCard
+        provider={makeProvider({ app: "opencode" })}
+        {...baseProps}
+        isConfigured
+        activatable={false}
+        unavailableReason="Start the router first."
+        onToggleEnabled={onToggle}
+        onSetDefault={vi.fn()}
+        onTest={vi.fn()}
+      />
+    );
+    const toggle = screen.getByLabelText("Disable");
+    expect(toggle).not.toBeDisabled();
+    toggle.click();
+    expect(onToggle).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Set as default" })).toBeDisabled();
+  });
 });
 
 describe("ProviderCard — balance row", () => {

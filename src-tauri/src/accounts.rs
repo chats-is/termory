@@ -401,37 +401,37 @@ fn sync_live_account(cli: CliApp) -> Result<bool, Box<dyn Error>> {
     // hundred milliseconds (that `security(1)` spawn), which is ample room
     // for the user to have deleted this account. Deciding against the copy
     // from the top and writing it back would bring it back from the dead.
-    let mut store = read_store()?;
-    // Scoped by `app` as well as `id`, like every other "refresh an
-    // existing entry" helper here. An id is not globally unique: both the
-    // codex and claude derivations fall back to the EMAIL when the account
-    // carries no primary id (`tokens.account_id` / `accountUuid`), so one
-    // person signed into both with the same address can hold two entries
-    // under one id. Matching on id alone would let a codex pass overwrite
-    // the claude entry outright — `app` field included, since this
-    // replaces the whole entry.
-    let Some(slot) = store.iter_mut().find(|e| {
-        str_field(e, "app") == Some(cli.key()) && str_field(e, "id") == Some(id.as_str())
-    }) else {
-        return Ok(false);
-    };
-    if entry_content_matches(slot, &fresh) {
-        return Ok(false);
-    }
-    // `savedAt` is not this flow's to stamp — it dates the user's own
-    // saves, and nobody saved anything here. Carry it over and record the
-    // update under `syncedAt`, this flow's own field: with the two apart,
-    // the store says which changes came from a person and which from the
-    // background, and an entry that has never carried `syncedAt` has
-    // demonstrably never been auto-updated.
-    carry_over(slot, &mut fresh, "savedAt");
-    fresh["syncedAt"] = JsonValue::String(now_rfc3339());
-    // Replacing the whole entry also drops `needsRelogin`, which is right:
-    // that flag described the credential just superseded, so re-logging in
-    // from the CLI clears the warning by itself.
-    *slot = fresh;
-    write_store(store)?;
-    Ok(true)
+    // (Under the store lock, so no other writer lands between this read
+    // and the write below.)
+    update_store(|store| {
+        // Scoped by `app` as well as `id`, like every other "refresh an
+        // existing entry" helper here. An id is not globally unique: both the
+        // codex and claude derivations fall back to the EMAIL when the account
+        // carries no primary id (`tokens.account_id` / `accountUuid`), so one
+        // person signed into both with the same address can hold two entries
+        // under one id. Matching on id alone would let a codex pass overwrite
+        // the claude entry outright — `app` field included, since this
+        // replaces the whole entry.
+        let Some(slot) = find_entry(store, cli.key(), &id) else {
+            return Ok(false);
+        };
+        if entry_content_matches(slot, &fresh) {
+            return Ok(false);
+        }
+        // `savedAt` is not this flow's to stamp — it dates the user's own
+        // saves, and nobody saved anything here. Carry it over and record the
+        // update under `syncedAt`, this flow's own field: with the two apart,
+        // the store says which changes came from a person and which from the
+        // background, and an entry that has never carried `syncedAt` has
+        // demonstrably never been auto-updated.
+        carry_over(slot, &mut fresh, "savedAt");
+        fresh["syncedAt"] = JsonValue::String(now_rfc3339());
+        // Replacing the whole entry also drops `needsRelogin`, which is right:
+        // that flag described the credential just superseded, so re-logging in
+        // from the CLI clears the warning by itself.
+        *slot = fresh;
+        Ok(true)
+    })
 }
 
 /// One pass for `cli`, skipped while a login owns the credential.
@@ -530,31 +530,55 @@ pub fn account_cli(id: &str) -> Option<CliApp> {
 }
 
 pub async fn switch_account(id: String) -> Result<CliApp, Box<dyn Error>> {
-    let store = read_store()?;
-    let entry = store
-        .iter()
-        .find(|e| str_field(e, "id") == Some(id.as_str()))
-        .ok_or("Account not found")?;
-    let payload = entry
+    let app = {
+        let store = read_store()?;
+        let entry = store
+            .iter()
+            .find(|e| str_field(e, "id") == Some(id.as_str()))
+            .ok_or("Account not found")?;
+        str_field(entry, "app").map(String::from)
+    };
+    let cli = match app.as_deref().and_then(CliApp::parse) {
+        Some(cli @ (CliApp::Codex | CliApp::Claude | CliApp::Grok)) => cli,
+        _ => {
+            return Err(
+                format!("Unsupported account app: {}", app.as_deref().unwrap_or("?")).into(),
+            )
+        }
+    };
+    // A switch SPENDS the snapshot's refresh token (it validates by
+    // refreshing), exactly like the router's refresh of the same login — so
+    // the two are serialized per CLI, and the payload is read only once the
+    // lock is held: a copy read earlier may hold a token the router has just
+    // spent and rotated away.
+    let _serial = match credential_lock(cli) {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
+    match cli {
+        CliApp::Codex => {
+            let payload = saved_payload("codex", &id)?;
+            switch_codex(&payload).await?;
+        }
+        CliApp::Claude => {
+            let payload = saved_payload("claude", &id)?;
+            switch_claude(&payload).await?;
+        }
+        // Re-reads the payload itself, under grok's own lock.
+        _ => switch_grok(&id).await?,
+    }
+    Ok(cli)
+}
+
+/// The stored credential payload of the entry for `app` + `id`.
+fn saved_payload(app: &str, id: &str) -> Result<JsonValue, Box<dyn Error>> {
+    read_store()?
+        .into_iter()
+        .find(|e| str_field(e, "app") == Some(app) && str_field(e, "id") == Some(id))
+        .ok_or("Account not found")?
         .get("payload")
         .cloned()
-        .ok_or("Saved account has no credential payload")?;
-    let app = str_field(entry, "app").map(String::from);
-    match app.as_deref() {
-        Some("codex") => {
-            switch_codex(&payload).await?;
-            Ok(CliApp::Codex)
-        }
-        Some("claude") => {
-            switch_claude(&payload).await?;
-            Ok(CliApp::Claude)
-        }
-        Some("grok") => {
-            switch_grok(&id, &payload).await?;
-            Ok(CliApp::Grok)
-        }
-        other => Err(format!("Unsupported account app: {}", other.unwrap_or("?")).into()),
-    }
+        .ok_or_else(|| "Saved account has no credential payload".into())
 }
 
 /// Spawn `codex login`, wait for completion, then save the resulting
@@ -928,7 +952,7 @@ pub async fn login_and_save_codex_account(
             // Don't fail the overall operation — the new account was saved successfully.
             // Mark the previous account as needing re-login so the UI reflects the issue.
             log::warn!("Failed to restore previous account {prev_id}: {e}");
-            let _ = mark_account_relogin(&prev_id, true);
+            let _ = mark_app_account_relogin("codex", &prev_id, true);
         }
     }
 
@@ -1026,21 +1050,13 @@ fn auto_save_unsaved_live_codex_account() -> Result<Option<String>, Box<dyn Erro
     let Some(live) = read_codex_live()? else {
         return Ok(None);
     };
-    let mut store = read_store()?;
     let id = live.id.clone();
-    if store
-        .iter()
-        .any(|e| str_field(e, "app") == Some("codex") && str_field(e, "id") == Some(id.as_str()))
-    {
-        return Ok(Some(id));
-    }
-    let entry = serde_json::json!({
-        "id": id, "app": "codex",
-        "name": live.name, "email": live.email, "plan": live.plan,
-        "payload": live.doc, "savedAt": now_rfc3339(),
-    });
-    store.push(entry);
-    write_store(store)?;
+    update_store(|store| {
+        if find_entry(store, "codex", &id).is_none() {
+            store.push(codex_entry(&live));
+        }
+        Ok(())
+    })?;
     Ok(Some(id))
 }
 
@@ -1067,13 +1083,14 @@ fn restore_auth(path: &std::path::Path, original: Option<&[u8]>) {
 
 /// Delete a saved snapshot. NEVER touches the live credential.
 pub fn delete_account(id: String) -> Result<(), Box<dyn Error>> {
-    let mut store = read_store()?;
-    let before = store.len();
-    store.retain(|e| str_field(e, "id") != Some(id.as_str()));
-    if store.len() == before {
-        return Err("Account not found".into());
-    }
-    write_store(store)
+    update_store(|store| {
+        let before = store.len();
+        store.retain(|e| str_field(e, "id") != Some(id.as_str()));
+        if store.len() == before {
+            return Err("Account not found".into());
+        }
+        Ok(())
+    })
 }
 
 // ===================================================================
@@ -1085,7 +1102,7 @@ pub fn delete_account(id: String) -> Result<(), Box<dyn Error>> {
 /// to `migrate_account_entries`. v1 is the original baseline.
 pub const ACCOUNTS_SCHEMA_VERSION: u64 = 3;
 
-fn read_store() -> Result<Vec<JsonValue>, Box<dyn Error>> {
+pub(crate) fn read_store() -> Result<Vec<JsonValue>, Box<dyn Error>> {
     let raw = crate::config::read_accounts()?;
     let map = match raw {
         JsonValue::Object(m) => m,
@@ -1164,6 +1181,59 @@ fn write_store(entries: Vec<JsonValue>) -> Result<(), Box<dyn Error>> {
     env.insert("version".into(), JsonValue::from(ACCOUNTS_SCHEMA_VERSION));
     env.insert("accounts".into(), JsonValue::Array(entries));
     crate::config::write_accounts(&JsonValue::Object(env))
+}
+
+/// Serializes every read-modify-write of accounts.json in this process.
+///
+/// The store has several independent writers — the Save button, a switch's
+/// outgoing re-snapshot, the auto-sync, the relogin flag and the router's
+/// background token refresh — and each rewrites the WHOLE file. Unlocked, a
+/// writer holding a copy read a moment earlier overwrites a snapshot another
+/// writer just rotated, putting a spent refresh token back as the only saved
+/// copy. A plain (non-reentrant) std mutex: nothing inside an `update_store`
+/// closure may call `update_store` again, and it is never held across an
+/// `.await`.
+static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Read the store, let `edit` change it, and write it back — all under
+/// [`STORE_LOCK`]. The file is written only when the entries actually
+/// changed, and not at all when `edit` fails.
+fn update_store<T>(
+    edit: impl FnOnce(&mut Vec<JsonValue>) -> Result<T, Box<dyn Error>>,
+) -> Result<T, Box<dyn Error>> {
+    let _guard = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut store = read_store()?;
+    let before = store.clone();
+    let out = edit(&mut store)?;
+    if store != before {
+        write_store(store)?;
+    }
+    Ok(out)
+}
+
+/// The entry for `app` + `id`. An id alone is NOT unique — both the codex and
+/// claude derivations fall back to the email — so every lookup is scoped.
+fn find_entry<'a>(store: &'a mut [JsonValue], app: &str, id: &str) -> Option<&'a mut JsonValue> {
+    store
+        .iter_mut()
+        .find(|e| str_field(e, "app") == Some(app) && str_field(e, "id") == Some(id))
+}
+
+/// Replace (or append) the entry for `entry`'s `app` + `id`, carrying the
+/// auto-sync's own `syncedAt` over — see [`carry_over`].
+fn upsert_entry(mut entry: JsonValue) -> Result<(), Box<dyn Error>> {
+    let app = str_field(&entry, "app").unwrap_or_default().to_string();
+    let id = str_field(&entry, "id").unwrap_or_default().to_string();
+    update_store(|store| {
+        match find_entry(store, &app, &id) {
+            Some(slot) => {
+                carry_over(slot, &mut entry, "syncedAt");
+                *slot = entry;
+            }
+            None => store.push(entry),
+        }
+        Ok(())
+    })
 }
 
 fn str_field<'a>(v: &'a JsonValue, key: &str) -> Option<&'a str> {
@@ -1394,20 +1464,7 @@ fn save_claude_account() -> Result<(), Box<dyn Error>> {
     let live = read_claude_live_uncached()?
         .ok_or("No Claude login with account info found to save (run `claude` and log in first)")?;
 
-    let mut entry = claude_entry(&live);
-    let id = live.id;
-    let mut store = read_store()?;
-    match store
-        .iter_mut()
-        .find(|e| str_field(e, "id") == Some(id.as_str()))
-    {
-        Some(slot) => {
-            carry_over(slot, &mut entry, "syncedAt");
-            *slot = entry;
-        }
-        None => store.push(entry),
-    }
-    write_store(store)
+    upsert_entry(claude_entry(&live))
 }
 
 /// One store entry built from a live Claude login. Shared by the save
@@ -1644,17 +1701,12 @@ async fn refresh_claude_doc_tokens(doc: &mut JsonValue) -> Result<(), RefreshErr
 /// in-memory doc holds the only working copy — parking it in the store first
 /// means a failed live write (fs error) loses nothing; the retry just works.
 fn persist_refreshed_claude_snapshot(id: &str, cred: &JsonValue) -> Result<(), Box<dyn Error>> {
-    let mut store = read_store()?;
-    if let Some(entry) = store
-        .iter_mut()
-        .find(|e| str_field(e, "app") == Some("claude") && str_field(e, "id") == Some(id))
-    {
-        if let Some(payload) = entry.get_mut("payload") {
+    update_store(|store| {
+        if let Some(payload) = find_entry(store, "claude", id).and_then(|e| e.get_mut("payload")) {
             payload["credentials"] = cred.clone();
         }
-        write_store(store)?;
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Restore a saved Claude snapshot: validate/refresh the tokens in memory
@@ -1692,11 +1744,7 @@ async fn switch_claude(payload: &JsonValue) -> Result<(), Box<dyn Error>> {
     // rotation this step defends against is exactly what makes a ≤30s-stale
     // cached doc wrong here.
     if let Ok(Some(live)) = read_claude_live_uncached() {
-        let store = read_store()?;
-        if store
-            .iter()
-            .any(|e| str_field(e, "id") == Some(live.id.as_str()))
-        {
+        if store_has("claude", &live.id) {
             save_claude_account()?;
         }
     }
@@ -1717,7 +1765,7 @@ async fn switch_claude(payload: &JsonValue) -> Result<(), Box<dyn Error>> {
             // Err, and flagging a locked-keychain victim would trap the row
             // behind a disabled Switch button.
             if let Some(id) = claude_payload_id(payload) {
-                let _ = mark_account_relogin(&id, true);
+                let _ = mark_app_account_relogin("claude", &id, true);
             }
             return Err(format!("Account needs re-login (refresh token revoked): {e}").into());
         }
@@ -2286,19 +2334,7 @@ fn grok_entry(live: &GrokLive) -> JsonValue {
 }
 
 fn save_grok_live(live: &GrokLive) -> Result<(), Box<dyn Error>> {
-    let mut store = read_store()?;
-    let mut entry = grok_entry(live);
-    match store
-        .iter_mut()
-        .find(|e| str_field(e, "id") == Some(live.id.as_str()))
-    {
-        Some(slot) => {
-            carry_over(slot, &mut entry, "syncedAt");
-            *slot = entry;
-        }
-        None => store.push(entry),
-    }
-    write_store(store)
+    upsert_entry(grok_entry(live))
 }
 
 /// xAI's OAuth2 token endpoint. Taken from the live discovery document
@@ -2324,6 +2360,12 @@ static GROK_REFRESH_STUB: std::sync::Mutex<Option<GrokRefreshStub>> = std::sync:
 enum GrokRefreshStub {
     /// Apply this token-endpoint response body (the patching still runs).
     Response(JsonValue),
+    /// Apply `response`, then run `after` — lets a test change the world
+    /// while the refresh is "in flight".
+    ResponseThen {
+        response: JsonValue,
+        after: fn(),
+    },
     AuthFailure,
     Transient,
 }
@@ -2372,6 +2414,11 @@ fn grok_refresh_stubbed(auth: &mut JsonValue) -> Result<bool, RefreshError> {
     };
     match stub {
         GrokRefreshStub::Response(v) => apply_grok_token_response(auth, v),
+        GrokRefreshStub::ResponseThen { response, after } => {
+            let rotated = apply_grok_token_response(auth, response);
+            after();
+            rotated
+        }
         GrokRefreshStub::AuthFailure => {
             Err(RefreshError::AuthFailure("stubbed auth failure".into()))
         }
@@ -2508,31 +2555,36 @@ fn apply_grok_token_response(
 /// between the two writes leaves the *durable record* holding the live token —
 /// recoverable by switching again — instead of leaving it only in a file we
 /// never got to write.
+///
+/// `by_user` says who caused the refresh: a switch is the user's action and
+/// stamps `savedAt`; the router's background refresh is not, so it records
+/// `syncedAt` instead and leaves `savedAt` alone (see [`carry_over`]).
 fn persist_refreshed_grok_snapshot(
     id: &str,
     scope: &str,
     auth: &JsonValue,
+    by_user: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let mut store = read_store()?;
-    // `id` is the entry `switch_account` already resolved, NOT one re-derived
-    // from the payload: by the time this runs the refresh has SPENT the stored
-    // token, so a lookup that misses would leave the rotated replacement only
-    // in auth.json and the spent one in the store — silently recreating the
-    // stale-snapshot failure this whole feature exists to prevent.
-    let Some(slot) = store
-        .iter_mut()
-        .find(|e| str_field(e, "app") == Some("grok") && str_field(e, "id") == Some(id))
-    else {
-        return Err(format!("Saved Grok account {id} vanished mid-switch").into());
-    };
-    slot["payload"] = json!({ "scope": scope, "auth": auth });
-    slot["savedAt"] = JsonValue::String(now_rfc3339());
-    // A successful refresh proves the credential is live, so any stale
-    // needs-relogin mark on it is wrong (same implicit clear as a re-save).
-    if let JsonValue::Object(o) = slot {
-        o.remove("needsRelogin");
-    }
-    write_store(store)
+    update_store(|store| {
+        // `id` is the entry `switch_account` already resolved, NOT one
+        // re-derived from the payload: by the time this runs the refresh has
+        // SPENT the stored token, so a lookup that misses would leave the
+        // rotated replacement only in auth.json and the spent one in the
+        // store — silently recreating the stale-snapshot failure this whole
+        // feature exists to prevent.
+        let Some(slot) = find_entry(store, "grok", id) else {
+            return Err(format!("Saved Grok account {id} vanished mid-switch").into());
+        };
+        slot["payload"] = json!({ "scope": scope, "auth": auth });
+        let stamp = if by_user { "savedAt" } else { "syncedAt" };
+        slot[stamp] = JsonValue::String(now_rfc3339());
+        // A successful refresh proves the credential is live, so any stale
+        // needs-relogin mark on it is wrong (same implicit clear as a re-save).
+        if let JsonValue::Object(o) = slot {
+            o.remove("needsRelogin");
+        }
+        Ok(())
+    })
 }
 
 /// Restore a saved grok login.
@@ -2542,7 +2594,20 @@ fn persist_refreshed_grok_snapshot(
 /// stored refresh token is dead, so the live login is left untouched and the
 /// entry is flagged `needsRelogin` — the user sees the failure at click time
 /// instead of being logged out hours later by grok's own refresh.
-async fn switch_grok(id: &str, payload: &JsonValue) -> Result<(), Box<dyn Error>> {
+///
+/// The snapshot is read from the store only AFTER grok's lock is held: every
+/// other spender of a saved grok refresh token (the router's refresh) holds
+/// the same lock and persists the rotated token before releasing it, so a
+/// payload read earlier can already be spent.
+async fn switch_grok(id: &str) -> Result<(), Box<dyn Error>> {
+    let path = grok_auth_path()?;
+    // ONE lock across read-outgoing → re-snapshot → refresh → write-incoming.
+    // The refresh is INSIDE it for the same reason grok holds this lock across
+    // its own IdP call: two processes spending a refresh token concurrently is
+    // the double-spend that trips rotation reuse detection.
+    let _lock = acquire_grok_lock(&path).await?;
+
+    let payload = saved_payload("grok", id)?;
     let scope = payload
         .get("scope")
         .and_then(|v| v.as_str())
@@ -2555,23 +2620,13 @@ async fn switch_grok(id: &str, payload: &JsonValue) -> Result<(), Box<dyn Error>
         .cloned()
         .ok_or("Saved Grok credential is corrupt")?;
 
-    let path = grok_auth_path()?;
-    // ONE lock across read-outgoing → re-snapshot → refresh → write-incoming.
-    // The refresh is INSIDE it for the same reason grok holds this lock across
-    // its own IdP call: two processes spending a refresh token concurrently is
-    // the double-spend that trips rotation reuse detection.
-    let _lock = acquire_grok_lock(&path).await?;
-
     // Re-snapshot the OUTGOING login before it is overwritten, so switching
     // back later restores the RT grok most recently rotated to instead of a
     // spent one. Only refreshes an EXISTING entry (never adds one — an unsaved
     // live login stays guarded by the page's confirm warning and the tray's
     // auto-save), mirroring switch_codex.
     if let Some(live) = read_grok_live_at(&path)? {
-        let store = read_store()?;
-        if store.iter().any(|e| {
-            str_field(e, "app") == Some("grok") && str_field(e, "id") == Some(live.id.as_str())
-        }) {
+        if store_has("grok", &live.id) {
             save_grok_live(&live)?;
         }
     }
@@ -2595,7 +2650,7 @@ async fn switch_grok(id: &str, payload: &JsonValue) -> Result<(), Box<dyn Error>
             // can use it, and the next switch AWAY recaptures it into the
             // store (the outgoing re-snapshot above). The store-before-live
             // ORDER still stands — it is about a crash, not a known failure.
-            if let Err(e) = persist_refreshed_grok_snapshot(id, &scope, &auth) {
+            if let Err(e) = persist_refreshed_grok_snapshot(id, &scope, &auth, true) {
                 log::warn!("grok switch: could not persist the refreshed snapshot: {e}");
             }
             // A switch SPENDS a refresh token, so it must leave a trace saying
@@ -2608,7 +2663,7 @@ async fn switch_grok(id: &str, payload: &JsonValue) -> Result<(), Box<dyn Error>
             // Flagged BACKEND-side, like switch_claude: only this arm knows the
             // failure was a dead token rather than a lock or write error, and
             // the caller sees just a string.
-            let _ = mark_account_relogin(id, true);
+            let _ = mark_app_account_relogin("grok", id, true);
             log::warn!("grok switch: refresh rejected for {who}, flagged needsRelogin: {msg}");
             return Err(msg.into());
         }
@@ -3054,20 +3109,7 @@ fn codex_entry(live: &CodexLive) -> JsonValue {
 fn save_codex_account() -> Result<(), Box<dyn Error>> {
     let live = read_codex_live()?
         .ok_or("No Codex ChatGPT login found to save (run `codex login` first)")?;
-    let mut entry = codex_entry(&live);
-    let id = live.id;
-    let mut store = read_store()?;
-    match store
-        .iter_mut()
-        .find(|e| str_field(e, "id") == Some(id.as_str()))
-    {
-        Some(slot) => {
-            carry_over(slot, &mut entry, "syncedAt");
-            *slot = entry;
-        }
-        None => store.push(entry),
-    }
-    write_store(store)
+    upsert_entry(codex_entry(&live))
 }
 
 /// Set or clear the `needsRelogin` flag on a saved account. Called by the
@@ -3075,20 +3117,30 @@ fn save_codex_account() -> Result<(), Box<dyn Error>> {
 /// refresh_token has been revoked; the user must re-authenticate); on success
 /// it is cleared. `save_codex_account` also clears it implicitly because it
 /// replaces the whole store entry without the flag.
+///
+/// The IPC and the tray hold only the id, so this resolves the app the same
+/// way `switch_account` does (the entry `account_cli` finds) and flags THAT
+/// entry. Every caller that knows the app uses
+/// [`mark_app_account_relogin`] instead.
 pub fn mark_account_relogin(id: &str, needed: bool) -> Result<(), Box<dyn Error>> {
-    let mut store = read_store()?;
-    let slot = store
-        .iter_mut()
-        .find(|e| str_field(e, "id") == Some(id))
-        .ok_or_else(|| format!("account {id} not found"))?;
-    if let JsonValue::Object(o) = slot {
-        if needed {
-            o.insert("needsRelogin".into(), JsonValue::Bool(true));
-        } else {
-            o.remove("needsRelogin");
+    let app = account_cli(id).ok_or_else(|| format!("account {id} not found"))?;
+    mark_app_account_relogin(app.key(), id, needed)
+}
+
+/// Set or clear `needsRelogin` on the entry for `app` + `id` only — an id is
+/// not unique across CLIs (see [`find_entry`]).
+fn mark_app_account_relogin(app: &str, id: &str, needed: bool) -> Result<(), Box<dyn Error>> {
+    update_store(|store| {
+        let slot = find_entry(store, app, id).ok_or_else(|| format!("account {id} not found"))?;
+        if let JsonValue::Object(o) = slot {
+            if needed {
+                o.insert("needsRelogin".into(), JsonValue::Bool(true));
+            } else {
+                o.remove("needsRelogin");
+            }
         }
-    }
-    write_store(store)
+        Ok(())
+    })
 }
 
 #[allow(dead_code)]
@@ -3115,7 +3167,66 @@ async fn refresh_doc_tokens(doc: &mut JsonValue) -> Result<(), RefreshError> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| RefreshError::Transient("No refresh_token in saved credential".into()))?
         .to_string();
+    #[cfg(test)]
+    {
+        let _ = refresh_token;
+        codex_refresh_stubbed(doc)
+    }
+    #[cfg(not(test))]
+    codex_refresh_over_http(doc, refresh_token).await
+}
 
+/// Test-only override for `refresh_doc_tokens` — the Codex sibling of
+/// `GROK_REFRESH_STUB`, with a call counter so a test can assert how many
+/// refresh tokens were spent. Guarded by `lock_home()`.
+#[cfg(test)]
+static CODEX_REFRESH_STUB: std::sync::Mutex<Option<CodexRefreshStub>> = std::sync::Mutex::new(None);
+#[cfg(test)]
+static CODEX_REFRESH_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+enum CodexRefreshStub {
+    /// Apply this token-endpoint response body.
+    Response(JsonValue),
+    /// Run the hook, then reject the token.
+    AuthFailureThen(fn()),
+    /// Apply `response`, then run `after` — lets a test play "Codex rewrote
+    /// auth.json while our request was in flight".
+    ResponseThen { response: JsonValue, after: fn() },
+}
+
+/// Test build of [`refresh_doc_tokens`]: never opens a socket. A document
+/// holding a refresh token with no stub installed PANICS, like
+/// `grok_refresh_stubbed` — a made-up token must never reach auth.openai.com.
+#[cfg(test)]
+fn codex_refresh_stubbed(doc: &mut JsonValue) -> Result<(), RefreshError> {
+    CODEX_REFRESH_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let guard = CODEX_REFRESH_STUB.lock().unwrap();
+    let Some(stub) = guard.as_ref() else {
+        panic!("refresh_doc_tokens would hit the network: install a CodexRefreshGuard");
+    };
+    match stub {
+        CodexRefreshStub::Response(body) => {
+            apply_codex_token_response(doc, body);
+            Ok(())
+        }
+        CodexRefreshStub::ResponseThen { response, after } => {
+            apply_codex_token_response(doc, response);
+            after();
+            Ok(())
+        }
+        CodexRefreshStub::AuthFailureThen(after) => {
+            after();
+            Err(RefreshError::AuthFailure("stubbed auth failure".into()))
+        }
+    }
+}
+
+#[cfg(not(test))]
+async fn codex_refresh_over_http(
+    doc: &mut JsonValue,
+    refresh_token: String,
+) -> Result<(), RefreshError> {
     // Mirror codex-rs default_client.rs `get_codex_user_agent()` +
     // `default_headers()` (default_client.rs:138-161, 289-304):
     //   User-Agent = "codex_cli_rs/{ver} ({OS type} {OS ver}; {arch}) {terminal}"
@@ -3123,9 +3234,18 @@ async fn refresh_doc_tokens(doc: &mut JsonValue) -> Result<(), RefreshError> {
     // Primary: `codex --version`. Fallback: `~/.codex/version.json` latest_version
     // (written by Codex itself — a real version string). Both are real Codex
     // version numbers so the User-Agent is never fabricated.
-    let codex_version = crate::providers::detect_cli_version(crate::providers::CliApp::Codex)
-        .or_else(|| crate::providers::codex_latest_known_version())
-        .unwrap_or_else(|| "unknown".to_string());
+    //
+    // OFF the async worker: `detect_cli_version` spawns `codex --version`
+    // and can fall back to a ~1 s interactive shell, which would park a
+    // Tokio worker for the whole spawn.
+    let codex_version = tauri::async_runtime::spawn_blocking(|| {
+        crate::providers::detect_cli_version(crate::providers::CliApp::Codex)
+            .or_else(crate::providers::codex_latest_known_version)
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| "unknown".to_string());
     let os = os_info::get();
     let user_agent_str = format!(
         "codex_cli_rs/{codex_version} ({} {}; {}) unknown",
@@ -3188,6 +3308,14 @@ async fn refresh_doc_tokens(doc: &mut JsonValue) -> Result<(), RefreshError> {
         .json()
         .await
         .map_err(|e| RefreshError::Transient(e.to_string()))?;
+    apply_codex_token_response(doc, &body);
+    Ok(())
+}
+
+/// Merge a token-endpoint response into a Codex auth document: the three
+/// token fields the response carries, plus `last_refresh`. Everything else in
+/// the document is left as it was.
+fn apply_codex_token_response(doc: &mut JsonValue, body: &JsonValue) {
     if let Some(tokens) = doc.get_mut("tokens").and_then(|v| v.as_object_mut()) {
         for key in ["id_token", "access_token", "refresh_token"] {
             if let Some(v) = body.get(key).filter(|v| v.is_string()) {
@@ -3196,7 +3324,6 @@ async fn refresh_doc_tokens(doc: &mut JsonValue) -> Result<(), RefreshError> {
         }
     }
     doc["last_refresh"] = JsonValue::String(chrono::Utc::now().to_rfc3339());
-    Ok(())
 }
 
 /// Validate/refresh tokens in memory first, then write to auth.json.
@@ -3220,10 +3347,7 @@ async fn switch_codex(payload: &JsonValue) -> Result<(), Box<dyn Error>> {
     // stays guarded by the page's confirm warning / the tray's auto-save).
     // No cache concern here: auth.json is read fresh every time.
     if let Ok(Some(live)) = read_codex_live() {
-        let store = read_store()?;
-        if store.iter().any(|e| {
-            str_field(e, "app") == Some("codex") && str_field(e, "id") == Some(live.id.as_str())
-        }) {
+        if store_has("codex", &live.id) {
             save_codex_account()?;
         }
     }
@@ -3405,6 +3529,500 @@ pub(crate) fn atomic_write_0600(
     }
     std::fs::rename(&tmp_path, path)?;
     Ok(())
+}
+
+// ===================================================================
+// Router-driven token refresh (Codex + Grok)
+// ===================================================================
+//
+// The local router uses logins long after the CLI that owns them last ran,
+// so it keeps their access tokens fresh itself. A refresh SPENDS a rotating
+// refresh token, so it is only safe when the rotated result lands where the
+// login's owner reads it — the same contract the account switch keeps:
+//
+// - a LIVE login is refreshed under the CLI's own refresh lock where the CLI
+//   has one (grok's `auth.json.lock`; Codex keeps none and re-reads instead),
+//   re-read after the lock (another process may have just refreshed it), and
+//   written straight back to the CLI's own auth.json; the saved entry for
+//   the same login is updated FIRST (durable record);
+// - a SAVED login that is not the live one is refreshed in the store only;
+// - a saved login that IS the live one goes through the live path, so the
+//   CLI's copy is the one that rotates;
+// - a definitive 4xx marks the saved entry `needsRelogin`; 429/5xx/network
+//   leaves everything untouched.
+//
+// Claude Code is not covered yet (its credential lives in the macOS
+// Keychain). Nothing here logs token material.
+
+/// Refresh when the access token has less than this left.
+pub(crate) const ROUTER_REFRESH_MARGIN_SECS: i64 = 300;
+
+/// The margin in effect. DEV builds only may widen it through
+/// `TERMORY_ROUTER_REFRESH_MARGIN_SECS`, so the refresh can be exercised
+/// against real logins without waiting hours for a token to near expiry;
+/// release builds compile the override out.
+pub(crate) fn router_refresh_margin_secs() -> i64 {
+    #[cfg(debug_assertions)]
+    if let Some(v) = std::env::var("TERMORY_ROUTER_REFRESH_MARGIN_SECS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+    {
+        return v;
+    }
+    ROUTER_REFRESH_MARGIN_SECS
+}
+
+fn now_unix() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+fn jwt_exp(token: &str) -> Option<i64> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    serde_json::from_slice::<JsonValue>(&bytes)
+        .ok()?
+        .get("exp")?
+        .as_i64()
+}
+
+fn codex_doc_exp(doc: &JsonValue) -> Option<i64> {
+    jwt_exp(doc.pointer("/tokens/access_token")?.as_str()?)
+}
+
+fn grok_auth_exp(auth: &JsonValue) -> Option<i64> {
+    jwt_exp(auth.get("key")?.as_str()?)
+}
+
+/// `force` = the upstream just answered 401/403 with this token.
+fn refresh_due(exp: Option<i64>, force: bool) -> bool {
+    force || exp.is_some_and(|e| e <= now_unix() + router_refresh_margin_secs())
+}
+
+/// Which login a router upstream is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RouterLogin {
+    Live(CliApp),
+    Saved { app: CliApp, id: String },
+}
+
+/// Refreshes this process made recently: login id, the access token the
+/// refresh produced, and when.
+type RecentRefreshes = Vec<(String, Option<String>, std::time::Instant)>;
+
+/// One per CLI whose logins the router refreshes, held across every spend of
+/// that CLI's refresh tokens in this process: the router's refresh (whatever
+/// pool key asked — `live:codex` and `account:codex:<id>` can be the SAME
+/// login) and an account switch (which validates by refreshing). An async
+/// mutex because the hold spans the IdP round-trip.
+static CODEX_CREDENTIAL_LOCK: tokio::sync::Mutex<RecentRefreshes> =
+    tokio::sync::Mutex::const_new(Vec::new());
+static GROK_CREDENTIAL_LOCK: tokio::sync::Mutex<RecentRefreshes> =
+    tokio::sync::Mutex::const_new(Vec::new());
+
+fn credential_lock(app: CliApp) -> Option<&'static tokio::sync::Mutex<RecentRefreshes>> {
+    match app {
+        CliApp::Codex => Some(&CODEX_CREDENTIAL_LOCK),
+        CliApp::Grok => Some(&GROK_CREDENTIAL_LOCK),
+        _ => None,
+    }
+}
+
+/// A FORCED refresh (the upstream just rejected the token) for a login whose
+/// current token THIS process minted less than this long ago is downgraded to
+/// a due-check: the rejection almost certainly came from a request that raced
+/// the refresh with the previous token, and spending the new refresh token
+/// again for it is exactly the double spend the lock exists to prevent.
+const FORCED_REFRESH_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Refresh the login behind a router upstream if it is due (or `force`),
+/// persisting the result. `Ok` = a usable token is now stored (possibly by
+/// another process while we waited); `Err` carries a user-facing reason.
+pub(crate) async fn refresh_login_for_router(
+    login: &RouterLogin,
+    force: bool,
+) -> Result<(), String> {
+    let app = match login {
+        RouterLogin::Live(app) | RouterLogin::Saved { app, .. } => *app,
+    };
+    let lock = credential_lock(app).ok_or("the router does not refresh this login")?;
+    // The token the caller saw, taken BEFORE waiting: if it changed by the
+    // time we hold the lock, the refresh it asked for already happened.
+    let before = login_access_token(login);
+    let mut recent = lock.lock().await;
+
+    // Resolved under the lock: which login this is may have changed while
+    // we waited (a switch, a CLI login).
+    let live_id = live_login_id(app);
+    let (via_live, login_id) = match login {
+        RouterLogin::Live(_) => (true, live_id.clone()),
+        // The same login as the live one: refresh through the CLI's file so
+        // there is only ever one live copy of the refresh token.
+        RouterLogin::Saved { id, .. } => {
+            (live_id.as_deref() == Some(id.as_str()), Some(id.clone()))
+        }
+    };
+    recent.retain(|(_, _, at)| at.elapsed() < FORCED_REFRESH_DEBOUNCE);
+    let now = login_access_token(login);
+    let just_minted = login_id.as_deref().is_some_and(|id| {
+        recent
+            .iter()
+            .any(|(r, token, _)| r == id && now.is_some() && *token == now)
+    });
+    let force = force && now == before && !just_minted;
+
+    let refreshed = if via_live {
+        refresh_live_login(app, force).await
+    } else {
+        let RouterLogin::Saved { id, .. } = login else {
+            unreachable!("a live login always goes through the live path")
+        };
+        refresh_saved_login(app, id, force).await
+    }?;
+    if refreshed {
+        if let Some(id) = login_id {
+            recent.push((id, login_access_token(login), std::time::Instant::now()));
+        }
+    }
+    Ok(())
+}
+
+fn live_login_id(app: CliApp) -> Option<String> {
+    match app {
+        CliApp::Codex => read_codex_live().ok().flatten().map(|l| l.id),
+        CliApp::Grok => read_grok_live().ok().flatten().map(|l| l.id),
+        _ => None,
+    }
+}
+
+/// The access token the router would currently use for `login`.
+fn login_access_token(login: &RouterLogin) -> Option<String> {
+    let live = |app: CliApp| -> Option<String> {
+        match app {
+            CliApp::Codex => read_codex_live()
+                .ok()
+                .flatten()?
+                .doc
+                .pointer("/tokens/access_token")?
+                .as_str()
+                .map(String::from),
+            CliApp::Grok => read_grok_live()
+                .ok()
+                .flatten()?
+                .auth
+                .get("key")?
+                .as_str()
+                .map(String::from),
+            _ => None,
+        }
+    };
+    match login {
+        RouterLogin::Live(app) => live(*app),
+        RouterLogin::Saved { app, id } => {
+            if live_login_id(*app).as_deref() == Some(id.as_str()) {
+                return live(*app);
+            }
+            let pointer = match app {
+                CliApp::Codex => "/tokens/access_token",
+                CliApp::Grok => "/auth/key",
+                _ => return None,
+            };
+            saved_payload(app.key(), id)
+                .ok()?
+                .pointer(pointer)?
+                .as_str()
+                .map(String::from)
+        }
+    }
+}
+
+fn store_has(app: &str, id: &str) -> bool {
+    read_store()
+        .map(|s| {
+            s.iter()
+                .any(|e| str_field(e, "app") == Some(app) && str_field(e, "id") == Some(id))
+        })
+        .unwrap_or(false)
+}
+
+fn refresh_failure(app: &str, id: Option<&str>, err: RefreshError) -> String {
+    match err {
+        RefreshError::AuthFailure(msg) => {
+            if let Some(id) = id.filter(|id| store_has(app, id)) {
+                let _ = mark_app_account_relogin(app, id, true);
+            }
+            log::warn!("router: {app} login refresh rejected");
+            format!("login expired — sign in again ({msg})")
+        }
+        RefreshError::Transient(msg) => {
+            log::warn!("router: {app} login refresh unavailable");
+            msg
+        }
+    }
+}
+
+/// `Ok(true)` = this call spent a refresh token and stored the result;
+/// `Ok(false)` = nothing was due (or another writer already refreshed).
+async fn refresh_live_login(app: CliApp, force: bool) -> Result<bool, String> {
+    match app {
+        CliApp::Codex => refresh_live_codex(force).await,
+        CliApp::Grok => refresh_live_grok(force).await,
+        _ => Err("the router does not refresh this login".into()),
+    }
+}
+
+fn read_json_file(path: &std::path::Path) -> Option<JsonValue> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// Copy the refreshed token fields (and `last_refresh`) from `refreshed`
+/// into `target`, leaving every other field of `target` as it is.
+fn patch_codex_tokens(target: &mut JsonValue, refreshed: &JsonValue) {
+    if !target.get("tokens").is_some_and(|t| t.is_object()) {
+        target["tokens"] = json!({});
+    }
+    for key in ["id_token", "access_token", "refresh_token"] {
+        if let Some(v) = refreshed.pointer(&format!("/tokens/{key}")) {
+            target["tokens"][key] = v.clone();
+        }
+    }
+    if let Some(v) = refreshed.get("last_refresh") {
+        target["last_refresh"] = v.clone();
+    }
+}
+
+/// Codex keeps no cross-process lock (its refresh lock is in-process); it
+/// instead re-reads auth.json before refreshing and skips when the file
+/// changed (`login/src/auth/manager.rs` `refresh_token`). Mirror that: read,
+/// refresh, re-read, and only patch the token fields into the CURRENT file,
+/// so provider fields written meanwhile survive.
+async fn refresh_live_codex(force: bool) -> Result<bool, String> {
+    let path = codex_auth_path().map_err(|e| e.to_string())?;
+    let mut doc = read_json_file(&path)
+        .filter(|d| d.get("tokens").is_some_and(|t| t.is_object()))
+        .ok_or("not logged in")?;
+    if !refresh_due(codex_doc_exp(&doc), force) {
+        return Ok(false);
+    }
+    let spent = doc.pointer("/tokens/refresh_token").cloned();
+    let live_id = read_codex_live().ok().flatten().map(|l| l.id);
+    if let Err(e) = refresh_doc_tokens(&mut doc).await {
+        if matches!(e, RefreshError::AuthFailure(_)) {
+            // Rejected — but maybe only because Codex refreshed first and the
+            // token we sent is the one IT rotated away. Its copy is then the
+            // live, working one; flagging the account would be a false alarm.
+            let rotated = read_json_file(&path)
+                .is_some_and(|cur| cur.pointer("/tokens/refresh_token") != spent.as_ref());
+            if rotated {
+                return Ok(false);
+            }
+        }
+        return Err(refresh_failure("codex", live_id.as_deref(), e));
+    }
+
+    // From here the old refresh token is SPENT: the tokens in `doc` are the
+    // only working copy, so nothing below may drop them.
+    let current = reread_codex_auth(&path).await;
+    let mut rotated_meanwhile = false;
+    let to_write = match current {
+        CodexReread::Parsed(cur) if cur.pointer("/tokens/refresh_token") != spent.as_ref() => {
+            // auth.json moved on meanwhile — Codex rotated it itself, or it
+            // now holds ANOTHER login (`codex login` mid-refresh). Its copy
+            // is not ours to overwrite; but the tokens in `doc` are still
+            // the only working copy of THIS login, so the saved entry below
+            // takes them before returning.
+            rotated_meanwhile = true;
+            None
+        }
+        CodexReread::Parsed(mut cur) => {
+            patch_codex_tokens(&mut cur, &doc);
+            Some(cur)
+        }
+        // Torn or unreadable even after retrying: `doc` is the file as it was
+        // read before the refresh plus the new tokens — the right content, and
+        // far better than losing the tokens.
+        CodexReread::Unreadable => Some(doc.clone()),
+        // Deleted meanwhile (`codex logout`): do not sign the user back in.
+        // The saved entry below still keeps the tokens.
+        CodexReread::Missing => None,
+    };
+    // Durable record FIRST: a crash between the two writes then leaves the
+    // store holding the live token.
+    if let Some(id) = live_id.as_deref() {
+        if let Err(e) = persist_refreshed_codex_snapshot(id, &doc) {
+            log::warn!("router: could not persist the refreshed codex snapshot: {e}");
+        }
+    }
+    if rotated_meanwhile {
+        return Ok(false);
+    }
+    if let Some(to_write) = to_write {
+        let text = serde_json::to_string_pretty(&to_write).map_err(|e| e.to_string())?;
+        atomic_write_0600(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    log::info!("router: refreshed the live codex login");
+    Ok(true)
+}
+
+enum CodexReread {
+    Parsed(JsonValue),
+    Unreadable,
+    Missing,
+}
+
+/// Re-read auth.json after a refresh, retrying briefly: Codex writes it
+/// atomically, but a read can still land on a torn or momentarily absent
+/// file on some filesystems.
+async fn reread_codex_auth(path: &std::path::Path) -> CodexReread {
+    const ATTEMPTS: u32 = 3;
+    for attempt in 0..ATTEMPTS {
+        if let Some(doc) = read_json_file(path) {
+            return CodexReread::Parsed(doc);
+        }
+        if attempt + 1 < ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+    if path.exists() {
+        CodexReread::Unreadable
+    } else {
+        CodexReread::Missing
+    }
+}
+
+async fn refresh_live_grok(force: bool) -> Result<bool, String> {
+    let path = grok_auth_path().map_err(|e| e.to_string())?;
+    // grok's own lock across re-read → refresh → write, exactly as switch_grok.
+    let _lock = acquire_grok_lock(&path).await.map_err(|e| e.to_string())?;
+    refresh_live_grok_locked(&path, force).await
+}
+
+/// The live grok refresh, for a caller already holding grok's
+/// `auth.json.lock` (the lock is not reentrant, even within one process).
+async fn refresh_live_grok_locked(path: &std::path::Path, force: bool) -> Result<bool, String> {
+    let live = read_grok_live_at(path)
+        .map_err(|e| e.to_string())?
+        .ok_or("not logged in")?;
+    let mut auth = live.auth.clone();
+    if !refresh_due(grok_auth_exp(&auth), force) {
+        return Ok(false);
+    }
+    if let Err(e) = refresh_grok_auth(&mut auth).await {
+        return Err(refresh_failure("grok", Some(&live.id), e));
+    }
+    // Durable record first (see persist_refreshed_grok_snapshot).
+    if store_has("grok", &live.id) {
+        if let Err(e) = persist_refreshed_grok_snapshot(&live.id, &live.scope, &auth, false) {
+            log::warn!("router: could not persist the refreshed grok snapshot: {e}");
+        }
+    }
+    let mut doc = grok_doc_for_write(path).map_err(|e| e.to_string())?;
+    if let JsonValue::Object(map) = &mut doc {
+        map.insert(live.scope.clone(), auth);
+    }
+    let text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    atomic_write_0600(path, text.as_bytes()).map_err(|e| e.to_string())?;
+    log::info!("router: refreshed the live grok login");
+    Ok(true)
+}
+
+/// The stored entry for `app` + `id`, refused when it is flagged for re-login.
+fn saved_router_payload(app: &str, id: &str) -> Result<JsonValue, String> {
+    let entry = read_store()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|e| str_field(e, "app") == Some(app) && str_field(e, "id") == Some(id))
+        .ok_or("account deleted")?;
+    if entry
+        .get("needsRelogin")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Err("needs re-login".into());
+    }
+    entry
+        .get("payload")
+        .cloned()
+        .ok_or_else(|| "snapshot has no payload".into())
+}
+
+/// A saved login that is not the live one: refresh its snapshot and write it
+/// back to the store only.
+async fn refresh_saved_login(app: CliApp, id: &str, force: bool) -> Result<bool, String> {
+    match app {
+        CliApp::Codex => {
+            // Serialized against every other in-process spender by the
+            // per-app credential lock the caller holds.
+            let mut doc = saved_router_payload("codex", id)?;
+            if !refresh_due(codex_doc_exp(&doc), force) {
+                return Ok(false);
+            }
+            if let Err(e) = refresh_doc_tokens(&mut doc).await {
+                return Err(refresh_failure("codex", Some(id), e));
+            }
+            persist_refreshed_codex_snapshot(id, &doc).map_err(|e| e.to_string())?;
+            log::info!("router: refreshed a saved codex login");
+            Ok(true)
+        }
+        CliApp::Grok => {
+            // grok's own lock, like every other spender of a grok refresh
+            // token: a `grok` process switching logins, or restoring this
+            // snapshot, must not spend the same token beside us.
+            let path = grok_auth_path().map_err(|e| e.to_string())?;
+            let _lock = acquire_grok_lock(&path).await.map_err(|e| e.to_string())?;
+            // Under the lock, it may have BECOME the live login (a switch
+            // landed while we waited): then the CLI's copy is the one that
+            // rotates, and the stored one may already be spent.
+            let live = read_grok_live_at(&path).ok().flatten();
+            if live.is_some_and(|l| l.id == id) {
+                return refresh_live_grok_locked(&path, force).await;
+            }
+            // Re-read the entry now, not before the lock: a switch holding it
+            // may have just spent and rotated the stored token.
+            let payload = saved_router_payload("grok", id)?;
+            let scope = payload
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .ok_or("snapshot has no scope")?
+                .to_string();
+            let mut auth = payload
+                .get("auth")
+                .cloned()
+                .ok_or("snapshot has no credential")?;
+            if !refresh_due(grok_auth_exp(&auth), force) {
+                return Ok(false);
+            }
+            if let Err(e) = refresh_grok_auth(&mut auth).await {
+                return Err(refresh_failure("grok", Some(id), e));
+            }
+            persist_refreshed_grok_snapshot(id, &scope, &auth, false).map_err(|e| e.to_string())?;
+            log::info!("router: refreshed a saved grok login");
+            Ok(true)
+        }
+        _ => Err("the router does not refresh this login".into()),
+    }
+}
+
+/// Patch a saved Codex snapshot with refreshed tokens (store only). Only the
+/// token fields and `last_refresh` change; the refresh is the background's,
+/// not the user's, so it stamps `syncedAt` and leaves `savedAt` alone. A
+/// successful refresh also proves the credential alive, clearing
+/// `needsRelogin`. Returns whether an entry was found.
+fn persist_refreshed_codex_snapshot(id: &str, doc: &JsonValue) -> Result<bool, Box<dyn Error>> {
+    update_store(|store| {
+        let Some(slot) = find_entry(store, "codex", id) else {
+            return Ok(false);
+        };
+        let mut payload = slot.get("payload").cloned().unwrap_or_else(|| json!({}));
+        patch_codex_tokens(&mut payload, doc);
+        slot["payload"] = payload;
+        slot["syncedAt"] = JsonValue::String(now_rfc3339());
+        if let JsonValue::Object(o) = slot {
+            o.remove("needsRelogin");
+        }
+        Ok(true)
+    })
 }
 
 // ===================================================================
@@ -4810,6 +5428,140 @@ mod tests {
         );
     }
 
+    fn live_grok_field(home: &Path, field: &str) -> Option<String> {
+        grok_live_doc(home)
+            .pointer(&format!("/{}/{field}", GROK_SCOPE.replace('/', "~1")))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    }
+
+    #[test]
+    fn router_refresh_is_due_inside_the_margin_or_when_forced() {
+        assert!(refresh_due(None, true));
+        assert!(
+            !refresh_due(None, false),
+            "unknown expiry is not a reason to spend a token"
+        );
+        assert!(refresh_due(Some(now_unix() + 60), false));
+        assert!(!refresh_due(Some(now_unix() + 3600), false));
+    }
+
+    /// The live login is refreshed IN grok's auth.json (grok keeps working
+    /// with the rotated token) and its saved entry follows.
+    #[tokio::test]
+    async fn router_refresh_writes_the_live_grok_login_back_and_its_saved_entry() {
+        let _g = lock_home();
+        let tmp = tempdir("router-grok-live");
+        let _h = override_home(&tmp);
+        let _r = GrokRefreshGuard::rotating();
+        write_grok_auth(&tmp, "user-a", "a@example.com", "rt-a1");
+        save_current_account(CliApp::Grok).unwrap();
+
+        refresh_login_for_router(&RouterLogin::Live(CliApp::Grok), true)
+            .await
+            .unwrap();
+
+        assert_eq!(live_grok_field(&tmp, "key").as_deref(), Some("at-fresh"));
+        assert_eq!(
+            live_grok_field(&tmp, "refresh_token").as_deref(),
+            Some("rt-rotated")
+        );
+        assert_eq!(stored_grok_refresh("user-a").as_deref(), Some("rt-rotated"));
+    }
+
+    /// A saved login that is NOT live is refreshed in the store only; the
+    /// CLI's file is never touched.
+    #[tokio::test]
+    async fn router_refresh_of_a_saved_grok_login_touches_only_the_store() {
+        let _g = lock_home();
+        let tmp = tempdir("router-grok-saved");
+        let _h = override_home(&tmp);
+        let _r = GrokRefreshGuard::rotating();
+        write_grok_auth(&tmp, "user-b", "b@example.com", "rt-b1");
+        save_current_account(CliApp::Grok).unwrap();
+        write_grok_auth(&tmp, "user-a", "a@example.com", "rt-a1");
+
+        refresh_login_for_router(
+            &RouterLogin::Saved {
+                app: CliApp::Grok,
+                id: "user-b".into(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stored_grok_refresh("user-b").as_deref(), Some("rt-rotated"));
+        assert_eq!(live_grok_field(&tmp, "user_id").as_deref(), Some("user-a"));
+        assert_eq!(
+            live_grok_field(&tmp, "refresh_token").as_deref(),
+            Some("rt-a1")
+        );
+    }
+
+    /// A saved entry that IS the live login refreshes through the live file,
+    /// so the CLI's copy is the one that rotates.
+    #[tokio::test]
+    async fn router_refresh_of_the_saved_live_grok_login_goes_through_the_cli_file() {
+        let _g = lock_home();
+        let tmp = tempdir("router-grok-saved-live");
+        let _h = override_home(&tmp);
+        let _r = GrokRefreshGuard::rotating();
+        write_grok_auth(&tmp, "user-a", "a@example.com", "rt-a1");
+        save_current_account(CliApp::Grok).unwrap();
+
+        refresh_login_for_router(
+            &RouterLogin::Saved {
+                app: CliApp::Grok,
+                id: "user-a".into(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            live_grok_field(&tmp, "refresh_token").as_deref(),
+            Some("rt-rotated")
+        );
+        assert_eq!(stored_grok_refresh("user-a").as_deref(), Some("rt-rotated"));
+    }
+
+    /// A definitive 4xx flags the saved entry; a transient failure changes
+    /// nothing.
+    #[tokio::test]
+    async fn router_refresh_failures_flag_only_on_auth_failure() {
+        let _g = lock_home();
+        let tmp = tempdir("router-grok-fail");
+        let _h = override_home(&tmp);
+        write_grok_auth(&tmp, "user-b", "b@example.com", "rt-b1");
+        save_current_account(CliApp::Grok).unwrap();
+        write_grok_auth(&tmp, "user-a", "a@example.com", "rt-a1");
+        let login = RouterLogin::Saved {
+            app: CliApp::Grok,
+            id: "user-b".into(),
+        };
+        let flagged = || {
+            read_store()
+                .unwrap()
+                .iter()
+                .find(|e| str_field(e, "id") == Some("user-b"))
+                .and_then(|e| e.get("needsRelogin").and_then(|v| v.as_bool()))
+                .unwrap_or(false)
+        };
+        {
+            let _r = GrokRefreshGuard::set(GrokRefreshStub::Transient);
+            assert!(refresh_login_for_router(&login, true).await.is_err());
+            assert!(!flagged());
+            assert_eq!(stored_grok_refresh("user-b").as_deref(), Some("rt-b1"));
+        }
+        {
+            let _r = GrokRefreshGuard::set(GrokRefreshStub::AuthFailure);
+            assert!(refresh_login_for_router(&login, true).await.is_err());
+            assert!(flagged());
+        }
+    }
+
     /// THE load-bearing rule. grok rotates its refresh token under IdP reuse
     /// detection, so switching away must recapture the LIVE token first:
     /// restoring a stale one later is not a soft failure, it revokes the whole
@@ -4965,17 +5717,19 @@ mod tests {
         write_grok_auth(&tmp, "user-b", "b@example.com", "rt-b1");
         save_current_account(CliApp::Grok).unwrap();
 
-        // Take the payload the way switch_account does, then drop the entry so
-        // `persist_refreshed_grok_snapshot` cannot find it.
-        let payload = read_store()
-            .unwrap()
-            .into_iter()
-            .find(|e| str_field(e, "id") == Some("user-a"))
-            .and_then(|e| e.get("payload").cloned())
-            .unwrap();
-        delete_account("user-a".to_string()).unwrap();
+        // Drop the entry while the refresh is in flight (after the switch
+        // read the payload), so `persist_refreshed_grok_snapshot` cannot find
+        // it.
+        fn delete_a() {
+            delete_account("user-a".to_string()).unwrap();
+        }
+        drop(_r);
+        let _r = GrokRefreshGuard::set(GrokRefreshStub::ResponseThen {
+            response: json!({ "access_token": "at-fresh", "refresh_token": "rt-rotated", "expires_in": 21600 }),
+            after: delete_a,
+        });
 
-        switch_grok("user-a", &payload).await.unwrap();
+        switch_grok("user-a").await.unwrap();
 
         assert_eq!(
             grok_live_doc(&tmp)
@@ -5819,5 +6573,369 @@ mod tests {
         assert!(rows[0].active);
         // Display-only apps still contribute no rows.
         assert!(tray_accounts(CliApp::Gemini).is_empty());
+    }
+
+    // ── Router-driven refresh ─────────────────────────────────────────────
+
+    /// Installs a `refresh_doc_tokens` stub and zeroes the spend counter for
+    /// the test's lifetime. Held alongside `lock_home()`.
+    struct CodexRefreshGuard;
+    impl CodexRefreshGuard {
+        fn set(stub: CodexRefreshStub) -> Self {
+            *CODEX_REFRESH_STUB.lock().unwrap() = Some(stub);
+            CODEX_REFRESH_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+            CodexRefreshGuard
+        }
+    }
+    impl Drop for CodexRefreshGuard {
+        fn drop(&mut self) {
+            *CODEX_REFRESH_STUB.lock().unwrap() = None;
+        }
+    }
+
+    fn codex_spends() -> usize {
+        CODEX_REFRESH_CALLS.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// What the token endpoint answers: a fresh access token good for an hour
+    /// and a rotated refresh token.
+    fn codex_token_response() -> JsonValue {
+        json!({
+            "access_token": fake_jwt(json!({ "exp": now_unix() + 3600 })),
+            "refresh_token": "rt-new",
+        })
+    }
+
+    /// A live Codex ChatGPT login whose access token has EXPIRED, holding
+    /// refresh token `rt`, with a custom provider's fields beside it.
+    fn write_expiring_codex_login(home: &Path, account_id: &str, rt: &str) -> JsonValue {
+        let doc = json!({
+            "auth_mode": "apikey",
+            "OPENAI_API_KEY": "sk-third-party",
+            "tokens": {
+                "id_token": fake_jwt(json!({ "email": format!("{account_id}@example.com") })),
+                "access_token": fake_jwt(json!({ "exp": now_unix() - 10 })),
+                "refresh_token": rt,
+                "account_id": account_id,
+            },
+            "last_refresh": "2026-06-27T00:00:00Z",
+        });
+        let dir = home.join(".codex");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("auth.json"),
+            serde_json::to_string_pretty(&doc).unwrap(),
+        )
+        .unwrap();
+        doc
+    }
+
+    fn codex_live_file(home: &Path) -> JsonValue {
+        serde_json::from_slice(&std::fs::read(home.join(".codex/auth.json")).unwrap()).unwrap()
+    }
+
+    fn stored_entry(app: &str, id: &str) -> JsonValue {
+        read_store()
+            .unwrap()
+            .into_iter()
+            .find(|e| str_field(e, "app") == Some(app) && str_field(e, "id") == Some(id))
+            .expect("entry")
+    }
+
+    fn set_saved_at(app: &str, id: &str, at: &str) {
+        update_store(|store| {
+            find_entry(store, app, id).unwrap()["savedAt"] = json!(at);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn router_codex_live_refresh_patches_only_the_tokens_and_keeps_saved_at() {
+        let _g = lock_home();
+        let tmp = tempdir("router-codex-live");
+        let _h = override_home(&tmp);
+        let _r = CodexRefreshGuard::set(CodexRefreshStub::Response(codex_token_response()));
+
+        let before = write_expiring_codex_login(&tmp, "acct-a", "rt-1");
+        save_current_account(CliApp::Codex).unwrap();
+        set_saved_at("codex", "acct-a", "2020-01-01T00:00:00Z");
+
+        refresh_login_for_router(&RouterLogin::Live(CliApp::Codex), false)
+            .await
+            .unwrap();
+        assert_eq!(codex_spends(), 1);
+
+        let live = codex_live_file(&tmp);
+        assert_eq!(live["tokens"]["refresh_token"], json!("rt-new"));
+        assert_ne!(
+            live["tokens"]["access_token"],
+            before["tokens"]["access_token"]
+        );
+        assert_ne!(live["last_refresh"], before["last_refresh"]);
+        // Everything that is not a token field is exactly as it was.
+        assert_eq!(live["tokens"]["id_token"], before["tokens"]["id_token"]);
+        assert_eq!(live["tokens"]["account_id"], json!("acct-a"));
+        assert_eq!(live["auth_mode"], json!("apikey"));
+        assert_eq!(live["OPENAI_API_KEY"], json!("sk-third-party"));
+
+        let entry = stored_entry("codex", "acct-a");
+        assert_eq!(entry["payload"]["tokens"]["refresh_token"], json!("rt-new"));
+        assert_eq!(
+            entry["payload"]["tokens"]["access_token"],
+            live["tokens"]["access_token"]
+        );
+        assert!(
+            entry["payload"].get("OPENAI_API_KEY").is_none(),
+            "the provider's key must not leak into the snapshot"
+        );
+        assert_eq!(
+            entry["savedAt"],
+            json!("2020-01-01T00:00:00Z"),
+            "a background refresh is not a user save"
+        );
+        assert!(entry.get("syncedAt").is_some());
+    }
+
+    /// Rewrite the live auth.json's refresh token, as a running Codex would.
+    fn codex_rotates_it_itself() {
+        let path = codex_auth_path().unwrap();
+        let mut doc: JsonValue = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        doc["tokens"]["refresh_token"] = json!("rt-codex");
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn router_codex_refresh_yields_when_codex_rotated_meanwhile() {
+        let _g = lock_home();
+        let tmp = tempdir("router-codex-rotated");
+        let _h = override_home(&tmp);
+
+        // Rejected because Codex already spent the token we sent: its copy is
+        // live and fine, so this is NOT a dead login.
+        write_expiring_codex_login(&tmp, "acct-a", "rt-1");
+        save_current_account(CliApp::Codex).unwrap();
+        let _r = CodexRefreshGuard::set(CodexRefreshStub::AuthFailureThen(codex_rotates_it_itself));
+        refresh_login_for_router(&RouterLogin::Live(CliApp::Codex), false)
+            .await
+            .expect("Codex's own rotation is not a failure");
+        assert_eq!(
+            codex_live_file(&tmp)["tokens"]["refresh_token"],
+            json!("rt-codex")
+        );
+        assert!(
+            stored_entry("codex", "acct-a")
+                .get("needsRelogin")
+                .is_none(),
+            "a rejection of a token Codex rotated away must not flag the account"
+        );
+
+        // The success arm: our refresh worked but Codex rotated too — its
+        // file is left alone.
+        write_expiring_codex_login(&tmp, "acct-a", "rt-1");
+        drop(_r);
+        let _r = CodexRefreshGuard::set(CodexRefreshStub::ResponseThen {
+            response: codex_token_response(),
+            after: codex_rotates_it_itself,
+        });
+        refresh_login_for_router(&RouterLogin::Live(CliApp::Codex), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            codex_live_file(&tmp)["tokens"]["refresh_token"],
+            json!("rt-codex")
+        );
+        // …but OUR refresh spent rt-1: the tokens it got are the only working
+        // copy of this login, so the saved entry keeps them.
+        assert_eq!(
+            stored_entry("codex", "acct-a")["payload"]["tokens"]["refresh_token"],
+            json!("rt-new")
+        );
+    }
+
+    #[tokio::test]
+    async fn router_codex_refresh_keeps_the_tokens_when_the_reread_is_torn() {
+        let _g = lock_home();
+        let tmp = tempdir("router-codex-torn");
+        let _h = override_home(&tmp);
+        fn tear_the_file() {
+            std::fs::write(codex_auth_path().unwrap(), "{\"tokens\": {").unwrap();
+        }
+        let _r = CodexRefreshGuard::set(CodexRefreshStub::ResponseThen {
+            response: codex_token_response(),
+            after: tear_the_file,
+        });
+
+        write_expiring_codex_login(&tmp, "acct-a", "rt-1");
+        save_current_account(CliApp::Codex).unwrap();
+
+        refresh_login_for_router(&RouterLogin::Live(CliApp::Codex), false)
+            .await
+            .unwrap();
+
+        let live = codex_live_file(&tmp);
+        assert_eq!(
+            live["tokens"]["refresh_token"],
+            json!("rt-new"),
+            "the old token is spent: the new one must land, not be dropped"
+        );
+        assert_eq!(live["OPENAI_API_KEY"], json!("sk-third-party"));
+        assert_eq!(
+            stored_entry("codex", "acct-a")["payload"]["tokens"]["refresh_token"],
+            json!("rt-new")
+        );
+    }
+
+    #[tokio::test]
+    async fn router_refreshes_one_login_once_across_pool_keys() {
+        let _g = lock_home();
+        let tmp = tempdir("router-codex-serial");
+        let _h = override_home(&tmp);
+        let _r = CodexRefreshGuard::set(CodexRefreshStub::Response(codex_token_response()));
+
+        write_expiring_codex_login(&tmp, "acct-a", "rt-1");
+        save_current_account(CliApp::Codex).unwrap();
+
+        // `live:codex` and `account:codex:acct-a` are the same login.
+        let live = RouterLogin::Live(CliApp::Codex);
+        let saved = RouterLogin::Saved {
+            app: CliApp::Codex,
+            id: "acct-a".into(),
+        };
+        let (a, b) = tokio::join!(
+            refresh_login_for_router(&live, false),
+            refresh_login_for_router(&saved, false)
+        );
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(codex_spends(), 1, "the waiter must see the fresh token");
+
+        // A forced refresh right after (a 401 that raced the refresh) must
+        // not spend the new token again either.
+        refresh_login_for_router(&saved, true).await.unwrap();
+        assert_eq!(codex_spends(), 1);
+        assert_eq!(
+            codex_live_file(&tmp)["tokens"]["refresh_token"],
+            json!("rt-new")
+        );
+    }
+
+    const GROK_TEST_RESPONSE: fn() -> JsonValue = || json!({ "access_token": "at-fresh", "refresh_token": "rt-rotated", "expires_in": 21600 });
+
+    #[tokio::test]
+    async fn router_saved_grok_refresh_rereads_the_entry_under_grok_lock() {
+        let _g = lock_home();
+        let tmp = tempdir("router-grok-reread");
+        let _h = override_home(&tmp);
+        let _r = GrokRefreshGuard::set(GrokRefreshStub::Response(GROK_TEST_RESPONSE()));
+
+        write_grok_auth(&tmp, "user-a", "a@example.com", "rt-a1");
+        save_current_account(CliApp::Grok).unwrap();
+        write_grok_auth(&tmp, "user-b", "b@example.com", "rt-b1");
+        save_current_account(CliApp::Grok).unwrap();
+        set_saved_at("grok", "user-a", "2020-01-01T00:00:00Z");
+
+        // Someone else (a switch) holds grok's lock.
+        let held = GrokAuthLock::try_acquire(&grok_auth_path().unwrap())
+            .unwrap()
+            .expect("lock free");
+        let task = tokio::spawn(async {
+            refresh_login_for_router(
+                &RouterLogin::Saved {
+                    app: CliApp::Grok,
+                    id: "user-a".into(),
+                },
+                true,
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // …and rotates A's stored token while holding it.
+        update_store(|store| {
+            let auth = &mut find_entry(store, "grok", "user-a").unwrap()["payload"]["auth"];
+            auth["refresh_token"] = json!("rt-a2");
+            auth["first_name"] = json!("Rotated");
+            Ok(())
+        })
+        .unwrap();
+        drop(held);
+        task.await.unwrap().unwrap();
+
+        let entry = stored_entry("grok", "user-a");
+        assert_eq!(
+            entry["payload"]["auth"]["refresh_token"],
+            json!("rt-rotated")
+        );
+        assert_eq!(
+            entry["payload"]["auth"]["first_name"],
+            json!("Rotated"),
+            "the refresh must start from the entry as it is under the lock"
+        );
+        assert_eq!(entry["savedAt"], json!("2020-01-01T00:00:00Z"));
+        assert!(entry.get("syncedAt").is_some());
+        // B is live and untouched.
+        let scope_ptr = format!("/{}", GROK_SCOPE.replace('/', "~1"));
+        assert_eq!(
+            grok_live_doc(&tmp).pointer(&format!("{scope_ptr}/refresh_token")),
+            Some(&json!("rt-b1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn router_saved_grok_refresh_goes_live_when_the_login_became_live() {
+        let _g = lock_home();
+        let tmp = tempdir("router-grok-became-live");
+        let _h = override_home(&tmp);
+        let _r = GrokRefreshGuard::set(GrokRefreshStub::Response(GROK_TEST_RESPONSE()));
+
+        write_grok_auth(&tmp, "user-a", "a@example.com", "rt-a1");
+        save_current_account(CliApp::Grok).unwrap();
+        write_grok_auth(&tmp, "user-b", "b@example.com", "rt-b1");
+        save_current_account(CliApp::Grok).unwrap();
+
+        let held = GrokAuthLock::try_acquire(&grok_auth_path().unwrap())
+            .unwrap()
+            .expect("lock free");
+        let task = tokio::spawn(async {
+            refresh_login_for_router(
+                &RouterLogin::Saved {
+                    app: CliApp::Grok,
+                    id: "user-a".into(),
+                },
+                true,
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // A switch lands while the refresh waits: A is now the live login.
+        write_grok_auth(&tmp, "user-a", "a@example.com", "rt-a-live");
+        drop(held);
+        task.await.unwrap().unwrap();
+
+        let scope_ptr = format!("/{}", GROK_SCOPE.replace('/', "~1"));
+        assert_eq!(
+            grok_live_doc(&tmp).pointer(&format!("{scope_ptr}/refresh_token")),
+            Some(&json!("rt-rotated")),
+            "the CLI's copy is the one that must rotate once the login is live"
+        );
+        assert_eq!(stored_grok_refresh("user-a").as_deref(), Some("rt-rotated"));
+    }
+
+    #[test]
+    fn relogin_flag_is_scoped_to_the_app() {
+        let _g = lock_home();
+        let tmp = tempdir("relogin-scoped");
+        let _h = override_home(&tmp);
+        write_store(vec![
+            json!({ "id": "same", "app": "codex", "name": "c", "payload": {} }),
+            json!({ "id": "same", "app": "grok", "name": "g", "payload": {} }),
+        ])
+        .unwrap();
+
+        mark_app_account_relogin("grok", "same", true).unwrap();
+
+        assert!(stored_entry("codex", "same").get("needsRelogin").is_none());
+        assert_eq!(stored_entry("grok", "same")["needsRelogin"], json!(true));
+        assert!(mark_app_account_relogin("claude", "same", true).is_err());
     }
 }

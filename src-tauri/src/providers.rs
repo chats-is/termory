@@ -1327,6 +1327,11 @@ pub struct Provider {
     /// default (`chat_completions`). Inert storage for every other app.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_backend: Option<String>,
+    /// Set only on a binding synthesized from the LOCAL ROUTER's gateway
+    /// entry (`kind: "router"`), so the tray can label it without re-reading
+    /// providers.json per row on the main thread. Never stored or sent.
+    #[serde(skip)]
+    pub router_binding: bool,
 }
 
 /// One user-defined provider option ("Advanced settings" entry). `key`
@@ -1396,6 +1401,10 @@ pub struct GatewayBinding {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Gateway {
+    /// `"gateway"` or the local router's `"router"` — read only to tag the
+    /// router's synthesized bindings (`Provider::router_binding`).
+    #[serde(default)]
+    pub kind: Option<String>,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -1418,14 +1427,14 @@ pub struct Gateway {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum GatewayProtocol {
+pub(crate) enum GatewayProtocol {
     OpenaiCompatible,
     Openai,
     Anthropic,
     Gemini,
 }
 
-fn protocol_for_npm(npm: &str) -> GatewayProtocol {
+pub(crate) fn protocol_for_npm(npm: &str) -> GatewayProtocol {
     if npm.contains("anthropic") || npm.contains("bedrock") {
         GatewayProtocol::Anthropic
     } else if npm.contains("google") {
@@ -1504,6 +1513,7 @@ fn provider_from_binding(g: &Gateway, b: &GatewayBinding) -> Provider {
         app: b.app,
         kind: ProviderKind::Custom,
         name: g.name.clone(),
+        router_binding: g.kind.as_deref() == Some(crate::config::ROUTER_KIND),
         base_url: gateway_base_for_protocol(&g.base_url, protocol, anthropic_path),
         api_key: g.api_key.clone(),
         model: b.model.clone(),
@@ -1762,6 +1772,29 @@ pub fn activate(provider: &Provider, providers_for_app: &[Provider]) -> Result<(
     if provider.kind == ProviderKind::Official {
         return Err("activate() does not accept Official kind — call deactivate() instead.".into());
     }
+    // A binding of the local router routes every request through the router's
+    // listener, so putting it in use while the listener is down leaves the CLI
+    // pointed at a closed port. Guarded HERE, the one dispatch the page, the
+    // Gateways tab and the tray all go through (CLAUDE.md: a guard on one
+    // surface leaves the other as a way around it).
+    // The router entry's port and key are BACKEND-owned; the caller's copy
+    // (the page's in-memory gateways list) can predate a port change or a
+    // new key. Re-derive the binding from providers.json so a stale copy
+    // can never write an old port or key into the CLI.
+    let resynth;
+    let provider = if crate::router::is_router_binding_id(&provider.id) {
+        if !crate::router::is_running() {
+            return Err(
+                "The local router is not running — start it on the Router page first.".into(),
+            );
+        }
+        resynth = gateway_providers()
+            .into_iter()
+            .find(|p| p.id == provider.id);
+        resynth.as_ref().unwrap_or(provider)
+    } else {
+        provider
+    };
     // A provider's Base URL is its whole point, and BOTH editors already refuse
     // to save without one (`ProviderEditor.canSave` / `GatewayEditor.canSave`),
     // so an empty one means hand-edited providers.json or a bug — never a user
@@ -3667,6 +3700,42 @@ fn with_anthropic(req: reqwest::RequestBuilder, api_key: &str) -> reqwest::Reque
 /// `GET /v1beta/models` returning data (a non-Gemini gateway 404s that
 /// path), and that same response also feeds the catalog. `models` is the
 /// union of the two list endpoints, for autocomplete. All concurrent.
+/// A gateway's LIVE model catalog — the same two listings detection reads
+/// (`/v1/models` with a bearer, Gemini's `/v1beta/models?key=`), unioned.
+/// `None` when neither answered, so a caller keeps what it had rather than
+/// replacing it with nothing. Used by the local router, which must offer
+/// what the gateway serves NOW, not what it served when it was detected.
+pub async fn list_gateway_models(base_url: &str, api_key: &str) -> Option<Vec<String>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let root = base_url
+        .trim_end_matches('/')
+        .trim_end_matches("/v1beta")
+        .trim_end_matches("/v1");
+    let (oai, gemini) = tokio::join!(
+        fetch_models_list(
+            with_bearer(client.get(format!("{root}/v1/models")), api_key),
+            false
+        ),
+        fetch_models_list(
+            client
+                .get(format!("{root}/v1beta/models"))
+                .query(&[("key", api_key)]),
+            true
+        ),
+    );
+    if !oai.0 && !gemini.0 {
+        return None;
+    }
+    let mut models = oai.1;
+    models.extend(gemini.1);
+    models.sort();
+    models.dedup();
+    Some(models)
+}
+
 pub async fn detect_gateway_apis(base_url: &str, api_key: &str) -> GatewayCapabilities {
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -4385,6 +4454,7 @@ mod tests {
     #[test]
     fn provider_from_binding_synthesizes_provider() {
         let g = Gateway {
+            kind: None,
             name: "Router".into(),
             base_url: "https://gw.x".into(),
             api_key: "sk-1".into(),
@@ -4406,6 +4476,14 @@ mod tests {
         let oc = provider_from_binding(&g, &binding(CliApp::Opencode, None));
         assert_eq!(oc.base_url, "https://gw.x/v1");
         assert_eq!(oc.npm.as_deref(), Some("@ai-sdk/openai-compatible"));
+        assert!(!oc.router_binding);
+
+        // Only the local router's entry tags its bindings.
+        let rg = Gateway {
+            kind: Some("router".into()),
+            ..g.clone()
+        };
+        assert!(provider_from_binding(&rg, &binding(CliApp::Codex, None)).router_binding);
     }
 
     #[test]
@@ -4414,6 +4492,7 @@ mod tests {
         // the page does — the detected prefix lives on the gateway's saved
         // capabilities, not on the binding.
         let g = Gateway {
+            kind: None,
             name: "DeepSeek".into(),
             base_url: "https://api.deepseek.com".into(),
             api_key: "sk-1".into(),
@@ -5118,6 +5197,7 @@ mod tests {
 
     fn make_provider(app: CliApp, name: &str, base: &str, key: &str) -> Provider {
         Provider {
+            router_binding: false,
             id: format!("test-{name}"),
             app,
             kind: ProviderKind::Custom,

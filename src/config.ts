@@ -88,6 +88,15 @@ export function invalidateConfigCache(): void {
   configPromise = null;
 }
 
+/// Drop the cached gateways list (providers.json `kind: "gateway"` /
+/// `"router"` entries) so the next `getConfig("gateways")` re-reads it. The
+/// backend writes that list itself — the router syncs its own entry on every
+/// page-state read and config write — and `invalidateConfigCache` only covers
+/// config.json.
+export function invalidateGatewaysCache(): void {
+  gatewaysPromise = null;
+}
+
 /// Strip "", null, undefined leaf values from a Provider record so
 /// providers.json only persists the fields the user actually filled.
 /// Non-string falsy values (0, false) are kept — they only matter if a
@@ -125,13 +134,20 @@ function loadGateways(): Promise<unknown[]> {
 }
 
 async function flushGateways(next: unknown[]): Promise<void> {
-  const cleaned = next.map(stripEmpty);
-  gatewaysPromise = Promise.resolve(cleaned);
   try {
-    await invoke("write_app_gateways", { value: cleaned });
+    await writeGateways(next);
   } catch (err) {
     warn("config: write_app_gateways failed", err);
   }
+}
+
+/// Write the gateways list and REJECT when the write fails — for a caller
+/// that must not go on as if it landed (re-activating a router binding
+/// reads it back from providers.json).
+export async function writeGateways(next: unknown[]): Promise<void> {
+  const cleaned = next.map(stripEmpty);
+  gatewaysPromise = Promise.resolve(cleaned);
+  await invoke("write_app_gateways", { value: cleaned });
 }
 
 function loadFavorites(): Promise<unknown[]> {

@@ -150,6 +150,11 @@ const SettingsPage = React.lazy(() =>
     default: m.SettingsPage
   }))
 );
+const RouterPage = React.lazy(() =>
+  import("@/components/router/RouterPage").then((m) => ({
+    default: m.RouterPage
+  }))
+);
 const UpdateDialog = React.lazy(() =>
   import("@/components/UpdateDialog").then((m) => ({
     default: m.UpdateDialog
@@ -206,7 +211,9 @@ export function App() {
         statusWaiting: t("tray.statusWaiting"),
         // Placeholder for a provider row whose name is empty, matching the
         // Providers page's `p.name || t("providers.unnamed")`.
-        unnamed: t("providers.unnamed")
+        unnamed: t("providers.unnamed"),
+        // The local router's binding rows — localized like the page's title.
+        router: t("router.title")
       }
     }).catch(() => {});
   }, [t, localeReady]);
@@ -392,8 +399,9 @@ export function App() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
-  // ⌘1..6 (or Ctrl 1..6) switch rail routes by visual order:
-  // 1=Providers, 2=Records, 3=Favorites, 4=Search, 5=Stats, 6=Settings.
+  // ⌘1..7 (or Ctrl 1..7) switch rail routes by visual order:
+  // 1=Providers, 2=Router, 3=Records, 4=Favorites, 5=Search, 6=Stats,
+  // 7=Settings.
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey)) return;
@@ -1093,6 +1101,16 @@ export function App() {
                 sourceOrder={orderedCliApps}
                 traySwitch={traySwitch}
                 onTraySwitchDone={() => setTraySwitch(null)}
+              />
+            )}
+            {route === "router" && (
+              <RouterPage
+                gateways={gateways}
+                setGateways={setGateways}
+                activeProviderIds={activeProviderIds}
+                setActiveProviderIds={setActiveProviderIds}
+                sourceToggles={sourceToggles}
+                sourceOrder={orderedCliApps}
               />
             )}
             {route === "settings" && (

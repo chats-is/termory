@@ -37,14 +37,33 @@ tauri-plugin-updater = "2"
 toml = "1.1.2"
 toml_edit = "0.22"
 walkdir = "2"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process"] }
+# `stream`: the local router (src/router.rs) relays upstream SSE bodies chunk
+# by chunk instead of buffering a whole completion.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "net", "sync"] }
+# Local router (src/router.rs): a loopback HTTP/1.1 server built
+# directly on hyper — every crate here is already a transitive dependency
+# of reqwest, so this adds no new build unit.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+http = "1"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# Local router: the listen-address picker lists this machine's interface
+# IPs (std has no cross-platform way to enumerate them).
+if-addrs = "0.15"
+# Local router: count_tokens for Codex / OpenAI-compatible upstreams counts
+# locally, like CLIProxyAPI (tiktoken-go there).
+tiktoken-rs = "0.12.1"
 base64 = "0.22"
 # Claude Code derives its Keychain service name from a sha256 of a
 # non-default CLAUDE_CONFIG_DIR (macOsKeychainHelpers.ts:29); we must
 # reproduce it byte-for-byte to find the same entry. Already in the
 # lockfile as a transitive dep, so this adds no new build unit.
 sha2 = "0.10"
+getrandom = "0.3"
+regex = "1"
 log = "0.4"
 os_info = "3"
 tauri-plugin-autostart = "2"

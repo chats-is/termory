@@ -20,19 +20,11 @@ import {
 import { BalanceInline } from "./BalanceInline";
 import { BrandIcon } from "@/components/BrandIcon";
 import { EmptyState } from "@/components/EmptyState";
-import {
-  ACTIVE_STATE_REFRESH_EVENT,
-  CLI_APP_LABEL,
-  CLI_APP_SOURCE_BADGE
-} from "@/constants";
-import {
-  blankGateway,
-  isMultiSlot,
-  maskKey,
-  providerFromBinding
-} from "@/lib/provider-utils";
+import { CLI_APP_LABEL, CLI_APP_SOURCE_BADGE } from "@/constants";
+import { blankGateway, isMultiSlot, providerFromBinding } from "@/lib/provider-utils";
+import { useGatewayBindings } from "@/hooks/useGatewayBindings";
 import { useBalances } from "@/hooks/useBalances";
-import type { ActiveState, CliApp, Gateway, GatewayBinding } from "@/types";
+import type { CliApp, Gateway } from "@/types";
 import { useT } from "@/i18n";
 
 const GatewayEditor = React.lazy(() =>
@@ -49,6 +41,7 @@ const GatewayEditor = React.lazy(() =>
  */
 export function GatewaysPage({
   gateways,
+  allGateways,
   setGateways,
   addSignal,
   markActive,
@@ -57,7 +50,13 @@ export function GatewaysPage({
   visibleApps,
   codexFollowForBinding
 }: {
+  /** The gateways LISTED here (the AI Gateways — the router entry is not). */
   gateways: Gateway[];
+  /** EVERY gateway-shaped entry, router included — the binding hook's
+   * reverse-derivation and set-default strip set must see the router's
+   * bindings too, or making a gateway binding the Grok/OpenCode default
+   * leaves the router binding's options live. Defaults to `gateways`. */
+  allGateways?: Gateway[];
   setGateways: React.Dispatch<React.SetStateAction<Gateway[]>>;
   /** Bumped by the ProvidersPage header "+" to open a fresh editor. */
   addSignal: number;
@@ -81,23 +80,29 @@ export function GatewaysPage({
   codexFollowForBinding: (
     direction: "toCustom" | "toOfficial",
     label: string,
-    activate: () => Promise<boolean>
+    activate: () => Promise<boolean>,
+    opts?: { required?: boolean }
   ) => Promise<void>;
 }) {
   const t = useT();
   const [editing, setEditing] = React.useState<Gateway | null>(null);
   const [editingIsNew, setEditingIsNew] = React.useState(false);
-  const [activeStates, setActiveStates] = React.useState<
-    Record<CliApp, ActiveState | null>
-  >({
-    claude: null,
-    "claude-desktop": null,
-    codex: null,
-    gemini: null,
-    opencode: null,
-    grok: null
+  const {
+    activeStates,
+    busy,
+    refreshActive,
+    isBindingActive,
+    activateBinding,
+    deactivateBinding,
+    toggleBindingEnabled,
+    clearBindingDefault,
+    reconcileAfterEdit
+  } = useGatewayBindings({
+    gateways: allGateways ?? gateways,
+    markActive,
+    activeProviderIds,
+    codexFollowForBinding
   });
-  const [busy, setBusy] = React.useState<string | null>(null);
 
   // Wallet balance per GATEWAY, keyed by the gateway's own id. A gateway
   // is one {baseUrl, apiKey}, i.e. exactly one wallet, however many CLIs
@@ -107,13 +112,6 @@ export function GatewaysPage({
   // stand-in Provider is synthesized for it.
   const { balances, balanceLoading, balanceInCooldown, refreshBalance } =
     useBalances(gateways);
-
-  // All gateway bindings materialized as providers — passed to the
-  // reverse-derivation so a binding's synthesized id can be matched.
-  const synthProviders = React.useMemo(
-    () => gateways.flatMap((r) => r.bindings.map((b) => providerFromBinding(r, b))),
-    [gateways]
-  );
 
   // Settings → Tools: binding rows LISTED per gateway card (a disabled
   // tool's binding is hidden; the binding itself survives in
@@ -125,39 +123,16 @@ export function GatewaysPage({
       new Map(
         gateways.map((g) => [
           g.id,
-          g.bindings.filter((b) => !visibleApps || visibleApps.includes(b.app))
+          g.bindings
+            .filter((b) => !visibleApps || visibleApps.includes(b.app))
+            // Rows in the Settings → Tools order, not providers.json order.
+            .sort((x, y) =>
+              visibleApps ? visibleApps.indexOf(x.app) - visibleApps.indexOf(y.app) : 0
+            )
         ])
       ),
     [gateways, visibleApps]
   );
-
-  const refreshActive = React.useCallback(async () => {
-    try {
-      const states = await invoke<ActiveState[]>("provider_active_states", {
-        providers: synthProviders
-      });
-      const next: Record<CliApp, ActiveState | null> = {
-        claude: null,
-        "claude-desktop": null,
-        codex: null,
-        gemini: null,
-        opencode: null,
-    grok: null
-      };
-      for (const s of states) next[s.app] = s;
-      setActiveStates(next);
-      // Nudge the parent ProvidersPage (mounted alongside us) to re-derive
-      // too, so the per-CLI source list reflects a binding we just
-      // activated/deactivated here.
-      window.dispatchEvent(new Event(ACTIVE_STATE_REFRESH_EVENT));
-    } catch (err) {
-      toast.error(t("toast.readStateFailed", { error: String(err) }));
-    }
-  }, [synthProviders]);
-
-  React.useEffect(() => {
-    void refreshActive();
-  }, [refreshActive]);
 
   const startNew = () => {
     setEditing(blankGateway());
@@ -193,50 +168,8 @@ export function GatewaysPage({
     });
     closeEditor();
 
-    // Reconcile live config for bindings that were ACTIVE before this
-    // edit (a brand-new gateway has none, so nothing to do):
-    //   - a binding dropped from the gateway → deactivate it
-    //   - a binding kept → re-activate so base/key/model edits reach the
-    //     CLI's live config (mirrors ProvidersPage.saveProvider). The
-    //     binding's own id is stable across the edit, so "was active" is
-    //     read off the pre-edit active state, and the kept binding's
-    //     marker stays valid without re-marking.
-    if (!prev) return;
-    try {
-      for (const pb of prev.bindings) {
-        if (!isBindingActive(prev, pb)) continue;
-        const stillBound = next.bindings.find((nb) => nb.app === pb.app);
-        const oldSynth = providerFromBinding(prev, pb);
-        if (!stillBound) {
-          if (isMultiSlot(pb.app)) {
-            // Multi-slot: remove just THIS binding's slot/entries (leaves
-            // sibling slots). deactivate would only clear the default.
-            await invoke("delete_provider", { provider: oldSynth });
-          } else {
-            await invoke("deactivate_provider", {
-              app: pb.app,
-              providersForApp: [oldSynth]
-            });
-          }
-          markActive(pb.app, null); // binding gone → drop its stale marker
-        } else {
-          const newSynth = providerFromBinding(next, stillBound);
-          await invoke("activate_provider", {
-            provider: newSynth,
-            providersForApp: [newSynth]
-          });
-          if (isMultiSlot(pb.app)) {
-            await invoke("set_default_provider", {
-              provider: newSynth,
-              providersForApp: synthProviders.filter((s) => s.app === pb.app)
-            });
-          }
-        }
-      }
-      await refreshActive();
-    } catch (err) {
-      toast.error(t("toast.savedButFailed", { error: String(err) }));
-    }
+    if (!prev) return; // a brand-new gateway has no active bindings
+    await reconcileAfterEdit(prev, next);
   };
 
   const deleteGateway = async (gateway: Gateway) => {
@@ -274,150 +207,6 @@ export function GatewaysPage({
     // it isn't silently lost while a CLI still points at its endpoint.
     if (failed) return;
     setGateways((cur) => cur.filter((r) => r.id !== gateway.id));
-  };
-
-  const isBindingActive = (gateway: Gateway, b: GatewayBinding): boolean => {
-    const state = activeStates[b.app];
-    if (isMultiSlot(b.app)) {
-      // Multi-slot (OpenCode/Grok) slots are keyed by id — no collision.
-      return (state?.configuredProviderIds ?? []).includes(b.id);
-    }
-    // Single-slot: "in use" only when Termory's marker points at THIS
-    // binding AND its creds still match the live config — so a coincidental
-    // standalone provider with the same endpoint (whose activation wrote
-    // the identical live config) doesn't make a just-added binding look
-    // active.
-    if (activeProviderIds[b.app] !== b.id) return false;
-    const synth = providerFromBinding(gateway, b);
-    const live = state?.liveSnapshot;
-    return (
-      !!live &&
-      (live.baseUrl ?? "") === (synth.baseUrl ?? "") &&
-      (live.apiKeyMasked ?? "") === maskKey(synth.apiKey ?? "")
-    );
-  };
-
-  const activateBinding = async (gateway: Gateway, b: GatewayBinding) => {
-    const synth = providerFromBinding(gateway, b);
-    const doActivate = async (): Promise<boolean> => {
-      setBusy(synth.id);
-      try {
-        await invoke("activate_provider", {
-          provider: synth,
-          providersForApp: [synth]
-        });
-        if (isMultiSlot(b.app)) {
-          await invoke("set_default_provider", {
-            provider: synth,
-            providersForApp: synthProviders.filter((s) => s.app === b.app)
-          });
-        }
-        markActive(b.app, synth.id);
-        toast.success(t("toast.bindingActivated", { name: gateway.name, app: CLI_APP_LABEL[b.app] }));
-        await refreshActive();
-        return true;
-      } catch (err) {
-        toast.error(String(err));
-        return false;
-      } finally {
-        setBusy(null);
-      }
-    };
-    // Codex official→custom: switching the API endpoint hides a project's prior
-    // sessions from `codex resume`, so prompt to follow them — same as the
-    // Providers tab. Only on official→custom (custom→custom keeps the bucket).
-    if (b.app === "codex" && activeStates.codex?.kind === "official") {
-      await codexFollowForBinding("toCustom", synth.name || gateway.name, doActivate);
-      return;
-    }
-    await doActivate();
-  };
-
-  const deactivateBinding = async (gateway: Gateway, b: GatewayBinding) => {
-    const synth = providerFromBinding(gateway, b);
-    const doDeactivate = async (): Promise<boolean> => {
-      setBusy(synth.id);
-      try {
-        if (isMultiSlot(b.app)) {
-          await invoke("delete_provider", { provider: synth });
-        } else {
-          await invoke("deactivate_provider", {
-            app: b.app,
-            providersForApp: [synth]
-          });
-        }
-        markActive(b.app, null);
-        toast.success(t("toast.bindingDeactivated", { name: gateway.name, app: CLI_APP_LABEL[b.app] }));
-        await refreshActive();
-        return true;
-      } catch (err) {
-        toast.error(String(err));
-        return false;
-      } finally {
-        setBusy(null);
-      }
-    };
-    // Codex custom→official: turning the binding off folds Codex back to the
-    // openai bucket, which can hide sessions moved to a custom provider — prompt
-    // to bring them back, same as the Providers tab's "Set Official". (Codex is
-    // on a custom config now, so kind is custom/unmanaged, not official.)
-    const codexKind = activeStates.codex?.kind;
-    if (b.app === "codex" && (codexKind === "custom" || codexKind === "unmanaged")) {
-      await codexFollowForBinding("toOfficial", t("providers.official"), doDeactivate);
-      return;
-    }
-    await doDeactivate();
-  };
-
-  // Multi-slot only (OpenCode/Grok): add / remove the provider slot WITHOUT
-  // touching the startup default (the two states are independent — see
-  // `read_active_opencode` / `read_active_grok`). Mirrors
-  // ProvidersPage.toggleGatewayEnabled.
-  const toggleBindingEnabled = async (gateway: Gateway, b: GatewayBinding) => {
-    if (!isMultiSlot(b.app)) return;
-    const synth = providerFromBinding(gateway, b);
-    const enabled = (
-      activeStates[b.app]?.configuredProviderIds ?? []
-    ).includes(b.id);
-    setBusy(synth.id);
-    try {
-      if (enabled) {
-        await invoke("delete_provider", { provider: synth });
-        markActive(b.app, null);
-      } else {
-        await invoke("activate_provider", {
-          provider: synth,
-          providersForApp: [synth]
-        });
-      }
-      await refreshActive();
-    } catch (err) {
-      toast.error(String(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  // Multi-slot only (OpenCode/Grok): turn off the "in use" (default) state
-  // WITHOUT removing the slot — clears the startup-default pointer only
-  // (deactivate leaves enabled slots), so the binding stays configured but is
-  // no longer the default. Mirrors the single-slot "In use — turn off".
-  const clearBindingDefault = async (gateway: Gateway, b: GatewayBinding) => {
-    if (!isMultiSlot(b.app)) return;
-    const synth = providerFromBinding(gateway, b);
-    setBusy(synth.id);
-    try {
-      await invoke("deactivate_provider", {
-        app: b.app,
-        providersForApp: [synth]
-      });
-      markActive(b.app, null);
-      await refreshActive();
-    } catch (err) {
-      toast.error(String(err));
-    } finally {
-      setBusy(null);
-    }
   };
 
   return (

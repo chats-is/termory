@@ -322,13 +322,15 @@ export const ROUTES: Route[] = [
   "stats",
   "favorites",
   "providers",
+  "router",
   "settings"
 ];
 
-// Order matches the rail's visual order (Providers / Records /
-// Favorites / Search / Stats / Settings) and ⌘1..6 bindings.
+// Order matches the rail's visual order (Providers / Router / Records /
+// Favorites / Search / Stats / Settings) and ⌘1..7 bindings.
 export const RAIL_ROUTE_ORDER: Route[] = [
   "providers",
+  "router",
   "records",
   "favorites",
   "search",

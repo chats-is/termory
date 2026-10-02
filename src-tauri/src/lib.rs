@@ -1,14 +1,21 @@
 mod accounts;
+mod autofix;
 mod balance;
 mod claude_auth;
 mod claude_desktop;
+mod codex_exec;
 mod codex_follow;
 mod config;
+mod gemini_exec;
 mod process;
 mod providers;
 mod quota;
+mod router;
 mod sessions;
 mod terminal;
+mod thinking;
+mod token_count;
+mod translate;
 mod tray;
 mod updates;
 mod upgrade;
@@ -1274,6 +1281,16 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
+            router::router_page_state,
+            router::router_write_config,
+            router::router_start,
+            router::router_stop,
+            router::router_status,
+            router::router_reset_upstream,
+            router::router_generate_key,
+            router::router_reveal_key,
+            router::router_models,
+            router::router_binding_models,
             scan_all_sessions,
             load_session,
             search_all_sessions,
@@ -1383,6 +1400,9 @@ pub fn run() {
             app.manage(accounts::CodexLoginCancel(std::sync::Mutex::new(None)));
             app.manage(accounts::ClaudeLoginCancel(std::sync::Mutex::new(None)));
             app.manage(accounts::GrokLoginCancel(std::sync::Mutex::new(None)));
+            // Local router: comes up with the app only when the user opted in
+            // (router.json `autostart`).
+            router::start_if_configured(app.handle().clone());
             let handle = app.handle().clone();
             match watcher::start(handle) {
                 Ok(watcher_handle) => {
@@ -1438,6 +1458,9 @@ pub fn run() {
         // us. Only MANAGED children are affected — a terminal the user
         // opened is deliberately outside this (see process.rs).
         if let tauri::RunEvent::Exit = event {
+            // Hand every CLI using the local router back before the
+            // listener goes away with us (Start restores them).
+            router::stop_for_exit();
             process::shutdown_all();
         }
         // macOS: re-launching the app from Finder / the Dock when it's

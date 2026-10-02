@@ -63,7 +63,10 @@ export function ProviderCard({
   settingDefault,
   testing,
   activatable = true,
+  unavailableReason,
   gatewayBadge,
+  gatewayBadgeLabel,
+  icon,
   balance,
   balanceLoading,
   balanceCooldown,
@@ -103,6 +106,13 @@ export function ProviderCard({
   // config has no effect without a CLI to consume it. Edit / Delete /
   // Test stay enabled (data management, not activation).
   activatable?: boolean;
+  /** Why activation is unavailable (tooltip); defaults to "install first".
+   * An empty string disables activation WITHOUT a tooltip (reason unknown). */
+  unavailableReason?: string;
+  /** Badge text for a binding card; defaults to "AI Gateway". */
+  gatewayBadgeLabel?: string;
+  /** Replaces the favicon / letter avatar (the local router's own mark). */
+  icon?: React.ReactNode;
   // OpenCode-only: toggle the slot in opencode.json. Undefined for
   // other CLIs (their Enabled state isn't separately controllable).
   onToggleEnabled?: () => void;
@@ -117,6 +127,8 @@ export function ProviderCard({
   // OpenCode + Grok are multi-slot (shared helper): the primary action is
   // "Set default" (the slot is enabled separately), not single-slot "Activate".
   const multiSlot = isMultiSlot(provider.app);
+  // Tooltip text for a blocked activation; "" / activatable → none.
+  const blockedReason = activatable ? "" : (unavailableReason ?? t("providers.installFirst"));
   return (
     <Card
       className={cn(
@@ -135,7 +147,13 @@ export function ProviderCard({
     >
       <CardContent className="px-0 flex flex-col gap-2">
         <div className="flex items-start justify-between gap-3 flex-wrap min-h-7">
-          <ProviderFavicon favicon={provider.favicon} name={provider.name} />
+          {icon ? (
+            <span className="shrink-0 inline-flex items-center justify-center size-10 rounded-md bg-background shadow-sm text-primary">
+              {icon}
+            </span>
+          ) : (
+            <ProviderFavicon favicon={provider.favicon} name={provider.name} />
+          )}
           <div className="flex-1 min-w-0 flex flex-col gap-2">
             {/* `min-h-8` = the action cluster's own height. Both columns
                 start at the same top edge (`items-start`), so matching the
@@ -161,7 +179,7 @@ export function ProviderCard({
                   variant="outline"
                   className="text-[9px] tracking-wide px-1.5 py-0"
                 >
-                  {t("providers.aiGateway")}
+                  {gatewayBadgeLabel ?? t("providers.aiGateway")}
                 </Badge>
               )}
               {/* On the title row rather than in the `<dl>` below: a
@@ -237,7 +255,10 @@ export function ProviderCard({
                       size="icon-sm"
                       type="button"
                       onClick={onToggleEnabled}
-                      disabled={toggling || !activatable}
+                      // Only the ENABLE direction is activation; turning an
+                      // enabled slot off must stay possible (e.g. a router
+                      // slot while the router is stopped).
+                      disabled={toggling || (!activatable && !isConfigured)}
                       aria-label={isConfigured ? t("providers.disable") : t("providers.enable")}
                     >
                       {toggling ? (
@@ -251,8 +272,8 @@ export function ProviderCard({
                   </span>
                 </TooltipTrigger>
                 <TooltipContent side="top">
-                  {!activatable
-                    ? t("providers.installFirst")
+                  {!activatable && !isConfigured && blockedReason
+                    ? blockedReason
                     : isConfigured
                       ? t("providers.disable")
                       : t("providers.enable")}
@@ -309,21 +330,32 @@ export function ProviderCard({
             )}
             </div>
             {!isInUse && (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={onSetDefault}
-                disabled={settingDefault || !activatable}
-              >
-                {multiSlot
-                  ? settingDefault
-                    ? t("providers.setting")
-                    : t("providers.setDefault")
-                  : settingDefault
-                    ? t("providers.activating")
-                    : t("providers.activate")}
-              </Button>
+              // Wrapper span: a disabled button fires no pointer events, so
+              // the tooltip explaining WHY it is disabled must trigger on it.
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="inline-flex">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={onSetDefault}
+                      disabled={settingDefault || !activatable}
+                    >
+                      {multiSlot
+                        ? settingDefault
+                          ? t("providers.setting")
+                          : t("providers.setDefault")
+                        : settingDefault
+                          ? t("providers.activating")
+                          : t("providers.activate")}
+                    </Button>
+                  </span>
+                </TooltipTrigger>
+                {blockedReason && (
+                  <TooltipContent side="top">{blockedReason}</TooltipContent>
+                )}
+              </Tooltip>
             )}
           </div>
         </div>

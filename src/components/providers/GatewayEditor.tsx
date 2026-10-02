@@ -1,24 +1,12 @@
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
-import {
-  ChevronRight,
-  Eye,
-  EyeOff,
-  Loader2,
-  RefreshCw,
-  Trash2
-} from "lucide-react";
+import { Eye, EyeOff, Loader2, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger
 } from "@/components/ui/tooltip";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger
-} from "@/components/ui/collapsible";
 import {
   Dialog,
   DialogContent,
@@ -29,69 +17,27 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { BrandIcon } from "@/components/BrandIcon";
-import { ModelCombobox } from "@/components/ModelCombobox";
-import {
-  CLI_APPS,
-  CLI_APP_LABEL,
-  CLI_APP_SOURCE_BADGE,
-  OPENCODE_NPM_OPTIONS
-} from "@/constants";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from "@/components/ui/select";
-import {
-  appProtocols,
-  isClaudeSafeModelId,
-  newGatewayId,
-  isManagedOptionKey,
-  npmForProtocol,
-  overrideHelpFor
-} from "@/lib/provider-utils";
+import { CLI_APPS } from "@/constants";
+import { appProtocols } from "@/lib/provider-utils";
 import { cn, INPUT_NO_AUTO } from "@/lib/utils";
+import {
+  BindingRows,
+  bindingsFromDrafts,
+  draftChecks,
+  draftsFromGateway,
+  type BindDraft,
+  type Drafts
+} from "./BindingRows";
 import type {
   CliApp,
   Gateway,
-  GatewayBinding,
   GatewayCapabilities
 } from "@/types";
 import { useT } from "@/i18n";
 
-// Claude per-size routing keys, seeded as an options template for a
-// Claude binding (mirrors ProviderEditor's CLAUDE_OVERRIDE_TEMPLATE).
-const CLAUDE_ROUTING_KEYS = [
-  "env.ANTHROPIC_DEFAULT_SONNET_MODEL",
-  "env.ANTHROPIC_DEFAULT_OPUS_MODEL",
-  "env.ANTHROPIC_DEFAULT_HAIKU_MODEL"
-] as const;
-
 // Throttle window for the manual "Detect APIs" refresh — the button is
 // disabled this long after a detection completes so it can't be spammed.
 const DETECT_COOLDOWN_MS = 5000;
-
-// Sentinel value for the multi-model "Default model" Select's "no default"
-// option (Radix Select forbids an empty-string item value). Maps to "".
-const NO_DEFAULT_MODEL = "__no_default__";
-
-type KV = { key: string; value: string };
-type ModelRow = { id: string; name: string };
-
-// One editable binding row's draft state, keyed by CLI. No `protocol` —
-// it's derived from app/npm wherever needed (`protocolForBinding`). `id`
-// is the binding's own stable id.
-type BindDraft = {
-  id: string;
-  checked: boolean;
-  model: string;
-  npm: string; // OpenCode AI SDK package ("" → default for supported mode)
-  models: ModelRow[]; // OpenCode extra models
-  options: KV[]; // advanced settings (Claude: per-size routing keys)
-  apiBackend: string; // grok wire API ("" → omitted; grok's own default applies)
-};
 
 /**
  * Add / edit a gateway: one base URL + key, auto-detect which API
@@ -151,39 +97,7 @@ export function GatewayEditor({
   const [cooldownUntil, setCooldownUntil] = React.useState(0);
 
   // Per-CLI binding drafts, seeded from the gateway's existing bindings.
-  const [binds, setBinds] = React.useState<Record<CliApp, BindDraft>>(() => {
-    const out = {} as Record<CliApp, BindDraft>;
-    for (const app of CLI_APPS) {
-      const existing = gateway.bindings.find((b) => b.app === app);
-      out[app] = {
-        id: existing?.id ?? newGatewayId(),
-        checked: !!existing,
-        model: existing?.model ?? "",
-        npm: existing?.npm ?? "",
-        models: existing?.models ?? [],
-        options: existing?.options ?? [],
-        apiBackend: existing?.apiBackend ?? ""
-      };
-    }
-    return out;
-  });
-
-  // For a Claude binding, surface the 3 per-size routing keys as a fixed
-  // template (key read-only, fill the value) followed by any extra
-  // options the user added — matching the per-CLI Claude editor.
-  const optionRows = (app: CliApp): KV[] => {
-    const opts = binds[app].options;
-    if (app !== "claude") return opts.length ? opts : [{ key: "", value: "" }];
-    const byKey = new Map(opts.map((o) => [o.key, o.value]));
-    const template = CLAUDE_ROUTING_KEYS.map((key) => ({
-      key,
-      value: byKey.get(key) ?? ""
-    }));
-    const extras = opts.filter(
-      (o) => !CLAUDE_ROUTING_KEYS.includes(o.key as (typeof CLAUDE_ROUTING_KEYS)[number])
-    );
-    return [...template, ...extras];
-  };
+  const [binds, setBinds] = React.useState<Drafts>(() => draftsFromGateway(gateway));
 
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -279,85 +193,10 @@ export function GatewayEditor({
   const setBind = (app: CliApp, patch: Partial<BindDraft>) =>
     setBinds((cur) => ({ ...cur, [app]: { ...cur[app], ...patch } }));
 
-  // OpenCode + Grok are MULTI-model (unified): a checked binding needs a
-  // models LIST (each row → one picker entry); the `model` field is only the
-  // OPTIONAL default, chosen FROM the list (mirrors ProviderEditor).
-  const isMultiModel = (app: CliApp): boolean =>
-    app === "opencode" || app === "grok";
-  const boundMulti = (app: CliApp): boolean =>
-    binds[app].checked && protocols[app].length > 0;
-  const modelIdsFor = (app: CliApp): string[] =>
-    binds[app].models.map((m) => m.id.trim()).filter(Boolean);
-  const missingModelsFor = (app: CliApp): boolean =>
-    boundMulti(app) && modelIdsFor(app).length === 0;
-  const defaultInvalidFor = (app: CliApp): boolean => {
-    const d = binds[app].model.trim();
-    return boundMulti(app) && d.length > 0 && !modelIdsFor(app).includes(d);
-  };
-  const opencodeMissingModels = missingModelsFor("opencode");
-  const opencodeDefaultInvalid = defaultInvalidFor("opencode");
-  const grokMissingModels = missingModelsFor("grok");
-  const grokDefaultInvalid = defaultInvalidFor("grok");
+  const checks = draftChecks(binds, protocols);
 
-  // Claude Desktop rejects non-Claude model names, so a checked Claude
-  // Desktop binding can't carry an invalid (non-blank) model id.
-  const cdBindingInvalidModel =
-    binds["claude-desktop"].checked &&
-    protocols["claude-desktop"].length > 0 &&
-    binds["claude-desktop"].models.some((m) => !isClaudeSafeModelId(m.id));
-  // No duplicate model ids within ANY binding's models list (a repeat would
-  // silently override — grok's `[model."<id>-<model>"]`, OpenCode's `models`
-  // map, Claude Desktop's `inferenceModels`). Applies to every list-carrying
-  // app, consistent with the per-provider editor.
-  const bindingModelsDup = (app: CliApp): boolean => {
-    if (!binds[app].checked || protocols[app].length === 0) return false;
-    const ids = binds[app].models.map((m) => m.id.trim()).filter(Boolean);
-    return new Set(ids).size !== ids.length;
-  };
-  const anyBindingDupModels = CLI_APPS.some(bindingModelsDup);
-
-  // An Advanced-settings option key that a dedicated field already owns is
-  // silently skipped by the backend at write time, so block the save and
-  // tell the user (mirrors ProviderEditor's managed-key check). Uses the
-  // rendered rows so Claude's protected routing template — which is NOT
-  // managed — passes.
-  const bindingManagedKey = (app: CliApp): boolean => {
-    if (!binds[app].checked || protocols[app].length === 0) return false;
-    return optionRows(app).some((o) => {
-      const k = o.key.trim();
-      return !!k && isManagedOptionKey(app, k);
-    });
-  };
-  const anyBindingManagedKey = CLI_APPS.some(bindingManagedKey);
-
-  // Duplicate non-blank option keys silently overwrite each other on write
-  // (last wins), so block the save — mirrors ProviderEditor's `duplicateKeys`.
-  const bindingDupKeys = (app: CliApp): string[] => {
-    if (!binds[app].checked || protocols[app].length === 0) return [];
-    const seen = new Set<string>();
-    const dups = new Set<string>();
-    for (const o of optionRows(app)) {
-      const k = o.key.trim();
-      if (!k) continue;
-      if (seen.has(k)) dups.add(k);
-      else seen.add(k);
-    }
-    return [...dups];
-  };
-  const anyBindingDupKeys = CLI_APPS.some((app) => bindingDupKeys(app).length > 0);
-
-  const canSave =
-    name.trim().length > 0 &&
-    baseUrl.trim().length > 0 &&
-    // A gateway with no bindings is allowed (detect now, bind later).
-    !opencodeMissingModels &&
-    !opencodeDefaultInvalid &&
-    !grokMissingModels &&
-    !grokDefaultInvalid &&
-    !anyBindingDupModels &&
-    !anyBindingManagedKey &&
-    !anyBindingDupKeys &&
-    !cdBindingInvalidModel;
+  // A gateway with no bindings is allowed (detect now, bind later).
+  const canSave = name.trim().length > 0 && baseUrl.trim().length > 0 && checks.canSave;
 
   const handleSave = async () => {
     if (!canSave || saving) return;
@@ -369,43 +208,7 @@ export function GatewayEditor({
     const hiddenBindings = gateway.bindings.filter(
       (b) => !visibleApps.includes(b.app)
     );
-    const bindings: GatewayBinding[] = CLI_APPS.filter(
-      (app) =>
-        visibleApps.includes(app) &&
-        binds[app].checked &&
-        protocols[app].length > 0
-    ).map((app) => {
-      const d = binds[app];
-      // A binding is a provider minus the gateway's common fields, WITH
-      // its own id. Protocol is NOT stored — derived from app/npm.
-      const b: GatewayBinding = {
-        id: d.id,
-        app,
-        model: d.model.trim() || undefined
-      };
-      // Advanced options — drop blank-key or blank-value rows.
-      const options = d.options
-        .map((o) => ({ key: o.key.trim(), value: o.value.trim() }))
-        .filter((o) => o.key && o.value);
-      if (options.length) b.options = options;
-      // OpenCode-only: the AI SDK package (store the EFFECTIVE one so the
-      // derived protocol stays correct).
-      if (app === "opencode") {
-        b.npm =
-          d.npm.trim() ||
-          npmForProtocol(protocols[app][0] ?? "openai");
-      }
-      // Models list — OpenCode's extra models, Claude Desktop's
-      // inferenceModels, AND grok's required model list (drop blank-id rows).
-      if (app === "opencode" || app === "claude-desktop" || app === "grok") {
-        const models = d.models
-          .map((m) => ({ id: m.id.trim(), name: m.name.trim() }))
-          .filter((m) => m.id);
-        if (models.length) b.models = models;
-      }
-      if (app === "grok" && d.apiBackend.trim()) b.apiBackend = d.apiBackend.trim();
-      return b;
-    });
+    const bindings = bindingsFromDrafts(binds, protocols, visibleApps);
 
     // The gateway base is stored path-less (no API-version suffix) — each
     // CLI's real URL is derived per protocol. Strip a pasted /v1 or /v1beta.
@@ -596,492 +399,15 @@ export function GatewayEditor({
                   <Loader2 className="size-5 animate-spin text-muted-foreground" />
                 </div>
               )}
-              {visibleApps.map((app) => {
-                const allowed = protocols[app];
-                const bindable = allowed.length > 0;
-                const draft = binds[app];
-                // OpenCode: effective AI SDK package (falls back to the
-                // first detected mode's package). Protocol is derived, never
-                // stored.
-                const effectiveNpm =
-                  app === "opencode"
-                    ? draft.npm || npmForProtocol(allowed[0] ?? "openai")
-                    : "";
-                // One flat catalog for autocomplete — the gateway routes by
-                // model id, so candidates aren't split by protocol.
-                const models = caps?.models ?? [];
-                // OpenCode extra-models rows — always show one blank row to
-                // start, mirroring ProviderEditor's "Additional models".
-                const modelRows = draft.models.length
-                  ? draft.models
-                  : [{ id: "", name: "" }];
-                return (
-                  <Collapsible
-                    key={app}
-                    defaultOpen={bindable && draft.checked}
-                    className={cn(
-                      "rounded-md border p-2 flex flex-col gap-2",
-                      !bindable && "opacity-50"
-                    )}
-                  >
-                    <div className="flex items-center gap-2 text-sm">
-                      {/* Checkbox is standalone — toggles the binding only. */}
-                      <input
-                        type="checkbox"
-                        checked={bindable && draft.checked}
-                        disabled={!bindable}
-                        aria-label={t("providers.bindTo", { app: CLI_APP_LABEL[app] })}
-                        onChange={(e) =>
-                          setBind(app, { checked: e.target.checked })
-                        }
-                        className="cursor-pointer disabled:cursor-not-allowed"
-                      />
-                      {/* The whole label + chevron row toggles collapse. */}
-                      <CollapsibleTrigger
-                        disabled={!bindable}
-                        aria-label={t("providers.toggleSettings")}
-                        className="group flex flex-1 items-center gap-2 rounded-sm text-left disabled:opacity-50 disabled:pointer-events-none"
-                      >
-                        <BrandIcon source={CLI_APP_SOURCE_BADGE[app]} />
-                        <span className="font-medium">{CLI_APP_LABEL[app]}</span>
-                        {!bindable && (
-                          <span className="text-xs text-muted-foreground font-normal">
-                            {caps ? "no matching API mode" : "detect to enable"}
-                          </span>
-                        )}
-                        <ChevronRight className="ml-auto size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
-                      </CollapsibleTrigger>
-                    </div>
-
-                    <CollapsibleContent className="overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
-                      <div className="flex flex-col gap-2 pl-6 pt-2">
-                        {/* OpenCode: AI SDK package first — it selects the
-                            SDK/protocol before the model. */}
-                        {app === "opencode" && (
-                          <>
-                            <Label className="text-xs">{t("providers.aiSdk")}</Label>
-                            <Select
-                              value={effectiveNpm}
-                              onValueChange={(v) => setBind(app, { npm: v })}
-                            >
-                              <SelectTrigger className="w-full h-8">
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {OPENCODE_NPM_OPTIONS.map((o) => (
-                                  <SelectItem key={o.value} value={o.value}>
-                                    {o.label}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </>
-                        )}
-                        {/* Grok: api_backend — before the model. "" = default
-                            (field omitted; grok applies its own default,
-                            chat_completions). */}
-                        {app === "grok" && (
-                          <>
-                            <Label className="text-xs">
-                              {t("providers.apiBackend")}
-                            </Label>
-                            <Select
-                              value={draft.apiBackend || "default"}
-                              onValueChange={(v) =>
-                                setBind(app, {
-                                  apiBackend: v === "default" ? "" : v
-                                })
-                              }
-                            >
-                              <SelectTrigger className="w-full">
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="default">
-                                  {t("providers.apiBackendDefault")}
-                                </SelectItem>
-                                <SelectItem value="responses">
-                                  Responses
-                                </SelectItem>
-                                <SelectItem value="chat_completions">
-                                  Chat Completions
-                                </SelectItem>
-                                <SelectItem value="messages">Messages</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </>
-                        )}
-
-                        {/* Single-model apps (Claude / Codex / Gemini): the
-                            primary Model field. Multi-model (OpenCode + Grok)
-                            render their OPTIONAL default AFTER the models list
-                            below; Claude Desktop's picker is the list only. */}
-                        {!isMultiModel(app) && app !== "claude-desktop" && (
-                          <>
-                            <Label className="text-xs">
-                              {t("providers.model")}
-                            </Label>
-                            <ModelCombobox
-                              ariaLabel={t("providers.model")}
-                              value={draft.model}
-                              onValueChange={(v) => setBind(app, { model: v })}
-                              options={models}
-                              loading={detecting}
-                            />
-                          </>
-                        )}
-
-                        {/* Claude Desktop: the inferenceModels list (Model ID
-                            + optional display name; append [1m] for 1M). */}
-                        {app === "claude-desktop" && (
-                          <>
-                            <Label className="text-xs">{t("providers.modelList")}</Label>
-                            <p className="text-xs text-muted-foreground">
-                              {t("help.cdModels")}
-                            </p>
-                            {modelRows.map((m, i) => (
-                              <div key={i} className="flex items-center gap-1.5">
-                                <ModelCombobox
-                                  ariaLabel={t("providers.modelId")}
-                                  placeholder={t("providers.cdModelIdPlaceholder")}
-                                  value={m.id}
-                                  onValueChange={(v) =>
-                                    setBind(app, {
-                                      models: modelRows.map((r, j) =>
-                                        j === i ? { ...r, id: v } : r
-                                      )
-                                    })
-                                  }
-                                  options={models}
-                                  loading={detecting}
-                                  ariaInvalid={!isClaudeSafeModelId(m.id)}
-                                  className="flex-1"
-                                />
-                                <Input {...INPUT_NO_AUTO}
-                                  aria-label={t("providers.modelDisplayName")}
-                                  className="flex-1 h-8"
-                                  placeholder={t("providers.displayNameOptional")}
-                                  value={m.name}
-                                  onChange={(e) =>
-                                    setBind(app, {
-                                      models: modelRows.map((r, j) =>
-                                        j === i ? { ...r, name: e.target.value } : r
-                                      )
-                                    })
-                                  }
-                                />
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <Button
-                                      type="button"
-                                      variant="ghost"
-                                      size="icon-sm"
-                                      className="shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
-                                      aria-label={t("providers.removeModel")}
-                                      onClick={() =>
-                                        setBind(app, {
-                                          models: modelRows.filter((_, j) => j !== i)
-                                        })
-                                      }
-                                    >
-                                      <Trash2 className="size-4" />
-                                    </Button>
-                                  </TooltipTrigger>
-                                  <TooltipContent side="top">
-                                    {t("providers.removeModel")}
-                                  </TooltipContent>
-                                </Tooltip>
-                              </div>
-                            ))}
-                            {modelRows.some(
-                              (m) => !isClaudeSafeModelId(m.id)
-                            ) && (
-                              <p className="text-xs text-destructive">
-                                {t("help.cdModelInvalid")}
-                              </p>
-                            )}
-                            {bindingModelsDup(app) && (
-                              <p className="text-xs text-destructive">
-                                {t("help.duplicateModel", {
-                                  id:
-                                    modelRows
-                                      .map((m) => m.id.trim())
-                                      .filter(Boolean)
-                                      .find(
-                                        (id, i, a) => a.indexOf(id) !== i
-                                      ) ?? ""
-                                })}
-                              </p>
-                            )}
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              className="self-start"
-                              onClick={() =>
-                                setBind(app, {
-                                  models: [...draft.models, { id: "", name: "" }]
-                                })
-                              }
-                            >
-                              {t("providers.add")}
-                            </Button>
-                          </>
-                        )}
-
-                        {/* OpenCode + Grok: the REQUIRED model list (each row →
-                            one picker entry). */}
-                        {isMultiModel(app) && (
-                          <>
-                            <Label className="text-xs mt-1">
-                              {`${t("providers.modelList")} *`}
-                            </Label>
-                            <p className="text-xs text-muted-foreground">
-                              {t(app === "grok" ? "help.grokModels" : "help.extraModels")}
-                            </p>
-                            {modelRows.map((m, i) => (
-                              <div key={i} className="flex items-center gap-1.5">
-                                <ModelCombobox
-                                  ariaLabel={t("providers.modelId")}
-                                  value={m.id}
-                                  onValueChange={(v) =>
-                                    setBind(app, {
-                                      models: modelRows.map((r, j) =>
-                                        j === i ? { ...r, id: v } : r
-                                      )
-                                    })
-                                  }
-                                  options={models}
-                                  loading={detecting}
-                                  className="flex-1"
-                                />
-                                <Input {...INPUT_NO_AUTO}
-                                  aria-label={t("providers.modelDisplayName")}
-                                  className="flex-1 h-8"
-                                  placeholder={t("providers.displayNameOptional")}
-                                  value={m.name}
-                                  onChange={(e) =>
-                                    setBind(app, {
-                                      models: modelRows.map((r, j) =>
-                                        j === i ? { ...r, name: e.target.value } : r
-                                      )
-                                    })
-                                  }
-                                />
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <Button
-                                      type="button"
-                                      variant="ghost"
-                                      size="icon-sm"
-                                      className="shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
-                                      aria-label={t("providers.removeModel")}
-                                      onClick={() =>
-                                        setBind(app, {
-                                          models: modelRows.filter((_, j) => j !== i)
-                                        })
-                                      }
-                                    >
-                                      <Trash2 className="size-4" />
-                                    </Button>
-                                  </TooltipTrigger>
-                                  <TooltipContent side="top">
-                                    {t("providers.removeModel")}
-                                  </TooltipContent>
-                                </Tooltip>
-                              </div>
-                            ))}
-                            {bindingModelsDup(app) && (
-                              <p className="text-xs text-destructive">
-                                {t("help.duplicateModel", {
-                                  id:
-                                    modelRows
-                                      .map((m) => m.id.trim())
-                                      .filter(Boolean)
-                                      .find(
-                                        (id, i, a) => a.indexOf(id) !== i
-                                      ) ?? ""
-                                })}
-                              </p>
-                            )}
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              className="self-start"
-                              onClick={() =>
-                                setBind(app, {
-                                  models: [...draft.models, { id: "", name: "" }]
-                                })
-                              }
-                            >
-                              {t("providers.add")}
-                            </Button>
-                          </>
-                        )}
-
-                        {/* OpenCode + Grok: the OPTIONAL default model, chosen
-                            FROM the list above. Radix Select; the first item
-                            (sentinel value) is "no default" — Radix forbids an
-                            empty-string item value, so it maps to undefined. */}
-                        {isMultiModel(app) && (
-                          <>
-                            <Label className="text-xs mt-1">
-                              {t("providers.defaultModel")}
-                            </Label>
-                            <Select
-                              value={
-                                draft.model.trim()
-                                  ? draft.model.trim()
-                                  : NO_DEFAULT_MODEL
-                              }
-                              onValueChange={(v) =>
-                                setBind(app, {
-                                  model: v === NO_DEFAULT_MODEL ? "" : v
-                                })
-                              }
-                            >
-                              <SelectTrigger
-                                className="w-full h-8"
-                                aria-label={t("providers.defaultModel")}
-                                aria-invalid={defaultInvalidFor(app) || undefined}
-                              >
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value={NO_DEFAULT_MODEL}>
-                                  {t("providers.selectModel")}
-                                </SelectItem>
-                                {[...new Set(modelIdsFor(app))].map((id) => (
-                                  <SelectItem key={id} value={id}>
-                                    {id}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                            {defaultInvalidFor(app) ? (
-                              <p className="text-xs text-destructive">
-                                {t("help.grokDefaultInvalid")}
-                              </p>
-                            ) : (
-                              <p className="text-xs text-muted-foreground">
-                                {t(
-                                  app === "grok"
-                                    ? "help.grokDefault"
-                                    : "help.opencodeDefault"
-                                )}
-                              </p>
-                            )}
-                          </>
-                        )}
-
-                        {/* Advanced settings — same wording as ProviderEditor.
-                            For grok these are its GLOBAL config.toml keys,
-                            applied when the binding is set as DEFAULT
-                            (`set_grok_default`). Shown for every app. */}
-                        <Label className="text-xs mt-1">{t("providers.advancedSettings")}</Label>
-                        <p className="text-xs text-muted-foreground">
-                          {t("help.overrideIntro", { app: CLI_APP_LABEL[app] })}{" "}
-                          {overrideHelpFor(app, t)}
-                        </p>
-                        {optionRows(app).map((o, i) => {
-                          const rows = optionRows(app);
-                          const isTemplate =
-                            app === "claude" && i < CLAUDE_ROUTING_KEYS.length;
-                          return (
-                            <div key={i} className="flex items-center gap-1.5">
-                              <Input {...INPUT_NO_AUTO}
-                                value={o.key}
-                                readOnly={isTemplate}
-                                placeholder={t("providers.keyUpper")}
-                                className={cn(
-                                  "font-mono flex-1 h-8",
-                                  isTemplate && "text-muted-foreground"
-                                )}
-                                onChange={(e) =>
-                                  setBind(app, {
-                                    options: rows.map((x, j) =>
-                                      j === i ? { ...x, key: e.target.value } : x
-                                    )
-                                  })
-                                }
-                              />
-                              <Input {...INPUT_NO_AUTO}
-                                value={o.value}
-                                placeholder={t("providers.valueUpper")}
-                                className="flex-1 h-8"
-                                onChange={(e) =>
-                                  setBind(app, {
-                                    options: rows.map((x, j) =>
-                                      j === i ? { ...x, value: e.target.value } : x
-                                    )
-                                  })
-                                }
-                              />
-                              {!isTemplate && (
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <Button
-                                      type="button"
-                                      variant="ghost"
-                                      size="icon-sm"
-                                      className="shrink-0 text-destructive hover:text-destructive hover:bg-destructive/10"
-                                      aria-label={t("providers.removeOverride")}
-                                      onClick={() =>
-                                        setBind(app, {
-                                          options: rows.filter((_, j) => j !== i)
-                                        })
-                                      }
-                                    >
-                                      <Trash2 className="size-4" />
-                                    </Button>
-                                  </TooltipTrigger>
-                                  <TooltipContent side="top">
-                                    {t("providers.removeOverride")}
-                                  </TooltipContent>
-                                </Tooltip>
-                              )}
-                            </div>
-                          );
-                        })}
-                        {bindingManagedKey(app) && (
-                          <p className="text-xs text-destructive">
-                            {t("errors.managedKeys", {
-                              keys: optionRows(app)
-                                .map((o) => o.key.trim())
-                                .filter((k) => k && isManagedOptionKey(app, k))
-                                .map((k) => `"${k}"`)
-                                .join(", ")
-                            })}
-                          </p>
-                        )}
-                        {bindingDupKeys(app).length > 0 && (
-                          <p className="text-xs text-destructive">
-                            {t("errors.duplicateKeys", {
-                              keys: bindingDupKeys(app)
-                                .map((k) => `"${k}"`)
-                                .join(", ")
-                            })}
-                          </p>
-                        )}
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="self-start"
-                          onClick={() =>
-                            setBind(app, {
-                              options: [...optionRows(app), { key: "", value: "" }]
-                            })
-                          }
-                        >
-                          {t("providers.add")}
-                        </Button>
-                      </div>
-                    </CollapsibleContent>
-                  </Collapsible>
-                );
-              })}
+              <BindingRows
+                drafts={binds}
+                setBind={setBind}
+                protocols={protocols}
+                models={caps?.models ?? []}
+                visibleApps={visibleApps}
+                detecting={detecting}
+                unavailableHint={() => (caps ? "no matching API mode" : "detect to enable")}
+              />
             </div>
           </div>
         </div>

@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { Check, Copy, Loader2, Plug, Plus, RadioTower, UserPlus } from "lucide-react";
+import { Check, Copy, Loader2, Plug, Plus, RadioTower, Route, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 import { getConfig, invalidateConfigCache } from "@/config";
 import { Button } from "@/components/ui/button";
@@ -25,14 +25,14 @@ import {
   ACTIVE_STATE_REFRESH_EVENT,
   CLI_APPS,
   CLI_APP_LABEL,
-  CLI_APP_SOURCE_BADGE,
-  CODEX_KEEP_ALL_SESSIONS_KEY
+  CLI_APP_SOURCE_BADGE
 } from "@/constants";
 import {
   blankProvider,
   codexVersionSegments,
   hasUpdate,
   isMultiSlot,
+  isRouterGateway,
   isSourceEnabled,
   providerFromBinding,
   resolveActiveProviderId
@@ -53,11 +53,12 @@ import { useT, type MessageKey } from "@/i18n";
 import { ProviderCard } from "./ProviderCard";
 import { ProviderOfficialCard } from "./ProviderOfficialCard";
 import { OfficialAccountsSection } from "./OfficialAccountsSection";
+import { CodexFollowDialog } from "./CodexFollowDialog";
 import {
-  CodexFollowDialog,
-  type CodexFollowTarget,
-  type RecentCodexProject
-} from "./CodexFollowDialog";
+  CODEX_CUSTOM_PROVIDER_ID,
+  CODEX_OFFICIAL_PROVIDER_ID,
+  useCodexFollow
+} from "@/hooks/useCodexFollow";
 
 const GatewaysPage = React.lazy(() =>
   import("./GatewaysPage").then((m) => ({ default: m.GatewaysPage }))
@@ -80,10 +81,6 @@ const ProviderEditor = React.lazy(() =>
   import("./ProviderEditor").then((m) => ({ default: m.ProviderEditor }))
 );
 
-// Stable Codex model_provider ids: Termory writes "termory" for any custom
-// provider, and Official is the built-in "openai" bucket.
-const CODEX_CUSTOM_PROVIDER_ID = "termory";
-const CODEX_OFFICIAL_PROVIDER_ID = "openai";
 
 // Module-level cache for CLI detection results so the OpenCode tab
 // doesn't flash "Official → InstallGuide" every time the user
@@ -290,6 +287,30 @@ export function ProvidersPage({
   // switch) renders with the last-known truth, not the optimistic
   // default. The cache is written back from inside the refresh
   // helpers below.
+  // The local router's listener state — a router binding can only be put in
+  // use while it is up (the backend refuses otherwise; this just explains).
+  // null = not read yet: activation stays disabled but no "start the router
+  // first" reason is shown, so a running router's cards never flash it.
+  const [routerRunning, setRouterRunning] = React.useState<boolean | null>(null);
+  // The Gateways tab LISTS only the AI Gateways. Memoized: a fresh array per
+  // render re-keys useGatewayBindings' synth list → its refresh effect →
+  // ACTIVE_STATE_REFRESH_EVENT → this page's refresh → re-render, looping
+  // `provider_active_states` for as long as the tab is open.
+  const aiGateways = React.useMemo(
+    () => gateways.filter((g) => !isRouterGateway(g)),
+    [gateways]
+  );
+  React.useEffect(() => {
+    const read = () =>
+      void invoke<{ running: boolean }>("router_status")
+        .then((st) => setRouterRunning(st.running))
+        .catch(() => {});
+    read();
+    const unlisten = listen("termory:router-changed", read);
+    return () => {
+      void unlisten.then((fn) => fn()).catch(() => {});
+    };
+  }, []);
   const [installed, setInstalled] =
     React.useState<Record<CliApp, boolean>>(cachedInstalled);
   const [versions, setVersions] =
@@ -362,7 +383,8 @@ export function ProvidersPage({
   // When set, the switch-time Codex "bring sessions along?" picker is open.
   // The prompt appears BEFORE activation; `activate` runs only after the user
   // decides (bring-along moves the selected projects first, then activates).
-  const [followTarget, setFollowTarget] = React.useState<CodexFollowTarget | null>(null);
+  const { followTarget, setFollowTarget, maybePromptThenActivate, codexFollowForBinding } =
+    useCodexFollow();
   const [rechecking, setRechecking] = React.useState(false);
 
   // Official-account quota per CLI — fetch + rate limits + the two
@@ -388,9 +410,11 @@ export function ProvidersPage({
   );
   // Binding rows LISTED in the GatewayEditor — a disabled tool's row is
   // hidden entirely (vs installed-gating, which only dims it).
+  // Settings → Tools order, minus the tools switched off there — the order
+  // every per-tool list on this page follows (tabs, editor rows, binding rows).
   const enabledApps = React.useMemo(
-    () => CLI_APPS.filter((a) => isSourceEnabled(sourceToggles, a)),
-    [sourceToggles]
+    () => (sourceOrder ?? CLI_APPS).filter((a) => isSourceEnabled(sourceToggles, a)),
+    [sourceToggles, sourceOrder]
   );
 
   // Codex is "installed" with just the desktop app (shared ~/.codex).
@@ -744,10 +768,15 @@ export function ProvidersPage({
           .map((binding) => ({
             gateway,
             binding,
-            synth: providerFromBinding(gateway, binding)
+            // The router's stored name is a fixed English constant; show the
+            // localized feature title, same as the Router page and the tray.
+            synth: providerFromBinding(
+              isRouterGateway(gateway) ? { ...gateway, name: t("router.title") } : gateway,
+              binding
+            )
           }))
       ),
-    [gateways, app]
+    [gateways, app, t]
   );
   // Standalone providers + gateway-binding synths for this app — the full set
   // Grok's set_grok_default needs to strip the previous default's global
@@ -1039,73 +1068,6 @@ export function ProvidersPage({
   // project already tagged with the target provider has nothing to migrate. If
   // none remain, activate directly without prompting. Order on confirm:
   // activate first, then migrate (handled in the dialog).
-  const maybePromptThenActivate = async (
-    base: Omit<CodexFollowTarget, "projects">
-  ) => {
-    let projects: RecentCodexProject[] = [];
-    try {
-      // limit 0 = no cap — return every project, newest first; the dialog
-      // scrolls. So a project the user wants is never pushed out by a hard cap.
-      projects = await invoke<RecentCodexProject[]>("recent_codex_projects", {
-        limit: 0
-      });
-    } catch {
-      projects = [];
-    }
-    // Only projects with at least one session whose provider differs from the
-    // target are migration candidates.
-    const candidates = projects.filter((p) =>
-      p.providers.some((id) => id !== base.providerId)
-    );
-    if (candidates.length === 0) {
-      await base.activate();
-      return;
-    }
-    // Settings → "follow all projects silently": the user opted out of being
-    // asked, so switch and re-tag everything. Applies here too, not just to the
-    // tray, so the setting means the same thing wherever you switch from. Read
-    // per switch (not cached in state) so a change made while this page is open
-    // takes effect immediately — the Rust side reads the same key per switch.
-    invalidateConfigCache();
-    const keepSessions =
-      (await getConfig<boolean>(CODEX_KEEP_ALL_SESSIONS_KEY).catch(() => false)) === true;
-    if (keepSessions) {
-      const activated = await base.activate();
-      if (!activated) return;
-      try {
-        const moved = await invoke<{ moved: number }>("follow_codex_sessions", {
-          projects: candidates.map((p) => p.project),
-          targetProviderId: base.providerId
-        });
-        toast.success(t("providers.followDone", { count: String(moved.moved) }));
-      } catch (err) {
-        toast.error(String(err));
-      }
-      return;
-    }
-    setFollowTarget({ ...base, projects: candidates });
-  };
-
-  // Bridge for the Gateways tab: activate/deactivate a binding there calls the
-  // CLI write directly and would skip the Codex follow prompt the Providers tab
-  // applies. GatewaysPage calls this for a Codex binding on a bucket-changing
-  // switch — `"toCustom"` (official→custom, activate) or `"toOfficial"`
-  // (custom→official, deactivate) — so the prompt fires there too (the dialog
-  // is rendered here, regardless of which tab is open).
-  const codexFollowForBinding = (
-    direction: "toCustom" | "toOfficial",
-    label: string,
-    activate: () => Promise<boolean>
-  ) =>
-    maybePromptThenActivate({
-      providerId:
-        direction === "toOfficial"
-          ? CODEX_OFFICIAL_PROVIDER_ID
-          : CODEX_CUSTOM_PROVIDER_ID,
-      label,
-      activate
-    });
-
   // Universal "Set as default" — promotes a provider to "In use". For a Codex
   // official→custom switch we prompt first (see maybePromptThenActivate).
   const setAsDefault = async (target: Provider) => {
@@ -1353,8 +1315,12 @@ export function ProvidersPage({
 
       {view === "gateways" && (
         <React.Suspense fallback={null}>
+          {/* The local router is its OWN gateway (Router page), a peer of the
+              AI Gateways — it is stored in the same list but never listed
+              here. The setter still operates on the full list. */}
           <GatewaysPage
-            gateways={gateways}
+            gateways={aiGateways}
+            allGateways={gateways}
             setGateways={setGateways}
             addSignal={gatewayAddSignal}
             markActive={markActive}
@@ -1547,13 +1513,32 @@ export function ProvidersPage({
                 <ProviderCard
                   key={synth.id}
                   provider={synth}
-                  gatewayBadge={gateway.name || "gateway"}
+                  // The router's card: its own mark, and no badge — the fixed
+                  // title already says what it is.
+                  gatewayBadge={
+                    isRouterGateway(gateway) ? undefined : gateway.name || "gateway"
+                  }
+                  icon={isRouterGateway(gateway) ? <Route size={20} /> : undefined}
                   isConfigured={isConfigured}
                   isInUse={isInUse}
                   toggling={toggling === synth.id}
                   settingDefault={settingDefault === synth.id}
                   testing={testing === synth.id}
-                  activatable={installed[app]}
+                  // A router binding is put in use only while the router is
+                  // up; the card gates just that direction, so an enabled
+                  // multi-slot router slot can still be REMOVED while stopped.
+                  // While the status is unknown (null) activation stays off
+                  // with no reason shown ("" suppresses the tooltip).
+                  activatable={
+                    installed[app] && (!isRouterGateway(gateway) || routerRunning === true)
+                  }
+                  unavailableReason={
+                    installed[app] && isRouterGateway(gateway) && routerRunning !== true
+                      ? routerRunning === false
+                        ? t("router.startFirst")
+                        : ""
+                      : undefined
+                  }
                   balance={balances[synth.id]}
                   balanceLoading={balanceLoading.has(synth.id)}
                   balanceCooldown={balanceInCooldown(synth.id)}

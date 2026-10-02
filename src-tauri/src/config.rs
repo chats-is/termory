@@ -243,9 +243,19 @@ pub const PROVIDERS_SCHEMA_VERSION: u64 = 1;
 
 /// Discriminator value for a gateway entry in the unified `providers` list.
 const GATEWAY_KIND: &str = "gateway";
+/// The local router's own entry: gateway-SHAPED (one `{baseUrl, apiKey}`
+/// with per-CLI `bindings`) and read/written through the gateway paths, but
+/// its own kind so it is never mistaken for a user-added AI Gateway.
+pub const ROUTER_KIND: &str = "router";
 
+/// Gateway-shaped entries: the user's AI Gateways AND the local router's
+/// entry. Both ride the gateway read/write paths; `write_providers` keeps
+/// them intact the same way.
 fn entry_is_gateway(v: &JsonValue) -> bool {
-    v.get("kind").and_then(|k| k.as_str()) == Some(GATEWAY_KIND)
+    matches!(
+        v.get("kind").and_then(|k| k.as_str()),
+        Some(GATEWAY_KIND) | Some(ROUTER_KIND)
+    )
 }
 
 /// Read every entry in providers.json (`{ "version": N, "providers": [...] }`,
@@ -253,6 +263,15 @@ fn entry_is_gateway(v: &JsonValue) -> bool {
 /// `kind: "official"|"custom"` and gateways `kind: "gateway"`), running it
 /// through `migrate_entries` so an older on-disk version is upgraded to the
 /// current shape. A missing / empty / non-object file yields `[]`.
+/// One lock around every read-modify-write of providers.json. Its three
+/// writers each read the whole unified array and write it back whole; run
+/// concurrently (the router's background entry sync against a page save),
+/// the later write erases the earlier one.
+fn providers_rmw_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn read_all_entries() -> Result<Vec<JsonValue>, Box<dyn Error>> {
     let raw = read_json(&providers_path()?, JsonValue::Object(Map::new()))?;
     let mut map = match raw {
@@ -300,6 +319,7 @@ pub fn read_providers() -> Result<JsonValue, Box<dyn Error>> {
 /// in the unified list (the two kinds share one array, discriminated by
 /// `kind`, so each writer must keep the other kind intact).
 pub fn write_providers(value: &JsonValue) -> Result<(), Box<dyn Error>> {
+    let _rmw = providers_rmw_lock();
     let mut next: Vec<JsonValue> = match value {
         JsonValue::Array(a) => a.clone(),
         _ => Vec::new(),
@@ -318,20 +338,82 @@ pub fn read_gateways() -> Result<JsonValue, Box<dyn Error>> {
     ))
 }
 
-/// Write the gateways (each tagged `kind: "gateway"`), preserving the
-/// per-CLI providers in the unified list.
+/// The ROUTER's own write of its entry (`router::sync_router_gateway`):
+/// replaces it wholesale, in place, leaving every other entry untouched.
+/// `write_gateways` deliberately keeps the on-disk connection fields of this
+/// entry against a stale caller — which would also discard the router's own
+/// port/key update, so the owner writes through here instead.
+pub fn upsert_router_entry(entry: &JsonValue) -> Result<(), Box<dyn Error>> {
+    let _rmw = providers_rmw_lock();
+    let mut all = read_all_entries()?;
+    let mut entry = entry.clone();
+    if let JsonValue::Object(o) = &mut entry {
+        o.insert("kind".into(), JsonValue::from(ROUTER_KIND));
+    }
+    match all
+        .iter_mut()
+        .find(|v| v.get("kind").and_then(|k| k.as_str()) == Some(ROUTER_KIND))
+    {
+        Some(slot) => {
+            // The bindings are the USER's (the Router page writes them via
+            // `write_gateways`), so the copy on disk — read just now — wins
+            // over the one the caller read earlier: a bind toggle landing
+            // between the caller's read and this write is not reverted.
+            if let (JsonValue::Object(o), Some(b)) = (&mut entry, slot.get("bindings")) {
+                o.insert("bindings".into(), b.clone());
+            }
+            *slot = entry;
+        }
+        None => all.push(entry),
+    }
+    write_all_entries(all)
+}
+
+/// Write the gateways (each tagged `kind: "gateway"` — an entry that is the
+/// router's keeps `kind: "router"`), preserving the per-CLI providers in the
+/// unified list.
 pub fn write_gateways(value: &JsonValue) -> Result<(), Box<dyn Error>> {
-    let mut next: Vec<JsonValue> = read_all_entries()?
-        .into_iter()
-        .filter(|v| !entry_is_gateway(v))
-        .collect();
+    let _rmw = providers_rmw_lock();
+    let all = read_all_entries()?;
+    // The router's entry is BACKEND-owned except for its `bindings`: the
+    // frontend holds the whole gateways list in memory and writes it back
+    // on every change, so a stale copy would otherwise clobber the id, key,
+    // port and capabilities the backend synced meanwhile. Merge: on-disk
+    // entry + the caller's bindings.
+    let disk_router = all
+        .iter()
+        .find(|v| v.get("kind").and_then(|k| k.as_str()) == Some(ROUTER_KIND))
+        .cloned();
+    let mut next: Vec<JsonValue> = all.into_iter().filter(|v| !entry_is_gateway(v)).collect();
     if let JsonValue::Array(arr) = value {
         for g in arr {
             let mut g = g.clone();
             if let JsonValue::Object(ref mut o) = g {
-                o.insert("kind".into(), JsonValue::from(GATEWAY_KIND));
+                if o.get("kind").and_then(|k| k.as_str()) == Some(ROUTER_KIND) {
+                    if let Some(JsonValue::Object(disk)) = &disk_router {
+                        let bindings = o.remove("bindings");
+                        *o = disk.clone();
+                        if let Some(b) = bindings {
+                            o.insert("bindings".into(), b);
+                        }
+                    }
+                } else {
+                    o.insert("kind".into(), JsonValue::from(GATEWAY_KIND));
+                }
             }
             next.push(g);
+        }
+    }
+    // A caller whose copy predates the router's entry (or simply left it
+    // out) must not delete it: the entry is backend-owned, and dropping it
+    // would orphan every CLI still pointed at the router. Only the router
+    // module removes it — and nothing does today.
+    if let Some(disk) = disk_router {
+        let kept = next
+            .iter()
+            .any(|v| v.get("kind").and_then(|k| k.as_str()) == Some(ROUTER_KIND));
+        if !kept {
+            next.push(disk);
         }
     }
     write_all_entries(next)
@@ -385,6 +467,36 @@ mod tests {
         dir.push(format!("termory-appconfig-{tag}-{nanos}"));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn upsert_router_entry_keeps_the_bindings_on_disk() {
+        let _g = crate::testutils::lock_home();
+        let dir = std::env::temp_dir().join(format!("termory-upsert-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _h = crate::testutils::override_home(&dir);
+        let stale = serde_json::json!({
+            "kind": ROUTER_KIND, "id": "r", "name": "Local Router",
+            "baseUrl": "http://127.0.0.1:1", "apiKey": "k",
+            "bindings": [{ "id": "old", "app": "claude" }]
+        });
+        upsert_router_entry(&stale).unwrap();
+        // The user toggles a binding meanwhile…
+        let mut gws = read_gateways().unwrap();
+        gws[0]["bindings"] = serde_json::json!([{ "id": "new", "app": "codex" }]);
+        write_gateways(&gws).unwrap();
+        // …and a sync carrying the copy it read before lands after it.
+        let mut later = stale.clone();
+        later["baseUrl"] = serde_json::json!("http://127.0.0.1:2");
+        upsert_router_entry(&later).unwrap();
+        let gws = read_gateways().unwrap();
+        assert_eq!(gws[0]["baseUrl"], serde_json::json!("http://127.0.0.1:2"));
+        assert_eq!(
+            gws[0]["bindings"],
+            serde_json::json!([{ "id": "new", "app": "codex" }])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -564,6 +676,51 @@ mod tests {
         let tmp = tempdir("gateways-empty");
         let _h = override_home(&tmp);
         assert!(read_gateways().unwrap().as_array().unwrap().is_empty());
+    }
+
+    /// A gateways write that leaves the router's entry out (a stale frontend
+    /// copy) keeps the on-disk entry, bindings and all; one that includes it
+    /// replaces only its bindings.
+    #[test]
+    fn a_gateways_write_never_drops_the_router_entry() {
+        let _g = lock_home();
+        let tmp = tempdir("gateways-router");
+        let _h = override_home(&tmp);
+        write_gateways(&serde_json::json!([
+            {"kind": "router", "id": "rt", "name": "Local Router", "baseUrl": "http://127.0.0.1:8317",
+             "apiKey": "sk-r", "bindings": [{"id": "b1", "app": "codex"}]},
+            {"id": "g1", "name": "G"}
+        ]))
+        .unwrap();
+        // Stale copy without the router entry: user gateway replaced, router kept.
+        write_gateways(&serde_json::json!([{"id": "g2", "name": "G2"}])).unwrap();
+        let gws = read_gateways().unwrap();
+        let ids: Vec<&str> = gws
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|g| g.get("id").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(ids, vec!["g2", "rt"]);
+        let router = gws
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["id"] == "rt")
+            .unwrap();
+        assert_eq!(router["bindings"][0]["id"], "b1");
+        assert_eq!(router["kind"], "router");
+        // A copy that carries it: connection fields stay the disk's, the
+        // caller's bindings win.
+        write_gateways(&serde_json::json!([
+            {"kind": "router", "id": "rt", "apiKey": "stale", "bindings": []}
+        ]))
+        .unwrap();
+        let gws = read_gateways().unwrap();
+        let router = &gws.as_array().unwrap()[0];
+        assert_eq!(router["apiKey"], "sk-r");
+        assert_eq!(router["bindings"], serde_json::json!([]));
+        assert_eq!(gws.as_array().unwrap().len(), 1);
     }
 
     #[test]

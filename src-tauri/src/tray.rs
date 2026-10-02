@@ -444,6 +444,15 @@ pub struct TrayLabels {
     /// page's `p.name || t("providers.unnamed")`, so a nameless row is a
     /// readable placeholder here instead of a blank, unclickable-looking line.
     unnamed: String,
+    /// Display name of the local router's bindings — the entry's stored name
+    /// is a fixed English constant, and the page shows `t("router.title")`
+    /// instead, so the tray shows the same localized word.
+    #[serde(default = "default_router_label")]
+    router: String,
+}
+
+fn default_router_label() -> String {
+    "Local Router".to_string()
 }
 
 impl Default for TrayLabels {
@@ -462,6 +471,7 @@ impl Default for TrayLabels {
             balance: "Balance".to_string(),
             credits: "Credits".to_string(),
             unnamed: "(unnamed)".to_string(),
+            router: default_router_label(),
         }
     }
 }
@@ -470,6 +480,9 @@ impl TrayLabels {
     /// A provider's menu label: its name, else the localized placeholder —
     /// the Providers page's `p.name || t("providers.unnamed")`.
     fn provider_name<'a>(&'a self, p: &'a Provider) -> &'a str {
+        if p.router_binding {
+            return &self.router;
+        }
         let name = p.name.trim();
         if name.is_empty() {
             &self.unnamed
@@ -924,7 +937,7 @@ fn settle_account_change(app: &AppHandle, cli: CliApp) {
 /// On success the quota belongs to a DIFFERENT account, so force a refetch:
 /// that also emits `quota-changed`, which an open Providers page already
 /// listens to for reloading its account list — no extra event needed.
-fn spawn_account_switch(app: &AppHandle, cli: CliApp, id: String) {
+pub(crate) fn spawn_account_switch(app: &AppHandle, cli: CliApp, id: String) {
     // Same guard as the `switch_account` IPC, and the reason that one is
     // not enough on its own: this row is reachable from the menu bar with
     // the window closed, while an add-account flow started on the page is
@@ -989,31 +1002,37 @@ fn spawn_account_switch(app: &AppHandle, cli: CliApp, id: String) {
 /// The caller has already established that the bucket changes; `to_official`
 /// names the side just switched TO.
 fn spawn_codex_follow_all(to_official: bool) {
+    tauri::async_runtime::spawn_blocking(move || codex_follow_all_blocking(to_official));
+}
+
+/// Silent all-projects follow ("Keep all sessions on a Codex switch"), run
+/// on the CALLER's thread: the tray hands it to a blocking worker, the local
+/// router runs it inside its own suspend/restore (which may be the app's
+/// quit, where nothing spawned would outlive the process).
+pub(crate) fn codex_follow_all_blocking(to_official: bool) {
     let target = codex_bucket(to_official);
-    tauri::async_runtime::spawn_blocking(move || {
-        let projects = match codex_follow_candidates(target) {
-            Ok(list) => list,
-            Err(err) => {
-                log::warn!("tray codex follow: listing projects failed: {err}");
-                return;
-            }
-        };
-        if projects.is_empty() {
+    let projects = match codex_follow_candidates(target) {
+        Ok(list) => list,
+        Err(err) => {
+            log::warn!("codex follow: listing projects failed: {err}");
             return;
         }
-        match crate::codex_follow::follow_projects(&projects, target) {
-            // Nothing to refresh: the re-tag changes which threads `codex
-            // resume` lists, and Termory's own Codex scan never filters on
-            // `model_provider` — so no menu rebuild and no re-scan.
-            Ok(res) => log::info!(
-                "tray codex follow: re-tagged {} thread(s) into {target}",
-                res.moved
-            ),
-            // A running Codex holds the DB lock — the switch itself already
-            // landed, and the user can re-switch after quitting Codex.
-            Err(err) => log::warn!("tray codex follow failed: {err}"),
-        }
-    });
+    };
+    if projects.is_empty() {
+        return;
+    }
+    match crate::codex_follow::follow_projects(&projects, target) {
+        // Nothing to refresh: the re-tag changes which threads `codex
+        // resume` lists, and Termory's own Codex scan never filters on
+        // `model_provider` — so no menu rebuild and no re-scan.
+        Ok(res) => log::info!(
+            "codex follow: re-tagged {} thread(s) into {target}",
+            res.moved
+        ),
+        // A running Codex holds the DB lock — the switch itself already
+        // landed, and the user can re-switch after quitting Codex.
+        Err(err) => log::warn!("codex follow failed: {err}"),
+    }
 }
 
 /// Codex's OFFICIAL thread bucket — both official logins default to this
@@ -2610,6 +2629,11 @@ fn build_menu(app: &AppHandle, installed: &InstallSnapshot) -> tauri::Result<Men
                     labels.provider_name(p),
                 )
                 .checked(is_active)
+                .enabled(provider_row_enabled(
+                    p,
+                    is_active,
+                    crate::router::is_running(),
+                ))
                 .build(app)?;
                 sub = sub.item(&item);
             }
@@ -2833,6 +2857,15 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
     if bucket_changes {
         spawn_codex_follow_all(to_official);
     }
+}
+
+/// A provider row is clickable unless it is a LOCAL ROUTER binding while the
+/// router is stopped — activation is refused then anyway (`providers::
+/// activate`), and the Providers page disables the same card. The row in use
+/// stays enabled so it is never greyed out beside its own checkmark (the
+/// saved-account rows' rule); start/stop rebuild the menu, so this follows.
+fn provider_row_enabled(p: &Provider, is_active: bool, router_running: bool) -> bool {
+    !p.router_binding || router_running || is_active
 }
 
 /// CLI display names — kept in sync with the Providers page tabs
@@ -3463,6 +3496,30 @@ mod tests {
         assert!(!set.row("c2").expect("standalone row").from_gateway);
         // An Official-kind entry is never a clickable row.
         assert!(set.row("legacy").is_none());
+    }
+
+    /// A router binding shows the localized router label, decided from the
+    /// flag set at synthesis — no providers.json read on the main thread.
+    #[test]
+    fn provider_name_labels_router_bindings_from_the_flag() {
+        let labels = TrayLabels::default();
+        let mut p = provider("rb", "codex", "custom", "Local Router");
+        assert_eq!(labels.provider_name(&p), "Local Router");
+        p.name = "anything".into();
+        p.router_binding = true;
+        assert_eq!(labels.provider_name(&p), "Local Router");
+    }
+
+    #[test]
+    fn router_rows_are_disabled_only_while_the_router_is_stopped() {
+        let plain = provider("p", "codex", "custom", "P");
+        let mut router = provider("r", "codex", "custom", "R");
+        router.router_binding = true;
+        assert!(provider_row_enabled(&plain, false, false));
+        assert!(provider_row_enabled(&router, false, true));
+        assert!(!provider_row_enabled(&router, false, false));
+        // The row in use is never greyed out beside its own checkmark.
+        assert!(provider_row_enabled(&router, true, false));
     }
 
     #[test]

@@ -622,8 +622,9 @@ export function isGatewayList(raw: unknown): raw is Gateway[] {
   for (const item of raw) {
     if (!item || typeof item !== "object") return false;
     const r = item as Record<string, unknown>;
-    // Unified providers.json discriminant — a gateway is `kind: "gateway"`.
-    if (r.kind !== "gateway") return false;
+    // Unified providers.json discriminant — a gateway is `kind: "gateway"`;
+    // the local router's entry is the same shape under `kind: "router"`.
+    if (r.kind !== "gateway" && r.kind !== "router") return false;
     if (typeof r.id !== "string" || typeof r.name !== "string") return false;
     if (r.bindings === undefined) continue;
     if (!Array.isArray(r.bindings)) return false;
@@ -716,4 +717,10 @@ export function isClaudeSafeModelId(id: string): boolean {
   return ["sonnet-", "opus-", "haiku-", "fable-"].some(
     (role) => tail.startsWith(role) && tail.length > role.length
   );
+}
+
+/** The local router's own entry in the gateways list — identified by its
+ * kind, never by id (mirror of the Rust `is_router_entry`). */
+export function isRouterGateway(g: { kind?: string }): boolean {
+  return g.kind === "router";
 }

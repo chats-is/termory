@@ -4,6 +4,7 @@ import {
   History,
   Plug,
   Search,
+  Route as RouteIcon,
   Settings as SettingsIcon,
   Star
 } from "lucide-react";
@@ -26,6 +27,7 @@ export function ActivityRail({
   const t = useT();
   const items: { id: Route; icon: React.ReactNode; labelKey: MessageKey }[] = [
     { id: "providers", icon: <Plug size={20} />, labelKey: "nav.providers" },
+    { id: "router", icon: <RouteIcon size={20} />, labelKey: "nav.router" },
     { id: "records", icon: <History size={20} />, labelKey: "nav.records" },
     { id: "favorites", icon: <Star size={20} />, labelKey: "nav.favorites" },
     { id: "search", icon: <Search size={20} />, labelKey: "nav.search" },

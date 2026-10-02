@@ -39,6 +39,12 @@ export type CodexFollowTarget = {
    * Returns true on success — migration only runs when activation landed.
    */
   activate: () => Promise<boolean>;
+  /**
+   * Set when the switch is no longer optional — the saved config already
+   * changed (an unbind of the binding in use). Closing the dialog then
+   * still runs it, without moving any sessions.
+   */
+  onDismiss?: () => void;
 };
 
 function basename(path: string): string {
@@ -128,7 +134,14 @@ export function CodexFollowDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && !running && onClose()}>
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (o || running) return;
+        target?.onDismiss?.();
+        onClose();
+      }}
+    >
       <DialogContent
         className="sm:max-w-2xl"
         onPointerDownOutside={(e) => running && e.preventDefault()}

@@ -439,7 +439,7 @@ A Provider is a named snapshot of `{baseUrl, apiKey, model, …}`; each CLI has 
 **Local storage** — `~/.termory/`, `0700` dir / `0600` files on Unix, atomic write (tmp + rename).
 
 - `config.json` — UI prefs, no secrets. Two keys are read by BOTH sides and each needs a Rust const beside a frontend mirror: `active_provider_ids` (per-CLI record of the last switch, used by both reverse-derivations to disambiguate identical-creds entries) and `codex_keep_all_sessions` (read PER SWITCH on both sides).
-- `providers.json` — one UNIFIED `providers` array holding per-CLI providers (`kind: "official"|"custom"`) AND gateways (`kind: "gateway"`), split by `kind` on read; **each writer must preserve the other kind**. Contains API keys.
+- `providers.json` — one UNIFIED `providers` array holding per-CLI providers (`kind: "official"|"custom"`), gateways (`kind: "gateway"`) and the local router's entry (`kind: "router"`, gateway-shaped, rides the gateway read/write paths), split by `kind` on read; **each writer must preserve the other kinds.** Contains API keys.
 
 **Lenient config parsing (LOCKED — valid JSON must never error).** Syntactically valid JSON must never make the code fail, even when it holds a value this build does not recognize. The canonical case is a DOWNGRADE: an older binary reading a providers.json a newer version wrote. That is Termory's own data, so an unrecognized entry is **skipped**, not fatal; only a real syntax error may fail.
 
@@ -533,6 +533,28 @@ A gateway is ONE `{baseUrl, apiKey}` that may speak several API modes; add it on
 - When a standalone provider and a binding share identical creds they are indistinguishable on disk, so the per-CLI marker disambiguates which is "in use" — honored only while its creds still match the live snapshot.
 - **Gateway bindings appear on the per-CLI Providers list as view + activate only, with NO Edit/Delete** — bindings are managed exclusively from the Gateways tab.
 - **Known gap:** detection is best-effort; a permissive gateway can answer several modes on the same route.
+
+## Local router (`router.rs`)
+
+Named ROUTER, not proxy: a future network-proxy feature would collide with the word.
+
+A local HTTP server (loopback by default) pooling the Codex and Grok Build logins (live and saved accounts), custom providers and AI Gateways behind one endpoint. Page `src/components/router/`, config `~/.termory/router.json` (0600 — holds the router key). **Claude logins are NOT pooled** (user decision).
+
+- **Reference (LOCKED): CLIProxyAPI** (`.audit-sources/CLIProxyAPI`) — cite the Go file and func next to each port. From magpie only its ROUTING rules are taken (quota order, affinity, request repairs, Codex account switch), never its tool-integration channels (relaying with the client's own login, writing a CLI's config).
+- **Any tool, any model.** The request's model picks the members; a member that does not speak the client's API is spoken to through `translate/`, a port of CLIProxyAPI's translators. The client's own API is preferred when a member speaks it.
+- **A provider's API is the one Termory writes for it**: OpenCode by its `npm`, Grok by its `api_backend`, every other tool by the tool.
+- **Selection, retry and cooldown follow CLIProxyAPI** (`sdk/cliproxy/auth/`). A request fault goes straight back to the client; a member that failed is never re-sent within one request.
+- **No key, no use (LOCKED).** Every request needs the router key; an empty key refuses everything.
+- **Logins are refreshed only by writing back where their owner reads them** — the CLI's `auth.json` for the live login, `accounts.json` for a saved one. Every refresh and every account switch of one CLI is serialized by one lock. Listing models never refreshes a credential.
+- **Model lists are live listings, not a static catalog** (user decision). A request waits only for a listing never fetched; a stale one is refreshed in the background.
+- **The router reaches the CLIs as ONE managed gateway entry (`kind: "router"`), never as per-CLI providers.** Termory owns its connection fields, the user owns its bindings; `write_gateways` never drops it, and it is never its own upstream.
+- **Activation happens on the Providers page, only while the router runs**; the tray greys the same rows. Stop and quit hand every binding in use back to Official, Start restores them unless the user moved the CLI elsewhere meanwhile. A Codex hand-back follows Settings → "Keep all sessions on a Codex switch".
+- **Listen address, port and key change only while stopped.** Any address other than loopback requires a key.
+- **`providers.json`, `accounts.json` and `router.json` are each read-modify-written under one lock.**
+- **Binding activation is one hook, `useGatewayBindings`**, shared by the Gateways tab and the Router page; the Codex follow prompt is `useCodexFollow`.
+- **A Grok upstream needs two repairs**: its Anthropic stream omits `index` on block deltas (filled in), and its Responses API rejects `namespace` tools (dropped).
+- **Settings → Tools applies to the router**: a switched-off tool's members are hidden and refused.
+- **Nothing sensitive is logged or echoed to the client.**
 
 ## Official-account quota (`quota.rs`)
 
@@ -904,7 +926,7 @@ Rows carry `select-none` so a right-click does not text-select the row. The Favo
 
 ## Decided against — do not propose these again
 
-- **Arrow-key navigation inside the Records/Favorites lists and the sidebar** — a two-step highlight is unintuitive. `⌘1`–`⌘6`, `⌘K`, `⌘F` and Esc are the shortcuts that exist.
+- **Arrow-key navigation inside the Records/Favorites lists and the sidebar** — a two-step highlight is unintuitive. `⌘1`–`⌘7`, `⌘K`, `⌘F` and Esc are the shortcuts that exist.
 - **Scan-path overrides in Settings** — users with non-default CLI locations rely on each tool's own env var.
 - **A "Clear filters" action on the empty states** — the only filters are the sidebar's source and project rows, which are always visible and directly clickable.
 - **A watcher toggle** — the watcher runs unconditionally.

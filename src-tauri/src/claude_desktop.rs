@@ -890,6 +890,7 @@ mod tests {
 
     fn provider(id: &str, base: &str, key: &str) -> Provider {
         Provider {
+            router_binding: false,
             id: id.into(),
             app: CliApp::ClaudeDesktop,
             kind: ProviderKind::Custom,

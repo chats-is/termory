@@ -1171,7 +1171,10 @@ fn codex_plan(body: &serde_json::Value) -> Option<String> {
 /// token. Endpoint per codex-rs `backend-client/src/client.rs:296`
 /// (`{base}/wham/usage`, ChatGptApi path style); the
 /// `ChatGPT-Account-Id` header per client.rs:214.
-async fn query_codex_quota(access_token: &str, account_id: Option<&str>) -> SubscriptionQuota {
+pub(crate) async fn query_codex_quota(
+    access_token: &str,
+    account_id: Option<&str>,
+) -> SubscriptionQuota {
     let client = match quota_http_client("codex") {
         Ok(c) => c,
         Err(e) => return e,
@@ -1930,7 +1933,7 @@ async fn fetch_grok_plan(
 /// (neither's result feeds the other), so they run concurrently — each
 /// has its own 10s timeout and sequencing them would let a slow
 /// connection double the worst-case wait for a single quota refresh.
-async fn query_grok_quota(
+pub(crate) async fn query_grok_quota(
     access_token: &str,
     user_id: &str,
     email: Option<&str>,

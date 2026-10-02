@@ -6,16 +6,17 @@ Termory brings the history your terminal AI coding tools — **Codex**, **Claude
 
 ## Feature map
 
-Termory has six destinations on the left activity rail (`⌘1`–`⌘6`), plus a macOS menu-bar tray:
+Termory has seven destinations on the left activity rail (`⌘1`–`⌘7`), plus a macOS menu-bar tray:
 
 | # | Destination | What it does |
 |---|-------------|--------------|
 | 1 | **[Providers](#1-providers)** | Manage each CLI's API providers and switch the active one; manage AI Gateways; view official quota and account balances; save and switch Codex / Claude Code / Grok Build accounts. |
-| 2 | **[Records](#2-records)** | Browse every session, memory file, and skill; resume, migrate, or delete them. |
-| 3 | **[Favorites](#3-favorites)** | Messages you've starred, saved as snapshots. |
-| 4 | **[Search](#4-search)** | Full-text search across all history, plus a `⌘K` quick-search palette. |
-| 5 | **[Stats](#5-stats)** | Overview KPIs + calendar heatmap and a token chart split by type / model over All / 30d / 7d. |
-| 6 | **[Settings](#6-settings)** | Appearance, tool toggles, startup, language, terminal, storage, search history, shortcuts, updates. |
+| 2 | **[Router](#7-router)** | A local endpoint that pools your logins, saved accounts, providers and gateways with automatic failover; bind it to any tool like a gateway. |
+| 3 | **[Records](#2-records)** | Browse every session, memory file, and skill; resume, migrate, or delete them. |
+| 4 | **[Favorites](#3-favorites)** | Messages you've starred, saved as snapshots. |
+| 5 | **[Search](#4-search)** | Full-text search across all history, plus a `⌘K` quick-search palette. |
+| 6 | **[Stats](#5-stats)** | Overview KPIs + calendar heatmap and a token chart split by type / model over All / 30d / 7d. |
+| 7 | **[Settings](#6-settings)** | Appearance, tool toggles, startup, language, terminal, storage, search history, shortcuts, updates. |
 | — | **[Menu-bar tray](#menu-bar-tray-macos)** | Resume a session, start a new one, or switch providers without opening the window. |
 
 Two cross-cutting topics — **[Privacy & your data](#privacy--your-data)** and **[Installation & updates](#installation--updates)** — are covered at the end.
@@ -418,10 +419,35 @@ The Settings page (`⌘6`) has these sections:
 
 | Shortcut | Action |
 |----------|--------|
-| `⌘1`–`⌘6` | Switch rail destination |
+| `⌘1`–`⌘7` | Switch rail destination |
 | `⌘K` | Open the quick-search palette |
 | `⌘F` | Find in the open record (Records) |
 | `Esc` | Close the palette / a dropdown |
+
+---
+
+## 7. Router
+
+The Router page runs a small HTTP server — on `127.0.0.1` by default — that stands in front of everything Termory already knows how to authenticate with — the **Codex and Grok Build logins** (the live ones and your **saved accounts**), your **custom providers** and your **AI Gateways** — and hands a tool one endpoint with **automatic failover** between them. Think of it as a local CLIProxyAPI built from the credentials you already have.
+
+**How requests are routed.** It works like CLIProxyAPI: every tool can use every model the router offers. The model a request names decides which logins, accounts, providers and gateways can serve it; when the one chosen speaks a different API from the tool (for example Claude Code using a Codex account, or Codex using DeepSeek), the router translates the request and the reply — streaming, tool calls and reasoning included. When both speak the same API the request is forwarded untouched. `/v1/models` lists every model, in Anthropic format for Claude Code and OpenAI format for everything else. You can set the reasoning strength per request by adding it to the model name, as in CLIProxyAPI: `gpt-5.6-terra(high)`, `(low)`, `(xhigh)`, a token budget such as `(8192)`, or `(none)`. Gemini is covered both ways: Gemini CLI can use any model, and any tool can use a Gemini source. To point Gemini CLI at the router by hand, set `GOOGLE_GEMINI_BASE_URL` and `GEMINI_API_KEY`, and make sure its auth type is the API key (`security.auth.selectedType: gemini-api-key`). Claude Code logins are not pooled.
+
+**Failover.** Upstreams are tried in the order you set. When one answers with an auth, billing, rate-limit or server error (401 / 402 / 403 / 408 / 429 / 5xx / 529) or cannot be reached, the same request is sent to the next one, and the failed upstream sits out a cooldown (a minute after a rate limit, five after an auth rejection, 15 s doubling per repeat otherwise). A `400`-class error is the request's own fault and is returned as-is. Once an upstream has started answering, its stream is relayed live — there is no mid-stream retry. **Round-robin** rotates the starting point per request and keeps the same failover.
+
+**Setting it up.**
+
+1. **Server** — pick a port (default `8317`), generate a **router API key** (clients send it as `Authorization: Bearer`, `x-api-key`, `x-goog-api-key` or `?key=`), choose the routing strategy, and optionally start it with Termory. Every setting works whether or not the router is running.
+2. **Providers** — switch on the logins, accounts, providers and gateways you want pooled and order them (↑/↓). Each row shows the API it speaks, whether it is usable right now, and its request / failure counts; *Retry now* clears a cooldown.
+3. **Use in tools** — configuration only. The router is a gateway of its own, a peer of your AI Gateways (which can in turn be its providers), managed here and never listed under Providers → AI Gateways. Every tool is listed with a switch: switching it on **binds** the tool, and the router then appears as a *Local Router* entry in that tool's list on the **Providers** page. Expanding a row sets the tool's model and options (the same rows the AI Gateway editor uses — **Save bindings** applies edits).
+**Using it from another device.** Pick a **Listen address** from the list — *All interfaces* (`0.0.0.0`) or one of this machine's IPs, each shown with its network interface — and other devices on your network can use the router too — the page shows the address to give them. That shares every pooled login and API key with anyone who has the router key, so an API key is **required** before the router can be opened to the network, and it cannot be cleared while it is. Tools on this machine keep using `127.0.0.1` unless you bind one specific IP. Your OS firewall may ask to allow incoming connections the first time.
+
+4. **Activate** — on the Providers page, in the tool's own list, once the router is **running**. Activation is refused while it is stopped, from the page and from the menu bar alike. **Stopping the router — or quitting Termory — hands every tool that was using it back to Official**, and starting it again puts those bindings back in use. If Termory was force-quit or crashed, the next launch does the same hand-back, so no tool is left pointing at a router that is not running. For Codex, these switches follow **Settings → Keep all sessions on a Codex switch**: when it is on, your sessions move along silently, so `codex resume` keeps listing them; when it is off, sessions started through the router are hidden from `codex resume` while the router is off and come back once it is running again. The listen address, port and router key can be changed only while the router is stopped; the tools pick up the new values when it starts again.
+
+**Smarter routing.** A login whose subscription is nearly used up (90 % or more) is tried after the others; a conversation stays on the source that answered it, so the vendor's prompt cache keeps working (under round-robin, only until the next message you type); and when a source turns a request down for something the router can fix — a reply-length minimum, an option it does not accept, reasoning that another account sealed, Gemini refusing web search next to tools — the router corrects the request and sends it again.
+
+**Codex moves to an account with room.** While the router runs, when the ChatGPT account Codex is signed in to has used 98 % of a usage window, Termory signs Codex in to the next saved Codex account you have switched on in the router's list (top to bottom) that still has room — the same as switching it yourself in the Accounts section. Accounts that need a re-login, or whose usage cannot be read, are skipped. Codex sessions started after the switch use the new account.
+
+**Token refresh.** While the router runs it keeps Codex and Grok Build logins fresh on its own — before their access token expires, and again if one is rejected —, and the new token is written back to that tool's own login file, so the tool keeps working with it.
 
 ---
 
@@ -452,6 +478,7 @@ Only `~/.termory/` (on macOS/Linux the directory is `0700`, files `0600` — onl
 | `config.json` | UI preferences. No secrets. |
 | `providers.json` | Saved providers and gateways — **contains API keys**. |
 | `favorites.json` | Snapshots of starred messages. |
+| `router.json` | Router settings — port, upstream order and the **router API key**. |
 
 ### Does Termory modify my history?
 
