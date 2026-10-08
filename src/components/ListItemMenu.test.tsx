@@ -14,8 +14,54 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: (...args: unknown[]) => openMock(...args),
   ask: (...args: unknown[]) => askMock(...args)
 }));
-vi.mock("@/lib/clipboard", () => ({ copyToClipboard: vi.fn() }));
-vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+const copyMock = vi.fn();
+vi.mock("@/lib/clipboard", () => ({
+  copyToClipboard: (...args: unknown[]) => copyMock(...args)
+}));
+const toastSuccess = vi.fn();
+const toastError = vi.fn();
+vi.mock("sonner", () => ({
+  toast: {
+    success: (...args: unknown[]) => toastSuccess(...args),
+    error: (...args: unknown[]) => toastError(...args)
+  }
+}));
+
+describe("ListItemMenu — Copy", () => {
+  beforeEach(() => {
+    copyMock.mockReset();
+    toastSuccess.mockReset();
+    toastError.mockReset();
+  });
+
+  it("says Copied only after the clipboard write landed", async () => {
+    copyMock.mockResolvedValue(undefined);
+    render(
+      <ListItemMenu path="/p/s.jsonl">
+        <button>row</button>
+      </ListItemMenu>
+    );
+    fireEvent.contextMenu(screen.getByText("row"));
+    await userEvent.click(await screen.findByText("Copy path"));
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledTimes(1));
+    expect(copyMock).toHaveBeenCalledWith("/p/s.jsonl");
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed clipboard write instead of Copied", async () => {
+    copyMock.mockRejectedValue(new Error("denied"));
+    render(
+      <ListItemMenu path="/p/s.jsonl">
+        <button>row</button>
+      </ListItemMenu>
+    );
+    fireEvent.contextMenu(screen.getByText("row"));
+    await userEvent.click(await screen.findByText("Copy path"));
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    expect(String(toastError.mock.calls[0][0])).toContain("denied");
+    expect(toastSuccess).not.toHaveBeenCalled();
+  });
+});
 
 describe("ListItemMenu — Resume in terminal", () => {
   beforeEach(() => invokeMock.mockReset());

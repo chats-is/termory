@@ -548,12 +548,17 @@ export function RouterPage({
       await copyToClipboard(key);
       toast.success(t("common.copied"));
     } catch (err) {
-      toast.error(String(err));
+      toast.error(t("common.copyFailed", { error: String(err) }));
     }
   };
 
   const copyText = async (text: string) => {
-    await copyToClipboard(text);
+    try {
+      await copyToClipboard(text);
+    } catch (err) {
+      toast.error(t("common.copyFailed", { error: String(err) }));
+      return;
+    }
     toast.success(t("common.copied"));
   };
 
@@ -624,7 +629,7 @@ export function RouterPage({
                     type="button"
                     className="hidden md:inline-flex items-center gap-2 rounded-md bg-background px-2.5 h-8 text-xs font-mono shadow-sm hover:bg-accent"
                     onClick={() => void copyText(activeUrl(status))}
-                    aria-label={t("common.copy")}
+                    aria-label={t("router.copyUrl", { url: activeUrl(status) })}
                   >
                     {activeUrl(status)}
                     <Copy className="size-3.5 text-muted-foreground" aria-hidden />
@@ -738,7 +743,7 @@ export function RouterPage({
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      aria-label={t("common.copy")}
+                      aria-label={t("router.copyKey")}
                       disabled={!config.hasApiKey}
                       onClick={() => void copyKey()}
                     >

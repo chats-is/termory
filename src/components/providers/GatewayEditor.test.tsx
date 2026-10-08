@@ -86,6 +86,15 @@ function setup(
 
 const createBtn = () => screen.getByRole("button", { name: /^create$/i });
 
+// A screen reader announces each row's expander by its tool, not six
+// identical "Toggle settings" buttons.
+it("names each binding row's expander after its tool", () => {
+  setup();
+  expect(screen.getByRole("button", { name: "Claude Code settings" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Codex settings" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Toggle settings" })).toBeNull();
+});
+
 // Fill name + base URL + key, which triggers the debounced auto-detect, then
 // wait for at least one CLI bind checkbox to become enabled (caps arrived).
 async function fillCredsAndDetect() {

@@ -21,11 +21,16 @@ function render(ui: React.ReactElement, options?: RenderOptions) {
 // in jsdom there's no plugin. Mock to a spy so we can assert it was
 // called with the right value.
 const copyMock = vi.fn();
+const copyFails = { value: false };
 vi.mock("@/lib/clipboard", () => ({
   copyToClipboard: (value: string) => {
     copyMock(value);
-    return Promise.resolve();
+    return copyFails.value ? Promise.reject(new Error("denied")) : Promise.resolve();
   }
+}));
+const toastError = vi.fn();
+vi.mock("sonner", () => ({
+  toast: { error: (...args: unknown[]) => toastError(...args), success: vi.fn() }
 }));
 
 beforeEach(() => {
@@ -88,6 +93,25 @@ describe("CopyMenu", () => {
     expect(
       screen.getByRole("menuitem", { name: /Copy ID/ }).querySelector("svg")
     ).toBeNull();
+  });
+
+  it("shows no ✓ and reports the error when the clipboard write fails", async () => {
+    copyFails.value = true;
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      render(<CopyMenu items={items} />);
+      await user.click(screen.getByRole("button", { name: "Copy" }));
+      await user.click(screen.getByRole("menuitem", { name: /Copy ID/ }));
+      expect(toastError).toHaveBeenCalledTimes(1);
+      expect(String(toastError.mock.calls[0][0])).toContain("denied");
+      await user.click(screen.getByRole("button", { name: "Copy" }));
+      expect(
+        screen.getByRole("menuitem", { name: /Copy ID/ }).querySelector("svg")
+      ).toBeNull();
+    } finally {
+      copyFails.value = false;
+      toastError.mockReset();
+    }
   });
 
   it("closes on Escape key", async () => {

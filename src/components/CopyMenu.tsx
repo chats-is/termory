@@ -1,5 +1,6 @@
 import React from "react";
 import { Check, Copy } from "lucide-react";
+import { toast } from "sonner";
 import { copyToClipboard } from "@/lib/clipboard";
 import {
   Tooltip,
@@ -34,9 +35,14 @@ export function CopyMenu({ items }: { items: { label: string; value: string }[] 
   }, [open]);
 
   const handleCopy = async (label: string, value: string) => {
-    await copyToClipboard(value);
-    setCopied(label);
     setOpen(false);
+    try {
+      await copyToClipboard(value);
+    } catch (err) {
+      toast.error(t("common.copyFailed", { error: String(err) }));
+      return;
+    }
+    setCopied(label);
     window.setTimeout(() => setCopied(null), 1200);
   };
 

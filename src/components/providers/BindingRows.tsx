@@ -398,7 +398,7 @@ export function BindingRows({
               {/* The whole label + chevron row toggles collapse. */}
               <CollapsibleTrigger
                 disabled={!bindable}
-                aria-label={t("providers.toggleSettings")}
+                aria-label={t("providers.toggleSettingsFor", { app: CLI_APP_LABEL[app] })}
                 className="group flex flex-1 items-center gap-2 rounded-sm text-left disabled:opacity-50 disabled:pointer-events-none min-w-0"
               >
                 <BrandIcon source={CLI_APP_SOURCE_BADGE[app]} />

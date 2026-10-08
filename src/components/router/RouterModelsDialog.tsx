@@ -134,7 +134,8 @@ export function RouterModelsDialog({
                         onClick={() =>
                           void copyToClipboard(m.id).then(
                             () => toast.success(t("common.copied")),
-                            (err) => toast.error(String(err))
+                            (err) =>
+                              toast.error(t("common.copyFailed", { error: String(err) }))
                           )
                         }
                       >

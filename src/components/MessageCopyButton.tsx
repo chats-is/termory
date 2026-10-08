@@ -1,5 +1,6 @@
 import React from "react";
 import { Check, Copy } from "lucide-react";
+import { toast } from "sonner";
 import { copyToClipboard } from "@/lib/clipboard";
 import {
   Tooltip,
@@ -26,7 +27,12 @@ export function MessageCopyButton({
 
   const handleCopy = async (event: React.MouseEvent) => {
     event.stopPropagation();
-    await copyToClipboard(text);
+    try {
+      await copyToClipboard(text);
+    } catch (err) {
+      toast.error(t("common.copyFailed", { error: String(err) }));
+      return;
+    }
     setCopied(true);
     window.clearTimeout(timerRef.current);
     timerRef.current = window.setTimeout(() => setCopied(false), 1200);

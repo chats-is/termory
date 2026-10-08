@@ -80,8 +80,13 @@ export function ListItemMenu({
   const guard = useContextMenuGuard();
   const resumeCmd = source && id ? resumeCommandFor(source, id) : null;
 
-  const copy = (value: string) => {
-    void copyToClipboard(value);
+  const copy = async (value: string) => {
+    try {
+      await copyToClipboard(value);
+    } catch (err) {
+      toast.error(t("common.copyFailed", { error: String(err) }));
+      return;
+    }
     toast.success(t("menu.copied"));
   };
 
@@ -164,24 +169,24 @@ export function ListItemMenu({
                 {t("menu.resumeInTerminal")}
               </ContextMenuItem>
             )}
-            <ContextMenuItem onSelect={() => copy(resumeCmd)}>
+            <ContextMenuItem onSelect={() => void copy(resumeCmd)}>
               {t("menu.copyResumeCommand")}
             </ContextMenuItem>
           </>
         )}
-        <ContextMenuItem onSelect={() => copy(path)}>
+        <ContextMenuItem onSelect={() => void copy(path)}>
           {t("menu.copyPath")}
         </ContextMenuItem>
-        <ContextMenuItem onSelect={() => copy(basename(path))}>
+        <ContextMenuItem onSelect={() => void copy(basename(path))}>
           {t("menu.copyFilename")}
         </ContextMenuItem>
         {id && (
-          <ContextMenuItem onSelect={() => copy(id)}>
+          <ContextMenuItem onSelect={() => void copy(id)}>
             {t("menu.copySessionId")}
           </ContextMenuItem>
         )}
         {messageId && (
-          <ContextMenuItem onSelect={() => copy(messageId)}>
+          <ContextMenuItem onSelect={() => void copy(messageId)}>
             {t("menu.copyMessageId")}
           </ContextMenuItem>
         )}

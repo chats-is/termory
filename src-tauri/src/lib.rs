@@ -1239,6 +1239,56 @@ fn mark_account_relogin(handle: tauri::AppHandle, id: String, needed: bool) -> R
     Ok(())
 }
 
+/// Unix: a SIGTERM (`kill`, a session logout on Linux, a service manager),
+/// SIGINT (Ctrl-C on a dev run) or SIGHUP (the launching terminal closed)
+/// used to end the process on the spot — `RunEvent::Exit` never ran, so
+/// every CLI bound to the local router stayed pointed at a closed port
+/// until the next launch. The FIRST such signal now takes the ordinary
+/// quit path (`app.exit`), which hands those CLIs back; a SECOND one ends
+/// the process at once, so a quit that hangs can still be forced.
+/// Windows has no such signals for a GUI process; its quit paths are
+/// unchanged.
+#[cfg(unix)]
+fn exit_signals() -> std::io::Result<impl std::future::Future<Output = &'static str>> {
+    use tokio::signal::unix::{signal, SignalKind};
+    // Registered NOW (not on first poll): from here on these signals no
+    // longer kill the process by default.
+    let mut term = signal(SignalKind::terminate())?;
+    let mut int = signal(SignalKind::interrupt())?;
+    let mut hup = signal(SignalKind::hangup())?;
+    Ok(async move {
+        tokio::select! {
+            _ = term.recv() => "SIGTERM",
+            _ = int.recv() => "SIGINT",
+            _ = hup.recv() => "SIGHUP",
+        }
+    })
+}
+
+#[cfg(unix)]
+fn install_exit_signals(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let first = match exit_signals() {
+            Ok(f) => f,
+            Err(err) => {
+                log::warn!("signal handlers not installed: {err}");
+                return;
+            }
+        };
+        let name = first.await;
+        log::info!("{name} received: quitting");
+        // A second signal while the quit runs forces it.
+        if let Ok(second) = exit_signals() {
+            tauri::async_runtime::spawn(async move {
+                let name = second.await;
+                log::warn!("{name} received again: exiting now");
+                std::process::exit(1);
+            });
+        }
+        app.exit(0);
+    });
+}
+
 pub fn run() {
     // Log target directory: `~/.termory/logs/`. Falls back to the
     // OS-default log location if HOME isn't readable so app launch
@@ -1416,6 +1466,8 @@ pub fn run() {
             // Local router: comes up with the app only when the user opted in
             // (router.json `autostart`).
             router::start_if_configured(app.handle().clone());
+            #[cfg(unix)]
+            install_exit_signals(app.handle().clone());
             let handle = app.handle().clone();
             match watcher::start(handle) {
                 Ok(watcher_handle) => {
@@ -1490,4 +1542,22 @@ pub fn run() {
             let _ = (app_handle, event);
         }
     });
+}
+
+#[cfg(all(test, unix))]
+mod exit_signal_tests {
+    // Once the listener exists, the signal is DELIVERED to it instead of
+    // killing the process: raising one here is safe and resolves the
+    // future. (SIGHUP: nothing else in the test binary listens for it.)
+    #[tokio::test]
+    async fn a_hangup_is_caught_instead_of_killing_the_process() {
+        let caught = super::exit_signals().expect("handlers install");
+        unsafe {
+            libc::raise(libc::SIGHUP);
+        }
+        let name = tokio::time::timeout(std::time::Duration::from_secs(5), caught)
+            .await
+            .expect("the signal reached the listener");
+        assert_eq!(name, "SIGHUP");
+    }
 }

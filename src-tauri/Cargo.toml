@@ -40,7 +40,7 @@ walkdir = "2"
 # `stream`: the local router (src/router.rs) relays upstream SSE bodies chunk
 # by chunk instead of buffering a whole completion.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "net", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "net", "sync", "signal"] }
 # Local router (src/router.rs): a loopback HTTP/1.1 server built
 # directly on hyper — every crate here is already a transitive dependency
 # of reqwest, so this adds no new build unit.

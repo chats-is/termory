@@ -3935,6 +3935,9 @@ async fn handle_count(
             }}),
         );
     }
+    let mut plan = plan;
+    let stick_key = format!("{model}|{}", conversation_id(headers, body));
+    order_for_count(&mut plan.members, &model, &stick_key);
     let client_format = thinking_format(client);
     let mut last_error = "no member could count tokens".to_string();
     for (key, resolved) in &plan.members {
@@ -4043,7 +4046,20 @@ async fn handle_count(
         };
         match builder.send().await {
             Ok(resp) if resp.status().is_success() => {
-                let answer: JsonValue = resp.json().await.unwrap_or(JsonValue::Null);
+                // An answer without the count field is not a count of 0:
+                // the next member is asked (a confident `0` makes the
+                // client think its context is empty).
+                let field = match counter {
+                    RemoteCounter::Claude => "input_tokens",
+                    RemoteCounter::Gemini => "totalTokens",
+                };
+                let answer: JsonValue = match resp.json::<JsonValue>().await {
+                    Ok(v) if v.get(field).is_some_and(|n| n.is_number()) => v,
+                    _ => {
+                        last_error = format!("{}: no token count in the answer", public_key(key));
+                        continue;
+                    }
+                };
                 let n = crate::token_count::parse_upstream_count(counter, &answer);
                 return json_response(
                     StatusCode::OK,
@@ -4062,6 +4078,27 @@ async fn handle_count(
         }
     }
     error_response(StatusCode::BAD_GATEWAY, "upstream_unavailable", &last_error)
+}
+
+/// The order a token count asks the members in: the member that last
+/// ANSWERED this conversation first (each member counts with its own
+/// tokenizer or endpoint, so a count from another member makes the
+/// client's context gauge jump between turns), then the order a real
+/// request would take (quota order included). The count itself never
+/// moves the stick — only an answer does.
+fn order_for_count(
+    members: &mut [(String, Result<Upstream, String>)],
+    model: &str,
+    stick_key: &str,
+) {
+    order_by_quota(members);
+    // `within = true`: a count belongs to the conversation's current turn
+    // whatever the routing strategy, so the stick holds while it is fresh.
+    if let Some(stuck) = sticky_member(stick_key, members, model, true, false) {
+        if let Some(pos) = members.iter().position(|(k, _)| *k == stuck) {
+            members[..=pos].rotate_right(1);
+        }
+    }
 }
 
 /// CLIProxyAPI `request-retry` / `max-retry-interval` (config.example.yaml).
@@ -7372,6 +7409,40 @@ mod tests {
         // Attempted and failed: not waited for either.
         catalog_tried().insert(failed.to_string(), std::time::Instant::now());
         assert!(!catalog_never_fetched(failed));
+    }
+
+    // The member that answered this conversation also counts its tokens:
+    // a count from another member (another tokenizer) made Claude Code's
+    // context gauge jump whenever the pool order changed.
+    #[test]
+    fn token_count_asks_the_member_that_answered_the_conversation() {
+        let up = || {
+            Ok(Upstream {
+                protocol: Protocol::Anthropic,
+                base_url: "http://127.0.0.1:1".into(),
+                auth: Auth::ApiKey("k".into()),
+                login: None,
+                expires_at: None,
+            })
+        };
+        let mut members = vec![
+            ("count:a".to_string(), up()),
+            ("count:b".to_string(), up()),
+            ("count:c".to_string(), up()),
+        ];
+        // No stick yet: the order a real request would take.
+        order_for_count(&mut members, "m", "m|conv-count-1");
+        let keys: Vec<&str> = members.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["count:a", "count:b", "count:c"]);
+        // `c` answered this conversation: it counts, the rest keep order.
+        remember_stick("m|conv-count-1", "count:c");
+        order_for_count(&mut members, "m", "m|conv-count-1");
+        let keys: Vec<&str> = members.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["count:c", "count:a", "count:b"]);
+        // Another conversation is not affected.
+        let mut other = vec![("count:a".to_string(), up()), ("count:c".to_string(), up())];
+        order_for_count(&mut other, "m", "m|conv-count-2");
+        assert_eq!(other[0].0, "count:a");
     }
 
     #[test]
