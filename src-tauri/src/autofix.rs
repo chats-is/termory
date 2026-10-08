@@ -62,6 +62,15 @@ static REASONING_CONTENT_REFUSED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(unknown|unrecognized|unexpected|extra|not permitted|not allowed|unsupported|additional propert).{0,80}?reasoning_content|reasoning_content.{0,80}?(unknown|unrecognized|unexpected|extra|not permitted|not allowed|unsupported)").unwrap()
 });
 const REASONING_CONTENT: &str = "reasoning_content";
+/// A refusal of the effort VALUE `auto` ("Invalid value: 'auto'. Supported
+/// values are: 'low', 'medium', and 'high'."). "Let the model decide" reaches
+/// an OpenAI-shaped body as `"auto"` (Gemini CLI's default
+/// `thinkingBudget: -1`, a Claude `thinking` enabled without a budget, a
+/// `model(auto)` suffix); OpenAI rejects it, Kimi and others take it — so it
+/// is sent, and left out only for a member that refused it.
+static AUTO_EFFORT_REFUSED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(invalid|unsupported|unknown|not supported|not a valid|not one of|must be one of|supported values)[^\n]{0,120}?\bauto\b|\bauto\b[^\n]{0,120}?(invalid|unsupported|not supported|not a valid|not one of|supported values)").unwrap()
+});
 const EFFORT_ORDER: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
 static SHAPE_WORDS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)failed to deserialize|unknown (item |content |input )?(type|variant|field|parameter)|unknown_parameter|unrecognized (request argument|field|parameter)|extra (inputs|fields) are not permitted|additional properties are not allowed").unwrap()
@@ -129,6 +138,12 @@ pub struct BodyFixes {
     /// The highest reasoning effort the member takes; anything above it
     /// is lowered to it.
     pub effort_cap: Option<String>,
+    /// The member refused a reasoning effort of `"auto"`: an `"auto"`
+    /// effort is left out (the model's own default). A real level is kept.
+    pub drop_auto_effort: bool,
+    /// The member refused Anthropic's prompt-cache markers: every
+    /// `cache_control` is left out.
+    pub drop_cache_control: bool,
 }
 
 impl BodyFixes {
@@ -139,6 +154,19 @@ impl BodyFixes {
     /// Apply every repair to an upstream body (any API's shape — each
     /// repair only touches the fields it names).
     pub fn apply(&self, body: &mut JsonValue) {
+        if self.drop_cache_control {
+            fn strip(v: &mut JsonValue) {
+                match v {
+                    JsonValue::Object(o) => {
+                        o.remove("cache_control");
+                        o.values_mut().for_each(strip);
+                    }
+                    JsonValue::Array(a) => a.iter_mut().for_each(strip),
+                    _ => {}
+                }
+            }
+            strip(body);
+        }
         let Some(o) = body.as_object_mut() else {
             return;
         };
@@ -193,6 +221,25 @@ impl BodyFixes {
                         p.insert("effort".into(), "low".into());
                     }
                 }
+            }
+        }
+        if self.drop_auto_effort {
+            let is_auto = |v: Option<&JsonValue>| {
+                v.and_then(|v| v.as_str())
+                    .is_some_and(|s| s.trim().eq_ignore_ascii_case("auto"))
+            };
+            if is_auto(o.get("reasoning_effort")) {
+                o.remove("reasoning_effort");
+            }
+            let mut empty = false;
+            if let Some(r) = o.get_mut("reasoning").and_then(|r| r.as_object_mut()) {
+                if is_auto(r.get("effort")) {
+                    r.remove("effort");
+                }
+                empty = r.is_empty();
+            }
+            if empty {
+                o.remove("reasoning");
             }
         }
         if let Some(cap) = &self.effort_cap {
@@ -350,6 +397,29 @@ pub fn next_fix(
             }
         }
         if let Some(n) = changes(next) {
+            return Some(n);
+        }
+    }
+    // An Anthropic-compatible endpoint refusing the prompt-cache markers
+    // the router adds to a translated request ("cache_control: Extra inputs
+    // are not permitted"): resent without any.
+    if bad_request(status) && !cur.drop_cache_control && text.contains("cache_control") {
+        if let Some(n) = changes(BodyFixes {
+            drop_cache_control: true,
+            ..cur.clone()
+        }) {
+            return Some(n);
+        }
+    }
+    if bad_request(status)
+        && !cur.drop_auto_effort
+        && text.to_ascii_lowercase().contains("effort")
+        && AUTO_EFFORT_REFUSED.is_match(text)
+    {
+        if let Some(n) = changes(BodyFixes {
+            drop_auto_effort: true,
+            ..cur.clone()
+        }) {
             return Some(n);
         }
     }
@@ -522,6 +592,58 @@ mod tests {
             next_fix(400, missing, &sent, &BodyFixes::default(), true),
             None
         );
+    }
+
+    // An "auto" effort refused by the member (OpenAI's wording): left out
+    // and resent. A real level is never touched, and an "auto" elsewhere
+    // (tool_choice) is not read as the effort.
+    #[test]
+    fn a_refused_auto_effort_is_left_out() {
+        let err = r#"{"error":{"message":"Invalid value: 'auto'. Supported values are: 'low', 'medium', and 'high'.","type":"invalid_request_error","param":"reasoning_effort","code":"invalid_value"}}"#;
+        let chat = json!({"model": "gpt-5", "messages": [], "reasoning_effort": "auto"});
+        let f = next_fix(400, err, &chat, &BodyFixes::default(), true).unwrap();
+        assert!(f.drop_auto_effort);
+        let mut b = chat.clone();
+        f.apply(&mut b);
+        assert!(b.get("reasoning_effort").is_none());
+        assert_eq!(next_fix(400, err, &b, &f, true), None);
+
+        let resp = json!({"model": "gpt-5", "input": "hi", "reasoning": {"effort": "auto", "summary": "auto"}});
+        let mut b = resp.clone();
+        f.apply(&mut b);
+        assert_eq!(b["reasoning"], json!({"summary": "auto"}));
+        let mut only = json!({"input": "hi", "reasoning": {"effort": "auto"}});
+        f.apply(&mut only);
+        assert!(only.get("reasoning").is_none());
+
+        // A real level stays, even with the fix in force.
+        let mut real = json!({"messages": [], "reasoning_effort": "high"});
+        f.apply(&mut real);
+        assert_eq!(real["reasoning_effort"], json!("high"));
+
+        // "auto" refused for tool_choice is not the effort.
+        let tc = r#"{"error":{"message":"Invalid value: 'auto' for tool_choice.","param":"tool_choice"}}"#;
+        assert_eq!(next_fix(400, tc, &chat, &BodyFixes::default(), true), None);
+    }
+
+    #[test]
+    fn refused_cache_markers_are_stripped_everywhere() {
+        let sent = json!({"system": [{"type": "text", "text": "r", "cache_control": {"type": "ephemeral"}}],
+            "tools": [{"name": "a", "cache_control": {"type": "ephemeral"}}],
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}]}]});
+        let err = r#"{"type":"error","error":{"type":"invalid_request_error","message":"system.0.cache_control: Extra inputs are not permitted"}}"#;
+        // Anthropic bodies never get the optional-field repairs, but this
+        // one applies to them.
+        let f = next_fix(400, err, &sent, &BodyFixes::default(), false).unwrap();
+        assert!(f.drop_cache_control);
+        let mut b = sent.clone();
+        f.apply(&mut b);
+        assert_eq!(
+            b,
+            json!({"system": [{"type": "text", "text": "r"}], "tools": [{"name": "a"}],
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]})
+        );
+        assert_eq!(next_fix(400, err, &b, &f, false), None);
     }
 
     #[test]

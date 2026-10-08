@@ -1018,12 +1018,16 @@ pub fn translate_request(model: &str, body: &Value, stream: bool) -> Value {
                     system_text.push_str(&gstr(Some(text)));
                 }
             }
+            // Claude's own `system`, not a leading user turn (Go's form):
+            // Claude follows a system prompt more closely than a user
+            // message, and a stable system block is what prompt caching
+            // keys on.
             if !system_text.is_empty() {
-                accumulator.append(json!({
-                    "role": "user",
-                    "content": [{"type": "text", "text": system_text}]
-                }));
-                accumulator.flush();
+                sj_set(
+                    &mut out,
+                    "system",
+                    json!([{"type": "text", "text": system_text}]),
+                );
             }
         }
     }
@@ -2183,20 +2187,22 @@ mod tests {
         );
     }
 
-    // port of TestConvertGeminiRequestToClaude_KeepsSystemInstructionUserSeparate (claude_gemini_request_test.go)
+    // The system instruction becomes Claude's `system` (Go sends it as a
+    // leading user turn); the user's own turn stays separate.
     #[test]
-    fn keeps_system_instruction_user_separate() {
+    fn system_instruction_becomes_claude_system() {
         let out = req(
             "claude-test",
             r#"{"system_instruction":{"parts":[{"text":"system rule"}]},
                 "contents":[{"role":"user","parts":[{"text":"question"}]}]}"#,
         );
         assert_eq!(
+            out["system"],
+            json!([{"type": "text", "text": "system rule"}])
+        );
+        assert_eq!(
             out["messages"],
-            json!([
-                {"role": "user", "content": [{"type": "text", "text": "system rule"}]},
-                {"role": "user", "content": [{"type": "text", "text": "question"}]}
-            ])
+            json!([{"role": "user", "content": [{"type": "text", "text": "question"}]}])
         );
     }
 
@@ -2210,11 +2216,12 @@ mod tests {
                 "contents":[{"role":"user","parts":[{"text":"question"}]}]}"#,
         );
         assert_eq!(
+            out["system"],
+            json!([{"type": "text", "text": "system rule"}])
+        );
+        assert_eq!(
             out["messages"],
-            json!([
-                {"role": "user", "content": [{"type": "text", "text": "system rule"}]},
-                {"role": "user", "content": [{"type": "text", "text": "question"}]}
-            ])
+            json!([{"role": "user", "content": [{"type": "text", "text": "question"}]}])
         );
     }
 

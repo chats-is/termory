@@ -94,6 +94,14 @@ pub fn request(
         }
         _ => return None,
     };
+    // A request TRANSLATED into Claude's API carries no cache markers of
+    // its own (Codex, OpenCode and Gemini CLI never write Anthropic's), so
+    // Claude re-reads the whole system prompt and tool list at the full
+    // input price every turn. A Claude client's own request is left as it
+    // is — Claude Code places its own markers.
+    if upstream == Anthropic && client != Anthropic {
+        add_claude_cache_breakpoints(&mut out);
+    }
     // A streamed Chat upstream sends usage only when asked; without it the
     // client's final usage reads 0/0.
     if upstream == OpenaiChat && stream {
@@ -386,6 +394,93 @@ impl PairTx {
             Self::ChatFromAnthropic(t) => t.finish(),
             Self::ResponsesFromAnthropic(t) => t.finish(),
             Self::ResponsesFromGemini(t) => t.finish(),
+        }
+    }
+}
+
+// ───────────────────────── Claude prompt-cache breakpoints ─────────────────────────
+//
+// Explicit block markers, the form Claude Code itself sends — so every
+// Anthropic-compatible endpoint that serves Claude Code accepts them (the
+// request-level automatic form is not available everywhere). Two markers of
+// the four allowed: the end of the stable prefix (system, else tools — tools
+// render first, so a system marker covers both) and the last block of the
+// last turn, which each following turn of the conversation reads back. A
+// prefix below the model's minimum simply is not cached; no error.
+
+/// Content blocks a marker may sit on.
+fn cacheable_block(block: &Value) -> bool {
+    match block.get("type").and_then(|t| t.as_str()) {
+        Some("text") => block
+            .get("text")
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| !t.is_empty()),
+        Some("image" | "tool_use" | "tool_result" | "document") => true,
+        _ => false,
+    }
+}
+
+fn has_cache_control(v: &Value) -> bool {
+    match v {
+        Value::Object(o) => o.contains_key("cache_control") || o.values().any(has_cache_control),
+        Value::Array(a) => a.iter().any(has_cache_control),
+        _ => false,
+    }
+}
+
+/// Mark the last cacheable block of `content` (a string becomes one text
+/// block); `false` when there is none.
+fn mark_last_block(content: &mut Value) -> bool {
+    if let Value::String(s) = content {
+        if s.is_empty() {
+            return false;
+        }
+        *content = serde_json::json!([{
+            "type": "text", "text": s.clone(), "cache_control": {"type": "ephemeral"}
+        }]);
+        return true;
+    }
+    let Some(blocks) = content.as_array_mut() else {
+        return false;
+    };
+    for block in blocks.iter_mut().rev() {
+        if cacheable_block(block) {
+            if let Some(o) = block.as_object_mut() {
+                o.insert(
+                    "cache_control".into(),
+                    serde_json::json!({"type": "ephemeral"}),
+                );
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Cache breakpoints on a request translated into Claude's API. A body that
+/// already carries any marker (the client placed its own) is left alone.
+pub fn add_claude_cache_breakpoints(body: &mut Value) {
+    if has_cache_control(body) {
+        return;
+    }
+    let Some(o) = body.as_object_mut() else {
+        return;
+    };
+    if !o.get_mut("system").is_some_and(mark_last_block) {
+        if let Some(Value::Array(tools)) = o.get_mut("tools") {
+            if let Some(Value::Object(last)) = tools.last_mut() {
+                last.insert(
+                    "cache_control".into(),
+                    serde_json::json!({"type": "ephemeral"}),
+                );
+            }
+        }
+    }
+    if let Some(Value::Array(msgs)) = o.get_mut("messages") {
+        for msg in msgs.iter_mut().rev() {
+            if msg.get_mut("content").is_some_and(mark_last_block) {
+                break;
+            }
         }
     }
 }
@@ -705,6 +800,97 @@ mod tests {
             None,
             &json!({"candidates": [{"content": {"parts": []}}]})
         ));
+    }
+
+    #[test]
+    fn cache_breakpoints_on_a_translated_claude_request() {
+        let mut b = json!({
+            "system": [{"type": "text", "text": "rules"}],
+            "tools": [{"name": "a", "input_schema": {"type": "object"}}],
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "a", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "ok"}]}
+            ]
+        });
+        add_claude_cache_breakpoints(&mut b);
+        assert_eq!(
+            b["system"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        // The system marker covers the tools (they render first).
+        assert!(b["tools"][0].get("cache_control").is_none());
+        assert_eq!(
+            b["messages"][2]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert!(b["messages"][0].get("cache_control").is_none());
+
+        // A string system and a string last turn become marked blocks; no
+        // system: the last tool carries the prefix marker.
+        let mut b = json!({"system": "rules", "messages": [{"role": "user", "content": "hi"}]});
+        add_claude_cache_breakpoints(&mut b);
+        assert_eq!(
+            b["system"],
+            json!([{"type": "text", "text": "rules", "cache_control": {"type": "ephemeral"}}])
+        );
+        assert_eq!(
+            b["messages"][0]["content"],
+            json!([{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}])
+        );
+        let mut b = json!({"tools": [{"name": "a"}, {"name": "b"}], "messages": []});
+        add_claude_cache_breakpoints(&mut b);
+        assert_eq!(b["tools"][1]["cache_control"], json!({"type": "ephemeral"}));
+
+        // Thinking blocks and empty text are never marked: the marker walks
+        // back to the last block that can carry one.
+        let mut b = json!({"messages": [{"role": "assistant", "content": [
+            {"type": "text", "text": "answer"},
+            {"type": "thinking", "thinking": "", "signature": "s"},
+            {"type": "text", "text": ""}
+        ]}]});
+        add_claude_cache_breakpoints(&mut b);
+        assert_eq!(
+            b["messages"][0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert!(b["messages"][0]["content"][1]
+            .get("cache_control")
+            .is_none());
+        assert!(b["messages"][0]["content"][2]
+            .get("cache_control")
+            .is_none());
+
+        // The client placed its own: untouched.
+        let own = json!({"system": [{"type": "text", "text": "r"}], "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "hi", "cache_control": {"type": "ephemeral", "ttl": "1h"}}]}]});
+        let mut b = own.clone();
+        add_claude_cache_breakpoints(&mut b);
+        assert_eq!(b, own);
+    }
+
+    #[test]
+    fn only_requests_translated_into_claude_get_markers() {
+        let codex = json!({"model": "claude-sonnet-4-6", "instructions": "You are Codex.",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]});
+        let out = request(
+            Protocol::OpenaiResponses,
+            Protocol::Anthropic,
+            "claude-sonnet-4-6",
+            &codex,
+            true,
+        )
+        .unwrap();
+        assert!(has_cache_control(&out), "{out}");
+        let chat = request(
+            Protocol::OpenaiResponses,
+            Protocol::OpenaiChat,
+            "gpt-5",
+            &codex,
+            true,
+        )
+        .unwrap();
+        assert!(!has_cache_control(&chat), "{chat}");
     }
 
     #[test]

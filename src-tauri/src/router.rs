@@ -1816,6 +1816,12 @@ fn in_cooldown(key: &str) -> bool {
 pub fn reset_provider_health() {
     let is_entry = |k: &str| k.starts_with("provider:") || k.starts_with("gateway:");
     model_states().retain(|(k, _), _| !is_entry(k));
+    // What a member was found to refuse (fields, an "auto" effort, cache
+    // markers) describes the endpoint it pointed at: an edit may point it
+    // somewhere else, so it is learned again.
+    refused_fields().retain(|(k, _), _| !is_entry(k));
+    auto_effort_refused().retain(|(k, _)| !is_entry(k));
+    cache_control_refused().retain(|(k, _)| !is_entry(k));
     for (k, h) in health_table().iter_mut() {
         if is_entry(k) {
             h.streak = 0;
@@ -3019,24 +3025,18 @@ fn apply_request_thinking(body: &mut JsonValue, out: &Outgoing<'_>, to_format: &
     if !body.is_object() {
         return;
     }
-    if out.literal_model {
-        if let Some(o) = body.as_object_mut() {
-            if o.contains_key("model") && !out.base_model.is_empty() {
-                o.insert("model".into(), JsonValue::from(out.base_model));
-            }
+    if !out.literal_model {
+        match crate::thinking::apply_thinking(
+            body,
+            out.requested_model,
+            thinking_format(out.client_protocol),
+            to_format,
+            to_format,
+            out.source_body,
+        ) {
+            Ok(v) => *body = v,
+            Err(err) => log::warn!("router: thinking config not applied: {err}"),
         }
-        return;
-    }
-    match crate::thinking::apply_thinking(
-        body,
-        out.requested_model,
-        thinking_format(out.client_protocol),
-        to_format,
-        to_format,
-        out.source_body,
-    ) {
-        Ok(v) => *body = v,
-        Err(err) => log::warn!("router: thinking config not applied: {err}"),
     }
     if let Some(o) = body.as_object_mut() {
         if o.contains_key("model") && !out.base_model.is_empty() {
@@ -3056,17 +3056,43 @@ fn refused_fields() -> std::sync::MutexGuard<'static, RefusedFields> {
     M.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Members that refused a reasoning effort of `"auto"` (OpenAI has no such
+/// value; Kimi and some OpenAI-compatible servers take it). Remembered like
+/// the refused fields, so only the FIRST request to such a member pays the
+/// refusal — and only an `"auto"` is left out, never a real level.
+fn auto_effort_refused(
+) -> std::sync::MutexGuard<'static, std::collections::HashSet<(String, Protocol)>> {
+    static M: std::sync::LazyLock<Mutex<std::collections::HashSet<(String, Protocol)>>> =
+        std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+    M.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Members that refused Anthropic's prompt-cache markers; remembered the
+/// same way.
+fn cache_control_refused(
+) -> std::sync::MutexGuard<'static, std::collections::HashSet<(String, Protocol)>> {
+    static M: std::sync::LazyLock<Mutex<std::collections::HashSet<(String, Protocol)>>> =
+        std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+    M.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn remembered_fixes(key: &str, protocol: Protocol) -> crate::autofix::BodyFixes {
+    let k = (key.to_string(), protocol);
     crate::autofix::BodyFixes {
-        drop_fields: refused_fields()
-            .get(&(key.to_string(), protocol))
-            .cloned()
-            .unwrap_or_default(),
+        drop_fields: refused_fields().get(&k).cloned().unwrap_or_default(),
+        drop_auto_effort: auto_effort_refused().contains(&k),
+        drop_cache_control: cache_control_refused().contains(&k),
         ..Default::default()
     }
 }
 
 fn remember_fixes(key: &str, protocol: Protocol, fixes: &crate::autofix::BodyFixes) {
+    if fixes.drop_auto_effort {
+        auto_effort_refused().insert((key.to_string(), protocol));
+    }
+    if fixes.drop_cache_control {
+        cache_control_refused().insert((key.to_string(), protocol));
+    }
     if fixes.drop_fields.is_empty() {
         return;
     }
@@ -7287,6 +7313,23 @@ mod tests {
         ));
     }
 
+    // A provider edit may point the member at another endpoint: what the
+    // router learned the old one refuses is forgotten. Logins keep theirs.
+    #[test]
+    fn a_provider_save_forgets_what_its_members_refused() {
+        let k = |s: &str| (s.to_string(), Protocol::OpenaiChat);
+        refused_fields().insert(k("provider:forget-me"), vec!["store".into()]);
+        auto_effort_refused().insert(k("provider:forget-me"));
+        auto_effort_refused().insert(k("gateway:forget-me"));
+        auto_effort_refused().insert(k("live:codex-keep-me"));
+        reset_provider_health();
+        assert!(!refused_fields().contains_key(&k("provider:forget-me")));
+        assert!(!auto_effort_refused().contains(&k("provider:forget-me")));
+        assert!(!auto_effort_refused().contains(&k("gateway:forget-me")));
+        assert!(auto_effort_refused().contains(&k("live:codex-keep-me")));
+        auto_effort_refused().remove(&k("live:codex-keep-me"));
+    }
+
     #[test]
     fn member_detail_never_shows_url_credentials() {
         assert_eq!(
@@ -8731,6 +8774,298 @@ mod tests {
     async fn body_text(resp: Response<OutBody>) -> String {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    /// A mock upstream that records each request BODY and answers it with
+    /// `respond(body)` — `(status, body)`, an SSE stream on 200.
+    async fn body_capturing_upstream(
+        respond: fn(&JsonValue) -> (u16, String),
+    ) -> (u16, Arc<Mutex<Vec<JsonValue>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let bodies: Arc<Mutex<Vec<JsonValue>>> = Arc::new(Mutex::new(Vec::new()));
+        let bodies2 = bodies.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let bodies = bodies2.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 8192];
+                    let (head_end, len) = loop {
+                        let n = sock.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
+                            let len = head
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length:"))
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            break (pos + 4, len);
+                        }
+                    };
+                    while buf.len() < head_end + len {
+                        let n = sock.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    let body = serde_json::from_slice::<JsonValue>(&buf[head_end..])
+                        .unwrap_or(JsonValue::Null);
+                    let (status, answer) = respond(&body);
+                    bodies.lock().unwrap().push(body);
+                    let ct = if status == 200 {
+                        "text/event-stream"
+                    } else {
+                        "application/json"
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: {ct}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        answer.len(),
+                        answer
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (port, bodies)
+    }
+
+    // "Let the model decide" reaches OpenAI-shaped upstreams as an effort of
+    // "auto" (Gemini CLI's default `thinkingBudget: -1`, a Claude `thinking`
+    // enabled without a budget). It is SENT: Kimi and other servers take it.
+    // A member that refuses it (OpenAI's wording) gets the request again
+    // without it, and later requests to that member leave it out up front;
+    // a member that takes it keeps getting it.
+    #[tokio::test]
+    async fn an_auto_effort_is_dropped_only_for_a_member_that_refuses_it() {
+        fn openai_like(body: &JsonValue) -> (u16, String) {
+            let auto = body.get("reasoning_effort") == Some(&json!("auto"));
+            if auto {
+                return (
+                    400,
+                    r#"{"error":{"message":"Invalid value: 'auto'. Supported values are: 'low', 'medium', and 'high'.","type":"invalid_request_error","param":"reasoning_effort","code":"invalid_value"}}"#.to_string(),
+                );
+            }
+            (
+                200,
+                "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_string(),
+            )
+        }
+        fn takes_auto(_: &JsonValue) -> (u16, String) {
+            (
+                200,
+                "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}\n\n".to_string(),
+            )
+        }
+        let (chat_port, chat_bodies) = body_capturing_upstream(openai_like).await;
+        let (resp_port, resp_bodies) = body_capturing_upstream(takes_auto).await;
+        let _g = lock_home();
+        let dir = tempdir("auto-effort");
+        let _h = override_home(&dir);
+        crate::config::write_providers(&json!([
+            { "id": "p-chat-auto", "app": "opencode", "kind": "custom", "name": "Chat",
+              "npm": "@ai-sdk/openai-compatible",
+              "baseUrl": format!("http://127.0.0.1:{chat_port}/v1"), "apiKey": "k",
+              "models": [{"id": "gpt-5"}] },
+            { "id": "p-resp-auto", "app": "codex", "kind": "custom", "name": "Resp",
+              "baseUrl": format!("http://127.0.0.1:{resp_port}/v1"), "apiKey": "k",
+              "model": "kimi-r" }
+        ]))
+        .unwrap();
+        write_config(&RouterConfig {
+            api_key: "local-key".into(),
+            upstreams: vec![
+                UpstreamPref {
+                    key: "provider:p-chat-auto".into(),
+                    enabled: true,
+                },
+                UpstreamPref {
+                    key: "provider:p-resp-auto".into(),
+                    enabled: true,
+                },
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+        for k in ["provider:p-chat-auto", "provider:p-resp-auto"] {
+            reset_health(k);
+            catalog_tried().insert(k.to_string(), std::time::Instant::now());
+        }
+        let send = |uri: &'static str, body: &'static [u8]| {
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("x-api-key", "local-key")
+                .header("content-type", "application/json")
+                .body(Full::new(Bytes::from_static(body)))
+                .unwrap()
+        };
+        let gemini_cli = br#"{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"temperature":0,"topP":1,"thinkingConfig":{"includeThoughts":true,"thinkingBudget":-1}}}"#;
+
+        // Gemini CLI -> the OpenAI-like member: refused, resent without it.
+        let r = handle_test(
+            send(
+                "/v1beta/models/gpt-5:streamGenerateContent?alt=sse",
+                gemini_cli,
+            ),
+            test_ctx(),
+        )
+        .await;
+        assert_eq!(r.status(), 200);
+        let _ = body_text(r).await;
+        {
+            let chat = chat_bodies.lock().unwrap();
+            assert_eq!(chat.len(), 2, "{chat:?}");
+            assert_eq!(chat[0]["reasoning_effort"], json!("auto"));
+            assert!(chat[1].get("reasoning_effort").is_none(), "{}", chat[1]);
+        }
+        // Claude Code, thinking without a budget, same member: left out up
+        // front — one send.
+        let r = handle_test(
+            send(
+                "/v1/messages",
+                br#"{"model":"gpt-5","max_tokens":1024,"stream":true,"thinking":{"type":"enabled"},"messages":[{"role":"user","content":"hi"}]}"#,
+            ),
+            test_ctx(),
+        )
+        .await;
+        assert_eq!(r.status(), 200);
+        let _ = body_text(r).await;
+        {
+            let chat = chat_bodies.lock().unwrap();
+            assert_eq!(chat.len(), 3, "{chat:?}");
+            assert!(chat[2].get("reasoning_effort").is_none(), "{}", chat[2]);
+        }
+        // A real level still goes to that member.
+        let r = handle_test(
+            send(
+                "/v1/messages",
+                br#"{"model":"gpt-5","max_tokens":1024,"stream":true,"thinking":{"type":"enabled","budget_tokens":2048},"messages":[{"role":"user","content":"hi"}]}"#,
+            ),
+            test_ctx(),
+        )
+        .await;
+        let _ = body_text(r).await;
+        assert_eq!(
+            chat_bodies.lock().unwrap()[3]["reasoning_effort"],
+            json!("medium")
+        );
+
+        // A member that takes "auto" keeps getting it.
+        let r = handle_test(
+            send(
+                "/v1beta/models/kimi-r:streamGenerateContent?alt=sse",
+                gemini_cli,
+            ),
+            test_ctx(),
+        )
+        .await;
+        let _ = body_text(r).await;
+        let resp = resp_bodies.lock().unwrap().clone();
+        assert_eq!(resp.len(), 1, "{resp:?}");
+        assert_eq!(resp[0]["reasoning"]["effort"], json!("auto"));
+        *config_cache() = None;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Codex -> an Anthropic-compatible member: the translated request carries
+    // prompt-cache markers. A member that refuses them gets the request again
+    // without, and later requests to it leave them out up front.
+    #[tokio::test]
+    async fn cache_markers_are_sent_and_dropped_only_where_refused() {
+        fn strict(body: &JsonValue) -> (u16, String) {
+            if body.to_string().contains("cache_control") {
+                return (
+                    400,
+                    r#"{"type":"error","error":{"type":"invalid_request_error","message":"system.0.cache_control: Extra inputs are not permitted"}}"#.to_string(),
+                );
+            }
+            ok(body)
+        }
+        fn ok(_: &JsonValue) -> (u16, String) {
+            (
+                200,
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_string(),
+            )
+        }
+        let (strict_port, strict_bodies) = body_capturing_upstream(strict).await;
+        let (ok_port, ok_bodies) = body_capturing_upstream(ok).await;
+        let _g = lock_home();
+        let dir = tempdir("cache-markers");
+        let _h = override_home(&dir);
+        crate::config::write_providers(&json!([
+            { "id": "p-strict", "app": "claude", "kind": "custom", "name": "Strict",
+              "baseUrl": format!("http://127.0.0.1:{strict_port}"), "apiKey": "k",
+              "model": "claude-strict" },
+            { "id": "p-ok", "app": "claude", "kind": "custom", "name": "Ok",
+              "baseUrl": format!("http://127.0.0.1:{ok_port}"), "apiKey": "k",
+              "model": "claude-ok" }
+        ]))
+        .unwrap();
+        write_config(&RouterConfig {
+            api_key: "local-key".into(),
+            upstreams: vec![
+                UpstreamPref {
+                    key: "provider:p-strict".into(),
+                    enabled: true,
+                },
+                UpstreamPref {
+                    key: "provider:p-ok".into(),
+                    enabled: true,
+                },
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+        for k in ["provider:p-strict", "provider:p-ok"] {
+            reset_health(k);
+            catalog_tried().insert(k.to_string(), std::time::Instant::now());
+        }
+        let codex = |model: &str| {
+            let body = json!({"model": model, "stream": true, "instructions": "You are Codex.",
+                "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]});
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("authorization", "Bearer local-key")
+                .header("content-type", "application/json")
+                .body(Full::new(Bytes::from(body.to_string())))
+                .unwrap()
+        };
+        let r = handle_test(codex("claude-ok"), test_ctx()).await;
+        assert_eq!(r.status(), 200);
+        let _ = body_text(r).await;
+        assert!(ok_bodies.lock().unwrap()[0]
+            .to_string()
+            .contains("cache_control"));
+
+        let r = handle_test(codex("claude-strict"), test_ctx()).await;
+        assert_eq!(r.status(), 200);
+        let _ = body_text(r).await;
+        {
+            let sent = strict_bodies.lock().unwrap();
+            assert_eq!(sent.len(), 2, "{sent:?}");
+            assert!(sent[0].to_string().contains("cache_control"));
+            assert!(!sent[1].to_string().contains("cache_control"));
+        }
+        let r = handle_test(codex("claude-strict"), test_ctx()).await;
+        assert_eq!(r.status(), 200);
+        let _ = body_text(r).await;
+        let sent = strict_bodies.lock().unwrap().clone();
+        assert_eq!(sent.len(), 3, "{sent:?}");
+        assert!(!sent[2].to_string().contains("cache_control"));
+        *config_cache() = None;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // One login in the pool and one dropped connection: the request is
