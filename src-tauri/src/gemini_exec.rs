@@ -153,6 +153,32 @@ pub fn rewrite_stream_event(event: &Value) -> Value {
     passthrough_gemini_response_stream(&filtered)
 }
 
+/// The per-STREAM form of [`rewrite_stream_event`]. Go keeps the usage of a
+/// chunk that follows the finish chunk only when both carry the same
+/// `traceId`; the public Gemini API sends none, so a usage-only chunk after
+/// `finishReason` was renamed too and the client was left with the finish
+/// chunk's partial numbers (thought tokens missing). Here, once the stream
+/// has finished, a later chunk's `usageMetadata` is kept as it is.
+#[derive(Default)]
+pub struct StreamUsageFilter {
+    finished: bool,
+}
+
+impl StreamUsageFilter {
+    pub fn rewrite(&mut self, event: &Value) -> Value {
+        if !event.is_object() {
+            return Value::Null;
+        }
+        if self.finished {
+            return passthrough_gemini_response_stream(event);
+        }
+        if finish_reason(event).is_some_and(|r| !gj_string(Some(r)).trim().is_empty()) {
+            self.finished = true;
+        }
+        rewrite_stream_event(event)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // gjson / sjson equivalents over serde_json::Value
 // ---------------------------------------------------------------------------
@@ -1816,6 +1842,31 @@ mod tests {
         assert_eq!(rewrite_stream_event(&plain), plain);
         // A non-object payload produces no frame.
         assert_eq!(rewrite_stream_event(&j("[1]")), Value::Null);
+    }
+
+    // The public Gemini API's split ending: a finish chunk, then a
+    // usage-only chunk with no traceId. The usage chunk keeps its
+    // `usageMetadata` (the client reads the LAST one), and a mid-stream
+    // chunk is still renamed.
+    #[test]
+    fn stream_filter_keeps_usage_after_the_finish_chunk() {
+        let mut f = StreamUsageFilter::default();
+        let mid = j(
+            r#"{"candidates":[{"content":{"parts":[{"text":"a"}]}}],"usageMetadata":{"promptTokenCount":3}}"#,
+        );
+        assert!(f.rewrite(&mid).get("usageMetadata").is_none());
+        let fin = j(
+            r#"{"candidates":[{"content":{"parts":[{"text":"b"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2}}"#,
+        );
+        assert_eq!(f.rewrite(&fin), fin);
+        let usage = j(
+            r#"{"candidates":[],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"thoughtsTokenCount":40,"totalTokenCount":45}}"#,
+        );
+        assert_eq!(
+            f.rewrite(&usage)["usageMetadata"]["thoughtsTokenCount"],
+            serde_json::json!(40)
+        );
+        assert_eq!(f.rewrite(&j("[1]")), Value::Null);
     }
 
     #[test]

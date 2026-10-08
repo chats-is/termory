@@ -2146,6 +2146,10 @@ pub struct StreamTranslator {
     sanitized_name_map: Option<HashMap<String, String>>,
     saw_tool_call: bool,
     has_final_events: bool,
+    /// The finishReason seen on an earlier chunk whose usage had not
+    /// arrived yet (Gemini may send the usage in a chunk of its own after
+    /// the finish chunk).
+    pending_finish: Option<String>,
 }
 
 /// The thought signature of a part: `thoughtSignature`, else
@@ -2167,6 +2171,7 @@ impl StreamTranslator {
             sanitized_name_map: sanitized_tool_name_map(original_request),
             saw_tool_call: false,
             has_final_events: false,
+            pending_finish: None,
         }
     }
 
@@ -2330,9 +2335,15 @@ impl StreamTranslator {
             }
         }
 
-        // Go: `bytes.Contains(rawJSON, []byte(`"finishReason"`))` on the raw chunk.
+        let chunk_finish = gstr(gget(data, "candidates.0.finishReason"));
+        if !chunk_finish.trim().is_empty() {
+            self.pending_finish = Some(chunk_finish.clone());
+        }
+        // Go: `bytes.Contains(rawJSON, []byte(`"finishReason"`))` on the raw
+        // chunk — plus a usage-only chunk AFTER the finish chunk, which Go
+        // leaves without a `message_delta` (no stop_reason, a block open).
         if let Some(usage) = data.get("usageMetadata") {
-            if data.to_string().contains("\"finishReason\"")
+            if (data.to_string().contains("\"finishReason\"") || self.pending_finish.is_some())
                 && !self.has_final_events
                 && self.has_content
             {
@@ -2340,9 +2351,14 @@ impl StreamTranslator {
                     self.block_stop(&mut out);
                     self.response_type = 0;
                 }
+                let finish = if chunk_finish.trim().is_empty() {
+                    self.pending_finish.clone().unwrap_or_default()
+                } else {
+                    chunk_finish.clone()
+                };
                 let stop_reason = if self.saw_tool_call {
                     "tool_use"
-                } else if gstr(gget(data, "candidates.0.finishReason")) == "MAX_TOKENS" {
+                } else if finish == "MAX_TOKENS" {
                     "max_tokens"
                 } else {
                     "end_turn"
@@ -2373,11 +2389,36 @@ impl StreamTranslator {
     /// only once some content was emitted.
     // port of ConvertGeminiResponseToClaude, `[DONE]` input (gemini_claude_response.go)
     pub fn finish(&mut self) -> Vec<String> {
-        if self.has_content {
-            vec![sse_frame("message_stop", &json!({"type": "message_stop"}))]
-        } else {
-            Vec::new()
+        if !self.has_content {
+            return Vec::new();
         }
+        let mut out = Vec::new();
+        // Finished but the usage never came: still close the open block and
+        // give the turn its stop_reason (usage unknown → 0).
+        if !self.has_final_events {
+            if let Some(finish) = self.pending_finish.clone() {
+                if self.response_type != 0 {
+                    self.block_stop(&mut out);
+                    self.response_type = 0;
+                }
+                let stop_reason = if self.saw_tool_call {
+                    "tool_use"
+                } else if finish == "MAX_TOKENS" {
+                    "max_tokens"
+                } else {
+                    "end_turn"
+                };
+                out.push(sse_frame(
+                    "message_delta",
+                    &json!({"type": "message_delta",
+                            "delta": {"stop_reason": stop_reason, "stop_sequence": null},
+                            "usage": {"input_tokens": 0, "output_tokens": 0}}),
+                ));
+                self.has_final_events = true;
+            }
+        }
+        out.push(sse_frame("message_stop", &json!({"type": "message_stop"})));
+        out
     }
 }
 
@@ -3254,6 +3295,46 @@ mod tests {
             json!([{"type": "thinking", "thinking": "thinking…"},
                    {"type": "text", "text": "The capital of France is Paris."}])
         );
+    }
+
+    // Gemini's split ending: the finish chunk carries no usage and a
+    // usage-only chunk follows. The turn still gets its block closed and a
+    // `message_delta` with the stop reason and the FULL usage (thoughts
+    // included).
+    #[test]
+    fn stream_usage_after_the_finish_chunk_closes_the_turn() {
+        let mut t = StreamTranslator::new(&json!({}));
+        let mut frames = String::new();
+        for chunk in [
+            json!({"candidates": [{"content": {"parts": [{"text": "hi"}], "role": "model"}, "index": 0}]}),
+            json!({"candidates": [{"content": {"parts": [], "role": "model"}, "index": 0, "finishReason": "MAX_TOKENS"}]}),
+            json!({"candidates": [], "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 4, "thoughtsTokenCount": 30, "totalTokenCount": 44}}),
+        ] {
+            frames.push_str(&t.push(None, &chunk).join(""));
+        }
+        frames.push_str(&t.finish().join(""));
+        assert!(frames.contains("event: content_block_stop"), "{frames}");
+        assert!(
+            frames.contains(r#""delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":10,"output_tokens":34}"#),
+            "{frames}"
+        );
+        assert!(
+            frames.ends_with("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+            "{frames}"
+        );
+
+        // No usage ever: the block is still closed and the turn ends.
+        let mut t = StreamTranslator::new(&json!({}));
+        let mut frames = String::new();
+        for chunk in [
+            json!({"candidates": [{"content": {"parts": [{"text": "hi"}], "role": "model"}, "index": 0}]}),
+            json!({"candidates": [{"content": {"parts": [], "role": "model"}, "index": 0, "finishReason": "STOP"}]}),
+        ] {
+            frames.push_str(&t.push(None, &chunk).join(""));
+        }
+        frames.push_str(&t.finish().join(""));
+        assert!(frames.contains(r#""stop_reason":"end_turn""#), "{frames}");
+        assert!(frames.contains("event: content_block_stop"), "{frames}");
     }
 
     #[test]

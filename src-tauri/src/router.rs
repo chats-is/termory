@@ -139,6 +139,12 @@ pub struct RouterConfig {
     /// were the CLI's DEFAULT when suspended; restore re-sets only those.
     #[serde(default)]
     pub suspended_defaults: Vec<String>,
+    /// The tool each suspended binding belonged to. A binding the user
+    /// unbinds and binds again while the router is stopped comes back under
+    /// a NEW id; Start then restores the tool's current binding instead of
+    /// dropping it for a missing id.
+    #[serde(default)]
+    pub suspended_apps: std::collections::BTreeMap<String, String>,
     /// A quit switched Codex to Official without re-tagging its sessions
     /// (`CodexFollow::Defer`); the next launch settles it.
     #[serde(default)]
@@ -246,6 +252,7 @@ impl Default for RouterConfig {
             upstreams: Vec::new(),
             suspended_bindings: Vec::new(),
             suspended_defaults: Vec::new(),
+            suspended_apps: std::collections::BTreeMap::new(),
             pending_codex_follow: false,
             former_ports: Vec::new(),
             former_hosts: Vec::new(),
@@ -320,6 +327,12 @@ fn config_from_json(raw: JsonValue) -> RouterConfig {
     };
     cfg.suspended_bindings = strings("suspendedBindings");
     cfg.suspended_defaults = strings("suspendedDefaults");
+    if let Some(JsonValue::Object(m)) = map.get("suspendedApps") {
+        cfg.suspended_apps = m
+            .iter()
+            .filter_map(|(id, app)| Some((id.clone(), app.as_str()?.to_string())))
+            .collect();
+    }
     if let Some(b) = map.get("pendingCodexFollow").and_then(|v| v.as_bool()) {
         cfg.pending_codex_follow = b;
     }
@@ -900,10 +913,17 @@ fn gateway_candidates() -> Vec<Candidate> {
         .collect()
 }
 
+/// The host (and port) of a base URL, as the Router page shows it under a
+/// member. Credentials written into the URL (`https://user:secret@host`)
+/// are never part of it.
 fn host_of(url: &str) -> String {
     let s = url.trim();
     let s = s.split("://").nth(1).unwrap_or(s);
-    s.split('/').next().unwrap_or("").to_string()
+    let authority = s.split(['/', '?', '#']).next().unwrap_or("");
+    authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host)
+        .to_string()
 }
 
 // ---- credential readers (read-only, never refresh) ----------------
@@ -2810,6 +2830,10 @@ fn is_dropped_response_header(name: &str) -> bool {
     matches!(
         name,
         "connection" | "keep-alive" | "transfer-encoding" | "content-length" | "trailer"
+        // An upstream's cookies belong to the upstream's domain: relayed,
+        // they would be stored for the router's own address by any browser
+        // that reaches it.
+            | "set-cookie" | "set-cookie2"
     )
 }
 
@@ -3453,9 +3477,16 @@ async fn serve_api(
     // (CLAUDE.md); rounds retry only members cooling down.
     let mut failed_without_cooldown: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    // Transport failures per member in THIS request. A connection that
+    // could not be made, or was reset before the first payload, is usually
+    // a blip: the member gets one more try in a later round (after
+    // TRANSPORT_RETRY_DELAY) instead of none — with a single login in the
+    // pool, "none" failed the whole request on one dropped connection.
+    let mut transport_fails: HashMap<String, u8> = HashMap::new();
     for round in 0..=REQUEST_RETRY {
         let mut tried: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut round_retryable = false;
+        let mut round_transport = false;
         let mut round_429: std::collections::HashSet<String> = std::collections::HashSet::new();
         'member: loop {
             let eligible: Vec<&str> = plan
@@ -3757,7 +3788,7 @@ async fn serve_api(
                         let class = if err.is_connect() {
                             "connect failed"
                         } else if err.is_timeout() {
-                            "timed out"
+                            TIMED_OUT
                         } else {
                             "request failed"
                         };
@@ -3786,7 +3817,14 @@ async fn serve_api(
                 round_429.insert(key.to_string());
             }
             if failure.transport {
-                failed_without_cooldown.insert(key.to_string());
+                let n = transport_fails.entry(key.to_string()).or_insert(0);
+                *n += 1;
+                // A read timeout already cost READ_TIMEOUT: not tried again.
+                if *n >= TRANSPORT_ATTEMPTS || failure.text == TIMED_OUT {
+                    failed_without_cooldown.insert(key.to_string());
+                } else {
+                    round_transport = true;
+                }
             }
             mark_model_failure(key, &model_key, &failure);
             last_error = Some(format!("{}: {}", public_key(key), failure.text));
@@ -3820,6 +3858,13 @@ async fn serve_api(
             })
             .min()
             .unwrap_or(0);
+        // A member retried after a transport failure is not cooling down
+        // (zero wait): give the network a moment first.
+        let wait_ms = if round_transport {
+            wait_ms.max(TRANSPORT_RETRY_DELAY.as_millis() as u64)
+        } else {
+            wait_ms
+        };
         if wait_ms > MAX_RETRY_INTERVAL.as_millis() as u64 {
             break;
         }
@@ -4103,6 +4148,12 @@ fn order_for_count(
 
 /// CLIProxyAPI `request-retry` / `max-retry-interval` (config.example.yaml).
 const REQUEST_RETRY: usize = 3;
+/// Sends per member per request after transport failures (the first try
+/// plus one retry).
+const TRANSPORT_ATTEMPTS: u8 = 2;
+const TRANSPORT_RETRY_DELAY: Duration = Duration::from_millis(500);
+/// The transport class of a read timeout (never retried in the request).
+const TIMED_OUT: &str = "timed out";
 const MAX_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How a successful upstream answer reaches the client.
@@ -4606,7 +4657,7 @@ fn translated_stream(
         /// A Codex upstream's events first go through the executor's relay
         /// (terminal / error handling), as CLIProxyAPI does.
         relay: Option<crate::codex_exec::CodexStreamRelay>,
-        gemini: bool,
+        gemini: Option<crate::gemini_exec::StreamUsageFilter>,
         finished: bool,
         ended: bool,
         member: String,
@@ -4617,8 +4668,8 @@ fn translated_stream(
                 crate::translate::SseEvent::Data(e, v) if !st.finished => {
                     // A Gemini upstream's chunks pass the executor's stream
                     // filter first (`FilterSSEUsageMetadata`); Null = drop.
-                    let v = if st.gemini {
-                        let v = crate::gemini_exec::rewrite_stream_event(&v);
+                    let v = if let Some(filter) = st.gemini.as_mut() {
+                        let v = filter.rewrite(&v);
                         if v.is_null() {
                             continue;
                         }
@@ -4660,7 +4711,7 @@ fn translated_stream(
         parser: crate::translate::SseParser::default(),
         tx,
         relay: codex_model.map(|m| crate::codex_exec::CodexStreamRelay::new(m, false)),
-        gemini: upstream == Protocol::Gemini,
+        gemini: (upstream == Protocol::Gemini).then(crate::gemini_exec::StreamUsageFilter::default),
         finished: false,
         ended: false,
         member,
@@ -4876,6 +4927,7 @@ fn gemini_relay_stream(
         upstream: std::pin::Pin<Box<S>>,
         prefix: Option<Bytes>,
         parser: crate::translate::SseParser,
+        filter: crate::gemini_exec::StreamUsageFilter,
         ended: bool,
         member: String,
     }
@@ -4883,6 +4935,7 @@ fn gemini_relay_stream(
         upstream: Box::pin(resp.bytes_stream()),
         prefix: Some(prefix),
         parser: crate::translate::SseParser::default(),
+        filter: crate::gemini_exec::StreamUsageFilter::default(),
         ended: false,
         member,
     };
@@ -4911,7 +4964,7 @@ fn gemini_relay_stream(
             let mut out = String::new();
             for ev in events {
                 if let crate::translate::SseEvent::Data(_, v) = ev {
-                    let v = crate::gemini_exec::rewrite_stream_event(&v);
+                    let v = st.filter.rewrite(&v);
                     if !v.is_null() {
                         out.push_str(&format!("data: {v}\n\n"));
                     }
@@ -5423,6 +5476,10 @@ pub fn suspend_live_bindings(follow: CodexFollow) -> Result<usize, Box<dyn Error
     if let Err(err) = update_config(|c| {
         c.suspended_bindings = merge_suspended(&c.suspended_bindings, ids.clone());
         c.suspended_defaults = merge_suspended(&c.suspended_defaults, defaults.clone());
+        for b in &live {
+            c.suspended_apps
+                .insert(b.id.clone(), b.app.key().to_string());
+        }
         Ok(())
     }) {
         // Switching anyway: a CLI left on a closed port is the worse outcome.
@@ -5457,6 +5514,7 @@ pub fn suspend_live_bindings(follow: CodexFollow) -> Result<usize, Box<dyn Error
         let _ = update_config(|c| {
             c.suspended_bindings.retain(|id| !failed.contains(id));
             c.suspended_defaults.retain(|id| !failed.contains(id));
+            c.suspended_apps.retain(|id, _| !failed.contains(id));
             Ok(())
         });
     }
@@ -5529,20 +5587,36 @@ pub fn stop_for_exit() {
 /// multi-slot slot is made default again only if it was, and no other
 /// default was chosen meanwhile. Returns how many were restored.
 pub fn restore_suspended_bindings() -> Result<usize, Box<dyn Error>> {
-    let mut taken = (Vec::new(), Vec::new(), false);
+    let mut taken = (
+        Vec::new(),
+        Vec::new(),
+        false,
+        std::collections::BTreeMap::new(),
+    );
     update_config(|c| {
         taken = (
             std::mem::take(&mut c.suspended_bindings),
             std::mem::take(&mut c.suspended_defaults),
             c.pending_codex_follow,
+            std::mem::take(&mut c.suspended_apps),
         );
         Ok(())
     })?;
-    let (ids, defaults, pending_follow) = taken;
+    let (ids, defaults, pending_follow, apps) = taken;
     if ids.is_empty() {
         return Ok(0);
     }
     let synths = crate::providers::gateway_providers();
+    let router_ids = router_binding_ids().unwrap_or_default();
+    // A suspended id that no longer exists: the tool's CURRENT router
+    // binding, when it has one (unbound and bound again while stopped, which
+    // mints a new id) and no other suspended id names it already.
+    let current_for = |id: &str| {
+        let app = apps.get(id).and_then(|a| CliApp::parse(a))?;
+        synths
+            .iter()
+            .find(|p| p.app == app && router_ids.contains(&p.id) && !ids.iter().any(|i| *i == p.id))
+    };
     let mut n = 0;
     // Ids that could not be restored for a passing reason (the CLI's config
     // unreadable — torn mid-write —, an activation that failed): kept for
@@ -5550,7 +5624,11 @@ pub fn restore_suspended_bindings() -> Result<usize, Box<dyn Error>> {
     // binding is gone, the user moved the CLI elsewhere) are not.
     let mut retry: Vec<String> = Vec::new();
     for id in &ids {
-        let Some(p) = synths.iter().find(|p| &p.id == id) else {
+        let Some(p) = synths
+            .iter()
+            .find(|p| &p.id == id)
+            .or_else(|| current_for(id))
+        else {
             continue;
         };
         let for_app: Vec<_> = synths.iter().filter(|q| q.app == p.app).cloned().collect();
@@ -5581,7 +5659,7 @@ pub fn restore_suspended_bindings() -> Result<usize, Box<dyn Error>> {
             continue;
         }
         if multi_slot(p.app) {
-            if defaults.contains(&p.id) && state.matched_provider_id.is_none() {
+            if defaults.contains(id) && state.matched_provider_id.is_none() {
                 if let Err(err) = crate::providers::set_default(p, &for_app) {
                     log::warn!(
                         "restoring the router default for {} failed: {err}",
@@ -5616,6 +5694,11 @@ pub fn restore_suspended_bindings() -> Result<usize, Box<dyn Error>> {
         update_config(|c| {
             c.suspended_bindings = merge_suspended(&c.suspended_bindings, retry.clone());
             c.suspended_defaults = merge_suspended(&c.suspended_defaults, retry_defaults.clone());
+            for id in &retry {
+                if let Some(app) = apps.get(id) {
+                    c.suspended_apps.insert(id.clone(), app.clone());
+                }
+            }
             Ok(())
         })?;
     }
@@ -7205,6 +7288,25 @@ mod tests {
     }
 
     #[test]
+    fn member_detail_never_shows_url_credentials() {
+        assert_eq!(
+            host_of("https://user:secret@api.example.com/v1"),
+            "api.example.com"
+        );
+        assert_eq!(
+            host_of("https://api.example.com:8443/v1"),
+            "api.example.com:8443"
+        );
+        assert_eq!(host_of("api.example.com/v1?x=1"), "api.example.com");
+        assert_eq!(
+            host_of("https://tok@relay.example.com"),
+            "relay.example.com"
+        );
+        assert!(is_dropped_response_header("set-cookie"));
+        assert!(!is_dropped_response_header("content-type"));
+    }
+
+    #[test]
     fn router_url_recognises_a_former_host() {
         let cfg = RouterConfig {
             port: 8317,
@@ -7979,6 +8081,9 @@ mod tests {
             }],
             suspended_bindings: vec!["b1".into(), "b2".into()],
             suspended_defaults: vec!["b2".into()],
+            suspended_apps: [("b1".to_string(), "claude".to_string())]
+                .into_iter()
+                .collect(),
             pending_codex_follow: true,
             former_ports: vec![8300],
             former_hosts: vec!["192.168.1.5".into()],
@@ -8151,6 +8256,28 @@ mod tests {
         assert_eq!(restore_suspended_bindings().unwrap(), 1);
         assert_eq!(token(), "sk-new");
         assert!(read_config().unwrap().suspended_bindings.is_empty());
+
+        // Unbound and bound again while stopped: the binding comes back
+        // under a NEW id. Start restores the tool's current binding instead
+        // of dropping the suspended one for a missing id.
+        assert_eq!(suspend_live_bindings(CodexFollow::Now).unwrap(), 1);
+        assert_eq!(token(), "");
+        let mut gws = crate::config::read_gateways().unwrap();
+        for g in gws.as_array_mut().unwrap() {
+            if let Some(bs) = g.get_mut("bindings").and_then(|b| b.as_array_mut()) {
+                for b in bs {
+                    if b["id"] == json!("b1") {
+                        b["id"] = json!("b1-rebound");
+                    }
+                }
+            }
+        }
+        crate::config::write_gateways(&gws).unwrap();
+        assert_eq!(restore_suspended_bindings().unwrap(), 1);
+        assert_eq!(token(), "sk-new");
+        let after = read_config().unwrap();
+        assert!(after.suspended_bindings.is_empty());
+        assert!(after.suspended_apps.is_empty());
 
         *server_slot() = None;
         *config_cache() = None;
@@ -8528,9 +8655,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_transport_failure_is_not_resent_in_later_rounds() {
+    async fn a_transport_failure_is_retried_once_and_no_more() {
         // An upstream that accepts and drops every connection: a transport
-        // failure, which sets no cooldown.
+        // failure, which sets no cooldown. One retry (a dropped connection
+        // is usually a blip), then the request fails — never a loop.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -8579,8 +8707,8 @@ mod tests {
         assert!(!resp.status().is_success());
         assert_eq!(
             hits.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "one send, no resend in a retry round"
+            2,
+            "the first send plus one retry"
         );
         *config_cache() = None;
         let _ = std::fs::remove_dir_all(&dir);
@@ -8603,6 +8731,76 @@ mod tests {
     async fn body_text(resp: Response<OutBody>) -> String {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    // One login in the pool and one dropped connection: the request is
+    // sent again after a short wait instead of failing outright.
+    #[tokio::test]
+    async fn a_dropped_connection_is_retried_once() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let conns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let conns2 = conns.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let n = conns2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    if n == 0 {
+                        // Reset without an answer.
+                        drop(sock);
+                        return;
+                    }
+                    let body = "event: message_start\ndata: {}\n\n";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        let _g = lock_home();
+        let dir = tempdir("transport-retry");
+        let _h = override_home(&dir);
+        crate::config::write_providers(&json!([
+            { "id": "p-only", "app": "claude", "kind": "custom", "name": "Only",
+              "baseUrl": format!("http://127.0.0.1:{port}"), "apiKey": "k" }
+        ]))
+        .unwrap();
+        write_config(&RouterConfig {
+            api_key: "local-key".into(),
+            upstreams: vec![UpstreamPref {
+                key: "provider:p-only".into(),
+                enabled: true,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        reset_health("provider:p-only");
+        catalog_tried().insert("provider:p-only".to_string(), std::time::Instant::now());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header("x-api-key", "local-key")
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from_static(
+                br#"{"model":"claude","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+            )))
+            .unwrap();
+        let resp = handle_test(req, test_ctx()).await;
+        assert_eq!(resp.status(), 200);
+        assert!(body_text(resp).await.contains("message_start"));
+        assert_eq!(conns.load(std::sync::atomic::Ordering::SeqCst), 2);
+        *config_cache() = None;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // An OpenAI-compatible gateway reporting a rate limit INSIDE a 200

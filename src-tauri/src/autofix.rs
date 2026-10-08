@@ -54,6 +54,14 @@ static UNSUPPORTED_REASONING: LazyLock<Regex> = LazyLock::new(|| {
 static EFFORT_SUPPORTED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)invalid value:?\s*'(?:minimal|low|medium|high|xhigh|max)'.{0,160}?supported values are:?\s*([^.]+)").unwrap()
 });
+/// A Chat member refusing the `reasoning_content` the Responses→Chat
+/// translator puts on assistant turns (DeepSeek's thinking mode requires it;
+/// strict OpenAI-compatible servers reject the unknown field). Only a
+/// REFUSAL matches — DeepSeek asking for a MISSING one must not strip it.
+static REASONING_CONTENT_REFUSED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(unknown|unrecognized|unexpected|extra|not permitted|not allowed|unsupported|additional propert).{0,80}?reasoning_content|reasoning_content.{0,80}?(unknown|unrecognized|unexpected|extra|not permitted|not allowed|unsupported)").unwrap()
+});
+const REASONING_CONTENT: &str = "reasoning_content";
 const EFFORT_ORDER: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
 static SHAPE_WORDS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)failed to deserialize|unknown (item |content |input )?(type|variant|field|parameter)|unknown_parameter|unrecognized (request argument|field|parameter)|extra (inputs|fields) are not permitted|additional properties are not allowed").unwrap()
@@ -145,6 +153,16 @@ impl BodyFixes {
         }
         for f in &self.drop_fields {
             o.remove(f);
+            // Lives on the assistant MESSAGES, not at the top level.
+            if f == REASONING_CONTENT {
+                if let Some(msgs) = o.get_mut("messages").and_then(|v| v.as_array_mut()) {
+                    for m in msgs {
+                        if let Some(mo) = m.as_object_mut() {
+                            mo.remove(REASONING_CONTENT);
+                        }
+                    }
+                }
+            }
         }
         if self.rename_max_tokens {
             if let Some(v) = o.remove("max_tokens") {
@@ -314,6 +332,16 @@ pub fn next_fix(
             }
         }
     }
+    if bad_request(status)
+        && !cur.drop_fields.iter().any(|f| f == REASONING_CONTENT)
+        && REASONING_CONTENT_REFUSED.is_match(text)
+    {
+        let mut next = cur.clone();
+        next.drop_fields.push(REASONING_CONTENT.to_string());
+        if let Some(n) = changes(next) {
+            return Some(n);
+        }
+    }
     if bad_request(status) && UNSUPPORTED_REASONING.is_match(text) {
         let mut next = cur.clone();
         for f in ["reasoning", "reasoning_effort"] {
@@ -467,6 +495,33 @@ mod tests {
         assert_eq!(b["reasoning"]["effort"], json!("high"));
         // Already at or under the cap: nothing more to do.
         assert_eq!(next_fix(400, err, &b, &f, true), None);
+    }
+
+    // A strict Chat server refusing the placeholder `reasoning_content` on
+    // assistant turns: stripped from the messages and resent. DeepSeek
+    // asking for a MISSING one is not a refusal and strips nothing.
+    #[test]
+    fn refused_reasoning_content_is_stripped_from_messages() {
+        let sent = json!({"model": "gpt-4.1", "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "tool_calls": [], "reasoning_content": "[reasoning unavailable]"},
+            {"role": "tool", "tool_call_id": "c", "content": "ok"}
+        ]});
+        let err = r#"{"error":{"message":"Additional properties are not allowed ('reasoning_content' was unexpected)","type":"invalid_request_error"}}"#;
+        let f = next_fix(400, err, &sent, &BodyFixes::default(), true).unwrap();
+        let mut b = sent.clone();
+        f.apply(&mut b);
+        assert!(b["messages"][1].get("reasoning_content").is_none());
+        assert_eq!(b["messages"][1]["role"], json!("assistant"));
+        assert_eq!(next_fix(400, err, &b, &f, true), None);
+        let unknown = r#"{"error":{"message":"Unrecognized request argument supplied: messages.1.reasoning_content"}}"#;
+        assert!(next_fix(400, unknown, &sent, &BodyFixes::default(), true).is_some());
+
+        let missing = r#"{"error":{"message":"Missing `reasoning_content` field in the assistant message at message index 1.","type":"invalid_request_error"}}"#;
+        assert_eq!(
+            next_fix(400, missing, &sent, &BodyFixes::default(), true),
+            None
+        );
     }
 
     #[test]

@@ -369,6 +369,7 @@ pub fn read_gateways() -> Result<JsonValue, Box<dyn Error>> {
 pub fn upsert_router_entry(entry: &JsonValue) -> Result<(), Box<dyn Error>> {
     let _rmw = providers_rmw_lock();
     let mut all = read_all_entries()?;
+    let before = all.clone();
     let mut entry = entry.clone();
     if let JsonValue::Object(o) = &mut entry {
         o.insert("kind".into(), JsonValue::from(ROUTER_KIND));
@@ -388,6 +389,12 @@ pub fn upsert_router_entry(entry: &JsonValue) -> Result<(), Box<dyn Error>> {
             *slot = entry;
         }
         None => all.push(entry),
+    }
+    // Every Router page read syncs the entry; nearly always nothing moved.
+    // An unchanged entry is not rewritten — the file holds every API key,
+    // and a write is also what the watcher and the tray react to.
+    if all == before {
+        return Ok(());
     }
     write_all_entries(all)
 }
@@ -521,6 +528,33 @@ mod tests {
         assert_eq!(
             cfg[ACTIVE_PROVIDER_IDS_KEY]["claude"],
             serde_json::json!("p99")
+        );
+    }
+
+    #[test]
+    fn upsert_router_entry_skips_an_unchanged_write() {
+        let _g = lock_home();
+        let dir = tempdir("upsert-noop");
+        let _h = override_home(&dir);
+        let entry = serde_json::json!({
+            "kind": ROUTER_KIND, "id": "r", "name": "Local Router",
+            "baseUrl": "http://127.0.0.1:1", "apiKey": "k", "bindings": []
+        });
+        upsert_router_entry(&entry).unwrap();
+        let path = providers_path().unwrap();
+        let first = fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        // The same entry again: no write.
+        upsert_router_entry(&entry).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), first);
+        // A real change is written.
+        let mut moved = entry.clone();
+        moved["baseUrl"] = serde_json::json!("http://127.0.0.1:2");
+        upsert_router_entry(&moved).unwrap();
+        assert_ne!(fs::metadata(&path).unwrap().modified().unwrap(), first);
+        assert_eq!(
+            read_gateways().unwrap()[0]["baseUrl"],
+            serde_json::json!("http://127.0.0.1:2")
         );
     }
 
