@@ -1318,7 +1318,10 @@ impl StreamTranslator {
         let p = &mut self.p;
 
         match type_str.as_str() {
-            "error" => {
+            // `response.failed` is the terminal event of a failed answer: an
+            // error for the client, like an `error` event — not a message
+            // closed as `end_turn`.
+            "error" | "response.failed" => {
                 self.errored = true;
                 out.push(codex_stream_error_to_claude_error(root));
             }
@@ -1556,7 +1559,11 @@ fn should_defer_codex_stream_event(type_str: &str, root: &Value) -> bool {
 
 // port of codexStreamErrorToClaudeError (codex_claude_response.go)
 fn codex_stream_error_to_claude_error(root: &Value) -> String {
-    let error = gp(root, "error").unwrap_or(&Value::Null);
+    // An `error` event carries it at the root; `response.failed` under
+    // `response.error`.
+    let error = gp(root, "error")
+        .or_else(|| gp(root, "response.error"))
+        .unwrap_or(&Value::Null);
     let mut err_type = gstr(error, "type").trim().to_string();
     if err_type.is_empty() {
         err_type = gstr(root, "error_type").trim().to_string();
@@ -2435,6 +2442,29 @@ mod tests {
     const GROK_SIG: &str = "HmlYdr2aCAqCYP/m9mr8PS6KOsdMs72FGDigmydR+Jsmuv8KX97yWPlbOwmXJgWn0CbHaCacdQD3+n5EvpgLfPNmafS3kdICBjRuDf4bzHy7uBiUhNVhqPtp/ee1y9q4imPE4LYgD1VZ4J+bp9mTeqA1+nC9Oue58CiNEMV9SVaGenCD+aBnVuSTzQhD32Y+68i6HLJW0Dx6ifaRfb8hxYtA/sPM+/FTvAMW11nRho5a2BBSkpnzfqqAz/e/vGJ77/bygpXM823QA9wL9i0X";
 
     // ───── request tests (codex_claude_request_test.go and friends) ─────
+
+    // A `response.failed` mid-stream (a plain Responses provider — the Codex
+    // relay reports it before the translator sees it) is an error event for
+    // Claude Code, and nothing is closed as complete afterwards.
+    #[test]
+    fn stream_response_failed_is_an_error_event() {
+        let mut t = StreamTranslator::new(&json!({}));
+        let created = t.push(
+            None,
+            &json!({"type": "response.created", "response": {"id": "resp_4", "model": "gpt-5"}}),
+        );
+        assert!(created.join("").contains("message_start"));
+        let out = t.push(
+            None,
+            &json!({"type": "response.failed", "response": {"id": "resp_4", "status": "failed",
+            "error": {"code": "server_error", "message": "The model produced invalid content."}}}),
+        );
+        assert_eq!(
+            out,
+            vec!["event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"The model produced invalid content.\"}}\n\n"]
+        );
+        assert!(t.finish().is_empty());
+    }
 
     #[test]
     fn request_full_body_exact() {

@@ -2081,6 +2081,19 @@ fn convert_claude_request_to_gemini(model_name: &str, raw: &Value, _stream: bool
             }
             _ => {}
         }
+        // The client asked for thinking it can show (Claude Code renders
+        // thinking blocks): without `includeThoughts` Gemini spends the
+        // budget and returns no thought parts, so the user sees only a pause.
+        if out
+            .pointer("/generationConfig/thinkingConfig")
+            .is_some_and(|c| c.is_object())
+        {
+            set_path(
+                &mut out,
+                &path_of(&["generationConfig", "thinkingConfig", "includeThoughts"]),
+                Value::Bool(true),
+            );
+        }
     }
     for (src, dst) in [
         ("temperature", "temperature"),
@@ -2219,11 +2232,14 @@ impl StreamTranslator {
 
                 if let Some(text) = text {
                     let text = gstr(Some(text));
-                    if gbool(part.get("thought")) || has_sig {
-                        if has_sig && text.is_empty() {
-                            self.signature_delta(&mut out, &sig);
-                            continue;
-                        }
+                    if has_sig && text.is_empty() {
+                        self.signature_delta(&mut out, &sig);
+                        continue;
+                    }
+                    // Only `thought: true` is thinking. Gemini 3 attaches the
+                    // thought signature to the LAST TEXT part of a text-only
+                    // answer — that part is the visible answer, not reasoning.
+                    if gbool(part.get("thought")) {
                         if self.response_type == 2 {
                             self.delta(
                                 &mut out,
@@ -2418,18 +2434,21 @@ pub fn translate_non_stream(upstream: &Value, original_request: &Value) -> Value
         for part in parts {
             let sig = gstr(thought_signature(part));
             let has_sig = !sig.is_empty();
-            if has_sig {
-                thinking_signature = sig;
-            }
             let text = part.get("text").map(|t| gstr(Some(t)));
             let function_call = part.get("functionCall");
+            let is_thought = gbool(part.get("thought"));
+            // A signature on a plain text part (Gemini 3's text-only answers)
+            // belongs to no thinking block: it is not carried.
+            if has_sig && (is_thought || text.as_deref().unwrap_or("").is_empty()) {
+                thinking_signature = sig;
+            }
 
             if has_sig && text.as_deref().unwrap_or("").is_empty() && function_call.is_none() {
                 continue;
             }
 
             if let Some(text) = text.filter(|t| !t.is_empty()) {
-                if gbool(part.get("thought")) || has_sig {
+                if is_thought {
                     flush_text(&mut text_buf, &mut blocks);
                     thinking_buf.push_str(&text);
                     continue;
@@ -2946,7 +2965,7 @@ mod tests {
                     "x-ext": {"type": "string"}},
                     "required": ["kind", "mode"]}}]}],
             "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}},
-            "generationConfig": {"thinkingConfig": {"thinkingBudget": 65535},
+            "generationConfig": {"thinkingConfig": {"thinkingBudget": 65535, "includeThoughts": true},
                                  "temperature": 0.5, "topP": 1, "topK": 40},
             "safetySettings": default_safety_settings()
         });
@@ -3213,23 +3232,50 @@ mod tests {
         assert_eq!(out.to_string(), want.to_string(), "key order");
     }
 
-    // port of TestConvertGeminiResponseToClaudeNonStream_PartWithThoughtSignatureWithoutThoughtBool
+    // Gemini 3 puts the thought signature on the last TEXT part of a
+    // text-only answer: that part is visible text, not thinking (Go's
+    // `thought || hasThoughtSignature` moved the end of the answer into the
+    // collapsed thinking block).
     #[test]
-    fn non_stream_part_with_thought_signature_without_thought_bool() {
+    fn non_stream_signed_plain_text_part_stays_text() {
         let request =
-            json!({"model": "gemini-2.5-pro", "messages": [{"role": "user", "content": "hi"}]});
+            json!({"model": "gemini-3-pro", "messages": [{"role": "user", "content": "hi"}]});
         let out = translate_non_stream(
             &json!({"candidates": [{"content": {"parts": [
-                        {"text": "inferred reasoning", "thought_signature": "sig-snake-case"},
-                        {"text": "final answer"}]}, "finishReason": "STOP"}],
+                        {"text": "thinking…", "thought": true},
+                        {"text": "The capital of France"},
+                        {"text": " is Paris.", "thought_signature": "CpYBAXSig=="}]}, "finishReason": "STOP"}],
                     "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5},
-                    "modelVersion": "gemini-2.5-pro", "responseId": "resp-non-stream-2"}),
+                    "modelVersion": "gemini-3-pro", "responseId": "resp-non-stream-2"}),
             &request,
         );
         assert_eq!(
             out["content"],
-            json!([{"type": "thinking", "thinking": "inferred reasoning", "signature": "sig-snake-case"},
-                   {"type": "text", "text": "final answer"}])
+            json!([{"type": "thinking", "thinking": "thinking…"},
+                   {"type": "text", "text": "The capital of France is Paris."}])
+        );
+    }
+
+    #[test]
+    fn stream_signed_plain_text_part_stays_text() {
+        let mut t = StreamTranslator::new(&json!({}));
+        let mut frames = String::new();
+        for chunk in [
+            json!({"candidates": [{"content": {"parts": [{"text": "thinking…", "thought": true}], "role": "model"}, "index": 0}], "responseId": "r1"}),
+            json!({"candidates": [{"content": {"parts": [{"text": "The capital of France"}], "role": "model"}, "index": 0}]}),
+            json!({"candidates": [{"content": {"parts": [{"text": " is Paris.", "thoughtSignature": "CpYBAXSig=="}], "role": "model"}, "index": 0, "finishReason": "STOP"}],
+                   "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 7, "totalTokenCount": 17}}),
+        ] {
+            frames.push_str(&t.push(None, &chunk).join(""));
+        }
+        frames.push_str(&t.finish().join(""));
+        assert!(
+            frames.contains("\"text_delta\",\"text\":\" is Paris.\""),
+            "{frames}"
+        );
+        assert!(
+            !frames.contains("\"thinking_delta\",\"thinking\":\" is Paris.\""),
+            "{frames}"
         );
     }
 

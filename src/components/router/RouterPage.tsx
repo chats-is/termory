@@ -335,12 +335,11 @@ export function RouterPage({
     const list = gateways.some((g) => g.id === next.id)
       ? gateways.map((g) => (g.id === next.id ? next : g))
       : [...gateways, next];
-    setGateways(list);
-    // Written to disk BEFORE re-activating: a router binding is activated
-    // from providers.json (`providers::activate` re-derives it there so a
-    // stale page copy can never write an old port or key), and the state
-    // setter above only persists in a later effect — activating first would
-    // apply the OLD binding while the page shows the new one.
+    // Written to disk BEFORE the page state changes and before
+    // re-activating: a router binding is activated from providers.json
+    // (`providers::activate` re-derives it there so a stale page copy can
+    // never write an old port or key), and a write that fails must leave
+    // the page showing what IS on disk — not a binding that never landed.
     try {
       await writeGateways(list);
     } catch (err) {
@@ -349,6 +348,7 @@ export function RouterPage({
       toast.error(t("router.saveFailed", { error: String(err) }));
       return;
     }
+    setGateways(list);
     if (prev) await reconcileAfterEdit(prev, next);
   };
 
@@ -401,19 +401,35 @@ export function RouterPage({
 
   React.useEffect(() => {
     void reload();
-    void loadBindingModels();
-  }, [reload, loadBindingModels]);
+  }, [reload]);
 
-  // The enabled provider set decides the catalog; refetch when it changes.
+  // The enabled provider set decides the catalog: ONE unforced load once it
+  // is known, and again when it changes. Unforced is enough — a provider
+  // just enabled has no listing yet and is fetched; the rest are served
+  // from the backend's cache until their TTL runs out. (Forcing here cost
+  // one full `/models` sweep of every provider per tool per visit.)
   const enabledKey = state?.candidates
     .filter((c) => c.enabled)
     .map((c) => c.key)
     .join("\n");
   React.useEffect(() => {
     if (enabledKey === undefined) return;
-    void loadBindingModels(true);
+    void loadBindingModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabledKey]);
+
+  // A tray switch, a Start that restored bindings or a Stop that suspended
+  // them all emit this after writing the CLIs' live configs: re-read the
+  // "In use" state and the router entry, like the Providers page does.
+  React.useEffect(() => {
+    const unlisten = listen("termory:providers-changed", () => {
+      void refreshInUse();
+      void refreshGateways();
+    });
+    return () => {
+      void unlisten.then((fn) => fn()).catch(() => {});
+    };
+  }, [refreshInUse, refreshGateways]);
 
   // Status changes (a request completed, start/stop) push an event; the
   // status read is cheap, the full candidate read is not, so only status

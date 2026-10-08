@@ -1840,6 +1840,26 @@ impl StreamTranslator {
         self.seq
     }
 
+    /// `response.failed` for an in-stream Chat error object; nothing follows.
+    fn fail_with(&mut self, err: &Value) -> Vec<String> {
+        let message = match gs(err, "message") {
+            m if m.is_empty() => "upstream request failed".to_string(),
+            m => m,
+        };
+        let code = match err.get("code") {
+            Some(Value::String(c)) if !c.is_empty() => c.clone(),
+            Some(Value::Number(n)) => n.to_string(),
+            _ => "server_error".to_string(),
+        };
+        self.completed_emitted = true;
+        self.started = true;
+        let seq = self.next_seq();
+        let failed = json!({"type":"response.failed","sequence_number": seq,"response":{
+            "id": self.response_id,"object":"response","created_at": self.created,"status":"failed",
+            "error": {"code": code, "message": message}}});
+        vec![emit_resp_event("response.failed", &failed)]
+    }
+
     fn alloc_output_index(&mut self) -> i64 {
         let ix = self.next_output_ix;
         self.next_output_ix += 1;
@@ -1866,6 +1886,16 @@ impl StreamTranslator {
         let empty = Value::Null;
         let root = chunk.unwrap_or(&empty);
         if !is_done {
+            // An error delivered inside the 200 stream (`{"error":{…}}`, no
+            // `choices`): the Responses client gets `response.failed` with
+            // the upstream's reason, not a stream that ends without its
+            // terminal event (Codex: "stream closed before
+            // response.completed", retried, the reason lost).
+            if let Some(err) = root.get("error").filter(|e| e.is_object()) {
+                if root.get("choices").is_none() {
+                    return self.fail_with(err);
+                }
+            }
             let obj = gs(root, "object");
             if !obj.is_empty() && obj != "chat.completion.chunk" {
                 return Vec::new();
@@ -1971,7 +2001,11 @@ impl StreamTranslator {
             if has_active_unfinished_tool {
                 return out;
             }
-            if self.msg_item_added.is_empty() && self.func_item_added.is_empty() {
+            // Go returns here when no message or function item was produced
+            // (an empty answer, reasoning only): the client then waits for
+            // a `response.completed` that never comes. The terminal event is
+            // sent with whatever output there is.
+            if false {
                 return out;
             }
             self.completed_emitted = true;
@@ -2606,6 +2640,23 @@ mod tests {
             event.to_string(),
             serde_json::from_str(data).expect("frame data is JSON"),
         )
+    }
+
+    /// DeepSeek-style reasoning-only answer, then `[DONE]`: the terminal
+    /// `response.completed` arrives with the reasoning item as its output —
+    /// without it Codex reports "stream closed before response.completed".
+    fn reasoning_only_stream_completes() {
+        let mut t = StreamTranslator::new(&json!({"model": "deepseek-v4-flash"}));
+        t.push(None, &json!({"id":"resp_reasoning_only","object":"chat.completion.chunk","created":1773896263,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"still thinking"},"finish_reason":null}]}));
+        let done = t.finish();
+        let last = parse_frame(done.last().expect("terminal frame"));
+        assert_eq!(last.0, "response.completed");
+        assert_eq!(last.1["response"]["status"], json!("completed"));
+        assert_eq!(last.1["response"]["output"][0]["type"], json!("reasoning"));
+        assert_eq!(
+            last.1["response"]["output"][0]["summary"][0]["text"],
+            json!("still thinking")
+        );
     }
 
     fn frames_as_json(frames: &[String]) -> Value {
@@ -3359,7 +3410,9 @@ mod tests {
 
     #[test]
     fn go_stream_does_not_complete_reasoning_only_stream() {
-        run_golden("TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoesNotCompleteReasoningOnlyStream", 1);
+        // Termory diverges from Go here: a reasoning-only stream still gets its
+        // `response.completed` (Go left the client waiting for it).
+        reasoning_only_stream_completes();
     }
 
     #[test]

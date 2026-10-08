@@ -31,6 +31,30 @@ static EFFORT_LEVELS_NAMED: LazyLock<Regex> =
 static BUILTIN_WITH_FUNCTIONS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)built-in tools.{0,80}function calling.{0,40}cannot be combined").unwrap()
 });
+/// OpenAI's refusal of `max_tokens` on its reasoning models: "Unsupported
+/// parameter: 'max_tokens' is not supported with this model. Use
+/// 'max_completion_tokens' instead." — the body is resent with the field
+/// renamed. Not in magpie (it never speaks Chat Completions to OpenAI).
+static MAX_COMPLETION_TOKENS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?i)max_tokens.{0,120}max_completion_tokens|max_completion_tokens.{0,120}max_tokens"#,
+    )
+    .unwrap()
+});
+/// OpenAI's refusal of `reasoning` on a model without it ("Unsupported
+/// parameter: 'reasoning.effort' is not supported with this model."): the
+/// field is dropped and the body resent.
+static UNSUPPORTED_REASONING: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)unsupported parameter:?\s*'?(reasoning(\.effort)?|reasoning_effort)\b")
+        .unwrap()
+});
+/// OpenAI's refusal of an effort level the model lacks ("Invalid value:
+/// 'xhigh'. Supported values are: 'minimal', 'low', 'medium', and 'high'."):
+/// the effort is lowered to the highest value named.
+static EFFORT_SUPPORTED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)invalid value:?\s*'(?:minimal|low|medium|high|xhigh|max)'.{0,160}?supported values are:?\s*([^.]+)").unwrap()
+});
+const EFFORT_ORDER: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
 static SHAPE_WORDS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)failed to deserialize|unknown (item |content |input )?(type|variant|field|parameter)|unknown_parameter|unrecognized (request argument|field|parameter)|extra (inputs|fields) are not permitted|additional properties are not allowed").unwrap()
 });
@@ -92,6 +116,11 @@ pub struct BodyFixes {
     pub token_floor: Option<u64>,
     pub effort_low: bool,
     pub drop_builtin_tools: bool,
+    /// `max_tokens` → `max_completion_tokens` (Chat Completions).
+    pub rename_max_tokens: bool,
+    /// The highest reasoning effort the member takes; anything above it
+    /// is lowered to it.
+    pub effort_cap: Option<String>,
 }
 
 impl BodyFixes {
@@ -117,6 +146,13 @@ impl BodyFixes {
         for f in &self.drop_fields {
             o.remove(f);
         }
+        if self.rename_max_tokens {
+            if let Some(v) = o.remove("max_tokens") {
+                if !o.contains_key("max_completion_tokens") {
+                    o.insert("max_completion_tokens".into(), v);
+                }
+            }
+        }
         if let Some(floor) = self.token_floor {
             for k in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
                 raise(o, k, floor);
@@ -138,6 +174,29 @@ impl BodyFixes {
                     if p.get("effort").is_some_and(off) {
                         p.insert("effort".into(), "low".into());
                     }
+                }
+            }
+        }
+        if let Some(cap) = &self.effort_cap {
+            let rank = |v: &str| EFFORT_ORDER.iter().position(|e| *e == v);
+            let cap_rank = rank(cap);
+            let lower = |v: &mut JsonValue| {
+                if let (Some(cur), Some(c)) = (v.as_str().and_then(rank), cap_rank) {
+                    if cur > c {
+                        *v = JsonValue::from(cap.as_str());
+                    }
+                }
+            };
+            if let Some(v) = o.get_mut("reasoning_effort") {
+                lower(v);
+            }
+            for parent in ["reasoning", "output_config"] {
+                if let Some(v) = o
+                    .get_mut(parent)
+                    .and_then(|p| p.as_object_mut())
+                    .and_then(|p| p.get_mut("effort"))
+                {
+                    lower(v);
                 }
             }
         }
@@ -255,6 +314,48 @@ pub fn next_fix(
             }
         }
     }
+    if bad_request(status) && UNSUPPORTED_REASONING.is_match(text) {
+        let mut next = cur.clone();
+        for f in ["reasoning", "reasoning_effort"] {
+            if sent.get(f).is_some() && !next.drop_fields.iter().any(|d| d == f) {
+                next.drop_fields.push(f.to_string());
+            }
+        }
+        if let Some(n) = changes(next) {
+            return Some(n);
+        }
+    }
+    if bad_request(status) && cur.effort_cap.is_none() {
+        if let Some(m) = EFFORT_SUPPORTED.captures(text) {
+            let listed = m
+                .get(1)
+                .map(|g| g.as_str().to_ascii_lowercase())
+                .unwrap_or_default();
+            let cap = EFFORT_ORDER
+                .iter()
+                .rev()
+                .find(|e| {
+                    listed.contains(&format!("'{e}'")) || listed.contains(&format!("\"{e}\""))
+                })
+                .map(|e| e.to_string());
+            if let Some(cap) = cap {
+                if let Some(n) = changes(BodyFixes {
+                    effort_cap: Some(cap),
+                    ..cur.clone()
+                }) {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    if bad_request(status) && !cur.rename_max_tokens && MAX_COMPLETION_TOKENS.is_match(text) {
+        if let Some(n) = changes(BodyFixes {
+            rename_max_tokens: true,
+            ..cur.clone()
+        }) {
+            return Some(n);
+        }
+    }
     if status == 400 && !cur.effort_low && EFFORT_LEVELS_NAMED.is_match(text) {
         if let Some(n) = changes(BodyFixes {
             effort_low: true,
@@ -312,6 +413,60 @@ mod tests {
             json!([{"type": "message", "role": "user", "content": "hi"}])
         );
         assert_eq!(next_fix(400, err, &c, &f2, true), None);
+    }
+
+    // OpenAI's own wording for `max_tokens` on a reasoning model: the field
+    // is renamed and the member resent — not cooled down, not skipped.
+    #[test]
+    fn max_tokens_is_renamed_when_the_error_names_max_completion_tokens() {
+        let sent = json!({"model": "o3", "max_tokens": 4096, "messages": []});
+        let err = r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","type":"invalid_request_error","param":"max_tokens","code":"unsupported_parameter"}}"#;
+        let f = next_fix(400, err, &sent, &BodyFixes::default(), true).unwrap();
+        assert!(f.rename_max_tokens);
+        let mut b = sent.clone();
+        f.apply(&mut b);
+        assert_eq!(
+            b,
+            json!({"model": "o3", "max_completion_tokens": 4096, "messages": []})
+        );
+        // Already renamed: nothing more to do.
+        assert_eq!(next_fix(400, err, &b, &f, true), None);
+        // A body without the field is not resent.
+        let no_field = json!({"model": "o3", "messages": []});
+        assert_eq!(
+            next_fix(400, err, &no_field, &BodyFixes::default(), true),
+            None
+        );
+    }
+
+    // OpenAI's own wording for `reasoning` on a model without it (gpt-4.1)
+    // and for an effort level the model lacks (xhigh on gpt-5): the field
+    // is dropped / lowered and the member resent instead of the 400 reaching
+    // the client on every turn.
+    #[test]
+    fn openai_reasoning_refusals_are_repaired() {
+        let sent = json!({"model": "gpt-4.1", "input": "hi", "reasoning": {"effort": "medium"}});
+        let err = r#"{"error":{"message":"Unsupported parameter: 'reasoning.effort' is not supported with this model.","type":"invalid_request_error","param":"reasoning.effort","code":"unsupported_parameter"}}"#;
+        let f = next_fix(400, err, &sent, &BodyFixes::default(), true).unwrap();
+        assert_eq!(f.drop_fields, vec!["reasoning".to_string()]);
+        let mut b = sent.clone();
+        f.apply(&mut b);
+        assert!(b.get("reasoning").is_none());
+
+        let chat = json!({"model": "gpt-4.1", "messages": [], "reasoning_effort": "medium"});
+        let err = r#"{"error":{"message":"Unsupported parameter: 'reasoning_effort' is not supported with this model.","type":"invalid_request_error","param":"reasoning_effort","code":"unsupported_parameter"}}"#;
+        let f = next_fix(400, err, &chat, &BodyFixes::default(), true).unwrap();
+        assert_eq!(f.drop_fields, vec!["reasoning_effort".to_string()]);
+
+        let sent = json!({"model": "gpt-5", "input": "hi", "reasoning": {"effort": "xhigh"}});
+        let err = r#"{"error":{"message":"Invalid value: 'xhigh'. Supported values are: 'minimal', 'low', 'medium', and 'high'.","type":"invalid_request_error","param":"reasoning.effort","code":"invalid_value"}}"#;
+        let f = next_fix(400, err, &sent, &BodyFixes::default(), true).unwrap();
+        assert_eq!(f.effort_cap.as_deref(), Some("high"));
+        let mut b = sent.clone();
+        f.apply(&mut b);
+        assert_eq!(b["reasoning"]["effort"], json!("high"));
+        // Already at or under the cap: nothing more to do.
+        assert_eq!(next_fix(400, err, &b, &f, true), None);
     }
 
     #[test]

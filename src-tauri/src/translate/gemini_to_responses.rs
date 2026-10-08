@@ -694,6 +694,33 @@ impl StreamTranslator {
         }
 
         match type_str.as_str() {
+            // A failure delivered inside the stream (`error`, or the
+            // terminal `response.failed`): the Gemini client gets an error
+            // object, and a function call still buffered is dropped — it
+            // belongs to the answer that failed.
+            "error" | "response.failed" => {
+                self.last_storage_output.clear();
+                let err = gp(root, "error")
+                    .or_else(|| gp(root, "response.error"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let mut message = gs(gp(&err, "message"));
+                if message.is_empty() {
+                    message = gs(gp(root, "message"));
+                }
+                if message.is_empty() {
+                    message = gs(gp(&err, "code"));
+                }
+                if message.is_empty() {
+                    message = "upstream request failed".to_string();
+                }
+                let status = gs(gp(&err, "type"));
+                return vec![json!({ "error": {
+                    "code": 500,
+                    "message": message,
+                    "status": if status.is_empty() { "INTERNAL".to_string() } else { status },
+                }})];
+            }
             "response.created" => {
                 let model = gs(gp(root, "response.model"));
                 template["modelVersion"] = json!(model);
@@ -753,6 +780,13 @@ impl StreamTranslator {
                             root,
                             "response.incomplete_details.reason"
                         ))));
+                } else if self.last_storage_output.is_empty() {
+                    // A text-only answer: the Gemini client needs a
+                    // finishReason on the last chunk (Gemini CLI fails a
+                    // stream without one as "ended without a finish reason"
+                    // and re-sends the prompt). A buffered function call
+                    // carries its own STOP.
+                    template["candidates"][0]["finishReason"] = json!("STOP");
                 }
             }
             _ => return Vec::new(),
@@ -918,6 +952,24 @@ mod tests {
     }
 
     // port of TestConvertGeminiRequestToCodex_PreservesCustomCallIDs
+    // A `response.failed` mid-stream reaches the Gemini client as an error
+    // object; a buffered function call of the failed answer is dropped.
+    #[test]
+    fn stream_response_failed_becomes_error() {
+        let mut t = StreamTranslator::new(&json!({}));
+        t.push(None, &json!({"type": "response.output_item.done", "item": {"type": "function_call", "call_id": "c1", "name": "lookup", "arguments": "{}"}}));
+        let out = t.push(
+            None,
+            &json!({"type": "response.failed", "response": {"status": "failed",
+            "error": {"code": "server_error", "message": "The model produced invalid output."}}}),
+        );
+        assert_eq!(
+            out,
+            vec!["data: {\"error\":{\"code\":500,\"message\":\"The model produced invalid output.\",\"status\":\"INTERNAL\"}}\n\n"]
+        );
+        assert!(t.finish().is_empty());
+    }
+
     #[test]
     fn preserves_custom_call_ids() {
         for (field, want) in [

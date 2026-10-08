@@ -2601,6 +2601,25 @@ impl StreamTranslator {
 
     // port of ConvertGeminiResponseToOpenAI (gemini_openai_response.go)
     fn convert(&mut self, raw: &Value) -> Vec<Value> {
+        // An error delivered inside the 200 stream (`{"error":{"code":429,
+        // "status":"RESOURCE_EXHAUSTED",…}}`, no candidates): the chat client
+        // gets the error chunk OpenAI-compatible servers send, not a
+        // `[DONE]` with no finish_reason.
+        if let Some(err) = raw.get("error").filter(|e| e.is_object()) {
+            if raw.get("candidates").is_none() {
+                let mut message = gstr(err.get("message"));
+                if message.is_empty() {
+                    message = "upstream request failed".to_string();
+                }
+                let code = match gstr(err.get("status")).as_str() {
+                    "" => Value::Null,
+                    s => Value::String(s.to_ascii_lowercase()),
+                };
+                return vec![
+                    json!({"error": {"message": message, "type": "server_error", "code": code}}),
+                ];
+            }
+        }
         let mut base = json!({
             "id": "",
             "object": "chat.completion.chunk",
@@ -2683,12 +2702,14 @@ impl StreamTranslator {
                         template["choices"][0]["delta"][key] = Value::String(gstr(Some(t)));
                     } else if let Some(fc) = function_call {
                         self.saw_tool_call.insert(cand_idx, true);
+                        // The index is the call's position across the WHOLE
+                        // stream (an OpenAI client merges deltas by it), not
+                        // its position inside this chunk.
                         let counter = self.function_index.entry(cand_idx).or_insert(0);
-                        let mut fc_index = *counter;
+                        let fc_index = *counter;
                         *counter += 1;
-                        match &template["choices"][0]["delta"]["tool_calls"] {
-                            Value::Array(a) => fc_index = a.len() as i64,
-                            _ => template["choices"][0]["delta"]["tool_calls"] = json!([]),
+                        if !template["choices"][0]["delta"]["tool_calls"].is_array() {
+                            template["choices"][0]["delta"]["tool_calls"] = json!([]);
                         }
                         let name = restore_sanitized_tool_name(
                             self.sanitized_name_map.as_ref(),
@@ -3800,6 +3821,23 @@ mod tests {
                 "images": [{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="},"index":0}]
             })
         );
+    }
+
+    // Two calls in a LATER chunk must take the next indexes of the stream
+    // (1 and 2), not restart at the chunk's own positions — an index that
+    // repeats makes the client merge two calls' arguments into one.
+    #[test]
+    fn streaming_tool_call_indexes_continue_across_chunks() {
+        let mut t = StreamTranslator::new(&Value::Null);
+        let r1 = frames(t.push(None, &json!({"candidates":[{"index":0,"content":{"parts":[{"functionCall":{"name":"a","args":{}}}]}}]})));
+        assert_eq!(
+            r1[0]["choices"][0]["delta"]["tool_calls"][0]["index"],
+            json!(0)
+        );
+        let r2 = frames(t.push(None, &json!({"candidates":[{"index":0,"content":{"parts":[{"functionCall":{"name":"b","args":{}}},{"functionCall":{"name":"c","args":{}}}]}}]})));
+        let calls = &r2[0]["choices"][0]["delta"]["tool_calls"];
+        assert_eq!(calls[0]["index"], json!(1));
+        assert_eq!(calls[1]["index"], json!(2));
     }
 
     // ── gemini_openai_response_test.go ──

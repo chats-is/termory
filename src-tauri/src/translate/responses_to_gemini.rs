@@ -6727,6 +6727,30 @@ impl StreamTranslator {
     fn convert(&mut self, raw_root: &Value) {
         let root = unwrap_gemini_response_root(raw_root).clone();
 
+        // An error delivered inside the 200 stream (`{"error":{"code":429,
+        // "status":"RESOURCE_EXHAUSTED",…}}`, no candidates): the Responses
+        // client gets `response.failed` with the reason, not a stream closed
+        // as completed with the partial text.
+        if let Some(err) = root.get("error").filter(|e| e.is_object()) {
+            if root.get("candidates").is_none() {
+                let message = match gs(err, "message") {
+                    m if m.is_empty() => "upstream request failed".to_string(),
+                    m => m,
+                };
+                let code = match gs(err, "status") {
+                    s if s.is_empty() => "server_error".to_string(),
+                    s => s.to_ascii_lowercase(),
+                };
+                let seq = self.next_seq();
+                let failed = json!({"type":"response.failed","sequence_number":seq,"response":{
+                    "id":self.response_id,"object":"response","created_at":self.created_at,"status":"failed",
+                    "error":{"code":code,"message":message}}});
+                self.emit("response.failed", failed);
+                self.completed = true;
+                return;
+            }
+        }
+
         if !self.started {
             self.response_id = gs(&root, "responseId");
             if self.response_id.is_empty() {
@@ -7162,8 +7186,24 @@ impl StreamTranslator {
             self.func_done.insert(idx);
         }
 
+        // A Gemini `MAX_TOKENS` is a truncated answer: `response.incomplete`
+        // with `max_output_tokens`, which is how Codex learns to say so
+        // (Go reports every finish as completed).
+        let truncated = gs(root, "candidates.0.finishReason") == "MAX_TOKENS";
+        let (event, status) = if truncated {
+            ("response.incomplete", "incomplete")
+        } else {
+            ("response.completed", "completed")
+        };
         let seq = self.next_seq();
-        let mut completed = json!({"type":"response.completed","sequence_number":seq,"response":{"id":self.response_id,"object":"response","created_at":self.created_at,"status":"completed","background":false,"error":null}});
+        let mut completed = json!({"type":event,"sequence_number":seq,"response":{"id":self.response_id,"object":"response","created_at":self.created_at,"status":status,"background":false,"error":null}});
+        if truncated {
+            set_path(
+                &mut completed,
+                "response.incomplete_details",
+                json!({"reason": "max_output_tokens"}),
+            );
+        }
         if let Some(req) = self.req_json().cloned() {
             echo_request_fields(&mut completed, "response", unwrap_request_root(&req));
         }
@@ -7257,7 +7297,7 @@ impl StreamTranslator {
                 json!(gint(um.get("totalTokenCount"))),
             );
         }
-        self.emit("response.completed", completed);
+        self.emit(event, completed);
         self.completed = true;
     }
 }

@@ -1581,12 +1581,18 @@ fn apply_compatible_claude(mut body: Value, config: &ThinkingConfig) -> Value {
             body
         }
         ThinkingMode::Budget => {
+            // Anthropic requires `budget_tokens < max_tokens`: a suffix like
+            // `claude-x(8192)` on a request with a small `max_tokens`
+            // (Claude Code's title and summary calls) is capped under it,
+            // else every such request is a 400.
+            let max_tokens = body.get("max_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+            let budget = if max_tokens > 1 && config.budget >= max_tokens {
+                max_tokens - 1
+            } else {
+                config.budget
+            };
             sj_set(&mut body, "thinking.type", Value::from("enabled"));
-            sj_set(
-                &mut body,
-                "thinking.budget_tokens",
-                Value::from(config.budget),
-            );
+            sj_set(&mut body, "thinking.budget_tokens", Value::from(budget));
             sj_delete(&mut body, "output_config.effort");
             sj_delete_if_empty_object(&mut body, "output_config");
             body
@@ -3944,9 +3950,16 @@ mod tests {
             )
             .unwrap()
         };
+        // Anthropic wants `budget_tokens < max_tokens`: a suffix larger than
+        // the request's `max_tokens` (Claude Code's small helper calls) is
+        // capped under it instead of earning a 400 on every such request.
         assert_eq!(
             claude("claude-x(8192)"),
-            j(r#"{"max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":8192}}"#)
+            j(r#"{"max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":4095}}"#)
+        );
+        assert_eq!(
+            claude("claude-x(2048)"),
+            j(r#"{"max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":2048}}"#)
         );
         assert_eq!(
             claude("claude-x(high)"),

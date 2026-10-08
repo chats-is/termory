@@ -468,7 +468,7 @@ export const en = {
   "router.portDesc": "Stop the router to change it.",
   "router.apiKey": "API Key",
   "router.apiKeyDesc": "Clients send it as Authorization: Bearer, x-api-key, x-goog-api-key or ?key=. Requests without it are refused. Stop the router to regenerate it.",
-  "router.apiKeyNone": "No key set — any client on this machine is accepted.",
+  "router.apiKeyNone": "No key yet — one is generated when the router starts. Until then every request is refused.",
   "router.regenerate": "Regenerate key",
   "router.strategy": "Routing",
   "router.strategyDesc": "Failover: first healthy upstream in order. Round-robin: rotate the start, still failing over.",

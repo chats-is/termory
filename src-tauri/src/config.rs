@@ -165,6 +165,32 @@ pub fn write_config(value: &JsonValue) -> Result<(), Box<dyn Error>> {
     write_json_atomic_0600(&config_path()?, value)
 }
 
+/// One lock around every read-modify-write of config.json. Its writers
+/// each read the whole document, change ONE key and write it back whole —
+/// the renderer's per-key writes (route, panes, tool toggles) and the
+/// backend's activation marker (the tray's switch, the router's binding
+/// suspend/restore on launch and quit) run on different threads, and two
+/// interleaved read→write cycles silently lose whichever key was written
+/// first.
+fn config_rmw_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Read config.json, let `f` change it, write it back — under the RMW lock.
+/// `f` sees the top-level object.
+pub fn update_config_object(
+    f: impl FnOnce(&mut Map<String, JsonValue>),
+) -> Result<(), Box<dyn Error>> {
+    let _g = config_rmw_lock();
+    let mut cfg = read_config()?;
+    let obj = cfg
+        .as_object_mut()
+        .ok_or_else(|| "config.json is not a JSON object".to_string())?;
+    f(obj);
+    write_config(&cfg)
+}
+
 /// config.json key holding the per-CLI activation markers (`{ cli: providerId }`).
 /// Written by the Providers page's `markActive` and by the tray's own switch;
 /// read by BOTH reverse-derivations to disambiguate a standalone provider and a
@@ -210,26 +236,23 @@ pub fn active_provider_markers() -> std::collections::HashMap<String, String> {
 /// provider vs a gateway binding that share creds. `id = None` removes the
 /// CLI's entry (Set Official).
 pub fn set_active_provider_marker(cli_key: &str, id: Option<&str>) -> Result<(), Box<dyn Error>> {
-    let mut cfg = read_config()?;
-    let obj = cfg
-        .as_object_mut()
-        .ok_or_else(|| "config.json is not a JSON object".to_string())?;
-    let markers = obj
-        .entry(ACTIVE_PROVIDER_IDS_KEY)
-        .or_insert_with(|| JsonValue::Object(Map::new()));
-    if !markers.is_object() {
-        *markers = JsonValue::Object(Map::new());
-    }
-    let map = markers.as_object_mut().expect("reset to object above");
-    match id {
-        Some(id) => {
-            map.insert(cli_key.to_string(), JsonValue::String(id.to_string()));
+    update_config_object(|obj| {
+        let markers = obj
+            .entry(ACTIVE_PROVIDER_IDS_KEY)
+            .or_insert_with(|| JsonValue::Object(Map::new()));
+        if !markers.is_object() {
+            *markers = JsonValue::Object(Map::new());
         }
-        None => {
-            map.remove(cli_key);
+        let map = markers.as_object_mut().expect("reset to object above");
+        match id {
+            Some(id) => {
+                map.insert(cli_key.to_string(), JsonValue::String(id.to_string()));
+            }
+            None => {
+                map.remove(cli_key);
+            }
         }
-    }
-    write_config(&cfg)
+    })
 }
 
 // ===================================================================
@@ -467,6 +490,38 @@ mod tests {
         dir.push(format!("termory-appconfig-{tag}-{nanos}"));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    // The renderer's per-key writes and the backend's activation marker
+    // run on different threads; each is a whole-document read→write, so
+    // without one lock the later write erases the earlier key.
+    #[test]
+    fn concurrent_config_writers_keep_each_others_keys() {
+        let _g = lock_home();
+        let dir = tempdir("rmw");
+        let _h = override_home(&dir);
+        write_config(&serde_json::json!({})).unwrap();
+        let a = std::thread::spawn(|| {
+            for i in 0..100 {
+                update_config_object(|o| {
+                    o.insert("route".into(), serde_json::json!(i));
+                })
+                .unwrap();
+            }
+        });
+        let b = std::thread::spawn(|| {
+            for i in 0..100 {
+                set_active_provider_marker("claude", Some(&format!("p{i}"))).unwrap();
+            }
+        });
+        a.join().unwrap();
+        b.join().unwrap();
+        let cfg = read_config().unwrap();
+        assert_eq!(cfg["route"], serde_json::json!(99));
+        assert_eq!(
+            cfg[ACTIVE_PROVIDER_IDS_KEY]["claude"],
+            serde_json::json!("p99")
+        );
     }
 
     #[test]

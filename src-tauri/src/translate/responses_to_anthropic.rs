@@ -903,8 +903,8 @@ type ClaudeModelInfo = (i64, Option<(i64, Vec<String>)>);
 
 /// Stand-in for `registry.LookupModelInfo(model, "claude")`
 /// (internal/registry/model_registry.go). Termory has no model registry.
-fn lookup_claude_model_info(_model: &str) -> Option<ClaudeModelInfo> {
-    None
+fn lookup_claude_model_info(model: &str) -> Option<ClaudeModelInfo> {
+    crate::translate::claude_thinking_support(model).map(|t| (0, Some(t)))
 }
 
 // port of ConvertLevelToBudget (thinking/convert.go)
@@ -935,7 +935,10 @@ fn map_to_claude_effort(level: &str, supports_max: bool) -> Option<String> {
     match level.as_str() {
         "minimal" => Some("low".to_string()),
         "low" | "medium" | "high" => Some(level),
-        "xhigh" | "max" => Some(if supports_max { "max" } else { "high" }.to_string()),
+        // Claude has `xhigh` of its own: a client's xhigh stays xhigh,
+        // only `max` is max.
+        "xhigh" => Some(if supports_max { "xhigh" } else { "high" }.to_string()),
+        "max" => Some(if supports_max { "max" } else { "high" }.to_string()),
         "auto" => Some("high".to_string()),
         _ => None,
     }
@@ -1819,10 +1822,13 @@ fn convert_openai_responses_request_to_claude(
 
             if supports_adaptive {
                 match effort.as_str() {
+                    // "none": `disabled` is a 400 on Opus 5.5, Sonnet 5.5
+                    // and the Fable tier; adaptive at the lowest effort is
+                    // accepted everywhere adaptive is.
                     "none" => {
-                        sj_set(&mut out, "thinking.type", Value::from("disabled"));
+                        sj_set(&mut out, "thinking.type", Value::from("adaptive"));
                         sj_delete(&mut out, "thinking.budget_tokens");
-                        sj_delete(&mut out, "output_config.effort");
+                        sj_set(&mut out, "output_config.effort", Value::from("low"));
                     }
                     "auto" => {
                         sj_set(&mut out, "thinking.type", Value::from("adaptive"));
@@ -1842,7 +1848,11 @@ fn convert_openai_responses_request_to_claude(
                 // Legacy/manual thinking (budget_tokens).
                 match budget {
                     0 => sj_set(&mut out, "thinking.type", Value::from("disabled")),
-                    -1 => sj_set(&mut out, "thinking.type", Value::from("enabled")),
+                    // `enabled` needs a budget: "auto" takes the medium one.
+                    -1 => {
+                        sj_set(&mut out, "thinking.type", Value::from("enabled"));
+                        sj_set(&mut out, "thinking.budget_tokens", Value::from(8192));
+                    }
                     b if b > 0 => {
                         sj_set(&mut out, "thinking.type", Value::from("enabled"));
                         sj_set(&mut out, "thinking.budget_tokens", Value::from(b));
@@ -2247,6 +2257,7 @@ fn convert_openai_responses_request_to_claude(
     }
 
     apply_translated_summary_to_claude(&mut out, &raw, model_name);
+    crate::translate::clamp_claude_budget(&mut out);
     out
 }
 
@@ -3240,14 +3251,26 @@ fn split_responses_qualified_function_call_from_request(
     };
     let descriptors = responses_tool_descriptors(root);
     let winners = responses_tool_winners(&descriptors);
-    let Some(&w) = winners.get(qualified_name) else {
-        return (qualified_name.to_string(), String::new());
+    // Claude answers with the name it was DECLARED — the sanitized form
+    // (non-`[A-Za-z0-9_-]` replaced, cut at 64 chars). A long MCP tool name
+    // comes back truncated, which Codex never declared; map it back to the
+    // request's own name.
+    let original = match winners.get(qualified_name) {
+        Some(_) => qualified_name.to_string(),
+        None => match winners
+            .keys()
+            .find(|k| sanitize_claude_function_name(k) == qualified_name)
+        {
+            Some(k) => k.clone(),
+            None => return (qualified_name.to_string(), String::new()),
+        },
     };
+    let w = winners[&original];
     let descriptor = &descriptors[w];
     if !descriptor.direct {
         return (descriptor.child_name.clone(), descriptor.namespace.clone());
     }
-    (qualified_name.to_string(), String::new())
+    (original, String::new())
 }
 
 // port of isUnsupportedOpenAIBuiltinToolType (claude_openai-responses_request.go)
@@ -5307,11 +5330,13 @@ mod tests {
                 r#"{{"model":"claude-opus-5-5","reasoning":{{"effort":"high"{summary}}},"input":"hi"}}"#
             );
             let out = convert("claude-opus-5-5", &raw);
-            let mut thinking = json!({"type": "enabled", "budget_tokens": 24576});
+            // Opus 5.5: adaptive thinking (budget_tokens is a 400).
+            let mut thinking = json!({"type": "adaptive"});
             if let Some(display) = want {
                 thinking["display"] = json!(display);
             }
             assert_eq!(out["thinking"], thinking, "summary {summary:?}");
+            assert_eq!(out["output_config"]["effort"], json!("high"));
         }
     }
 
@@ -6078,13 +6103,57 @@ mod tests {
         }
     }
 
+    // A Codex MCP tool name longer than Claude's 64-char limit is declared
+    // truncated; the call Claude makes with the truncated name comes back
+    // under the name Codex declared.
+    #[test]
+    fn truncated_tool_name_is_restored_on_the_way_back() {
+        let long = format!("mcp__some-very-long-server-name__{}", "x".repeat(70));
+        let request = json!({"model": "claude-sonnet-4-5", "input": "hi",
+            "tools": [{"type": "function", "name": long, "parameters": {"type": "object", "properties": {}}}]});
+        let declared = sanitize_claude_function_name(&long);
+        assert_eq!(declared.len(), 64);
+        let (name, ns) =
+            split_responses_qualified_function_call_from_request(Some(&request), &declared);
+        assert_eq!(name, long);
+        assert_eq!(ns, "");
+    }
+
+    // Codex's default `reasoning.effort` against a current Claude model:
+    // adaptive thinking with the effort — `budget_tokens` is a 400 there.
+    #[test]
+    fn codex_effort_against_current_claude_models_is_adaptive() {
+        for (model, effort, want_effort) in [
+            ("claude-opus-5-5", "medium", "medium"),
+            ("claude-sonnet-5", "xhigh", "xhigh"),
+            ("claude-fable-5-1", "none", "low"),
+            ("claude-opus-4-7", "high", "high"),
+        ] {
+            let out = convert(
+                model,
+                &format!(r#"{{"input":"hi","reasoning":{{"effort":"{effort}"}}}}"#),
+            );
+            assert_eq!(
+                out["thinking"],
+                json!({"type": "adaptive"}),
+                "{model} {effort}"
+            );
+            assert_eq!(
+                out["output_config"]["effort"],
+                json!(want_effort),
+                "{model} {effort}"
+            );
+        }
+    }
+
     #[test]
     fn reasoning_effort_maps_to_manual_thinking_without_registry() {
         for (effort, want) in [
             ("none", json!({"type": "disabled"})),
-            ("auto", json!({"type": "enabled"})),
+            ("auto", json!({"type": "enabled", "budget_tokens": 8192})),
             ("minimal", json!({"type": "enabled", "budget_tokens": 512})),
-            ("xhigh", json!({"type": "enabled", "budget_tokens": 32768})),
+            // 32768 is capped under the default max_tokens (32000).
+            ("xhigh", json!({"type": "enabled", "budget_tokens": 31999})),
         ] {
             let out = convert(
                 "claude-sonnet-4-5",

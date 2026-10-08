@@ -443,7 +443,7 @@ export const zhHans: Record<MessageKey, string> = {
   "router.portDesc": "停止路由后才能修改。",
   "router.apiKey": "API Key",
   "router.apiKeyDesc": "客户端以 Authorization: Bearer、x-api-key、x-goog-api-key 或 ?key= 携带。没有携带的请求一律拒绝。停止路由后才能重新生成。",
-  "router.apiKeyNone": "未设置 Key,本机任意客户端都可访问。",
+  "router.apiKeyNone": "尚未生成 Key,启动路由时会自动生成;在此之前所有请求一律拒绝。",
   "router.regenerate": "重新生成 Key",
   "router.strategy": "路由策略",
   "router.strategyDesc": "故障切换:按顺序取第一个健康上游;轮询:依次轮换起点,失败时同样切换。",

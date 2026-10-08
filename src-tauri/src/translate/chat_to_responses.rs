@@ -792,6 +792,13 @@ impl StreamTranslator {
             self.model = gstr(get(root, "response.model"));
             return Vec::new();
         }
+        // A failure delivered inside the stream (`error`, or the terminal
+        // `response.failed`): the chat client gets the error chunk
+        // OpenAI-compatible servers emit, not a stream that just ends as if
+        // the answer were complete.
+        if data_type == "error" || data_type == "response.failed" {
+            return vec![json!({ "error": responses_stream_error(root) })];
+        }
 
         // Extract and set the model version.
         if let Some(model) = get(root, "model") {
@@ -1402,6 +1409,31 @@ fn gint(v: Option<&Value>) -> i64 {
     }
 }
 
+/// The `{message, type, code}` of an in-stream failure: `error` at the
+/// root (an `error` event) or under `response` (`response.failed`).
+fn responses_stream_error(root: &Value) -> Value {
+    let err = get(root, "error")
+        .or_else(|| get(root, "response.error"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let mut message = gstr(get(&err, "message"));
+    if message.is_empty() {
+        message = gstr(get(root, "message"));
+    }
+    let mut kind = gstr(get(&err, "type"));
+    if kind.is_empty() {
+        kind = "server_error".to_string();
+    }
+    let code = get(&err, "code").cloned().unwrap_or(Value::Null);
+    if message.is_empty() {
+        message = match &code {
+            Value::String(c) if !c.is_empty() => c.clone(),
+            _ => kind.clone(),
+        };
+    }
+    json!({ "message": message, "type": kind, "code": code })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1418,6 +1450,39 @@ mod tests {
 
     fn req(body: Value) -> Value {
         translate_request("gpt-5.6-sol", &body, true)
+    }
+
+    // A `response.failed` mid-stream reaches the chat client as the error
+    // chunk OpenAI-compatible servers send — before this it was dropped and
+    // the stream ended as if complete.
+    #[test]
+    fn stream_response_failed_becomes_error_chunk() {
+        let mut t = StreamTranslator::new(&req(json!({"input": "hi"})));
+        push(
+            &mut t,
+            json!({"type": "response.created", "response": {"id": "resp_1", "created_at": 1, "model": "gpt-5"}}),
+        );
+        let out = push(
+            &mut t,
+            json!({"type": "response.failed", "response": {"id": "resp_1", "status": "failed",
+            "error": {"code": "server_error", "message": "The model produced invalid output."}}}),
+        );
+        assert_eq!(
+            out,
+            vec![
+                json!({"error": {"message": "The model produced invalid output.", "type": "server_error", "code": "server_error"}})
+            ]
+        );
+        let out = push(
+            &mut t,
+            json!({"type": "error", "code": "rate_limit_exceeded", "message": "Rate limit reached"}),
+        );
+        assert_eq!(
+            out,
+            vec![
+                json!({"error": {"message": "Rate limit reached", "type": "server_error", "code": null}})
+            ]
+        );
     }
 
     fn push(t: &mut StreamTranslator, data: Value) -> Vec<Value> {

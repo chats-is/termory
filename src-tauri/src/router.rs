@@ -149,6 +149,12 @@ pub struct RouterConfig {
     /// is not.
     #[serde(default)]
     pub former_ports: Vec<u16>,
+    /// Hosts (as the CLIs were given them) the router listened on before
+    /// the current one, same purpose as `former_ports`: a CLI left on
+    /// `http://192.168.1.5:8317` after the host was changed back to loopback
+    /// is still recognised as the router's.
+    #[serde(default)]
+    pub former_hosts: Vec<String>,
 }
 
 fn default_port() -> u16 {
@@ -242,6 +248,7 @@ impl Default for RouterConfig {
             suspended_defaults: Vec::new(),
             pending_codex_follow: false,
             former_ports: Vec::new(),
+            former_hosts: Vec::new(),
         }
     }
 }
@@ -316,6 +323,7 @@ fn config_from_json(raw: JsonValue) -> RouterConfig {
     if let Some(b) = map.get("pendingCodexFollow").and_then(|v| v.as_bool()) {
         cfg.pending_codex_follow = b;
     }
+    cfg.former_hosts = strings("formerHosts");
     if let Some(JsonValue::Array(list)) = map.get("formerPorts") {
         cfg.former_ports = list
             .iter()
@@ -1626,6 +1634,16 @@ fn error_fields(body: &str) -> (Option<String>, Option<String>) {
     (pick("code"), pick("type"))
 }
 
+/// The `param` an error names (OpenAI: `error.param`), when it does.
+fn error_param(body: &str) -> Option<String> {
+    let v = serde_json::from_str::<JsonValue>(body).ok()?;
+    ["/error/param", "/param"]
+        .iter()
+        .find_map(|path| v.pointer(path).and_then(|x| x.as_str()))
+        .filter(|p| !p.is_empty())
+        .map(|p| p.split('.').next().unwrap_or(p).to_string())
+}
+
 /// "This member does not serve that model" — an explicit `model_not_found`
 /// code, or a 400/404/422 whose text says the model is not supported.
 fn is_model_support_error(status: Option<u16>, body: &str) -> bool {
@@ -1637,6 +1655,22 @@ fn is_model_support_error(status: Option<u16>, body: &str) -> bool {
         return true;
     }
     if !matches!(status, Some(400) | Some(404) | Some(422)) {
+        return false;
+    }
+    // A refusal of ONE PARAMETER names it ("Unsupported parameter:
+    // 'max_tokens' is not supported with this model. Use
+    // 'max_completion_tokens' instead." — `param: "max_tokens"`, `code:
+    // "unsupported_parameter"`): the REQUEST is at fault, the model is
+    // served. Read as "model not supported" it parked the member for 12 h.
+    if code.as_deref().is_some_and(|c| {
+        matches!(
+            c,
+            "unsupported_parameter" | "unsupported_value" | "invalid_value" | "invalid_type"
+        )
+    }) {
+        return false;
+    }
+    if error_param(body).is_some_and(|p| p != "model") {
         return false;
     }
     let l = body.to_ascii_lowercase();
@@ -1757,6 +1791,20 @@ fn in_cooldown(key: &str) -> bool {
 }
 
 /// Clear one upstream's cooldown and error (the page's "retry now").
+/// Forget every cooldown held against a provider or gateway member (a
+/// provider save: the settings that earned it are gone).
+pub fn reset_provider_health() {
+    let is_entry = |k: &str| k.starts_with("provider:") || k.starts_with("gateway:");
+    model_states().retain(|(k, _), _| !is_entry(k));
+    for (k, h) in health_table().iter_mut() {
+        if is_entry(k) {
+            h.streak = 0;
+            h.cooldown_until = None;
+            h.last_error = None;
+        }
+    }
+}
+
 pub fn reset_health(key: &str) {
     model_states().retain(|(k, _), _| k != key);
     if let Some(h) = health_table().get_mut(key) {
@@ -1815,7 +1863,12 @@ pub fn routing_plan(cfg: &RouterConfig, protocol: Protocol, model: Option<&str>)
         .iter()
         .map(|(key, _)| (key.clone(), model_rank(&upstream_models(&stores, key), m)))
         .collect();
-    let has_listed = ranks.values().any(|r| *r == 0);
+    // Only a member that can be USED decides whether the model is listed:
+    // a login that no longer resolves (signed out, needs re-login) listing
+    // the model must not push out a working member that has no listing.
+    let has_listed = members
+        .iter()
+        .any(|(key, r)| r.is_ok() && ranks.get(key) == Some(&0));
     let wanted = if has_listed { 0 } else { 1 };
     members.retain(|(key, _)| ranks.get(key) == Some(&wanted));
     Plan {
@@ -2388,7 +2441,26 @@ pub fn status() -> RouterStatus {
 /// running there.
 pub async fn start(app: tauri::AppHandle) -> Result<RouterStatus, String> {
     let _g = lifecycle().lock().await;
-    let cfg = current_config();
+    let mut cfg = current_config();
+    // No key, no use: a router without one refuses every request, and a
+    // fresh config has none. Mint one before listening (the gateway entry
+    // the bindings read is synced with it), so the first Start works.
+    if cfg.api_key.is_empty() {
+        tauri::async_runtime::spawn_blocking(|| {
+            update_config(|c| {
+                if c.api_key.is_empty() {
+                    c.api_key = generate_api_key();
+                }
+                Ok(())
+            })
+            .map_err(|e| e.to_string())?;
+            sync_router_gateway().map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        cfg = current_config();
+        let _ = app.emit("termory:providers-changed", ());
+    }
     // A hand-edited file cannot open the router to the LAN without a key.
     validate_exposure(&cfg)?;
     listen(&app, bind_ip(&cfg), cfg.port).await
@@ -2432,6 +2504,12 @@ async fn listen(
         shutdown: tx,
     });
     log::info!("router listening on {addr}");
+    // `grok_client_version` probes the installed binary ONCE and caches it;
+    // its first caller would otherwise be a request's header builder on an
+    // async worker (a `--version` spawn, up to the probe timeout).
+    tauri::async_runtime::spawn_blocking(|| {
+        let _ = grok_client_version();
+    });
 
     // Keep the pooled logins fresh while the router runs, not only when a
     // request happens to need one: a pass now, then every
@@ -2494,6 +2572,13 @@ async fn listen(
                         let svc = service_fn(move |req| handle(req, ctx.clone()));
                         let conn = http1::Builder::new()
                             .keep_alive(true)
+                            // Without a timer hyper's header-read timeout is
+                            // silently OFF: a peer that opens connections and
+                            // never sends a request line holds them forever
+                            // (and, exposed on the LAN, starves the local CLIs
+                            // of file descriptors).
+                            .timer(hyper_util::rt::TokioTimer::new())
+                            .header_read_timeout(Duration::from_secs(30))
                             .serve_connection(io, svc);
                         let mut conn = std::pin::pin!(conn);
                         tokio::select! {
@@ -2881,6 +2966,9 @@ struct Outgoing<'a> {
     /// (`gpt-5.6-terra(high)`), and without it.
     requested_model: &'a str,
     base_model: &'a str,
+    /// The model id is served AS WRITTEN (its parenthesised tail is part
+    /// of the id, not a thinking suffix): no thinking pass.
+    literal_model: bool,
     /// The client's own API and body (the thinking config's source).
     client_protocol: Protocol,
     source_body: Option<&'a JsonValue>,
@@ -2905,6 +2993,14 @@ fn thinking_format(p: Protocol) -> &'static str {
 /// model becomes the base name.
 fn apply_request_thinking(body: &mut JsonValue, out: &Outgoing<'_>, to_format: &str) {
     if !body.is_object() {
+        return;
+    }
+    if out.literal_model {
+        if let Some(o) = body.as_object_mut() {
+            if o.contains_key("model") && !out.base_model.is_empty() {
+                o.insert("model".into(), JsonValue::from(out.base_model));
+            }
+        }
         return;
     }
     match crate::thinking::apply_thinking(
@@ -3249,7 +3345,7 @@ async fn serve_api(
     // the model — routing, cooldowns and the catalog use the base name
     // (CLIProxyAPI `ParseSuffix(...).ModelName`).
     let requested_full = requested_model(&path, &body).unwrap_or_default();
-    let model = (!requested_full.is_empty())
+    let mut model = (!requested_full.is_empty())
         .then(|| crate::thinking::parse_suffix(&requested_full).model_name);
     // Routing picks members by their model LISTS (CLIProxyAPI's registry is
     // populated at start-up; ours is fetched): make sure every enabled
@@ -3259,8 +3355,23 @@ async fn serve_api(
         catalog_for_request().await;
     }
     let plan_model = model.clone();
-    let plan = match tokio::task::spawn_blocking(move || {
-        routing_plan(&plan_cfg, protocol, plan_model.as_deref())
+    let literal_model = (!requested_full.is_empty()
+        && plan_model.as_deref() != Some(&requested_full))
+    .then(|| requested_full.clone());
+    let (plan, literal) = match tokio::task::spawn_blocking(move || {
+        let plan = routing_plan(&plan_cfg, protocol, plan_model.as_deref());
+        // `my-model(beta)`: when no member lists the stripped name but one
+        // lists the id AS WRITTEN, the parenthesised tail is part of the
+        // model, not a thinking suffix.
+        if plan.model_unknown {
+            if let Some(full) = literal_model {
+                let as_written = routing_plan(&plan_cfg, protocol, Some(&full));
+                if !as_written.model_unknown {
+                    return (as_written, true);
+                }
+            }
+        }
+        (plan, false)
     })
     .await
     {
@@ -3273,6 +3384,9 @@ async fn serve_api(
             )
         }
     };
+    if literal {
+        model = Some(requested_full.clone());
+    }
     let mut plan = plan;
     order_by_quota(&mut plan.members);
     spawn_quota_refresh(&plan.members);
@@ -3464,6 +3578,7 @@ async fn serve_api(
                 passthrough: !translated,
                 requested_model: &requested_full,
                 base_model: &model_key,
+                literal_model: literal,
                 client_protocol: protocol,
                 source_body: client_json.as_ref(),
                 fixes: &crate::autofix::BodyFixes::default(),
@@ -3519,6 +3634,7 @@ async fn serve_api(
                             fix_grok_anthropic: protocol == Protocol::Anthropic
                                 && !translated
                                 && matches!(upstream.auth, Auth::GrokOauth { .. }),
+                            member: key,
                         };
                         match deliver(resp, &delivery).await {
                             Ok(out) => {
@@ -3966,6 +4082,28 @@ struct Delivery<'a> {
     /// The requested model (the Codex relay fills it into response events).
     model: &'a str,
     fix_grok_anthropic: bool,
+    /// The pool member answering, for the health table: a stream that
+    /// breaks AFTER its first payload is already a success to the request
+    /// loop (the client has the start of the answer), but the member's row
+    /// must still say it broke — a provider that dies after one event every
+    /// time otherwise stays "healthy" and keeps its priority.
+    member: &'a str,
+}
+
+/// A stream broke after the request loop committed to it: counted against
+/// the member (failures, streak, last error) without a second request and
+/// without a cooldown — the next request still tries it.
+fn record_stream_break(key: &str, why: &str) {
+    let mut table = health_table();
+    let h = table
+        .entry(key.to_string())
+        .or_insert_with(|| UpstreamHealth {
+            key: key.to_string(),
+            ..Default::default()
+        });
+    h.failures += 1;
+    h.streak += 1;
+    h.last_error = Some(why.chars().take(300).collect());
 }
 
 /// Turn a 2xx answer into the client response. A STREAM is only handed
@@ -4005,14 +4143,26 @@ async fn deliver(
             }
             Ok(folded)
         } else {
-            serde_json::from_str(&text).map_err(|_| Failure {
+            let obj: JsonValue = serde_json::from_str(&text).map_err(|_| Failure {
                 status: None,
                 retry_after: None,
                 text: "the upstream answered with something that is not JSON".into(),
                 transport: false,
                 credential_scoped: false,
                 request_scoped: false,
-            })
+            })?;
+            // A 200 whose JSON is an error object (Chat / Gemini gateways).
+            if is_bare_error_payload(&obj) {
+                return Err(Failure {
+                    status: in_stream_error_status(&obj),
+                    retry_after: None,
+                    text: obj.to_string(),
+                    transport: false,
+                    credential_scoped: false,
+                    request_scoped: false,
+                });
+            }
+            Ok(obj)
         }
     };
     let read_all = |r: reqwest::Response| async move {
@@ -4037,6 +4187,7 @@ async fn deliver(
                 d.upstream,
                 &original,
                 codex_model,
+                d.member.to_string(),
             ));
         }
         let obj = whole(read_all(resp).await?)?;
@@ -4050,18 +4201,23 @@ async fn deliver(
     }
     if streamed && d.codex {
         let prefix = bootstrap(&mut resp, Some(d.model)).await?;
-        return Ok(codex_relay_stream(prefix, resp, d.model));
+        return Ok(codex_relay_stream(
+            prefix,
+            resp,
+            d.model,
+            d.member.to_string(),
+        ));
     }
     if streamed && d.upstream == Protocol::Gemini {
         let prefix = bootstrap(&mut resp, None).await?;
-        return Ok(gemini_relay_stream(prefix, resp));
+        return Ok(gemini_relay_stream(prefix, resp, d.member.to_string()));
     }
     if streamed {
         let prefix = bootstrap(&mut resp, None).await?;
         return Ok(if d.fix_grok_anthropic {
             relay_fixing_anthropic_indexes(prefix, resp)
         } else {
-            relay_prefixed(prefix, resp)
+            relay_prefixed(prefix, resp, d.member.to_string())
         });
     }
     Ok(relay(resp))
@@ -4091,7 +4247,8 @@ async fn bootstrap(
                         return Ok(Bytes::from(buf));
                     }
                     let kind = first.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    if kind == "error" || kind == "response.failed" {
+                    if kind == "error" || kind == "response.failed" || is_bare_error_payload(&first)
+                    {
                         return Err(Failure {
                             status: in_stream_error_status(&first),
                             retry_after: None,
@@ -4126,6 +4283,16 @@ async fn bootstrap(
             }
         }
     }
+}
+
+/// A Chat / Gemini error object delivered as a payload (`{"error":{…}}`,
+/// no `type`, no answer fields) — what OpenAI-compatible gateways and Gemini
+/// send inside a 200 for a rate limit or an upstream fault.
+fn is_bare_error_payload(payload: &JsonValue) -> bool {
+    payload.get("error").is_some_and(|e| e.is_object())
+        && ["choices", "candidates", "content", "output", "message"]
+            .iter()
+            .all(|k| payload.get(*k).is_none())
 }
 
 /// OpenAI paths no translator covers: only a member speaking the client's
@@ -4387,9 +4554,10 @@ fn translated_stream(
     upstream: Protocol,
     original: &JsonValue,
     codex_model: Option<&str>,
+    member: String,
 ) -> Response<OutBody> {
     let Some(tx) = crate::translate::StreamTx::new(client, upstream, original) else {
-        return relay_prefixed(prefix, resp);
+        return relay_prefixed(prefix, resp, member);
     };
     // Generic over the CONCRETE upstream stream: erasing it to a
     // `dyn Stream + Send` would drop the `Sync` the response body needs.
@@ -4404,6 +4572,7 @@ fn translated_stream(
         gemini: bool,
         finished: bool,
         ended: bool,
+        member: String,
     }
     fn emit<S>(st: &mut State<S>, events: Vec<crate::translate::SseEvent>, out: &mut String) {
         for ev in events {
@@ -4442,7 +4611,7 @@ fn translated_stream(
                 }
                 crate::translate::SseEvent::Done if !st.finished => {
                     st.finished = true;
-                    out.extend(st.tx.finish());
+                    out.extend(st.tx.done());
                 }
                 _ => {}
             }
@@ -4457,6 +4626,7 @@ fn translated_stream(
         gemini: upstream == Protocol::Gemini,
         finished: false,
         ended: false,
+        member,
     };
     let stream = futures_util::stream::unfold(state, |mut st| async move {
         use futures_util::StreamExt;
@@ -4476,7 +4646,17 @@ fn translated_stream(
                 }
                 Some(Err(err)) => {
                     st.ended = true;
-                    return Some((Err(std::io::Error::other(err)), st));
+                    record_stream_break(&st.member, "the upstream stream broke after it started");
+                    // The client's connection is still good: it gets the
+                    // break as an error in its own API, not a torn body.
+                    if !st.finished {
+                        st.finished = true;
+                        out.extend(st.tx.eof());
+                    }
+                    if out.is_empty() {
+                        return Some((Err(std::io::Error::other(err)), st));
+                    }
+                    return Some((Ok(Frame::data(Bytes::from(out))), st));
                 }
                 None => {
                     let events = st.parser.finish();
@@ -4488,7 +4668,19 @@ fn translated_stream(
                             out.extend(st.tx.push(Some("error"), &codex_error_event(&err)));
                         }
                         st.finished = true;
-                        out.extend(st.tx.finish());
+                        // EOF: the pair's closing frames after a terminal
+                        // event, the cut error before one.
+                        let frames = st.tx.eof();
+                        if frames
+                            .iter()
+                            .any(|f| f.contains("ended before the response completed"))
+                        {
+                            record_stream_break(
+                                &st.member,
+                                "the upstream stream ended before the response completed",
+                            );
+                        }
+                        out.extend(frames);
                     }
                     st.ended = true;
                 }
@@ -4526,7 +4718,12 @@ fn codex_error_event(err: &crate::codex_exec::CodexError) -> JsonValue {
 /// re-emitted (model filled in, output rebuilt at completion), the stream
 /// ends at the terminal event, and an in-stream failure or a missing
 /// terminal event is delivered as an `error` event.
-fn codex_relay_stream(prefix: Bytes, resp: reqwest::Response, model: &str) -> Response<OutBody> {
+fn codex_relay_stream(
+    prefix: Bytes,
+    resp: reqwest::Response,
+    model: &str,
+    member: String,
+) -> Response<OutBody> {
     struct State<S> {
         upstream: std::pin::Pin<Box<S>>,
         prefix: Option<Bytes>,
@@ -4534,6 +4731,7 @@ fn codex_relay_stream(prefix: Bytes, resp: reqwest::Response, model: &str) -> Re
         relay: crate::codex_exec::CodexStreamRelay,
         done: bool,
         ended: bool,
+        member: String,
     }
     fn frame(event: Option<&str>, data: &JsonValue) -> String {
         let name = event.map(str::to_string).or_else(|| {
@@ -4553,6 +4751,7 @@ fn codex_relay_stream(prefix: Bytes, resp: reqwest::Response, model: &str) -> Re
         relay: crate::codex_exec::CodexStreamRelay::new(model, false),
         done: false,
         ended: false,
+        member,
     };
     let stream = futures_util::stream::unfold(state, |mut st| async move {
         use futures_util::StreamExt;
@@ -4569,6 +4768,7 @@ fn codex_relay_stream(prefix: Bytes, resp: reqwest::Response, model: &str) -> Re
                 Some(Ok(chunk)) => st.parser.feed(&chunk),
                 Some(Err(err)) => {
                     st.ended = true;
+                    record_stream_break(&st.member, "the upstream stream broke after it started");
                     return Some((Err(std::io::Error::other(err)), st));
                 }
                 None => {
@@ -4576,6 +4776,7 @@ fn codex_relay_stream(prefix: Bytes, resp: reqwest::Response, model: &str) -> Re
                     let mut ev = st.parser.finish();
                     if !st.done {
                         if let Some(err) = st.relay.finish() {
+                            record_stream_break(&st.member, &err.message);
                             ev.push(crate::translate::SseEvent::Data(
                                 Some("error".into()),
                                 codex_error_event(&err),
@@ -4629,18 +4830,24 @@ fn codex_relay_stream(prefix: Bytes, resp: reqwest::Response, model: &str) -> Re
 /// filter (`gemini_exec::rewrite_stream_event`, CLIProxyAPI
 /// `FilterSSEUsageMetadata`): each chunk re-emitted as `data:`, dropped
 /// when the filter says so.
-fn gemini_relay_stream(prefix: Bytes, resp: reqwest::Response) -> Response<OutBody> {
+fn gemini_relay_stream(
+    prefix: Bytes,
+    resp: reqwest::Response,
+    member: String,
+) -> Response<OutBody> {
     struct State<S> {
         upstream: std::pin::Pin<Box<S>>,
         prefix: Option<Bytes>,
         parser: crate::translate::SseParser,
         ended: bool,
+        member: String,
     }
     let state = State {
         upstream: Box::pin(resp.bytes_stream()),
         prefix: Some(prefix),
         parser: crate::translate::SseParser::default(),
         ended: false,
+        member,
     };
     let stream = futures_util::stream::unfold(state, |mut st| async move {
         use futures_util::StreamExt;
@@ -4656,6 +4863,7 @@ fn gemini_relay_stream(prefix: Bytes, resp: reqwest::Response) -> Response<OutBo
                 Some(Ok(chunk)) => st.parser.feed(&chunk),
                 Some(Err(err)) => {
                     st.ended = true;
+                    record_stream_break(&st.member, "the upstream stream broke after it started");
                     return Some((Err(std::io::Error::other(err)), st));
                 }
                 None => {
@@ -4687,7 +4895,7 @@ fn gemini_relay_stream(prefix: Bytes, resp: reqwest::Response) -> Response<OutBo
 }
 
 /// Relay a stream whose first bytes the bootstrap already read.
-fn relay_prefixed(prefix: Bytes, resp: reqwest::Response) -> Response<OutBody> {
+fn relay_prefixed(prefix: Bytes, resp: reqwest::Response, member: String) -> Response<OutBody> {
     use futures_util::StreamExt;
     let status = resp.status();
     let mut builder = Response::builder().status(status.as_u16());
@@ -4700,7 +4908,10 @@ fn relay_prefixed(prefix: Bytes, resp: reqwest::Response) -> Response<OutBody> {
     let stream = futures_util::stream::once(async move { Ok::<Bytes, reqwest::Error>(prefix) })
         .chain(resp.bytes_stream())
         .map_ok(Frame::data)
-        .map_err(std::io::Error::other);
+        .map_err(move |err| {
+            record_stream_break(&member, "the upstream stream broke after it started");
+            std::io::Error::other(err)
+        });
     let body: OutBody = BodyExt::boxed(StreamBody::new(stream));
     builder.body(body).unwrap_or_else(|_| {
         error_response(
@@ -5139,7 +5350,8 @@ fn is_router_url_for(url: &str, cfg: &RouterConfig) -> bool {
         return false;
     };
     let own = client_host(bind_ip(cfg));
-    (host == "127.0.0.1" || host == own) && (port == cfg.port || cfg.former_ports.contains(&port))
+    (host == "127.0.0.1" || host == own || cfg.former_hosts.iter().any(|h| h == host))
+        && (port == cfg.port || cfg.former_ports.contains(&port))
 }
 
 /// When a suspend moves Codex out of the router, what happens to the
@@ -5485,7 +5697,15 @@ pub fn fold_responses_sse(text: &str) -> (StatusCode, JsonValue) {
                     return (StatusCode::OK, with_items(r.clone(), &items));
                 }
             }
-            Some("response.failed") | Some("response.incomplete") => {
+            Some("response.failed") => {
+                // The terminal event of a FAILED answer: an error for the
+                // client, never a 200 with an empty `output`.
+                let err = v.pointer("/response/error").cloned().unwrap_or_else(
+                    || json!({ "type": "api_error", "message": "the upstream response failed" }),
+                );
+                return (StatusCode::BAD_GATEWAY, json!({ "error": err }));
+            }
+            Some("response.incomplete") => {
                 if let Some(r) = v.get("response") {
                     last = Some(r.clone());
                 }
@@ -5592,6 +5812,18 @@ fn catalog_store(key: &str, models: Vec<String>) -> bool {
 /// only, as Codex's own picker shows them) — and a gateway's own live
 /// listing, which REPLACES the list its entry saved at detection time.
 pub async fn refresh_catalog(force: bool) {
+    // ONE sweep at a time: callers that arrive while one runs wait for it
+    // and then find the listings fresh (the Router page asks per tool, six
+    // times; each used to start its own sweep of every provider's
+    // `/models`). A FORCED sweep right after another forced one is served
+    // by it too.
+    static GATE: tokio::sync::Mutex<Option<std::time::Instant>> =
+        tokio::sync::Mutex::const_new(None);
+    let mut last_forced = GATE.lock().await;
+    let force = force && !last_forced.is_some_and(|at| at.elapsed() < Duration::from_secs(5));
+    if force {
+        *last_forced = Some(std::time::Instant::now());
+    }
     let cfg = current_config();
     let enabled: Vec<String> = cfg
         .upstreams
@@ -5602,6 +5834,16 @@ pub async fn refresh_catalog(force: bool) {
         .collect();
     if enabled.is_empty() {
         return;
+    }
+    // Every key attempted is stamped NOW — a member whose credential does
+    // not resolve (deleted provider, signed-out login, tool switched off)
+    // included. Unstamped, such a member read as "never fetched" and every
+    // request awaited a whole new sweep.
+    {
+        let mut tried = catalog_tried();
+        for key in &enabled {
+            tried.insert(key.clone(), std::time::Instant::now());
+        }
     }
     let keys = enabled.clone();
     // Resolution reads credential stores (blocking) — off the async worker.
@@ -5632,11 +5874,21 @@ pub async fn refresh_catalog(force: bool) {
     })
     .await
     .unwrap_or_default();
-    let codex_version = tokio::task::spawn_blocking(|| {
-        crate::providers::detect_cli_version(CliApp::Codex).unwrap_or_else(|| "0.0.0".to_string())
-    })
-    .await
-    .unwrap_or_else(|_| "0.0.0".to_string());
+    // The Codex listing is asked with the installed CLI's version — a
+    // `codex --version` spawn, so only when a Codex login is in the batch.
+    let needs_codex = resolved.iter().any(|(k, r)| {
+        r.is_ok() && (k.starts_with("live:codex") || k.starts_with("account:codex:"))
+    });
+    let codex_version = if needs_codex {
+        tokio::task::spawn_blocking(|| {
+            crate::providers::detect_cli_version(CliApp::Codex)
+                .unwrap_or_else(|| "0.0.0".to_string())
+        })
+        .await
+        .unwrap_or_else(|_| "0.0.0".to_string())
+    } else {
+        "0.0.0".to_string()
+    };
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -5718,12 +5970,6 @@ pub async fn refresh_catalog(force: bool) {
     .await;
     results.extend(gateway_results);
     let mut changed = false;
-    {
-        let mut tried = catalog_tried();
-        for (key, _) in &results {
-            tried.insert(key.clone(), std::time::Instant::now());
-        }
-    }
     for (key, models) in results {
         // A failed listing keeps whatever was cached.
         if let Some(models) = models {
@@ -6133,8 +6379,16 @@ pub fn apply_patch(
     }
     if let Some(h) = patch.host {
         let h = h.trim();
-        h.parse::<std::net::IpAddr>()
+        let ip = h
+            .parse::<std::net::IpAddr>()
             .map_err(|_| format!("\"{h}\" is not an IP address"))?;
+        let old = client_host(bind_ip(&cfg));
+        let new = client_host(ip);
+        if new != old {
+            cfg.former_hosts.retain(|x| *x != old && *x != new);
+            cfg.former_hosts.insert(0, old);
+            cfg.former_hosts.truncate(FORMER_PORTS_KEPT);
+        }
         cfg.host = h.to_string();
     }
     if let Some(p) = patch.port {
@@ -6183,8 +6437,29 @@ fn refuse_while_running(changed: bool) -> Result<(), String> {
 pub fn start_if_configured(app: tauri::AppHandle) {
     if current_config().autostart {
         tauri::async_runtime::spawn(async move {
-            if let Err(err) = start(app).await {
+            if let Err(err) = start(app.clone()).await {
                 log::warn!("router autostart failed: {err}");
+                // The listener is not up (the port is taken, the saved
+                // address is gone after a network change): a binding still
+                // pointing at it would fail every request with no word on
+                // the page. Hand the CLIs back, as the non-autostart launch
+                // does; Start restores them.
+                let _g = lifecycle().lock().await;
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    match suspend_live_bindings(CodexFollow::Now) {
+                        Ok(n) if n > 0 => {
+                            log::info!(
+                                "router: suspended {n} binding(s) after the autostart failed"
+                            );
+                            notify_bindings_changed(&app);
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            log::warn!("suspending router bindings after autostart failure: {err}")
+                        }
+                    }
+                })
+                .await;
             }
         });
         return;
@@ -6274,10 +6549,17 @@ pub async fn router_write_config(
     .await
     .map_err(|e| e.to_string())??;
     // A newly enabled provider's listing has to be in before the gateway
-    // entry's model catalog is synced from it.
-    if upstreams_changed {
+    // entry's model catalog is synced from it. That is NETWORK (10 s per
+    // unreachable provider), so the lifecycle lock is released around it:
+    // held, a Stop (or the quit) queues behind a provider whose host is
+    // down. The sync below re-takes it.
+    let _g = if upstreams_changed {
+        drop(_g);
         refresh_catalog(false).await;
-    }
+        lifecycle().lock().await
+    } else {
+        _g
+    };
     tauri::async_runtime::spawn_blocking(move || {
         // Every change re-syncs the gateway entry (the upstream set decides
         // its capabilities); only a connection change re-applies live bindings.
@@ -6831,6 +7113,84 @@ mod tests {
         order_by_quota(&mut m);
         let keys: Vec<&str> = m.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(keys, ["q:unknown", "q:fine", "q:low", "q:spent"]);
+    }
+
+    // OpenAI's refusal of ONE parameter ("Unsupported parameter:
+    // 'max_tokens' is not supported with this model…", `param`,
+    // `unsupported_parameter`) is the request's fault: relayed, no
+    // cooldown. Before, "model" + "not supported" in the text read as
+    // "model not served" and parked the member for 12 hours.
+    #[test]
+    fn a_parameter_refusal_is_not_a_model_support_error() {
+        let unsupported_param = r#"{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","type":"invalid_request_error","param":"max_tokens","code":"unsupported_parameter"}}"#;
+        let temperature = r#"{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model.","type":"invalid_request_error","param":"temperature","code":"unsupported_parameter"}}"#;
+        let effort = r#"{"error":{"message":"Invalid value: 'xhigh'. Supported values are: 'minimal', 'low', 'medium', and 'high'.","type":"invalid_request_error","param":"reasoning.effort","code":"invalid_value"}}"#;
+        for body in [unsupported_param, temperature, effort] {
+            assert!(!is_model_support_error(Some(400), body), "{body}");
+            assert!(is_request_invalid(400, body), "{body}");
+        }
+        // The model itself refused stays a model-support error.
+        let model = r#"{"error":{"message":"The model `gpt-9` does not exist or you do not have access to it.","type":"invalid_request_error","param":"model","code":"model_not_found"}}"#;
+        assert!(is_model_support_error(Some(404), model));
+        let plain = r#"{"error":{"message":"model gpt-9 is not supported","type":"invalid_request_error"}}"#;
+        assert!(is_model_support_error(Some(400), plain));
+    }
+
+    #[test]
+    fn a_failed_responses_answer_is_not_a_200() {
+        let text = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r\",\"output\":[]}}\n\nevent: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"r\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"The model produced invalid content.\"},\"output\":[]}}\n\n";
+        let (status, folded) = fold_responses_sse(text);
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            folded["error"]["message"],
+            json!("The model produced invalid content.")
+        );
+    }
+
+    #[test]
+    fn bare_error_payloads_are_recognised() {
+        assert!(is_bare_error_payload(
+            &json!({"error": {"message": "rate limited", "type": "rate_limit_error", "code": 429}})
+        ));
+        assert!(is_bare_error_payload(
+            &json!({"error": {"code": 429, "message": "quota", "status": "RESOURCE_EXHAUSTED"}})
+        ));
+        // Answers that merely carry an `error` key are not errors.
+        assert!(!is_bare_error_payload(
+            &json!({"choices": [{"delta": {"content": "hi"}}], "error": null})
+        ));
+        assert!(!is_bare_error_payload(
+            &json!({"type": "response.created", "response": {"error": null, "output": []}})
+        ));
+        assert!(!is_bare_error_payload(
+            &json!({"candidates": [{"content": {"parts": []}}]})
+        ));
+    }
+
+    #[test]
+    fn router_url_recognises_a_former_host() {
+        let cfg = RouterConfig {
+            port: 8317,
+            former_hosts: vec!["192.168.1.5".into()],
+            ..Default::default()
+        };
+        // Left on the LAN address the router listened on before the host
+        // went back to loopback.
+        assert!(is_router_url_for("http://192.168.1.5:8317", &cfg));
+        assert!(!is_router_url_for("http://192.168.1.6:8317", &cfg));
+        // A host change records the previous client host.
+        let next = apply_patch(
+            RouterConfig {
+                host: "192.168.1.5".into(),
+                ..Default::default()
+            },
+            RouterConfigPatch {
+                host: Some("127.0.0.1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(next.former_hosts, vec!["192.168.1.5".to_string()]);
     }
 
     #[test]
@@ -7550,6 +7910,7 @@ mod tests {
             suspended_defaults: vec!["b2".into()],
             pending_codex_follow: true,
             former_ports: vec![8300],
+            former_hosts: vec!["192.168.1.5".into()],
         };
         write_config(&cfg).unwrap();
         *config_cache() = None;
@@ -8171,6 +8532,193 @@ mod tests {
     async fn body_text(resp: Response<OutBody>) -> String {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    // An OpenAI-compatible gateway reporting a rate limit INSIDE a 200
+    // stream (`data: {"error":{…}}`, no `type`): a failure for that member
+    // — the next one answers — not a "successful" stream of one error line.
+    #[tokio::test]
+    async fn an_error_object_under_200_fails_over_to_the_next_member() {
+        let (bad_port, _) = mock_upstream(
+            200,
+            "data: {\"error\":{\"message\":\"rate limited\",\"type\":\"rate_limit_error\",\"code\":429}}\n\n",
+        )
+        .await;
+        let (good_port, good_seen) = mock_upstream(200, "event: message_start\ndata: {}\n\n").await;
+        let _g = lock_home();
+        let dir = tempdir("bare-error");
+        let _h = override_home(&dir);
+        crate::config::write_providers(&json!([
+            { "id": "p-bad", "app": "claude", "kind": "custom", "name": "Bad",
+              "baseUrl": format!("http://127.0.0.1:{bad_port}"), "apiKey": "key-bad" },
+            { "id": "p-good", "app": "claude", "kind": "custom", "name": "Good",
+              "baseUrl": format!("http://127.0.0.1:{good_port}"), "apiKey": "key-good" }
+        ]))
+        .unwrap();
+        write_config(&RouterConfig {
+            api_key: "local-key".into(),
+            upstreams: vec![
+                UpstreamPref {
+                    key: "provider:p-bad".into(),
+                    enabled: true,
+                },
+                UpstreamPref {
+                    key: "provider:p-good".into(),
+                    enabled: true,
+                },
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+        reset_health("provider:p-bad");
+        reset_health("provider:p-good");
+        for k in ["provider:p-bad", "provider:p-good"] {
+            catalog_tried().insert(k.to_string(), std::time::Instant::now());
+        }
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header("x-api-key", "local-key")
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from_static(
+                br#"{"model":"claude","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+            )))
+            .unwrap();
+        let resp = handle_test(req, test_ctx()).await;
+        assert_eq!(resp.status(), 200);
+        let text = body_text(resp).await;
+        assert!(text.contains("message_start"), "{text}");
+        assert!(!text.contains("rate limited"), "{text}");
+        assert!(
+            good_seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(k, _)| k == "request-line"),
+            "the second member was asked"
+        );
+        let health = health_table();
+        assert_eq!(health["provider:p-bad"].failures, 1);
+        drop(health);
+        *config_cache() = None;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // `my-model(beta)` is a model id, not `my-model` with a thinking suffix:
+    // when a member lists it as written the request is routed to it (before:
+    // `400 model_not_found` for a model the user never typed).
+    #[tokio::test]
+    async fn a_model_id_with_a_parenthesised_tail_is_routed_as_written() {
+        let (port, seen) = mock_upstream(200, "event: message_start\ndata: {}\n\n").await;
+        let _g = lock_home();
+        let dir = tempdir("literal-model");
+        let _h = override_home(&dir);
+        crate::config::write_providers(&json!([
+            { "id": "p-lit", "app": "claude", "kind": "custom", "name": "Lit",
+              "baseUrl": format!("http://127.0.0.1:{port}"), "apiKey": "key",
+              "model": "my-model(beta)" }
+        ]))
+        .unwrap();
+        write_config(&RouterConfig {
+            api_key: "local-key".into(),
+            upstreams: vec![UpstreamPref {
+                key: "provider:p-lit".into(),
+                enabled: true,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        reset_health("provider:p-lit");
+        catalog_tried().insert("provider:p-lit".to_string(), std::time::Instant::now());
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header("x-api-key", "local-key")
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from_static(
+                br#"{"model":"my-model(beta)","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+            )))
+            .unwrap();
+        let resp = handle_test(req, test_ctx()).await;
+        assert_eq!(resp.status(), 200, "{}", body_text(resp).await);
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(k, _)| k == "request-line"));
+        *config_cache() = None;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A member whose credential cannot be resolved (here: a provider that no
+    // longer exists) is stamped as attempted by a refresh, so the request
+    // path does not await a whole new sweep — and a `codex --version`
+    // probe — on every request.
+    #[tokio::test]
+    async fn a_refresh_stamps_an_unresolvable_member_as_tried() {
+        let _g = lock_home();
+        let dir = tempdir("ghost-catalog");
+        let _h = override_home(&dir);
+        crate::config::write_providers(&json!([])).unwrap();
+        write_config(&RouterConfig {
+            api_key: "local-key".into(),
+            upstreams: vec![UpstreamPref {
+                key: "provider:ghost".into(),
+                enabled: true,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        catalog_tried().remove("provider:ghost");
+        assert!(catalog_never_fetched("provider:ghost"));
+        refresh_catalog(false).await;
+        assert!(!catalog_never_fetched("provider:ghost"));
+        assert!(catalog_is_fresh("provider:ghost"));
+        *config_cache() = None;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A login that no longer resolves must not decide the routing: here the
+    // dead provider lists the model and the live one has no listing — the
+    // live one still gets the request.
+    #[test]
+    fn a_dead_member_listing_the_model_does_not_outvote_a_live_one() {
+        let _g = lock_home();
+        let dir = tempdir("dead-vote");
+        let _h = override_home(&dir);
+        crate::config::write_providers(&json!([
+            { "id": "p-dead", "app": "claude", "kind": "custom", "name": "Dead",
+              "baseUrl": "http://127.0.0.1:1", "apiKey": "", "model": "m" },
+            { "id": "p-live", "app": "claude", "kind": "custom", "name": "Live",
+              "baseUrl": "http://127.0.0.1:2", "apiKey": "k" }
+        ]))
+        .unwrap();
+        let cfg = RouterConfig {
+            upstreams: vec![
+                UpstreamPref {
+                    key: "provider:p-dead".into(),
+                    enabled: true,
+                },
+                UpstreamPref {
+                    key: "provider:p-live".into(),
+                    enabled: true,
+                },
+            ],
+            ..Default::default()
+        };
+        let plan = routing_plan(&cfg, Protocol::Anthropic, Some("m"));
+        assert!(!plan.model_unknown);
+        assert!(
+            plan.members
+                .iter()
+                .any(|(k, r)| k == "provider:p-live" && r.is_ok()),
+            "{:?}",
+            plan.members
+                .iter()
+                .map(|(k, r)| (k, r.is_ok()))
+                .collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

@@ -159,7 +159,7 @@ pub fn non_stream(
 }
 
 /// Per-response stream state for whichever pair is in use.
-pub enum StreamTx {
+enum PairTx {
     AnthropicFromResponses(anthropic_to_responses::StreamTranslator),
     ChatFromResponses(chat_to_responses::StreamTranslator),
     AnthropicFromChat(anthropic_to_chat::StreamTranslator),
@@ -174,8 +174,145 @@ pub enum StreamTx {
     ResponsesFromGemini(responses_to_gemini::StreamTranslator),
 }
 
+/// Per-response stream state: the pair's translator plus whether the
+/// upstream has reached a TERMINAL event. A stream that ends without one
+/// (connection dropped, upstream crashed mid-answer) is reported to the
+/// client as an error — never closed as if the answer were complete, which
+/// would hand Claude Code a truncated tool call to run, or show half an
+/// answer as the whole one.
+pub struct StreamTx {
+    pair: PairTx,
+    client: Protocol,
+    upstream: Protocol,
+    terminal: bool,
+    /// The cut error went out: nothing follows it.
+    cut: bool,
+}
+
 impl StreamTx {
     pub fn new(client: Protocol, upstream: Protocol, original_request: &Value) -> Option<Self> {
+        Some(StreamTx {
+            pair: PairTx::new(client, upstream, original_request)?,
+            client,
+            upstream,
+            terminal: false,
+            cut: false,
+        })
+    }
+
+    /// One upstream SSE event, translated into client frames.
+    pub fn push(&mut self, event: Option<&str>, data: &Value) -> Vec<String> {
+        if is_terminal_event(self.upstream, event, data) {
+            self.terminal = true;
+        }
+        self.pair.push(event, data)
+    }
+
+    /// The upstream sent its `[DONE]` marker: the stream ended on purpose.
+    pub fn done(&mut self) -> Vec<String> {
+        if self.cut {
+            return Vec::new();
+        }
+        self.terminal = true;
+        self.pair.finish()
+    }
+
+    /// The upstream stream ended (its terminal event was seen, or `[DONE]`,
+    /// or a relay already reported the failure): the pair's closing frames.
+    pub fn finish(&mut self) -> Vec<String> {
+        if self.cut {
+            return Vec::new();
+        }
+        self.terminal = true;
+        self.pair.finish()
+    }
+
+    /// The upstream connection ended (EOF). After a terminal event this is
+    /// the normal close; before one the answer was CUT, and the client gets
+    /// an error in its own shape instead of closing frames.
+    pub fn eof(&mut self) -> Vec<String> {
+        if self.cut {
+            return Vec::new();
+        }
+        if self.terminal {
+            return self.pair.finish();
+        }
+        self.cut = true;
+        cut_error_frames(self.client)
+    }
+}
+
+/// Whether an upstream event ends the response (success, failure or an
+/// in-stream error), per upstream API.
+fn is_terminal_event(upstream: Protocol, event: Option<&str>, data: &Value) -> bool {
+    let kind = data
+        .get("type")
+        .and_then(|t| t.as_str())
+        .or(event)
+        .unwrap_or("");
+    let has_error = data.get("error").is_some_and(|e| e.is_object());
+    match upstream {
+        Protocol::OpenaiResponses => matches!(
+            kind,
+            "response.completed" | "response.incomplete" | "response.failed" | "error"
+        ),
+        Protocol::Anthropic => matches!(kind, "message_stop" | "error"),
+        Protocol::OpenaiChat => {
+            has_error
+                || data
+                    .get("choices")
+                    .and_then(|c| c.as_array())
+                    .is_some_and(|choices| {
+                        choices.iter().any(|c| {
+                            c.get("finish_reason")
+                                .and_then(|f| f.as_str())
+                                .is_some_and(|f| !f.is_empty())
+                        })
+                    })
+        }
+        Protocol::Gemini => {
+            has_error
+                || data
+                    .get("candidates")
+                    .and_then(|c| c.as_array())
+                    .is_some_and(|cands| {
+                        cands.iter().any(|c| {
+                            c.get("finishReason")
+                                .and_then(|f| f.as_str())
+                                .is_some_and(|f| !f.is_empty())
+                        })
+                    })
+        }
+    }
+}
+
+const CUT_MESSAGE: &str = "the upstream stream ended before the response completed";
+
+/// The error a client is told when its answer was cut, in that API's own
+/// in-stream error shape.
+fn cut_error_frames(client: Protocol) -> Vec<String> {
+    match client {
+        Protocol::Anthropic => vec![format!(
+            "event: error\ndata: {}\n\n",
+            serde_json::json!({"type": "error", "error": {"type": "api_error", "message": CUT_MESSAGE}})
+        )],
+        Protocol::OpenaiResponses => vec![format!(
+            "event: error\ndata: {}\n\n",
+            serde_json::json!({"type": "error", "code": "server_error", "message": CUT_MESSAGE, "param": null})
+        )],
+        Protocol::OpenaiChat => vec![format!(
+            "data: {}\n\n",
+            serde_json::json!({"error": {"message": CUT_MESSAGE, "type": "server_error", "code": null}})
+        )],
+        Protocol::Gemini => vec![format!(
+            "data: {}\n\n",
+            serde_json::json!({"error": {"code": 500, "message": CUT_MESSAGE, "status": "INTERNAL"}})
+        )],
+    }
+}
+
+impl PairTx {
+    fn new(client: Protocol, upstream: Protocol, original_request: &Value) -> Option<Self> {
         use Protocol::*;
         Some(match (client, upstream) {
             (Anthropic, OpenaiResponses) => Self::AnthropicFromResponses(
@@ -218,7 +355,7 @@ impl StreamTx {
         })
     }
 
-    pub fn push(&mut self, event: Option<&str>, data: &Value) -> Vec<String> {
+    fn push(&mut self, event: Option<&str>, data: &Value) -> Vec<String> {
         match self {
             Self::AnthropicFromResponses(t) => t.push(event, data),
             Self::ChatFromResponses(t) => t.push(event, data),
@@ -235,7 +372,7 @@ impl StreamTx {
         }
     }
 
-    pub fn finish(&mut self) -> Vec<String> {
+    fn finish(&mut self) -> Vec<String> {
         match self {
             Self::AnthropicFromResponses(t) => t.finish(),
             Self::ChatFromResponses(t) => t.finish(),
@@ -249,6 +386,84 @@ impl StreamTx {
             Self::ChatFromAnthropic(t) => t.finish(),
             Self::ResponsesFromAnthropic(t) => t.finish(),
             Self::ResponsesFromGemini(t) => t.finish(),
+        }
+    }
+}
+
+// ───────────────────────── Claude request surface by model id ─────────────────────────
+//
+// Termory has no model registry (CLIProxyAPI's `registry.LookupModelInfo`
+// is what the three "→ Claude" translators ported against), so what a Claude
+// model accepts is decided from its id. The rules come from Anthropic's
+// migration notes: from Opus 4.7, Sonnet 5 and the Fable/Mythos tier on,
+// `thinking: {type: "enabled", budget_tokens}` and the sampling parameters
+// (`temperature`, `top_p`, `top_k`) return 400 — thinking is `adaptive` with
+// `output_config.effort`. Opus/Sonnet 4.6, Haiku 4.5 and older still take
+// the budget form. An id that is not a Claude model keeps the budget form
+// too (a relay serving another vendor under the Anthropic API).
+
+/// `(family, major.minor)` of a Claude id — `claude-opus-4-7`,
+/// `anthropic/claude-sonnet-5-5`, `us.anthropic.claude-haiku-4-5-20251001-v1:0`,
+/// `claude-fable-5-1`. `None` for anything else (including the old
+/// `claude-3-7-sonnet` order).
+fn claude_family_version(model: &str) -> Option<(String, f64)> {
+    let lower = model.trim().to_ascii_lowercase();
+    let start = lower.find("claude-")?;
+    let rest = &lower[start + "claude-".len()..];
+    let mut parts = rest.split(|c| c == '-' || c == ':' || c == '@' || c == '/');
+    let family = parts.next()?.to_string();
+    if !["opus", "sonnet", "haiku", "fable", "mythos"].contains(&family.as_str()) {
+        return None;
+    }
+    let major: u32 = parts.next()?.parse().ok()?;
+    // A short second number is the minor version; a date (8 digits) or a
+    // word is not.
+    let minor: u32 = parts
+        .next()
+        .filter(|p| p.len() <= 2)
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    Some((family, major as f64 + minor as f64 / 10.0))
+}
+
+/// Whether this Claude model takes ONLY adaptive thinking (and rejects
+/// sampling parameters).
+pub fn claude_adaptive_only(model: &str) -> bool {
+    match claude_family_version(model) {
+        Some((family, _)) if family == "fable" || family == "mythos" => true,
+        Some((family, v)) if family == "opus" => v >= 4.7,
+        Some((family, v)) if family == "sonnet" || family == "haiku" => v >= 5.0,
+        _ => false,
+    }
+}
+
+/// The thinking support the "→ Claude" translators read in place of the
+/// registry: `(min_budget, effort levels)` — a non-empty level list means
+/// adaptive thinking; `None` keeps the manual budget form.
+pub fn claude_thinking_support(model: &str) -> Option<(i64, Vec<String>)> {
+    claude_adaptive_only(model).then(|| {
+        (
+            1024,
+            ["low", "medium", "high", "xhigh", "max"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        )
+    })
+}
+
+/// Manual thinking needs `budget_tokens < max_tokens` (an `xhigh` effort
+/// maps to 32768 against the default 32000): cap the budget under it.
+pub fn clamp_claude_budget(out: &mut Value) {
+    let max_tokens = out.get("max_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+    let budget = out
+        .pointer("/thinking/budget_tokens")
+        .and_then(|v| v.as_i64());
+    if let (Some(b), true) = (budget, max_tokens > 1) {
+        if b >= max_tokens {
+            if let Some(t) = out.get_mut("thinking").and_then(|t| t.as_object_mut()) {
+                t.insert("budget_tokens".into(), Value::from(max_tokens - 1));
+            }
         }
     }
 }
@@ -382,6 +597,157 @@ mod tests {
         );
         assert!(p.feed(b"data: {\"b\":2}").is_empty());
         assert_eq!(p.finish(), vec![SseEvent::Data(None, json!({"b":2}))]);
+    }
+
+    // A Responses provider's connection drops after a partial tool call:
+    // Claude Code gets an `error` event, not a finished `tool_use` whose
+    // input is a truncated command.
+    #[test]
+    fn eof_before_the_terminal_event_is_an_error_not_a_complete_message() {
+        let req = json!({"model": "gpt-5", "messages": [{"role": "user", "content": "hi"}], "stream": true});
+        let mut tx = StreamTx::new(Protocol::Anthropic, Protocol::OpenaiResponses, &req).unwrap();
+        let resp = json!({"id": "resp_5", "model": "gpt-5", "status": "in_progress", "output": []});
+        tx.push(
+            Some("response.created"),
+            &json!({"type": "response.created", "response": resp}),
+        );
+        tx.push(Some("response.output_item.added"), &json!({"type": "response.output_item.added", "output_index": 0,
+            "item": {"id": "fc_5", "type": "function_call", "arguments": "", "call_id": "call_cut", "name": "Bash"}}));
+        tx.push(Some("response.function_call_arguments.delta"), &json!({"type": "response.function_call_arguments.delta",
+            "item_id": "fc_5", "output_index": 0, "delta": "{\"command\":\"rm -rf ./build && make"}));
+        let frames = tx.eof().join("");
+        assert_eq!(
+            frames,
+            "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"the upstream stream ended before the response completed\"}}\n\n"
+        );
+        // A second EOF emits nothing more.
+        assert!(tx.eof().is_empty());
+    }
+
+    // After the terminal event, EOF is the normal close (here: the Chat
+    // `finish_reason` arrived, `[DONE]` did not).
+    #[test]
+    fn eof_after_the_terminal_event_closes_normally() {
+        let req = json!({"model": "deepseek-chat", "messages": [{"role": "user", "content": "hi"}], "stream": true});
+        let mut tx = StreamTx::new(Protocol::Anthropic, Protocol::OpenaiChat, &req).unwrap();
+        tx.push(None, &json!({"id": "c1", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hello"}, "finish_reason": null}]}));
+        tx.push(
+            None,
+            &json!({"id": "c1", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+        );
+        let frames = tx.eof().join("");
+        assert!(frames.contains("event: message_stop"), "{frames}");
+        assert!(!frames.contains("event: error"), "{frames}");
+    }
+
+    // Every client API gets the cut reported in its own shape.
+    #[test]
+    fn cut_error_frames_per_client() {
+        let mut chat =
+            StreamTx::new(Protocol::OpenaiChat, Protocol::Anthropic, &json!({})).unwrap();
+        assert_eq!(
+            chat.eof(),
+            vec!["data: {\"error\":{\"message\":\"the upstream stream ended before the response completed\",\"type\":\"server_error\",\"code\":null}}\n\n"]
+        );
+        let mut gem = StreamTx::new(Protocol::Gemini, Protocol::OpenaiChat, &json!({})).unwrap();
+        assert_eq!(
+            gem.eof(),
+            vec!["data: {\"error\":{\"code\":500,\"message\":\"the upstream stream ended before the response completed\",\"status\":\"INTERNAL\"}}\n\n"]
+        );
+        let mut resp =
+            StreamTx::new(Protocol::OpenaiResponses, Protocol::OpenaiChat, &json!({})).unwrap();
+        assert_eq!(
+            resp.eof(),
+            vec!["event: error\ndata: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"the upstream stream ended before the response completed\",\"param\":null}\n\n"]
+        );
+        // `[DONE]` is a deliberate end: no error.
+        let mut done =
+            StreamTx::new(Protocol::Anthropic, Protocol::OpenaiChat, &json!({})).unwrap();
+        done.done();
+        assert!(done.eof().is_empty());
+    }
+
+    #[test]
+    fn terminal_events_per_upstream() {
+        use Protocol::*;
+        assert!(is_terminal_event(
+            OpenaiResponses,
+            None,
+            &json!({"type": "response.failed"})
+        ));
+        assert!(!is_terminal_event(
+            OpenaiResponses,
+            None,
+            &json!({"type": "response.output_text.delta"})
+        ));
+        assert!(is_terminal_event(
+            Anthropic,
+            Some("message_stop"),
+            &json!({"type": "message_stop"})
+        ));
+        assert!(is_terminal_event(
+            OpenaiChat,
+            None,
+            &json!({"error": {"message": "x"}})
+        ));
+        assert!(!is_terminal_event(
+            OpenaiChat,
+            None,
+            &json!({"choices": [{"delta": {}, "finish_reason": null}]})
+        ));
+        assert!(is_terminal_event(
+            Gemini,
+            None,
+            &json!({"candidates": [{"finishReason": "STOP"}]})
+        ));
+        assert!(!is_terminal_event(
+            Gemini,
+            None,
+            &json!({"candidates": [{"content": {"parts": []}}]})
+        ));
+    }
+
+    #[test]
+    fn claude_models_adaptive_only_by_id() {
+        for m in [
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-opus-5",
+            "claude-opus-5-5",
+            "claude-sonnet-5",
+            "claude-sonnet-5-5",
+            "anthropic/claude-sonnet-5-5",
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
+            "us.anthropic.claude-opus-5-5-v1:0",
+        ] {
+            assert!(claude_adaptive_only(m), "{m}");
+            assert!(claude_thinking_support(m).is_some(), "{m}");
+        }
+        for m in [
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-5-20250929",
+            "claude-haiku-4-5-20251001",
+            "claude-3-7-sonnet-20250219",
+            "deepseek-reasoner",
+            "gpt-5",
+        ] {
+            assert!(!claude_adaptive_only(m), "{m}");
+            assert!(claude_thinking_support(m).is_none(), "{m}");
+        }
+    }
+
+    #[test]
+    fn budget_is_clamped_under_max_tokens() {
+        let mut out =
+            json!({"max_tokens": 32000, "thinking": {"type": "enabled", "budget_tokens": 32768}});
+        clamp_claude_budget(&mut out);
+        assert_eq!(out["thinking"]["budget_tokens"], json!(31999));
+        let mut ok =
+            json!({"max_tokens": 32000, "thinking": {"type": "enabled", "budget_tokens": 8192}});
+        clamp_claude_budget(&mut ok);
+        assert_eq!(ok["thinking"]["budget_tokens"], json!(8192));
     }
 
     #[test]

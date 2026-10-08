@@ -246,12 +246,10 @@ fn convert_gemini_request_to_openai(model_name: &str, root: &Value, stream: bool
             let mut content_items: Vec<Value> = Vec::new();
             let mut only_text_content = true;
             let mut tool_call_items: Vec<Value> = Vec::new();
-            let mut dropped_thought = false;
 
             if let Some(Value::Array(parts)) = gget(content, "parts") {
                 for (current_part_idx, part) in parts.iter().enumerate() {
                     if is_gemini_thought_part(part) {
-                        dropped_thought = true;
                         continue;
                     }
 
@@ -364,7 +362,11 @@ fn convert_gemini_request_to_openai(model_name: &str, root: &Value, stream: bool
                 msg.insert("tool_calls".into(), Value::Array(tool_call_items));
             }
 
-            if dropped_thought && !has_content && !has_tool_calls {
+            // A content whose parts were all functionResponse (already
+            // emitted as `tool` messages) or thoughts leaves nothing for
+            // this message: an empty `{"role":"user","content":""}` is
+            // rejected by OpenAI ("string too short").
+            if !has_content && !has_tool_calls {
                 continue;
             }
 
@@ -601,6 +603,15 @@ impl StreamTranslator {
 
     // port of ConvertOpenAIResponseToGemini (openai_gemini_response.go)
     fn convert_openai_response_to_gemini(&mut self, root: &Value) -> Vec<Value> {
+        // An error delivered inside the 200 stream (`{"error":{…}}`, no
+        // `choices`): the Gemini client gets an error object with the
+        // upstream's reason instead of a stream that ends without a
+        // finishReason (Gemini CLI retries that as a broken stream).
+        if let Some(err) = root.get("error").filter(|e| e.is_object()) {
+            if root.get("choices").is_none() {
+                return vec![gemini_error_from_chat(err)];
+            }
+        }
         let Some(Value::Array(choices)) = gget(root, "choices") else {
             return Vec::new();
         };
@@ -663,13 +674,16 @@ impl StreamTranslator {
                 }
             }
 
-            if !chunk_outputs.is_empty() {
-                results.extend(chunk_outputs);
-                continue;
-            }
+            // A chunk may carry deltas AND the finish_reason (many
+            // OpenAI-compatible servers end the stream that way): the deltas
+            // go out and the finish reason is still read below.
+            let had_deltas = !chunk_outputs.is_empty();
+            results.extend(chunk_outputs);
 
             // Tool call deltas: accumulate, emit nothing until finish_reason.
+            let mut had_tool_calls = false;
             if let Some(Value::Array(tool_calls)) = delta.and_then(|d| gget(d, "tool_calls")) {
+                had_tool_calls = true;
                 for tool_call in tool_calls {
                     let tool_index = gint(gget(tool_call, "index"));
                     let tool_id = gstr(gget(tool_call, "id"));
@@ -703,7 +717,6 @@ impl StreamTranslator {
                         acc.arguments.push_str(&function_args);
                     }
                 }
-                continue;
             }
 
             // Finish reason
@@ -739,6 +752,9 @@ impl StreamTranslator {
                     results.push(Value::Object(template));
                     continue;
                 }
+            }
+            if had_deltas || had_tool_calls {
+                continue;
             }
 
             // Usage information
@@ -794,6 +810,27 @@ fn push_candidate_part(template: &mut Map<String, Value>, part: Value) {
     {
         parts.push(part);
     }
+}
+
+/// A Chat error object as the Gemini API's error shape.
+fn gemini_error_from_chat(err: &Value) -> Value {
+    let mut message = gstr(err.get("message"));
+    if message.is_empty() {
+        message = gstr(err.get("code"));
+    }
+    if message.is_empty() {
+        message = "upstream request failed".to_string();
+    }
+    let code = err
+        .get("code")
+        .and_then(|c| c.as_u64())
+        .filter(|c| (400..600).contains(c))
+        .unwrap_or(500);
+    let status = match gstr(err.get("type")).as_str() {
+        "" => "INTERNAL".to_string(),
+        t => t.to_string(),
+    };
+    json!({"error": {"code": code, "message": message, "status": status}})
 }
 
 // port of mapOpenAIFinishReasonToGemini (openai_gemini_response.go)
@@ -1294,9 +1331,9 @@ mod tests {
                     ]},
                     {"role":"tool","tool_call_id":a,"content":"{\"result\":\"a\"}"},
                     {"role":"tool","tool_call_id":b,"content":"{\"result\":\"b\"}"},
-                    {"role":"tool","tool_call_id":c,"content":"{\"result\":\"c\"}"},
-                    // Go appends the (now empty) function-role turn itself too.
-                    {"role":"function","content":""}
+                    {"role":"tool","tool_call_id":c,"content":"{\"result\":\"c\"}"}
+                    // Go appends an empty function-role turn here too, which
+                    // OpenAI rejects ("string too short"); Termory leaves it out.
                 ],
                 "stream":false
             })
@@ -1314,8 +1351,7 @@ mod tests {
         let want = json!({
             "model":"test-model",
             "messages":[
-                {"role":"tool","tool_call_id":id,"content":"{\"result\":\"ok\"}"},
-                {"role":"function","content":""}
+                {"role":"tool","tool_call_id":id,"content":"{\"result\":\"ok\"}"}
             ],
             "stream":false
         });
@@ -1737,6 +1773,30 @@ mod tests {
             vec!["data: {\"candidates\":[{\"content\":{\"parts\":[],\"role\":\"model\"},\"index\":0,\"finishReason\":\"STOP\"}]}\n\n"]
         );
         assert!(t.finish().is_empty());
+    }
+
+    // A last chunk carrying BOTH the final text and `finish_reason` (how
+    // several OpenAI-compatible servers end a stream): the text goes out and
+    // the finish reason is not lost — the Gemini client needs it to end the
+    // turn.
+    #[test]
+    fn stream_finish_reason_beside_content_is_kept() {
+        let mut t = StreamTranslator::new(&json!({}));
+        assert_eq!(
+            t.push(None, &json!({"choices":[{"index":0,"delta":{"content":"bye"},"finish_reason":"stop"}]})),
+            vec![
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"bye\"}],\"role\":\"model\"},\"index\":0}]}\n\n",
+                "data: {\"candidates\":[{\"content\":{\"parts\":[],\"role\":\"model\"},\"index\":0,\"finishReason\":\"STOP\"}]}\n\n",
+            ]
+        );
+        // Same for a tool-call delta that arrives with its finish reason.
+        let mut t = StreamTranslator::new(&json!({}));
+        assert_eq!(
+            t.push(None, &json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"tool_calls"}]})),
+            vec![
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"id\":\"call_1\",\"name\":\"lookup\",\"args\":{}}}],\"role\":\"model\"},\"index\":0,\"finishReason\":\"STOP\"}]}\n\n",
+            ]
+        );
     }
 
     // port of TestConvertOpenAIResponseToGeminiNonStream_NullFinishReasonIgnored

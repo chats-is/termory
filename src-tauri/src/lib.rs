@@ -856,24 +856,29 @@ async fn write_app_config(
     value: serde_json::Value,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut cfg = config::read_config().map_err(|e| e.to_string())?;
-        let obj = cfg
-            .as_object_mut()
-            .ok_or_else(|| "config.json is not a JSON object".to_string())?;
-        // Did `sources` actually change? Compare the on-disk value to the
-        // incoming one before we overwrite it.
-        let sources_changed = key == "sources" && obj.get("sources") != Some(&value);
-        // Same question for the per-CLI activation markers. The tray READS
-        // these to disambiguate a standalone provider from a gateway binding
-        // that share creds, so a marker change is a tray-visible change — and
-        // the Providers page always writes it AFTER the activate/deactivate
-        // IPC that rebuilt the menu (`markActive` follows `activate_provider`),
-        // so without a rebuild here the tray would keep resolving with the
-        // PREVIOUS marker until some unrelated rebuild happened to fire.
-        let markers_changed = key == config::ACTIVE_PROVIDER_IDS_KEY
-            && obj.get(config::ACTIVE_PROVIDER_IDS_KEY) != Some(&value);
-        obj.insert(key, value);
-        config::write_config(&cfg).map_err(|e| e.to_string())?;
+        let mut sources_changed = false;
+        let mut markers_changed = false;
+        // Under config.json's RMW lock: the backend writes the activation
+        // marker from other threads (tray switch, router binding
+        // suspend/restore at launch and quit), and an unlocked read→write
+        // pair here would drop that write — or this one.
+        config::update_config_object(|obj| {
+            // Did `sources` actually change? Compare the on-disk value to
+            // the incoming one before we overwrite it.
+            sources_changed = key == "sources" && obj.get("sources") != Some(&value);
+            // Same question for the per-CLI activation markers. The tray
+            // READS these to disambiguate a standalone provider from a
+            // gateway binding that share creds, so a marker change is a
+            // tray-visible change — and the Providers page always writes it
+            // AFTER the activate/deactivate IPC that rebuilt the menu
+            // (`markActive` follows `activate_provider`), so without a
+            // rebuild here the tray would keep resolving with the PREVIOUS
+            // marker until some unrelated rebuild happened to fire.
+            markers_changed = key == config::ACTIVE_PROVIDER_IDS_KEY
+                && obj.get(config::ACTIVE_PROVIDER_IDS_KEY) != Some(&value);
+            obj.insert(key, value);
+        })
+        .map_err(|e| e.to_string())?;
 
         // A change to the `sources` key (Settings → Tools toggles) must
         // propagate everywhere scan output flows: re-scan (the filter lives
@@ -932,6 +937,11 @@ async fn write_app_providers(
     })
     .await
     .map_err(|e| e.to_string())??;
+    // A provider edit is the moment a cooldown earned by its OLD settings
+    // (a mistyped key → 401 → 30 min, a wrong path → 404 → 12 h) stops
+    // describing anything: the router forgets what it held against every
+    // provider and gateway member and tries them afresh.
+    router::reset_provider_health();
     let _ = tray::rebuild_menu(&app);
     tray::invalidate_balance_all(&app);
     Ok(())
@@ -967,6 +977,9 @@ async fn write_app_gateways(app: tauri::AppHandle, value: serde_json::Value) -> 
     })
     .await
     .map_err(|e| e.to_string())??;
+    // A gateway edit, like a provider edit, retires the cooldowns its old
+    // settings earned in the router.
+    router::reset_provider_health();
     // The tray lists each CLI's gateway BINDINGS alongside its standalone
     // providers, so adding / editing / unbinding a gateway changes the menu
     // exactly like `write_app_providers` does — this is its sibling and needs

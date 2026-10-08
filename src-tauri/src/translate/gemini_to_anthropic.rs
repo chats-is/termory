@@ -530,8 +530,8 @@ type ThinkingSupport = (i64, Vec<String>);
 
 /// Stand-in for `registry.LookupModelInfo(model, "claude").Thinking`
 /// (internal/registry/model_registry.go). Termory has no model registry.
-fn lookup_claude_thinking_support(_model: &str) -> Option<ThinkingSupport> {
-    None
+fn lookup_claude_thinking_support(model: &str) -> Option<ThinkingSupport> {
+    crate::translate::claude_thinking_support(model)
 }
 
 // port of ConvertLevelToBudget (thinking/convert.go)
@@ -576,7 +576,10 @@ fn map_to_claude_effort(level: &str, supports_max: bool) -> Option<&'static str>
         "minimal" | "low" => Some("low"),
         "medium" => Some("medium"),
         "high" | "auto" => Some("high"),
-        "xhigh" | "max" => Some(if supports_max { "max" } else { "high" }),
+        // Claude has `xhigh` of its own: a client's xhigh stays xhigh,
+        // only `max` is max.
+        "xhigh" => Some(if supports_max { "xhigh" } else { "high" }),
+        "max" => Some(if supports_max { "max" } else { "high" }),
         _ => None,
     }
 }
@@ -975,8 +978,12 @@ pub fn translate_request(model: &str, body: &Value, stream: bool) -> Value {
         if let Some(max_tokens) = gen_config.get("maxOutputTokens") {
             sj_set(&mut out, "max_tokens", Value::from(gint(Some(max_tokens))));
         }
+        // Gemini CLI always sends `topP: 1`; the models that reject sampling
+        // parameters (Opus 4.7+, Sonnet 5+, Fable) do not get it.
         if let Some(top_p) = gen_config.get("topP") {
-            sj_set(&mut out, "top_p", float_value(gfloat(Some(top_p))));
+            if !crate::translate::claude_adaptive_only(model) {
+                sj_set(&mut out, "top_p", float_value(gfloat(Some(top_p))));
+            }
         }
         if let Some(Value::Array(stop_seqs)) = gen_config.get("stopSequences") {
             let stop_sequences: Vec<Value> = stop_seqs
@@ -992,8 +999,12 @@ pub fn translate_request(model: &str, body: &Value, stream: bool) -> Value {
         }
     }
 
-    // System instruction conversion (a user turn of its own)
-    if let Some(sys_instr) = root.get("system_instruction") {
+    // System instruction conversion (a user turn of its own). Gemini CLI
+    // (`@google/genai`) sends the camelCase key; the REST API takes both.
+    if let Some(sys_instr) = root
+        .get("systemInstruction")
+        .or_else(|| root.get("system_instruction"))
+    {
         if let Some(Value::Array(parts)) = sys_instr.get("parts") {
             let mut system_text = String::new();
             for part in parts {
@@ -1170,6 +1181,7 @@ pub fn translate_request(model: &str, body: &Value, stream: bool) -> Value {
     sj_set(&mut out, "stream", Value::Bool(stream));
 
     apply_translated_summary_to_claude(&mut out, root, model);
+    crate::translate::clamp_claude_budget(&mut out);
     out
 }
 
@@ -1191,10 +1203,13 @@ fn apply_gemini_thinking_config(out: &mut Value, thinking_config: &Value, model:
         if supports_adaptive {
             match level.as_str() {
                 "" => {}
+                // `disabled` is a 400 on Opus 5.5, Sonnet 5.5 and the Fable
+                // tier; adaptive at the lowest effort is accepted everywhere
+                // adaptive is.
                 "none" => {
-                    sj_set(out, "thinking.type", Value::from("disabled"));
+                    sj_set(out, "thinking.type", Value::from("adaptive"));
                     sj_delete(out, "thinking.budget_tokens");
-                    sj_delete(out, "output_config.effort");
+                    sj_set(out, "output_config.effort", Value::from("low"));
                 }
                 _ => {
                     let mapped = map_to_claude_effort(&level, supports_max)
@@ -1212,9 +1227,10 @@ fn apply_gemini_thinking_config(out: &mut Value, thinking_config: &Value, model:
                     sj_set(out, "thinking.type", Value::from("disabled"));
                     sj_delete(out, "thinking.budget_tokens");
                 }
+                // `enabled` needs a budget: "auto" takes the medium one.
                 "auto" => {
                     sj_set(out, "thinking.type", Value::from("enabled"));
-                    sj_delete(out, "thinking.budget_tokens");
+                    sj_set(out, "thinking.budget_tokens", Value::from(8192));
                 }
                 _ => {
                     if let Some(budget) = convert_level_to_budget(&level) {
@@ -1237,9 +1253,9 @@ fn apply_gemini_thinking_config(out: &mut Value, thinking_config: &Value, model:
     if supports_adaptive {
         match budget {
             0 => {
-                sj_set(out, "thinking.type", Value::from("disabled"));
+                sj_set(out, "thinking.type", Value::from("adaptive"));
                 sj_delete(out, "thinking.budget_tokens");
-                sj_delete(out, "output_config.effort");
+                sj_set(out, "output_config.effort", Value::from("low"));
             }
             _ => {
                 if let Some(level) = convert_budget_to_level(budget) {
@@ -1256,9 +1272,11 @@ fn apply_gemini_thinking_config(out: &mut Value, thinking_config: &Value, model:
                 sj_set(out, "thinking.type", Value::from("disabled"));
                 sj_delete(out, "thinking.budget_tokens");
             }
+            // Gemini CLI's default `thinkingBudget: -1` (dynamic): Claude's
+            // `enabled` needs a budget — the medium one.
             -1 => {
                 sj_set(out, "thinking.type", Value::from("enabled"));
-                sj_delete(out, "thinking.budget_tokens");
+                sj_set(out, "thinking.budget_tokens", Value::from(8192));
             }
             _ => {
                 sj_set(out, "thinking.type", Value::from("enabled"));
@@ -1687,21 +1705,18 @@ impl StreamTranslator {
             }
 
             "message_delta" => {
-                if let Some(delta) = root.get("delta") {
-                    if let Some(stop_reason) = delta.get("stop_reason") {
-                        let reason = match gstr(Some(stop_reason)).as_str() {
-                            "max_tokens" => "MAX_TOKENS",
-                            // end_turn, tool_use, stop_sequence and the rest
-                            _ => "STOP",
-                        };
-                        set_finish_reason(&mut template, reason);
-                    }
-                }
+                // Go overwrites the mapped reason with STOP; a truncated
+                // answer is reported as MAX_TOKENS instead, so the Gemini
+                // client can tell it was cut short.
+                let reason = match gstr(root.pointer("/delta/stop_reason")).as_str() {
+                    "max_tokens" => "MAX_TOKENS",
+                    // end_turn, tool_use, stop_sequence and the rest
+                    _ => "STOP",
+                };
                 if let Some(usage) = root.get("usage") {
                     write_usage(&mut template, "usageMetadata", usage);
                 }
-                // Go overwrites any mapped reason with STOP here.
-                set_finish_reason(&mut template, "STOP");
+                set_finish_reason(&mut template, reason);
                 vec![template]
             }
 
@@ -2069,7 +2084,8 @@ mod tests {
                     "max_tokens": 32000,
                     "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
                     "metadata": {"user_id": sha256_hex("content:hi")},
-                    "thinking": {"type": "enabled", "budget_tokens": 24576, "display": display},
+                    "thinking": {"type": "adaptive", "display": display},
+                    "output_config": {"effort": "high"},
                     "stream": false
                 })
             );
@@ -2080,7 +2096,10 @@ mod tests {
     fn thinking_budget_and_level_mapping() {
         let cases = [
             (json!({"thinkingBudget": 0}), json!({"type": "disabled"})),
-            (json!({"thinking_budget": -1}), json!({"type": "enabled"})),
+            (
+                json!({"thinking_budget": -1}),
+                json!({"type": "enabled", "budget_tokens": 8192}),
+            ),
             (
                 json!({"thinkingBudget": 4096}),
                 json!({"type": "enabled", "budget_tokens": 4096}),
@@ -2091,7 +2110,7 @@ mod tests {
             ),
             (
                 json!({"thinking_level": "auto"}),
-                json!({"type": "enabled"}),
+                json!({"type": "enabled", "budget_tokens": 8192}),
             ),
             (
                 json!({"thinkingLevel": "low"}),
@@ -2181,11 +2200,44 @@ mod tests {
         );
     }
 
+    // Gemini CLI sends `systemInstruction` (camelCase): the same system turn
+    // must come out — not dropped.
+    #[test]
+    fn keeps_camel_case_system_instruction() {
+        let out = req(
+            "claude-test",
+            r#"{"systemInstruction":{"parts":[{"text":"system rule"}]},
+                "contents":[{"role":"user","parts":[{"text":"question"}]}]}"#,
+        );
+        assert_eq!(
+            out["messages"],
+            json!([
+                {"role": "user", "content": [{"type": "text", "text": "system rule"}]},
+                {"role": "user", "content": [{"type": "text", "text": "question"}]}
+            ])
+        );
+    }
+
+    // Gemini CLI's request shape (`topP: 1`, `thinkingBudget: -1`) against a
+    // current Claude model: adaptive thinking, no sampling params.
+    #[test]
+    fn gemini_cli_defaults_against_a_current_claude_model() {
+        let out = req(
+            "claude-sonnet-5-5",
+            r#"{"generationConfig":{"temperature":0,"topP":1,"thinkingConfig":{"includeThoughts":true,"thinkingBudget":-1}},
+                "contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#,
+        );
+        assert_eq!(out["thinking"]["type"], json!("adaptive"));
+        assert!(out["thinking"].get("budget_tokens").is_none());
+        assert!(out.get("top_p").is_none());
+        assert!(out.get("temperature").is_none());
+    }
+
     // port of TestConvertGeminiRequestToClaude_DropsTemperature (claude_gemini_request_test.go)
     #[test]
     fn drops_temperature() {
         let out = req(
-            "claude-sonnet-5",
+            "claude-sonnet-4-6",
             r#"{"generationConfig":{"temperature":0.2,"topP":0.8,"maxOutputTokens":1024,"stopSequences":["END"]},
                 "service_tier":"auto",
                 "contents":[{"role":"user","parts":[{"text":"hi"}]}]}"#,
@@ -2193,7 +2245,7 @@ mod tests {
         assert_eq!(
             out,
             json!({
-                "model": "claude-sonnet-5",
+                "model": "claude-sonnet-4-6",
                 "max_tokens": 1024,
                 "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
                 "metadata": {"user_id": sha256_hex("content:hi")},
@@ -2714,7 +2766,7 @@ mod tests {
         assert_eq!(
             out,
             vec![frame(json!({
-                "candidates": [{"content": {"role": "model", "parts": []}, "finishReason": "STOP"}],
+                "candidates": [{"content": {"role": "model", "parts": []}, "finishReason": "MAX_TOKENS"}],
                 "usageMetadata": {
                     "trafficType": "PROVISIONED_THROUGHPUT",
                     "promptTokenCount": 5,

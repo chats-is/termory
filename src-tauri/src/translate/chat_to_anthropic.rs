@@ -821,8 +821,8 @@ type ThinkingSupport = (i64, Vec<String>);
 
 /// Stand-in for `registry.LookupModelInfo(model, "claude").Thinking`
 /// (internal/registry/model_registry.go). Termory has no model registry.
-fn lookup_claude_thinking_support(_model: &str) -> Option<ThinkingSupport> {
-    None
+fn lookup_claude_thinking_support(model: &str) -> Option<ThinkingSupport> {
+    crate::translate::claude_thinking_support(model)
 }
 
 // port of ConvertLevelToBudget (thinking/convert.go)
@@ -854,7 +854,10 @@ fn map_to_claude_effort(level: &str, supports_max: bool) -> Option<&'static str>
         "low" => Some("low"),
         "medium" => Some("medium"),
         "high" => Some("high"),
-        "xhigh" | "max" => Some(if supports_max { "max" } else { "high" }),
+        // Claude has `xhigh` of its own: a client's xhigh stays xhigh,
+        // only `max` is max.
+        "xhigh" => Some(if supports_max { "xhigh" } else { "high" }),
+        "max" => Some(if supports_max { "max" } else { "high" }),
         "auto" => Some("high"),
         _ => None,
     }
@@ -1061,10 +1064,13 @@ fn convert_openai_request_to_claude(
 
             if supports_adaptive {
                 match effort.as_str() {
+                    // "none": `disabled` is a 400 on Opus 5.5, Sonnet 5.5
+                    // and the Fable tier; adaptive at the lowest effort is
+                    // accepted everywhere adaptive is.
                     "none" => {
-                        sj_set(&mut out, "thinking.type", Value::from("disabled"));
+                        sj_set(&mut out, "thinking.type", Value::from("adaptive"));
                         sj_delete(&mut out, "thinking.budget_tokens");
-                        sj_delete(&mut out, "output_config.effort");
+                        sj_set(&mut out, "output_config.effort", Value::from("low"));
                     }
                     "auto" => {
                         sj_set(&mut out, "thinking.type", Value::from("adaptive"));
@@ -1084,7 +1090,11 @@ fn convert_openai_request_to_claude(
                 // Legacy/manual thinking (budget_tokens).
                 match budget {
                     0 => sj_set(&mut out, "thinking.type", Value::from("disabled")),
-                    -1 => sj_set(&mut out, "thinking.type", Value::from("enabled")),
+                    // `enabled` needs a budget: "auto" takes the medium one.
+                    -1 => {
+                        sj_set(&mut out, "thinking.type", Value::from("enabled"));
+                        sj_set(&mut out, "thinking.budget_tokens", Value::from(8192));
+                    }
                     b if b > 0 => {
                         sj_set(&mut out, "thinking.type", Value::from("enabled"));
                         sj_set(&mut out, "thinking.budget_tokens", Value::from(b));
@@ -1105,9 +1115,12 @@ fn convert_openai_request_to_claude(
         sj_set(&mut out, "max_tokens", Value::from(gint(Some(max_tokens))));
     }
 
-    // Top P setting for nucleus sampling.
+    // Top P setting for nucleus sampling — not on the models that reject
+    // sampling parameters (Opus 4.7+, Sonnet 5+, Fable).
     if let Some(top_p) = root.get("top_p") {
-        sj_set(&mut out, "top_p", float_value(gfloat(Some(top_p))));
+        if !crate::translate::claude_adaptive_only(model_name) {
+            sj_set(&mut out, "top_p", float_value(gfloat(Some(top_p))));
+        }
     }
 
     // Stop sequences configuration for custom termination conditions
@@ -1463,6 +1476,7 @@ fn convert_openai_request_to_claude(
     }
 
     apply_translated_summary_to_claude(&mut out, root, model_name);
+    crate::translate::clamp_claude_budget(&mut out);
     out
 }
 
@@ -2219,18 +2233,19 @@ mod tests {
     // port of TestConvertOpenAIRequestToClaude_ThinkingSummaryVisibility (claude_openai_request_test.go)
     #[test]
     fn thinking_summary_visibility() {
+        // Opus 5.5 takes adaptive thinking only (budget_tokens is a 400).
         let cases = [
             (
                 r#"{"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}"#,
-                json!({"type": "enabled", "budget_tokens": 24576}),
+                json!({"type": "adaptive"}),
             ),
             (
                 r#"{"reasoning_effort":"high","include_reasoning":true,"messages":[{"role":"user","content":"hi"}]}"#,
-                json!({"type": "enabled", "budget_tokens": 24576, "display": "summarized"}),
+                json!({"type": "adaptive", "display": "summarized"}),
             ),
             (
                 r#"{"reasoning_effort":"high","reasoning":{"exclude":true},"messages":[{"role":"user","content":"hi"}]}"#,
-                json!({"type": "enabled", "budget_tokens": 24576, "display": "omitted"}),
+                json!({"type": "adaptive", "display": "omitted"}),
             ),
         ];
         for (input, thinking) in cases {
@@ -2242,6 +2257,7 @@ mod tests {
                     "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
                     "metadata": {"user_id": user_id("hi")},
                     "thinking": thinking,
+                    "output_config": {"effort": "high"},
                     "stream": false
                 })
             );
@@ -2252,9 +2268,10 @@ mod tests {
     fn reasoning_effort_budget_mapping() {
         for (effort, thinking) in [
             ("none", json!({"type": "disabled"})),
-            ("auto", json!({"type": "enabled"})),
+            ("auto", json!({"type": "enabled", "budget_tokens": 8192})),
             ("LOW", json!({"type": "enabled", "budget_tokens": 1024})),
-            ("xhigh", json!({"type": "enabled", "budget_tokens": 32768})),
+            // 32768 is capped under the default max_tokens (32000).
+            ("xhigh", json!({"type": "enabled", "budget_tokens": 31999})),
         ] {
             let out = translate_request(
                 "claude-test",
@@ -2413,17 +2430,51 @@ mod tests {
         );
     }
 
+    // OpenCode (ai-sdk) replays `reasoning_effort` against a current Claude
+    // model: adaptive thinking with the effort, no budget, no sampling
+    // params; an older model keeps the budget form and `top_p`.
+    #[test]
+    fn current_claude_models_take_adaptive_thinking_and_no_sampling() {
+        let out = req(
+            "claude-sonnet-5-5",
+            r#"{"reasoning_effort":"medium","top_p":0.9,"messages":[{"role":"user","content":"hi"}]}"#,
+        );
+        assert_eq!(out["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(out["output_config"]["effort"], json!("medium"));
+        assert!(out.get("top_p").is_none());
+        let out = req(
+            "claude-fable-5-1",
+            r#"{"reasoning_effort":"none","messages":[{"role":"user","content":"hi"}]}"#,
+        );
+        assert_eq!(out["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(out["output_config"]["effort"], json!("low"));
+        let out = req(
+            "claude-opus-4-7",
+            r#"{"reasoning_effort":"xhigh","messages":[{"role":"user","content":"hi"}]}"#,
+        );
+        assert_eq!(out["output_config"]["effort"], json!("xhigh"));
+        let out = req(
+            "claude-sonnet-4-6",
+            r#"{"reasoning_effort":"medium","top_p":0.9,"messages":[{"role":"user","content":"hi"}]}"#,
+        );
+        assert_eq!(
+            out["thinking"],
+            json!({"type": "enabled", "budget_tokens": 8192})
+        );
+        assert_eq!(out["top_p"], json!(0.9));
+    }
+
     // port of TestConvertOpenAIRequestToClaude_DropsTemperature (claude_openai_request_test.go)
     #[test]
     fn drops_temperature() {
         let out = req(
-            "claude-sonnet-5",
+            "claude-sonnet-4-6",
             r#"{"model":"gpt-4.1","temperature":0.2,"top_p":0.8,"messages":[{"role":"user","content":"hi"}]}"#,
         );
         assert_eq!(
             out,
             json!({
-                "model": "claude-sonnet-5",
+                "model": "claude-sonnet-4-6",
                 "max_tokens": 32000,
                 "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
                 "metadata": {"user_id": user_id("hi")},

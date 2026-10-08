@@ -666,6 +666,14 @@ pub fn translate_request_with_compat(model: &str, body: &Value, stream: bool) ->
     convert_claude_request_to_openai(model, body, stream, true)
 }
 
+/// An Anthropic server tool: typed (`web_search_20250305`, `code_execution_…`,
+/// …) with no `input_schema`. A `custom` type or a schema makes it a
+/// client tool.
+fn is_anthropic_server_tool(tool: &Value) -> bool {
+    let kind = gstr(gget(tool, "type"));
+    !kind.is_empty() && kind != "custom" && gget(tool, "input_schema").is_none_or(|s| s.is_null())
+}
+
 // port of convertClaudeRequestToOpenAI (openai_claude_request.go)
 fn convert_claude_request_to_openai(
     model_name: &str,
@@ -932,10 +940,17 @@ fn convert_claude_request_to_openai(
         out.insert("messages".into(), Value::Array(aligned));
     }
 
-    // Tools
+    // Tools. Anthropic SERVER tools (`web_search_20250305`, …: a `type`
+    // other than `custom` and no `input_schema`) run on Anthropic's side;
+    // forwarded as a callable function, the model may call `web_search` and
+    // the client has no such tool to run. Left out, as the Gemini
+    // translator does.
     if let Some(Value::Array(tools)) = gget(root, "tools") {
         let mut tool_items = Vec::new();
         for tool in tools {
+            if is_anthropic_server_tool(tool) {
+                continue;
+            }
             let parameters = match gget(tool, "input_schema") {
                 Some(schema) if !schema.is_null() => {
                     normalize_object_schema_properties(schema.clone())
@@ -1526,6 +1541,8 @@ pub struct StreamTranslator {
     usage_output_tokens: i64,
     usage_cached_tokens: i64,
     usage_cache_write_tokens: i64,
+    /// An in-stream error was reported: nothing is closed as complete after it.
+    errored: bool,
 }
 
 impl StreamTranslator {
@@ -1556,6 +1573,7 @@ impl StreamTranslator {
             usage_output_tokens: 0,
             usage_cached_tokens: 0,
             usage_cache_write_tokens: 0,
+            errored: false,
         }
     }
 
@@ -1570,6 +1588,9 @@ impl StreamTranslator {
     // port of convertOpenAIDoneToAnthropic (openai_claude_response.go)
     pub fn finish(&mut self) -> Vec<String> {
         let mut results = Vec::new();
+        if self.errored {
+            return results;
+        }
         self.finalize_content_blocks(&mut results);
         if !self.message_delta_sent {
             self.emit_message_delta(&mut results);
@@ -1645,6 +1666,32 @@ impl StreamTranslator {
     // port of convertOpenAIStreamingChunkToAnthropic (openai_claude_response.go)
     fn convert_streaming_chunk(&mut self, root: &Value) -> Vec<String> {
         let mut results = Vec::new();
+
+        // An error delivered inside a 200 stream (`{"error":{…}}`, no
+        // `choices` — OpenAI-compatible gateways report an exhausted balance
+        // or an upstream fault this way). Claude Code gets the error, not an
+        // empty answer. Not in Go, which has no branch for it.
+        if let Some(err) = root.get("error").filter(|e| e.is_object()) {
+            if root.get("choices").is_none() {
+                self.errored = true;
+                let kind = match gstr(err.get("type")).as_str() {
+                    "" => "api_error".to_string(),
+                    t => t.to_string(),
+                };
+                let mut message = gstr(err.get("message"));
+                if message.is_empty() {
+                    message = gstr(err.get("code"));
+                }
+                if message.is_empty() {
+                    message = kind.clone();
+                }
+                results.push(sse_frame(
+                    "error",
+                    &json!({"type": "error", "error": {"type": kind, "message": message}}),
+                ));
+                return results;
+            }
+        }
 
         if self.message_id.is_empty() {
             self.message_id = gstr(gget(root, "id"));
@@ -2514,20 +2561,38 @@ mod tests {
 
     #[test]
     fn tool_without_input_schema_defaults_parameters() {
+        // The server tool (`web_search_20250305`) is left out: a Chat
+        // upstream could call it and the client has nothing to run.
         let out = req(r#"{"tools":[
             {"type":"web_search_20250305","name":"web_search","max_uses":8},
             {"name":"no_schema_custom"},
-            {"name":"null_schema_custom","input_schema":null}],
+            {"name":"null_schema_custom","input_schema":null},
+            {"type":"custom","name":"typed_custom","input_schema":{"type":"object"}}],
             "messages":[{"role":"user","content":"hello"}]}"#);
         let params = json!({"type":"object","properties":{}});
         assert_eq!(
             out["tools"],
             json!([
-                {"type":"function","function":{"name":"web_search","description":"","parameters":params}},
                 {"type":"function","function":{"name":"no_schema_custom","description":"","parameters":params}},
-                {"type":"function","function":{"name":"null_schema_custom","description":"","parameters":params}}
+                {"type":"function","function":{"name":"null_schema_custom","description":"","parameters":params}},
+                {"type":"function","function":{"name":"typed_custom","description":"","parameters":params}}
             ])
         );
+    }
+
+    // An OpenAI-compatible gateway reporting a failure INSIDE a 200 stream:
+    // Claude Code gets the error event with the gateway's message, and the
+    // stream is not closed as a complete (empty) answer afterwards.
+    #[test]
+    fn stream_in_stream_error_object_becomes_error_event() {
+        let mut t = StreamTranslator::new(&json!({}));
+        t.push(None, &json!({"id": "c1", "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": null}]}));
+        let out = t.push(None, &json!({"error": {"message": "Insufficient Balance", "type": "unknown_error", "param": null, "code": "invalid_request_error"}}));
+        assert_eq!(
+            out,
+            vec!["event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"unknown_error\",\"message\":\"Insufficient Balance\"}}\n\n"]
+        );
+        assert!(t.finish().is_empty());
     }
 
     #[test]
