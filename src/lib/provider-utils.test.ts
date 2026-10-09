@@ -353,6 +353,11 @@ describe("providerFromBinding", () => {
     expect(providerFromBinding(deepseek, { id: "b3", app: "codex" }).baseUrl).toBe(
       "https://api.deepseek.com/v1"
     );
+    // OpenCode's Anthropic SDK appends /messages under the prefix's /v1.
+    expect(
+      providerFromBinding(deepseek, { id: "b4", app: "opencode", npm: "@ai-sdk/anthropic" })
+        .baseUrl
+    ).toBe("https://api.deepseek.com/anthropic/v1");
   });
   it("Claude Desktop binding: anthropic base, no npm, but carries its models", () => {
     const cd = providerFromBinding(gateway, {
@@ -374,7 +379,16 @@ describe("providerFromBinding", () => {
       npm: "@ai-sdk/anthropic"
     });
     expect(oc.npm).toBe("@ai-sdk/anthropic");
-    expect(oc.baseUrl).toBe("https://r.x"); // anthropic → bare host
+    // The SDK posts to `{baseURL}/messages`, so the base carries /v1 —
+    // unlike Claude Code, which appends /v1 itself.
+    expect(oc.baseUrl).toBe("https://r.x/v1");
+    // @ai-sdk/google posts to `{baseURL}/models/…`, so it carries /v1beta.
+    const ocg = providerFromBinding(gateway, {
+      id: "b-ocg",
+      app: "opencode",
+      npm: "@ai-sdk/google"
+    });
+    expect(ocg.baseUrl).toBe("https://r.x/v1beta");
     // No npm → defaults to @ai-sdk/openai-compatible (Chat Completions).
     const oc2 = providerFromBinding(gateway, { id: "b-oc2", app: "opencode" });
     expect(oc2.npm).toBe(npmForProtocol("openai-compatible"));

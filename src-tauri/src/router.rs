@@ -1822,6 +1822,7 @@ pub fn reset_provider_health() {
     refused_fields().retain(|(k, _), _| !is_entry(k));
     auto_effort_refused().retain(|(k, _)| !is_entry(k));
     cache_control_refused().retain(|(k, _)| !is_entry(k));
+    namespace_refused().retain(|(k, _)| !is_entry(k));
     for (k, h) in health_table().iter_mut() {
         if is_entry(k) {
             h.streak = 0;
@@ -3076,12 +3077,21 @@ fn cache_control_refused(
     M.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Members that refused Codex's `namespace` tools; remembered the same way.
+fn namespace_refused(
+) -> std::sync::MutexGuard<'static, std::collections::HashSet<(String, Protocol)>> {
+    static M: std::sync::LazyLock<Mutex<std::collections::HashSet<(String, Protocol)>>> =
+        std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+    M.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn remembered_fixes(key: &str, protocol: Protocol) -> crate::autofix::BodyFixes {
     let k = (key.to_string(), protocol);
     crate::autofix::BodyFixes {
         drop_fields: refused_fields().get(&k).cloned().unwrap_or_default(),
         drop_auto_effort: auto_effort_refused().contains(&k),
         drop_cache_control: cache_control_refused().contains(&k),
+        drop_namespace_tools: namespace_refused().contains(&k),
         ..Default::default()
     }
 }
@@ -3092,6 +3102,9 @@ fn remember_fixes(key: &str, protocol: Protocol, fixes: &crate::autofix::BodyFix
     }
     if fixes.drop_cache_control {
         cache_control_refused().insert((key.to_string(), protocol));
+    }
+    if fixes.drop_namespace_tools {
+        namespace_refused().insert((key.to_string(), protocol));
     }
     if fixes.drop_fields.is_empty() {
         return;
@@ -8974,6 +8987,102 @@ mod tests {
         let resp = resp_bodies.lock().unwrap().clone();
         assert_eq!(resp.len(), 1, "{resp:?}");
         assert_eq!(resp[0]["reasoning"]["effort"], json!("auto"));
+        *config_cache() = None;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Codex -> grok through a GATEWAY (not a Grok login, whose requests have
+    // the namespace tools stripped up front): xAI refuses Codex's MCP
+    // `namespace` tools with a 422. The request is resent without them, and
+    // later requests to that member leave them out up front.
+    #[tokio::test]
+    async fn namespace_tools_refused_by_a_gateway_are_dropped_and_remembered() {
+        fn xai_like(body: &JsonValue) -> (u16, String) {
+            if body.is_null() {
+                // The gateway's own model listing (GET /v1/models).
+                return (
+                    200,
+                    r#"{"object":"list","data":[{"id":"grok-4.5","object":"model"}]}"#.to_string(),
+                );
+            }
+            let namespaced = body["tools"]
+                .as_array()
+                .is_some_and(|t| t.iter().any(|t| t["type"] == "namespace"));
+            if namespaced {
+                return (
+                    422,
+                    "Failed to deserialize the JSON body into the target type: tools[1].type: unknown variant `namespace`, expected one of `function`, `web_search`, `x_search`, `image_generation`, `collections_search`, `file_search`, `code_execution`, `code_interpreter`, `mcp`, `shell`, `tool_search` at line 1 column 300".to_string(),
+                );
+            }
+            (
+                200,
+                "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}\n\n".to_string(),
+            )
+        }
+        let (port, bodies) = body_capturing_upstream(xai_like).await;
+        let _g = lock_home();
+        let dir = tempdir("gw-namespace");
+        let _h = override_home(&dir);
+        crate::config::write_providers(&json!([
+            { "id": "g-ns", "kind": "gateway", "name": "Relay",
+              "baseUrl": format!("http://127.0.0.1:{port}"), "apiKey": "k",
+              "capabilities": { "openai": true }, "bindings": [] }
+        ]))
+        .unwrap();
+        write_config(&RouterConfig {
+            api_key: "local-key".into(),
+            upstreams: vec![UpstreamPref {
+                key: "gateway:g-ns".into(),
+                enabled: true,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        reset_health("gateway:g-ns");
+        let codex = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("authorization", "Bearer local-key")
+                .header("content-type", "application/json")
+                .body(Full::new(Bytes::from_static(
+                    br#"{"model":"grok-4.5","stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],"tools":[{"type":"function","name":"shell","parameters":{"type":"object"}},{"type":"namespace","name":"mcp__docs","description":"d","tools":[]}]}"#,
+                )))
+                .unwrap()
+        };
+        let posts = || -> Vec<JsonValue> {
+            bodies
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|b| !b.is_null())
+                .cloned()
+                .collect()
+        };
+        let tool_types = |b: &JsonValue| -> Vec<String> {
+            b["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["type"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let r = handle_test(codex(), test_ctx()).await;
+        assert_eq!(r.status(), 200);
+        let _ = body_text(r).await;
+        let sent = posts();
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert_eq!(tool_types(&sent[0]), vec!["function", "namespace"]);
+        assert_eq!(tool_types(&sent[1]), vec!["function"]);
+
+        // Remembered: the next request goes out without them, once.
+        let r = handle_test(codex(), test_ctx()).await;
+        assert_eq!(r.status(), 200);
+        let _ = body_text(r).await;
+        let sent = posts();
+        assert_eq!(sent.len(), 3, "{sent:?}");
+        assert_eq!(tool_types(&sent[2]), vec!["function"]);
         *config_cache() = None;
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -551,6 +551,25 @@ export function gatewayBaseForProtocol(
   }
 }
 
+/** OpenCode reaches a gateway through an AI SDK package, and those append
+ * their path to a VERSIONED base: `@ai-sdk/anthropic` posts to
+ * `{baseURL}/messages` (its default base is `https://api.anthropic.com/v1`)
+ * and `@ai-sdk/google` to `{baseURL}/models/{id}:generateContent` (default
+ * `…/v1beta`). Claude Code and Gemini CLI add the version themselves, which
+ * is why `gatewayBaseForProtocol` returns a bare root for those protocols.
+ * Mirror of the Rust `opencode_sdk_base`; keep the two in sync. */
+export function opencodeSdkBase(base: string, protocol: GatewayProtocol): string {
+  switch (protocol) {
+    case "anthropic":
+      return `${base}/v1`;
+    case "gemini":
+      return `${base}/v1beta`;
+    case "openai":
+    case "openai-compatible":
+      return base;
+  }
+}
+
 /** The wire protocol a binding uses — DERIVED, not stored. Claude/Codex/
  * Gemini each have exactly one mode; OpenCode's comes from its AI SDK
  * package. */
@@ -582,16 +601,17 @@ export function protocolForBinding(binding: {
  * synthesized provider's id IS the binding's own id (stable, unique). */
 export function providerFromBinding(gateway: Gateway, binding: GatewayBinding): Provider {
   const protocol = protocolForBinding(binding);
+  const base = gatewayBaseForProtocol(
+    gateway.baseUrl ?? "",
+    protocol,
+    gateway.capabilities?.anthropicPath
+  );
   const provider: Provider = {
     id: binding.id,
     app: binding.app,
     kind: "custom",
     name: gateway.name,
-    baseUrl: gatewayBaseForProtocol(
-      gateway.baseUrl ?? "",
-      protocol,
-      gateway.capabilities?.anthropicPath
-    ),
+    baseUrl: binding.app === "opencode" ? opencodeSdkBase(base, protocol) : base,
     apiKey: gateway.apiKey ?? "",
     model: binding.model ?? "",
     favicon: gateway.favicon

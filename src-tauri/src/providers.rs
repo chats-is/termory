@@ -1501,6 +1501,21 @@ fn gateway_base_for_protocol(
     }
 }
 
+/// OpenCode reaches a gateway through an AI SDK package, and those append
+/// their path to a VERSIONED base: `@ai-sdk/anthropic` posts to
+/// `{baseURL}/messages` (its default base is `https://api.anthropic.com/v1`)
+/// and `@ai-sdk/google` to `{baseURL}/models/{id}:generateContent` (default
+/// `…/v1beta`). Claude Code and Gemini CLI add the version themselves, which
+/// is why the protocol root above is bare. Mirror of the frontend
+/// `opencodeSdkBase`; keep the two in sync.
+fn opencode_sdk_base(base: String, p: GatewayProtocol) -> String {
+    match p {
+        GatewayProtocol::Anthropic => format!("{base}/v1"),
+        GatewayProtocol::Gemini => format!("{base}/v1beta"),
+        GatewayProtocol::OpenaiCompatible | GatewayProtocol::Openai => base,
+    }
+}
+
 fn provider_from_binding(g: &Gateway, b: &GatewayBinding) -> Provider {
     let protocol = protocol_for_binding(b);
     let anthropic_path = g
@@ -1508,13 +1523,19 @@ fn provider_from_binding(g: &Gateway, b: &GatewayBinding) -> Provider {
         .as_ref()
         .and_then(|c| c.anthropic_path.as_deref());
     let is_opencode = b.app == CliApp::Opencode;
+    let base_url = gateway_base_for_protocol(&g.base_url, protocol, anthropic_path);
+    let base_url = if is_opencode {
+        opencode_sdk_base(base_url, protocol)
+    } else {
+        base_url
+    };
     Provider {
         id: b.id.clone(),
         app: b.app,
         kind: ProviderKind::Custom,
         name: g.name.clone(),
         router_binding: g.kind.as_deref() == Some(crate::config::ROUTER_KIND),
-        base_url: gateway_base_for_protocol(&g.base_url, protocol, anthropic_path),
+        base_url,
         api_key: g.api_key.clone(),
         model: b.model.clone(),
         npm: if is_opencode {
@@ -4512,6 +4533,73 @@ mod tests {
         // Codex is unaffected — its mode was probed at the root.
         let codex = provider_from_binding(&g, &binding(CliApp::Codex, None));
         assert_eq!(codex.base_url, "https://api.deepseek.com/v1");
+        // OpenCode's SDK appends `/messages` under the prefix's `/v1`.
+        let oc = provider_from_binding(&g, &binding(CliApp::Opencode, Some("@ai-sdk/anthropic")));
+        assert_eq!(oc.base_url, "https://api.deepseek.com/anthropic/v1");
+    }
+
+    #[test]
+    fn an_opencode_binding_reaches_the_routers_own_paths() {
+        // The router's gateway entry is a bare loopback root. OpenCode's AI SDK
+        // packages append their own path to the base Termory writes, so each
+        // must land on a path the router serves — a bare root sent
+        // `@ai-sdk/anthropic` to `/messages`, which the router 404s.
+        let g = Gateway {
+            kind: Some("router".into()),
+            name: "Router".into(),
+            base_url: "http://127.0.0.1:8317".into(),
+            api_key: "sk-router".into(),
+            bindings: vec![],
+            capabilities: None,
+            favicon: None,
+        };
+        let path_of = |npm: &str, sdk_suffix: &str| {
+            let p = provider_from_binding(&g, &binding(CliApp::Opencode, Some(npm)));
+            let url = format!("{}{sdk_suffix}", p.base_url);
+            url.strip_prefix("http://127.0.0.1:8317")
+                .unwrap()
+                .to_string()
+        };
+        // Each package's own join, as its dist builds the request URL.
+        let cases = [
+            (
+                "@ai-sdk/anthropic",
+                "/messages",
+                crate::router::Protocol::Anthropic,
+            ),
+            (
+                "@ai-sdk/google",
+                "/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+                crate::router::Protocol::Gemini,
+            ),
+            (
+                "@ai-sdk/openai",
+                "/responses",
+                crate::router::Protocol::OpenaiResponses,
+            ),
+            (
+                "@ai-sdk/openai-compatible",
+                "/chat/completions",
+                crate::router::Protocol::OpenaiChat,
+            ),
+        ];
+        for (npm, suffix, want) in cases {
+            let path = path_of(npm, suffix);
+            assert_eq!(
+                crate::router::classify_path(&path),
+                Some(want),
+                "{npm} → {path}"
+            );
+        }
+        // Claude Code and Gemini CLI add the version themselves: bare root.
+        assert_eq!(
+            provider_from_binding(&g, &binding(CliApp::Claude, None)).base_url,
+            "http://127.0.0.1:8317"
+        );
+        assert_eq!(
+            provider_from_binding(&g, &binding(CliApp::Gemini, None)).base_url,
+            "http://127.0.0.1:8317"
+        );
     }
 
     #[test]

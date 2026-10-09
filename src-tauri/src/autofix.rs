@@ -144,6 +144,10 @@ pub struct BodyFixes {
     /// The member refused Anthropic's prompt-cache markers: every
     /// `cache_control` is left out.
     pub drop_cache_control: bool,
+    /// The member refused Codex's `namespace` tools (how Codex sends its MCP
+    /// servers; xAI's Responses API takes no such type): they are left out,
+    /// so the request goes through without the MCP tools.
+    pub drop_namespace_tools: bool,
 }
 
 impl BodyFixes {
@@ -263,6 +267,11 @@ impl BodyFixes {
                 {
                     lower(v);
                 }
+            }
+        }
+        if self.drop_namespace_tools {
+            if let Some(tools) = o.get_mut("tools").and_then(|v| v.as_array_mut()) {
+                tools.retain(|t| t.get("type").and_then(|v| v.as_str()) != Some("namespace"));
             }
         }
         if self.drop_builtin_tools {
@@ -406,6 +415,17 @@ pub fn next_fix(
     if bad_request(status) && !cur.drop_cache_control && text.contains("cache_control") {
         if let Some(n) = changes(BodyFixes {
             drop_cache_control: true,
+            ..cur.clone()
+        }) {
+            return Some(n);
+        }
+    }
+    // "tools[7].type: unknown variant `namespace`, expected one of
+    // `function`, …" (xAI, reached through a gateway or an API key): resent
+    // without Codex's `namespace` tools.
+    if bad_request(status) && !cur.drop_namespace_tools && text.contains("namespace") {
+        if let Some(n) = changes(BodyFixes {
+            drop_namespace_tools: true,
             ..cur.clone()
         }) {
             return Some(n);
@@ -644,6 +664,32 @@ mod tests {
                 "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]})
         );
         assert_eq!(next_fix(400, err, &b, &f, false), None);
+    }
+
+    #[test]
+    fn refused_namespace_tools_are_left_out() {
+        // xAI's 422, verbatim, for a Codex request carrying an MCP server.
+        let sent = json!({"model": "grok-4.5", "tools": [
+            {"type": "function", "name": "shell"},
+            {"type": "namespace", "name": "mcp__docs", "tools": []},
+            {"type": "web_search"}]});
+        let err = "Failed to deserialize the JSON body into the target type: tools[1].type: unknown variant `namespace`, expected one of `function`, `web_search`, `x_search`, `image_generation`, `collections_search`, `file_search`, `code_execution`, `code_interpreter`, `mcp`, `shell`, `tool_search`";
+        let f = next_fix(422, err, &sent, &BodyFixes::default(), true).unwrap();
+        assert!(f.drop_namespace_tools);
+        let mut b = sent.clone();
+        f.apply(&mut b);
+        assert_eq!(
+            b,
+            json!({"model": "grok-4.5", "tools": [
+                {"type": "function", "name": "shell"}, {"type": "web_search"}]})
+        );
+        assert_eq!(next_fix(422, err, &b, &f, true), None);
+        // No namespace tool sent: nothing to repair.
+        let plain = json!({"model": "m", "tools": [{"type": "function", "name": "a"}]});
+        assert_eq!(
+            next_fix(422, err, &plain, &BodyFixes::default(), true),
+            None
+        );
     }
 
     #[test]
