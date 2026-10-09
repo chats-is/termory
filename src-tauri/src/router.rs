@@ -3338,6 +3338,21 @@ fn build_upstream_request(
     (builder, None, sent_json)
 }
 
+/// The API endpoints the router answers, listed at its root (as
+/// CLIProxyAPI's root does: `internal/api/server_routes.go`, `setupRoutes`).
+/// Paths only — nothing about members or credentials.
+const ROUTER_ENDPOINTS: [&str; 9] = [
+    "POST /v1/messages",
+    "POST /v1/messages/count_tokens",
+    "POST /v1/responses",
+    "POST /v1/chat/completions",
+    "GET /v1/models",
+    "GET /v1beta/models",
+    "POST /v1beta/models/{model}:generateContent",
+    "POST /v1beta/models/{model}:streamGenerateContent",
+    "POST /v1beta/models/{model}:countTokens",
+];
+
 async fn handle(req: Request<Incoming>, ctx: Arc<Ctx>) -> Result<Response<OutBody>, hyper::Error> {
     Ok(handle_inner(req, ctx).await)
 }
@@ -3352,7 +3367,10 @@ where
     let query = req.uri().query().map(str::to_string);
 
     if req.method() == hyper::Method::GET && (path == "/" || path == "/health") {
-        return json_response(StatusCode::OK, json!({ "ok": true, "port": cfg.port }));
+        return json_response(
+            StatusCode::OK,
+            json!({ "ok": true, "port": cfg.port, "endpoints": ROUTER_ENDPOINTS }),
+        );
     }
 
     let headers = req.headers().clone();
@@ -8754,6 +8772,32 @@ mod tests {
         );
         *config_cache() = None;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_root_lists_the_endpoints_without_a_key() {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let resp = handle_test(req, test_ctx()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v: JsonValue = serde_json::from_str(&body_text(resp).await).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["endpoints"], json!(ROUTER_ENDPOINTS));
+        // Every listed POST is one the router routes, so the list cannot
+        // name a path that 404s.
+        for e in ROUTER_ENDPOINTS {
+            let (method, path) = e.split_once(' ').unwrap();
+            let path = path.replace("{model}", "m");
+            if method == "POST"
+                && !path.ends_with("count_tokens")
+                && !path.ends_with(":countTokens")
+            {
+                assert!(classify_path(&path).is_some(), "{e} is not routed");
+            }
+        }
     }
 
     async fn handle_test(req: Request<Full<Bytes>>, ctx: Arc<Ctx>) -> Response<OutBody> {
