@@ -28,7 +28,6 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { BrandIcon } from "@/components/BrandIcon";
 import { CLI_APPS, CLI_APP_LABEL, CLI_APP_SOURCE_BADGE } from "@/constants";
@@ -39,7 +38,8 @@ import {
   isGatewayList,
   isMultiSlot,
   isRouterGateway,
-  isSourceEnabled
+  isSourceEnabled,
+  routerBindingWire
 } from "@/lib/provider-utils";
 import { useCodexFollow } from "@/hooks/useCodexFollow";
 import { useGatewayBindings } from "@/hooks/useGatewayBindings";
@@ -110,11 +110,11 @@ const STATE_LABEL: Record<UpstreamState, MessageKey> = {
 
 const STATE_TONE: Record<UpstreamState, string> = {
   disabled: "text-muted-foreground",
-  unavailable: "text-muted-foreground",
+  unavailable: "text-orange-500 dark:text-orange-400",
   cooldown: "text-amber-600 dark:text-amber-400",
   error: "text-destructive",
   ok: "text-emerald-600 dark:text-emerald-400",
-  idle: "text-muted-foreground"
+  idle: "text-muted-foreground/40"
 };
 
 function Section({
@@ -289,6 +289,11 @@ export function RouterPage({
     await refreshActive();
   }, [setActiveProviderIds, refreshActive]);
   const routerGateway = gateways.find(isRouterGateway) ?? null;
+  // The saved bindings as the router uses them: no wire choice of their own.
+  const savedBindings = React.useMemo(
+    () => routerGateway?.bindings.map(routerBindingWire) ?? [],
+    [routerGateway]
+  );
   const visibleApps = (sourceOrder ?? CLI_APPS).filter((app) => isSourceEnabled(sourceToggles, app));
 
   // Binding and configuring are never gated here: every tool can be bound
@@ -316,15 +321,15 @@ export function RouterPage({
     !!routerGateway &&
     !sameBindings(
       [
-        ...bindingsFromDrafts(drafts, protocols, visibleApps),
-        ...routerGateway.bindings.filter((b) => !visibleApps.includes(b.app))
+        ...bindingsFromDrafts(drafts, protocols, visibleApps).map(routerBindingWire),
+        ...savedBindings.filter((b) => !visibleApps.includes(b.app))
       ],
-      routerGateway.bindings
+      savedBindings
     );
   React.useEffect(() => {
     if (!routerGateway) return;
     if (drafts && draftsDirty) return;
-    setDrafts(draftsFromGateway(routerGateway));
+    setDrafts(draftsFromGateway({ ...routerGateway, bindings: savedBindings }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedKey, routerGateway?.id]);
 
@@ -357,10 +362,10 @@ export function RouterPage({
     if (!draftChecks(d, protocols).canSave) return;
     // Rows hidden by Settings → Tools were never rendered, so their bindings
     // carry over verbatim (mirrors the AI Gateway editor).
-    const hidden = routerGateway.bindings.filter((b) => !visibleApps.includes(b.app));
+    const hidden = savedBindings.filter((b) => !visibleApps.includes(b.app));
     void saveBindings({
       ...routerGateway,
-      bindings: [...bindingsFromDrafts(d, protocols, visibleApps), ...hidden]
+      bindings: [...bindingsFromDrafts(d, protocols, visibleApps).map(routerBindingWire), ...hidden]
     });
   };
 
@@ -389,13 +394,13 @@ export function RouterPage({
     void saveBindings({
       ...routerGateway,
       bindings: withBindToggled(
-        routerGateway.bindings,
+        savedBindings,
         next,
         app,
         patch.checked,
         protocols,
         visibleApps
-      )
+      ).map(routerBindingWire)
     });
   };
 
@@ -843,15 +848,40 @@ export function RouterPage({
                       </Badge>
                       <span className="text-xs text-muted-foreground truncate min-w-0">{subtitle}</span>
                       <div className="ml-auto flex items-center gap-1 shrink-0">
-                        <div className="text-right mr-1">
-                          <div className={cn("text-xs", STATE_TONE[st])}>{stateText}</div>
+                        <div className="mr-1 flex items-baseline gap-1.5 whitespace-nowrap text-xs tabular-nums">
+                          {/* The state is a coloured dot; its words (and a
+                              cooldown's countdown) are the tooltip and the
+                              accessible name. A switched-off row shows none (its
+                              switch says so), but keeps the slot so the counts
+                              stay in line. */}
+                          {st === "disabled" ? (
+                            <span className="size-4 shrink-0 self-center" aria-hidden />
+                          ) : (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span
+                                  role="img"
+                                  aria-label={stateText}
+                                  className={`inline-flex size-4 shrink-0 items-center justify-center self-center ${STATE_TONE[st]}`}
+                                >
+                                  <span className="size-2 rounded-full bg-current" />
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent side="top">{stateText}</TooltipContent>
+                            </Tooltip>
+                          )}
                           {h && h.requests > 0 && (
-                            <div className="text-xs text-muted-foreground">
-                              {t("router.stats", { ok: h.requests - h.failures, fail: h.failures })}
-                            </div>
+                            <span className="text-muted-foreground">
+                              {h.failures > 0
+                                ? t("router.stats", { ok: h.requests - h.failures, fail: h.failures })
+                                : t("router.statsOk", { ok: h.requests })}
+                            </span>
                           )}
                         </div>
-                        {(st === "cooldown" || st === "error") && (
+                        {/* The retry slot is kept on every row, so the status
+                            text ends at the same place whether or not the row
+                            offers a retry. */}
+                        {st === "cooldown" || st === "error" ? (
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <Button
@@ -865,6 +895,8 @@ export function RouterPage({
                             </TooltipTrigger>
                             <TooltipContent side="top">{t("router.retryNow")}</TooltipContent>
                           </Tooltip>
+                        ) : (
+                          <span className="size-8 shrink-0" aria-hidden />
                         )}
                         <Button
                           variant="ghost"
@@ -899,16 +931,30 @@ export function RouterPage({
             title={t("router.useIn")}
             hint={t("router.useInDesc")}
             actions={
-              // Always shown; enabled only while there is an unsaved,
-              // valid edit.
-              <Button
-                size="sm"
-                disabled={!draftsDirty || !checks?.canSave}
-                onClick={() => drafts && commitDrafts(drafts)}
-              >
-                <Save className="size-4" />
-                {t("router.saveBindings")}
-              </Button>
+              // Always shown. Cancel is enabled while there is an unsaved
+              // edit and puts the rows back to what is saved; Save also
+              // needs the edit to be valid.
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!draftsDirty}
+                  onClick={() =>
+                    routerGateway &&
+                    setDrafts(draftsFromGateway({ ...routerGateway, bindings: savedBindings }))
+                  }
+                >
+                  {t("common.cancel")}
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={!draftsDirty || !checks?.canSave}
+                  onClick={() => drafts && commitDrafts(drafts)}
+                >
+                  <Save className="size-4" />
+                  {t("router.saveBindings")}
+                </Button>
+              </div>
             }
           >
             {routerGateway && drafts && (
@@ -921,6 +967,7 @@ export function RouterPage({
                   detecting={modelsLoading}
                   visibleApps={visibleApps}
                   control="switch"
+                  fixedWire
                   beforeChevron={(app) => {
                     // Configuration only: activation lives in the tool's own
                     // provider list (Providers page), and needs the router up.

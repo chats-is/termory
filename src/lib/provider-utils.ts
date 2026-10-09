@@ -467,6 +467,23 @@ export function npmForProtocol(protocol: GatewayProtocol): string {
   return OPENCODE_NPM_BY_PROTOCOL[protocol];
 }
 
+/** The local router speaks every API, so a router binding carries no wire
+ * choice: each tool uses its OWN default. OpenCode's is
+ * `@ai-sdk/openai-compatible` (`provider.ts`, the `npm` fallback in
+ * `fromModelsDevModel` and the config-provider parse) — written out because
+ * Termory's own writer falls back to a different package; Grok gets no
+ * `api_backend`. Applied wherever a router binding is read, so one saved
+ * with another choice still materializes the default. Mirrors
+ * `router_binding_wire` in providers.rs. */
+export const ROUTER_OPENCODE_NPM = npmForProtocol("openai-compatible");
+
+export function routerBindingWire(binding: GatewayBinding): GatewayBinding {
+  const out: GatewayBinding = { ...binding };
+  delete out.apiBackend;
+  if (out.app === "opencode") out.npm = ROUTER_OPENCODE_NPM;
+  return out;
+}
+
 /** Inverse of `npmForProtocol`: which wire protocol an OpenCode AI-SDK
  * package speaks. For OpenCode the binding's protocol is DERIVED from
  * the chosen package. NOTE order: `@ai-sdk/openai-compatible` (Chat
@@ -600,6 +617,7 @@ export function protocolForBinding(binding: {
  * normal `activate_provider` / reverse-derive path can be reused. The
  * synthesized provider's id IS the binding's own id (stable, unique). */
 export function providerFromBinding(gateway: Gateway, binding: GatewayBinding): Provider {
+  if (isRouterGateway(gateway)) binding = routerBindingWire(binding);
   const protocol = protocolForBinding(binding);
   const base = gatewayBaseForProtocol(
     gateway.baseUrl ?? "",

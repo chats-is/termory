@@ -1516,7 +1516,33 @@ fn opencode_sdk_base(base: String, p: GatewayProtocol) -> String {
     }
 }
 
+/// OpenCode's AI SDK package for every local-router binding. The router
+/// speaks every API, so its bindings carry no wire choice: each tool uses its
+/// OWN default. OpenCode's is `@ai-sdk/openai-compatible` (`provider.ts`, the
+/// `npm` fallback in `fromModelsDevModel` and the config-provider parse) —
+/// written out because `opencode_npm` falls back to a different package;
+/// Grok gets no `api_backend`. Mirrors `routerBindingWire` in provider-utils.ts.
+const ROUTER_OPENCODE_NPM: &str = "@ai-sdk/openai-compatible";
+
+/// A router binding as the router uses it, whatever wire was saved on it.
+fn router_binding_wire(b: &GatewayBinding) -> GatewayBinding {
+    let mut out = b.clone();
+    out.api_backend = None;
+    if out.app == CliApp::Opencode {
+        out.npm = Some(ROUTER_OPENCODE_NPM.to_string());
+    }
+    out
+}
+
 fn provider_from_binding(g: &Gateway, b: &GatewayBinding) -> Provider {
+    let router = g.kind.as_deref() == Some(crate::config::ROUTER_KIND);
+    let normalized;
+    let b = if router {
+        normalized = router_binding_wire(b);
+        &normalized
+    } else {
+        b
+    };
     let protocol = protocol_for_binding(b);
     let anthropic_path = g
         .capabilities
@@ -1534,7 +1560,7 @@ fn provider_from_binding(g: &Gateway, b: &GatewayBinding) -> Provider {
         app: b.app,
         kind: ProviderKind::Custom,
         name: g.name.clone(),
-        router_binding: g.kind.as_deref() == Some(crate::config::ROUTER_KIND),
+        router_binding: router,
         base_url,
         api_key: g.api_key.clone(),
         model: b.model.clone(),
@@ -4505,6 +4531,20 @@ mod tests {
             ..g.clone()
         };
         assert!(provider_from_binding(&rg, &binding(CliApp::Codex, None)).router_binding);
+
+        // A router binding takes no wire choice: whatever was saved, OpenCode
+        // gets the router's package and Grok no api_backend.
+        let oc = provider_from_binding(&rg, &binding(CliApp::Opencode, Some("@ai-sdk/openai")));
+        assert_eq!(oc.npm.as_deref(), Some("@ai-sdk/openai-compatible"));
+        assert_eq!(oc.base_url, "https://gw.x/v1");
+        let mut grok = binding(CliApp::Grok, None);
+        grok.api_backend = Some("messages".into());
+        assert!(provider_from_binding(&rg, &grok).api_backend.is_none());
+        assert_eq!(
+            provider_from_binding(&g, &grok).api_backend.as_deref(),
+            Some("messages"),
+            "an AI Gateway binding keeps its choice"
+        );
     }
 
     #[test]

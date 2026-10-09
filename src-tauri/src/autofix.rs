@@ -72,6 +72,23 @@ static AUTO_EFFORT_REFUSED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(invalid|unsupported|unknown|not supported|not a valid|not one of|must be one of|supported values)[^\n]{0,120}?\bauto\b|\bauto\b[^\n]{0,120}?(invalid|unsupported|not supported|not a valid|not one of|supported values)").unwrap()
 });
 const EFFORT_ORDER: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
+/// xAI's refusal of one argument it does not take ("Argument not supported:
+/// external_web_access" — Codex's `web_search` tool carries it). Repaired
+/// only when the named field sits on a TOOL: the tool is kept, the field
+/// left out.
+static ARGUMENT_NOT_SUPPORTED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)argument not supported:?\s*['"`]?([A-Za-z_][A-Za-z0-9_]*)"#).unwrap()
+});
+/// new-api (the relay behind many gateways) refusing a model on THIS API
+/// while it serves the model on another: `convert_request_failed`, or a bare
+/// "not implemented" / "not available" message. Observed on one gateway:
+/// deepseek and claude answer `/v1/messages` and `/v1/chat/completions` but
+/// refuse `/v1/responses`; grok answers `/v1/responses` but refuses
+/// `/v1/messages`.
+static API_REFUSED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)"code"\s*:\s*"convert_request_failed"|"message"\s*:\s*"not (implemented|available)\b"#)
+        .unwrap()
+});
 static SHAPE_WORDS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)failed to deserialize|unknown (item |content |input )?(type|variant|field|parameter)|unknown_parameter|unrecognized (request argument|field|parameter)|extra (inputs|fields) are not permitted|additional properties are not allowed").unwrap()
 });
@@ -148,6 +165,9 @@ pub struct BodyFixes {
     /// servers; xAI's Responses API takes no such type): they are left out,
     /// so the request goes through without the MCP tools.
     pub drop_namespace_tools: bool,
+    /// Fields the member refused on a tool (xAI: Codex's `web_search`
+    /// `external_web_access`): left out of every tool, the tools kept.
+    pub drop_tool_fields: Vec<String>,
 }
 
 impl BodyFixes {
@@ -272,6 +292,15 @@ impl BodyFixes {
         if self.drop_namespace_tools {
             if let Some(tools) = o.get_mut("tools").and_then(|v| v.as_array_mut()) {
                 tools.retain(|t| t.get("type").and_then(|v| v.as_str()) != Some("namespace"));
+            }
+        }
+        if !self.drop_tool_fields.is_empty() {
+            if let Some(tools) = o.get_mut("tools").and_then(|v| v.as_array_mut()) {
+                for t in tools.iter_mut().filter_map(|t| t.as_object_mut()) {
+                    for f in &self.drop_tool_fields {
+                        t.remove(f);
+                    }
+                }
             }
         }
         if self.drop_builtin_tools {
@@ -431,6 +460,27 @@ pub fn next_fix(
             return Some(n);
         }
     }
+    if bad_request(status) {
+        if let Some(field) = ARGUMENT_NOT_SUPPORTED
+            .captures(text)
+            .and_then(|m| m.get(1))
+            .map(|m| m.as_str().to_string())
+        {
+            // `type` / `name` identify the tool: never stripped.
+            let on_a_tool = !matches!(field.as_str(), "type" | "name")
+                && sent
+                    .get("tools")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|ts| ts.iter().any(|t| t.get(&field).is_some()));
+            if on_a_tool && !cur.drop_tool_fields.contains(&field) {
+                let mut next = cur.clone();
+                next.drop_tool_fields.push(field);
+                if let Some(n) = changes(next) {
+                    return Some(n);
+                }
+            }
+        }
+    }
     if bad_request(status)
         && !cur.drop_auto_effort
         && text.to_ascii_lowercase().contains("effort")
@@ -504,10 +554,86 @@ pub fn is_shape_refusal(status: u16, text: &str) -> bool {
         || (bad_request(status) && SHAPE_WORDS.is_match(text))
 }
 
+/// The member does not serve this MODEL over this API, though it may over
+/// another: new-api's refusals (any status — it answers 500) and the
+/// wrong-endpoint phrases. The router tries the member's next API before
+/// giving up on it; nothing about the model's availability is learned.
+pub fn is_api_refusal(status: u16, text: &str) -> bool {
+    if status < 400 {
+        return false;
+    }
+    let lower = text.to_ascii_lowercase();
+    API_REFUSED.is_match(text) || WRONG_ENDPOINT.iter().any(|p| lower.contains(p))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_refused_tool_argument_is_dropped_from_the_tools_only() {
+        let sent = json!({
+            "external_web_access": 1,
+            "tools": [
+                {"type": "function", "name": "shell"},
+                {"type": "web_search", "external_web_access": true}
+            ]
+        });
+        let err = r#"{"error":{"message":"Argument not supported: external_web_access","type":"bad_response_status_code","param":"","code":"bad_response_status_code"}}"#;
+        let f = next_fix(400, err, &sent, &BodyFixes::default(), true).unwrap();
+        assert_eq!(f.drop_tool_fields, vec!["external_web_access".to_string()]);
+        let mut b = sent.clone();
+        f.apply(&mut b);
+        assert_eq!(
+            b,
+            json!({
+                "external_web_access": 1,
+                "tools": [
+                    {"type": "function", "name": "shell"},
+                    {"type": "web_search"}
+                ]
+            })
+        );
+        // Already applied: nothing more to repair.
+        assert!(next_fix(400, err, &b, &f, true).is_none());
+    }
+
+    #[test]
+    fn a_refused_argument_not_on_a_tool_is_not_repaired() {
+        let sent = json!({"logprobs": true, "tools": [{"type": "function", "name": "shell"}]});
+        let err = "Argument not supported: logprobs";
+        assert!(next_fix(400, err, &sent, &BodyFixes::default(), true).is_none());
+        let err = "Argument not supported: type";
+        assert!(next_fix(400, err, &sent, &BodyFixes::default(), true).is_none());
+    }
+
+    #[test]
+    fn new_api_refusals_of_an_api_are_recognised() {
+        // Verbatim from a new-api gateway.
+        assert!(is_api_refusal(
+            500,
+            r#"{"error":{"message":"not implemented (request id: 2026100901)","type":"new_api_error","param":"","code":"convert_request_failed"}}"#
+        ));
+        assert!(is_api_refusal(
+            500,
+            r#"{"error":{"type":"new_api_error","message":"not available (request id: 2026100901)"},"type":"error"}"#
+        ));
+        assert!(is_api_refusal(
+            400,
+            "This model is only supported in v1/responses"
+        ));
+        // An outage or a missing model is not an API refusal.
+        assert!(!is_api_refusal(
+            500,
+            r#"{"error":{"message":"internal error"}}"#
+        ));
+        assert!(!is_api_refusal(
+            503,
+            r#"{"error":{"message":"service temporarily not available"}}"#
+        ));
+        assert!(!is_api_refusal(200, r#"{"message":"not implemented"}"#));
+    }
 
     #[test]
     fn foreign_reasoning_drops_reasoning_then_compaction() {

@@ -487,6 +487,7 @@ export const zhHans: Record<MessageKey, string> = {
   "router.state.ok": "正常",
   "router.state.idle": "空闲",
   "router.stats": "成功 {ok} · 失败 {fail}",
+  "router.statsOk": "成功 {ok}",
   "router.retryNow": "立即重试",
   "router.moveUp": "上移",
   "router.moveDown": "下移",

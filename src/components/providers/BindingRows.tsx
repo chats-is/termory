@@ -262,7 +262,8 @@ export function BindingRows({
   unavailableHint,
   control = "checkbox",
   beforeChevron,
-  trailing
+  trailing,
+  fixedWire = false
 }: {
   drafts: Drafts;
   setBind: (app: CliApp, patch: Partial<BindDraft>) => void;
@@ -282,6 +283,9 @@ export function BindingRows({
   /** Extra content at the right end of a row's header (e.g. an Activate
    * button); rendered outside the collapse trigger. */
   trailing?: (app: CliApp) => React.ReactNode;
+  /** The wire API is not the user's to pick (the local router speaks every
+   * one): the AI SDK and API backend selectors are left out. */
+  fixedWire?: boolean;
 }) {
   const t = useT();
   const checks = draftChecks(drafts, protocols);
@@ -425,7 +429,7 @@ export function BindingRows({
               <div className="flex flex-col gap-2 pl-6 pt-2">
                 {/* OpenCode: AI SDK package first — it selects the
                     SDK/protocol before the model. */}
-                {app === "opencode" && (
+                {app === "opencode" && !fixedWire && (
                   <>
                     <Label className="text-xs">{t("providers.aiSdk")}</Label>
                     <Select value={effectiveNpm} onValueChange={(v) => setBind(app, { npm: v })}>
@@ -444,7 +448,7 @@ export function BindingRows({
                 )}
                 {/* Grok: api_backend — before the model. "" = default (field
                     omitted; grok applies its own default, chat_completions). */}
-                {app === "grok" && (
+                {app === "grok" && !fixedWire && (
                   <>
                     <Label className="text-xs">{t("providers.apiBackend")}</Label>
                     <Select

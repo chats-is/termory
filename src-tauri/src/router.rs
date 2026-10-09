@@ -71,12 +71,12 @@ const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 /// `is_cli_chat_proxy_url`): a standard-shaped API serving Chat Completions,
 /// Responses AND Anthropic Messages (`ApiBackend` in `xai-grok-sampling-types`).
 const GROK_CLI_CHAT_BASE_URL: &str = "https://cli-chat-proxy.grok.com/v1";
-/// The three wire APIs a Grok login serves.
-const GROK_PROTOCOLS: [Protocol; 3] = [
-    Protocol::OpenaiChat,
-    Protocol::OpenaiResponses,
-    Protocol::Anthropic,
-];
+/// The wire APIs a Grok login is used over. The proxy also serves Anthropic
+/// Messages, but its stream there is broken for parallel tool calls (seen
+/// live with grok-4.7: one `content_block_start`, then every call's
+/// arguments as deltas of that one block, the other calls' names and ids
+/// gone), so an Anthropic client is translated onto Responses instead.
+const GROK_PROTOCOLS: [Protocol; 2] = [Protocol::OpenaiChat, Protocol::OpenaiResponses];
 
 // ===================================================================
 // Config
@@ -1336,6 +1336,50 @@ fn resolve_for_client(stores: &Stores, key: &str, client: Protocol) -> Result<Up
     Err(PROTOCOL_MISMATCH.to_string())
 }
 
+/// The APIs each member refused for a MODEL (`autofix::is_api_refusal`):
+/// one gateway can serve a model over Chat and Messages yet refuse it over
+/// Responses, and another model the other way round. Later requests for that
+/// model go straight to an API the member serves it over.
+fn api_refused(
+) -> std::sync::MutexGuard<'static, std::collections::HashSet<(String, String, Protocol)>> {
+    static M: std::sync::LazyLock<Mutex<std::collections::HashSet<(String, String, Protocol)>>> =
+        std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+    M.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `resolve_for_client`, passing over the APIs this member refused for
+/// `model`. `None` when it speaks no API it has not refused.
+fn resolve_unrefused(
+    stores: &Stores,
+    key: &str,
+    client: Protocol,
+    model: &str,
+) -> Option<Upstream> {
+    let refused = |p: Protocol| api_refused().contains(&(key.to_string(), model.to_string(), p));
+    std::iter::once(client)
+        .chain(crate::translate::targets_for(client).iter().copied())
+        .filter(|p| !refused(*p))
+        .find_map(|p| resolve_upstream_with(stores, key, p).ok())
+}
+
+/// The member's upstream for `model`: an API it has not refused for that
+/// model, else (every one refused — maybe a refusal was a blip) the usual
+/// choice.
+fn resolve_for_model(
+    stores: &Stores,
+    key: &str,
+    client: Protocol,
+    model: Option<&str>,
+) -> Result<Upstream, String> {
+    let has_refusals =
+        model.is_some_and(|m| api_refused().iter().any(|(k, rm, _)| k == key && rm == m));
+    match model.filter(|_| has_refusals) {
+        Some(m) => resolve_unrefused(stores, key, client, m)
+            .map_or_else(|| resolve_for_client(stores, key, client), Ok),
+        None => resolve_for_client(stores, key, client),
+    }
+}
+
 /// A gateway's per-protocol root. Mirrors `providers::gateway_base_for_protocol`;
 /// keep the two in sync.
 fn gateway_base(base: &str, protocol: Protocol, anthropic_path: Option<&str>) -> String {
@@ -1823,6 +1867,8 @@ pub fn reset_provider_health() {
     auto_effort_refused().retain(|(k, _)| !is_entry(k));
     cache_control_refused().retain(|(k, _)| !is_entry(k));
     namespace_refused().retain(|(k, _)| !is_entry(k));
+    tool_fields_refused().retain(|(k, _), _| !is_entry(k));
+    api_refused().retain(|(k, _, _)| !is_entry(k));
     for (k, h) in health_table().iter_mut() {
         if is_entry(k) {
             h.streak = 0;
@@ -1873,10 +1919,12 @@ pub fn routing_plan(cfg: &RouterConfig, protocol: Protocol, model: Option<&str>)
     let stores = Stores::load();
     let mut members: Vec<(String, Result<Upstream, String>)> = keys
         .into_iter()
-        .filter_map(|key| match resolve_for_client(&stores, &key, protocol) {
-            Err(why) if why == PROTOCOL_MISMATCH => None,
-            other => Some((key, other)),
-        })
+        .filter_map(
+            |key| match resolve_for_model(&stores, &key, protocol, model) {
+                Err(why) if why == PROTOCOL_MISMATCH => None,
+                other => Some((key, other)),
+            },
+        )
         .collect();
     let tools = tool_order();
     members.sort_by_key(|(key, _)| tool_rank(key_app(&stores, key), &tools));
@@ -3085,6 +3133,14 @@ fn namespace_refused(
     M.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Tool fields each member refused (xAI: `external_web_access`); remembered
+/// the same way.
+fn tool_fields_refused() -> std::sync::MutexGuard<'static, RefusedFields> {
+    static M: std::sync::LazyLock<Mutex<RefusedFields>> =
+        std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+    M.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn remembered_fixes(key: &str, protocol: Protocol) -> crate::autofix::BodyFixes {
     let k = (key.to_string(), protocol);
     crate::autofix::BodyFixes {
@@ -3092,6 +3148,7 @@ fn remembered_fixes(key: &str, protocol: Protocol) -> crate::autofix::BodyFixes 
         drop_auto_effort: auto_effort_refused().contains(&k),
         drop_cache_control: cache_control_refused().contains(&k),
         drop_namespace_tools: namespace_refused().contains(&k),
+        drop_tool_fields: tool_fields_refused().get(&k).cloned().unwrap_or_default(),
         ..Default::default()
     }
 }
@@ -3105,6 +3162,15 @@ fn remember_fixes(key: &str, protocol: Protocol, fixes: &crate::autofix::BodyFix
     }
     if fixes.drop_namespace_tools {
         namespace_refused().insert((key.to_string(), protocol));
+    }
+    if !fixes.drop_tool_fields.is_empty() {
+        let mut m = tool_fields_refused();
+        let e = m.entry((key.to_string(), protocol)).or_default();
+        for f in &fixes.drop_tool_fields {
+            if !e.contains(f) {
+                e.push(f.clone());
+            }
+        }
     }
     if fixes.drop_fields.is_empty() {
         return;
@@ -3241,6 +3307,9 @@ fn build_upstream_request(
         Ok(mut body) if body.is_object() && protocol != Protocol::Gemini => {
             apply_request_thinking(&mut body, out, thinking_format(protocol));
             out.fixes.apply(&mut body);
+            if protocol == Protocol::OpenaiResponses {
+                drop_null_reasoning_content(&mut body);
+            }
             let bytes = Bytes::from(serde_json::to_vec(&body).unwrap_or_default());
             sent_json = Some(body);
             bytes
@@ -3701,9 +3770,6 @@ async fn serve_api(
                             codex: codex_req.is_some(),
                             unwrap_codex: codex_req.as_ref().is_some_and(|r| r.unwrap_stream),
                             model: &model_key,
-                            fix_grok_anthropic: protocol == Protocol::Anthropic
-                                && !translated
-                                && matches!(upstream.auth, Auth::GrokOauth { .. }),
                             member: key,
                         };
                         match deliver(resp, &delivery).await {
@@ -3774,6 +3840,46 @@ async fn serve_api(
                             log::info!("router: repairing the request for {}", public_key(key));
                             fixes = n;
                             continue 'send;
+                        }
+                        // The member does not serve this MODEL over this
+                        // API (a gateway can serve it over Chat and refuse
+                        // it over Responses): the SAME member gets the
+                        // request again over the next API it speaks,
+                        // translated. No cooldown — that would block the
+                        // model on the APIs that do serve it.
+                        if crate::autofix::is_api_refusal(status, &text) {
+                            api_refused().insert((
+                                key.to_string(),
+                                model_key.clone(),
+                                upstream.protocol,
+                            ));
+                            let (k, m) = (key.to_string(), model_key.clone());
+                            let next = tokio::task::spawn_blocking(move || {
+                                resolve_unrefused(&Stores::load(), &k, protocol, &m)
+                            })
+                            .await
+                            .ok()
+                            .flatten();
+                            last_error = Some(format!("{}: HTTP {status}", public_key(key)));
+                            last_upstream = Some(buffered_response(status, &headers_out, text));
+                            let key = key.to_string();
+                            if let Some(next) = next {
+                                log::info!(
+                                    "router: {} does not serve {model_key} over {:?}, trying {:?}",
+                                    public_key(&key),
+                                    upstream.protocol,
+                                    next.protocol
+                                );
+                                if let Some(slot) = plan.members.iter_mut().find(|(k, _)| *k == key)
+                                {
+                                    slot.1 = Ok(next);
+                                }
+                                tried.remove(&key);
+                                sticky = Some(key);
+                            } else {
+                                failed_without_cooldown.insert(key);
+                            }
+                            continue 'member;
                         }
                         // magpie `shapeWords` / `wrongEndpoint`: this member
                         // does not take the request's shape — another may.
@@ -4208,7 +4314,6 @@ struct Delivery<'a> {
     unwrap_codex: bool,
     /// The requested model (the Codex relay fills it into response events).
     model: &'a str,
-    fix_grok_anthropic: bool,
     /// The pool member answering, for the health table: a stream that
     /// breaks AFTER its first payload is already a success to the request
     /// loop (the client has the start of the answer), but the member's row
@@ -4341,11 +4446,7 @@ async fn deliver(
     }
     if streamed {
         let prefix = bootstrap(&mut resp, None).await?;
-        return Ok(if d.fix_grok_anthropic {
-            relay_fixing_anthropic_indexes(prefix, resp)
-        } else {
-            relay_prefixed(prefix, resp, d.member.to_string())
-        });
+        return Ok(relay_prefixed(prefix, resp, d.member.to_string()));
     }
     Ok(relay(resp))
 }
@@ -4502,6 +4603,24 @@ fn first_sse_payload(buf: &[u8]) -> Option<JsonValue> {
     None
 }
 
+/// Codex echoes each reasoning item back with `"content": null`. A null is
+/// the same as no field in the Responses API, but xAI (reached through a
+/// gateway) refuses it with "Could not decode the compaction blob", so
+/// every tool call after the first fails. The null is left out; a real
+/// `content` array is untouched.
+fn drop_null_reasoning_content(body: &mut JsonValue) {
+    let Some(items) = body.get_mut("input").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for it in items.iter_mut().filter_map(|it| it.as_object_mut()) {
+        if it.get("type").and_then(|t| t.as_str()) == Some("reasoning")
+            && it.get("content").is_some_and(|c| c.is_null())
+        {
+            it.remove("content");
+        }
+    }
+}
+
 /// Tool types xAI's Responses endpoint accepts (its own 422 lists them:
 /// `function`, `web_search`, `x_search`, `image_generation`, `co…`). Codex
 /// sends its MCP servers as `namespace` tools, which xAI rejects outright —
@@ -4525,126 +4644,6 @@ pub fn strip_unsupported_tools(raw: &[u8]) -> Bytes {
         before - tools.len()
     );
     Bytes::from(doc.to_string())
-}
-
-/// Add the `index` Anthropic's stream grammar requires on
-/// `content_block_delta` / `content_block_stop` when an upstream omits it —
-/// Grok's backend does (seen live: `content_block_start` carries it, the
-/// deltas do not), which breaks every spec-following client. The index is
-/// the one the latest `content_block_start` announced. Lines are processed
-/// whole; a partial line waits for the rest of it.
-pub struct AnthropicIndexFixer {
-    pending: Vec<u8>,
-    current: i64,
-}
-
-impl AnthropicIndexFixer {
-    pub fn new() -> Self {
-        AnthropicIndexFixer {
-            pending: Vec::new(),
-            current: 0,
-        }
-    }
-
-    /// Feed a chunk; returns the complete lines (fixed) it finished.
-    pub fn feed(&mut self, chunk: &[u8]) -> Vec<u8> {
-        self.pending.extend_from_slice(chunk);
-        let Some(last_nl) = self.pending.iter().rposition(|b| *b == b'\n') else {
-            return Vec::new();
-        };
-        let rest = self.pending.split_off(last_nl + 1);
-        let complete = std::mem::replace(&mut self.pending, rest);
-        let mut out = Vec::with_capacity(complete.len() + 32);
-        for line in complete.split_inclusive(|b| *b == b'\n') {
-            out.extend_from_slice(&self.fix_line(line));
-        }
-        out
-    }
-
-    /// Whatever is left at end of stream, as-is.
-    pub fn finish(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.pending)
-    }
-
-    fn fix_line(&mut self, line: &[u8]) -> Vec<u8> {
-        let Some(data) = line.strip_prefix(b"data:") else {
-            return line.to_vec();
-        };
-        let text = String::from_utf8_lossy(data);
-        let trimmed = text.trim();
-        let Ok(mut v) = serde_json::from_str::<JsonValue>(trimmed) else {
-            return line.to_vec();
-        };
-        let kind = v
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string();
-        if kind == "content_block_start" {
-            if let Some(i) = v.get("index").and_then(|i| i.as_i64()) {
-                self.current = i;
-            }
-            return line.to_vec();
-        }
-        if (kind == "content_block_delta" || kind == "content_block_stop")
-            && v.get("index").is_none()
-        {
-            if let Some(o) = v.as_object_mut() {
-                o.insert("index".into(), JsonValue::from(self.current));
-            }
-            let mut fixed = b"data: ".to_vec();
-            fixed.extend_from_slice(v.to_string().as_bytes());
-            fixed.push(b'\n');
-            return fixed;
-        }
-        line.to_vec()
-    }
-}
-
-impl Default for AnthropicIndexFixer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// `relay`, with the Anthropic stream repaired on the way through.
-fn relay_fixing_anthropic_indexes(prefix: Bytes, resp: reqwest::Response) -> Response<OutBody> {
-    use futures_util::StreamExt;
-    let status = resp.status();
-    let mut builder = Response::builder().status(status.as_u16());
-    for (name, value) in resp.headers().iter() {
-        if is_dropped_response_header(name.as_str()) {
-            continue;
-        }
-        builder = builder.header(name, value);
-    }
-    let fixer = Arc::new(Mutex::new(AnthropicIndexFixer::new()));
-    let tail_fixer = fixer.clone();
-    let fixed = futures_util::stream::once(async move { Ok::<Bytes, reqwest::Error>(prefix) })
-        .chain(resp.bytes_stream())
-        .map(move |chunk| {
-            chunk
-                .map(|b| Bytes::from(fixer.lock().unwrap_or_else(|e| e.into_inner()).feed(&b)))
-                .map_err(std::io::Error::other)
-        })
-        .chain(futures_util::stream::once(async move {
-            Ok::<Bytes, std::io::Error>(Bytes::from(
-                tail_fixer
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .finish(),
-            ))
-        }))
-        .filter(|r| std::future::ready(!matches!(r, Ok(b) if b.is_empty())))
-        .map(|r| r.map(Frame::data));
-    let body: OutBody = BodyExt::boxed(StreamBody::new(fixed));
-    builder.body(body).unwrap_or_else(|_| {
-        error_response(
-            StatusCode::BAD_GATEWAY,
-            "relay_error",
-            "bad upstream headers",
-        )
-    })
 }
 
 /// An upstream response already read into memory (small error bodies).
@@ -7958,36 +7957,19 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_index_fixer_fills_missing_indexes_across_chunk_boundaries() {
-        let mut f = AnthropicIndexFixer::new();
-        let stream = concat!(
-            "event: content_block_start\n",
-            "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\"}}\n\n",
-            "event: content_block_delta\n",
-            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"po\"}}\n\n",
-            "event: content_block_stop\n",
-            "data: {\"type\":\"content_block_stop\"}\n\n",
-            "data: {\"type\":\"content_block_delta\",\"index\":7,\"delta\":{}}\n"
+    fn a_null_reasoning_content_is_left_out_and_nothing_else() {
+        let mut body = serde_json::json!({"input": [
+            {"type": "reasoning", "id": "rs_1", "summary": [], "content": null, "encrypted_content": "b"},
+            {"type": "reasoning", "id": "rs_2", "summary": [], "content": [{"type": "reasoning_text", "text": "t"}]},
+            {"type": "message", "role": "assistant", "content": null},
+        ]});
+        drop_null_reasoning_content(&mut body);
+        assert_eq!(
+            body["input"][0],
+            serde_json::json!({"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "b"})
         );
-        // Split mid-line to prove partial lines wait.
-        let (a, b) = stream.as_bytes().split_at(90);
-        let mut out = f.feed(a);
-        out.extend(f.feed(b));
-        out.extend(f.finish());
-        let text = String::from_utf8(out).unwrap();
-        let datas: Vec<JsonValue> = text
-            .lines()
-            .filter_map(|l| l.strip_prefix("data:"))
-            .map(|d| serde_json::from_str(d.trim()).unwrap())
-            .collect();
-        assert_eq!(datas[1]["index"], 1, "delta gets the started block's index");
-        assert_eq!(datas[1]["delta"]["text"], "po");
-        assert_eq!(datas[2]["index"], 1, "stop too");
-        assert_eq!(datas[3]["index"], 7, "an index already present is kept");
-        assert!(
-            text.contains("event: content_block_delta\n"),
-            "non-data lines pass through"
-        );
+        assert_eq!(body["input"][1]["content"][0]["text"], "t");
+        assert!(body["input"][2]["content"].is_null());
     }
 
     #[test]
@@ -8051,11 +8033,15 @@ mod tests {
         // A saved snapshot wraps the entry under `auth`.
         let snapshot = json!({ "payload": { "scope": "s", "auth": live } });
         assert!(account_auth(CliApp::Grok, &snapshot).is_ok());
-        // The cli-chat-proxy base carries /v1; every protocol lands on it.
+        // An Anthropic client is translated onto Responses, never sent to
+        // the proxy's Anthropic stream (it drops parallel tool calls).
         assert_eq!(
-            upstream_url(GROK_CLI_CHAT_BASE_URL, Protocol::Anthropic, "/v1/messages"),
-            "https://cli-chat-proxy.grok.com/v1/messages"
+            crate::translate::targets_for(Protocol::Anthropic)
+                .iter()
+                .find(|p| GROK_PROTOCOLS.contains(p)),
+            Some(&Protocol::OpenaiResponses)
         );
+        // The cli-chat-proxy base carries /v1; every protocol lands on it.
         assert_eq!(
             upstream_url(
                 GROK_CLI_CHAT_BASE_URL,
@@ -9083,6 +9069,93 @@ mod tests {
         let sent = posts();
         assert_eq!(sent.len(), 3, "{sent:?}");
         assert_eq!(tool_types(&sent[2]), vec!["function"]);
+        *config_cache() = None;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A new-api gateway serving deepseek over Chat but refusing it over
+    // Responses (`convert_request_failed`, HTTP 500): Codex's request is sent
+    // again to the SAME gateway over Chat, translated. The model is not
+    // cooled down, and the next request goes over Chat at once.
+    #[tokio::test]
+    async fn a_model_refused_over_one_api_is_sent_over_another() {
+        fn new_api(body: &JsonValue) -> (u16, String) {
+            if body.is_null() {
+                return (
+                    200,
+                    r#"{"object":"list","data":[{"id":"deepseek-v4-flash","object":"model"}]}"#
+                        .to_string(),
+                );
+            }
+            if body.get("input").is_some() {
+                return (
+                    500,
+                    r#"{"error":{"message":"not implemented (request id: 2026100901)","type":"new_api_error","param":"","code":"convert_request_failed"}}"#.to_string(),
+                );
+            }
+            (
+                200,
+                r#"{"id":"c","object":"chat.completion","created":1,"model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}"#.to_string(),
+            )
+        }
+        let (port, bodies) = body_capturing_upstream(new_api).await;
+        let _g = lock_home();
+        let dir = tempdir("gw-api-refused");
+        let _h = override_home(&dir);
+        crate::config::write_providers(&json!([
+            { "id": "g-api", "kind": "gateway", "name": "Relay",
+              "baseUrl": format!("http://127.0.0.1:{port}"), "apiKey": "k",
+              "capabilities": { "openai": true, "openaiCompatible": true }, "bindings": [] }
+        ]))
+        .unwrap();
+        write_config(&RouterConfig {
+            api_key: "local-key".into(),
+            upstreams: vec![UpstreamPref {
+                key: "gateway:g-api".into(),
+                enabled: true,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        reset_health("gateway:g-api");
+        let codex = || {
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("authorization", "Bearer local-key")
+                .header("content-type", "application/json")
+                .body(Full::new(Bytes::from_static(
+                    br#"{"model":"deepseek-v4-flash","input":[{"role":"user","content":[{"type":"input_text","text":"say pong"}]}]}"#,
+                )))
+                .unwrap()
+        };
+        let posts = || -> Vec<JsonValue> {
+            bodies
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|b| !b.is_null())
+                .cloned()
+                .collect()
+        };
+
+        let r = handle_test(codex(), test_ctx()).await;
+        assert_eq!(r.status(), 200);
+        assert!(body_text(r).await.contains("pong"));
+        let sent = posts();
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert!(sent[0].get("input").is_some(), "Responses first: {sent:?}");
+        assert!(sent[1].get("messages").is_some(), "then Chat: {sent:?}");
+        assert!(model_blocked("gateway:g-api", "deepseek-v4-flash").is_none());
+
+        // Remembered: straight to Chat.
+        let r = handle_test(codex(), test_ctx()).await;
+        assert_eq!(r.status(), 200);
+        let _ = body_text(r).await;
+        let sent = posts();
+        assert_eq!(sent.len(), 3, "{sent:?}");
+        assert!(sent[2].get("messages").is_some(), "{sent:?}");
+        reset_provider_health();
         *config_cache() = None;
         let _ = std::fs::remove_dir_all(&dir);
     }

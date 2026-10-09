@@ -318,6 +318,15 @@ describe("providerFromBinding", () => {
     apiKey: "sk-1",
     bindings: []
   };
+  it("gives a router binding no wire choice: OpenCode's package and Grok's backend are the defaults", () => {
+    const router: Gateway = { ...gateway, kind: "router" };
+    const oc = { id: "b-oc", app: "opencode" as const, npm: "@ai-sdk/openai" };
+    expect(providerFromBinding(router, oc).npm).toBe("@ai-sdk/openai-compatible");
+    expect(providerFromBinding(gateway, oc).npm).toBe("@ai-sdk/openai");
+    const grok = { id: "b-grok", app: "grok" as const, apiBackend: "messages" };
+    expect(providerFromBinding(router, grok).apiBackend).toBeUndefined();
+    expect(providerFromBinding(gateway, grok).apiBackend).toBe("messages");
+  });
   it("uses the binding's own id; derives the protocol (Claude → anthropic base)", () => {
     const claude = providerFromBinding(gateway, {
       id: "b-claude",

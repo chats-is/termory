@@ -551,8 +551,9 @@ A local HTTP server (loopback by default) pooling the Codex and Grok Build login
 - **Activation happens on the Providers page, only while the router runs**; the tray greys the same rows. Stop and quit hand every binding in use back to Official, Start restores them unless the user moved the CLI elsewhere meanwhile. A Codex hand-back follows Settings → "Keep all sessions on a Codex switch".
 - **Listen address, port and key change only while stopped.** Any address other than loopback requires a key.
 - **`providers.json`, `accounts.json` and `router.json` are each read-modify-written under one lock.**
+- **A router binding has no wire choice (user decision).** The router speaks every API, so the Router page shows no AI SDK / API backend selector: each tool uses its OWN default — OpenCode `@ai-sdk/openai-compatible` (written out, since Termory's writer falls back to another package), Grok no `api_backend`. Both synths (`routerBindingWire` ⟷ `router_binding_wire`) apply it on read, so a binding saved with another choice still materializes the default.
 - **Binding activation is one hook, `useGatewayBindings`**, shared by the Gateways tab and the Router page; the Codex follow prompt is `useCodexFollow`.
-- **A Grok upstream needs two repairs**: its Anthropic stream omits `index` on block deltas (filled in), and its Responses API rejects `namespace` tools (dropped).
+- **A Grok login is never used over Anthropic Messages**: the proxy's Anthropic stream folds parallel tool calls into one block, so an Anthropic client is translated onto Responses. Its Responses API rejects `namespace` tools (dropped).
 - **Settings → Tools applies to the router**: a switched-off tool's members are hidden and refused.
 - **Nothing sensitive is logged or echoed to the client.**
 

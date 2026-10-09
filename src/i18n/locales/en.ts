@@ -512,6 +512,7 @@ export const en = {
   "router.state.ok": "Healthy",
   "router.state.idle": "Idle",
   "router.stats": "{ok} ok · {fail} failed",
+  "router.statsOk": "{ok} ok",
   "router.retryNow": "Retry now",
   "router.moveUp": "Move up",
   "router.moveDown": "Move down",
